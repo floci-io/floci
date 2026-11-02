@@ -178,6 +178,8 @@ class LambdaDataSourceInvokerTest {
             "[\"errorMessage\"]",
             "\"errorMessage\"",
             "not json {",
+            "{\"errorMessage\":\"boom\"} trailing garbage",
+            "{\"errorMessage\":\"first\"}{\"errorMessage\":\"second\"}",
             "   ",
             ""
     })
@@ -188,6 +190,16 @@ class LambdaDataSourceInvokerTest {
 
         assertEquals("Lambda:Unhandled", e.getErrorCode());
         assertEquals(payload, e.getMessage());
+    }
+
+    @Test
+    void whitespaceAfterTheErrorPayloadStillYieldsTheErrorMessage() {
+        failsWith("Unhandled", "{\"errorMessage\":\"boom\"}\n".getBytes(StandardCharsets.UTF_8));
+
+        AwsException e = functionFailure(Map.of("payload", Map.of()));
+
+        assertEquals("Lambda:Unhandled", e.getErrorCode());
+        assertEquals("boom", e.getMessage());
     }
 
     @Test

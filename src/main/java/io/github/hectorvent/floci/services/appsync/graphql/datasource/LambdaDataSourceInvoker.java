@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
@@ -32,11 +34,13 @@ public class LambdaDataSourceInvoker implements AppSyncDataSourceInvoker {
 
     private final LambdaService lambdaService;
     private final ObjectMapper objectMapper;
+    private final ObjectReader strictPayloadReader;
 
     @Inject
     public LambdaDataSourceInvoker(LambdaService lambdaService, ObjectMapper objectMapper) {
         this.lambdaService = lambdaService;
         this.objectMapper = objectMapper;
+        this.strictPayloadReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     }
 
     @Override
@@ -103,7 +107,7 @@ public class LambdaDataSourceInvoker implements AppSyncDataSourceInvoker {
             return "";
         }
         try {
-            JsonNode errorMessage = objectMapper.readTree(response).path("errorMessage");
+            JsonNode errorMessage = strictPayloadReader.readTree(response).path("errorMessage");
             return errorMessage.isTextual() ? errorMessage.textValue() : response;
         } catch (JsonProcessingException ignored) {
             // A function that failed with something other than JSON: the text is all there is to report.
