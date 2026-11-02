@@ -170,7 +170,7 @@ public class SsmJsonHandler {
         authorizeSecretValues(List.of(param), authorization);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("Parameter", parameterToNode(param));
+        response.set("Parameter", parameterToNode(param, withDecryption));
         return Response.ok(response).build();
     }
 
@@ -186,7 +186,7 @@ public class SsmJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode parametersArray = objectMapper.createArrayNode();
         for (Parameter p : params) {
-            parametersArray.add(parameterToNode(p));
+            parametersArray.add(parameterToNode(p, withDecryption));
         }
         response.set("Parameters", parametersArray);
         response.set("InvalidParameters", invalidParameterNames(names,
@@ -239,6 +239,7 @@ public class SsmJsonHandler {
         PageRequest pageRequest = pageRequest(request, GET_PARAMETERS_BY_PATH_MAX_RESULTS);
         String path = request.path("Path").asText();
         boolean recursive = request.path("Recursive").asBoolean(false);
+        boolean withDecryption = request.path("WithDecryption").asBoolean(false);
 
         List<ParameterStringFilter> filters = parameterFilters(request);
         List<Parameter> params = ssmService.getParametersByPath(path, recursive, filters, region);
@@ -254,7 +255,7 @@ public class SsmJsonHandler {
                 GET_PARAMETERS_BY_PATH_TOKEN + ssmService.accountId() + ":" + region + ":" + recursive + ":"
                         + (path.endsWith("/") ? path : path + "/") + (labeledVersions ? ":labels" : ""));
         for (Parameter p : page.items()) {
-            parametersArray.add(parameterToNode(p));
+            parametersArray.add(parameterToNode(p, withDecryption));
         }
         response.set("Parameters", parametersArray);
         putNextToken(response, page);
@@ -298,6 +299,7 @@ public class SsmJsonHandler {
     private Response handleGetParameterHistory(JsonNode request, String region) {
         PageRequest pageRequest = pageRequest(request, GET_PARAMETER_HISTORY_MAX_RESULTS);
         String name = request.path("Name").asText();
+        boolean withDecryption = request.path("WithDecryption").asBoolean(false);
         List<ParameterHistory> history = ssmService.getParameterHistory(name, region);
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -310,7 +312,7 @@ public class SsmJsonHandler {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", h.getName());
             node.put("Version", h.getVersion());
-            node.put("Value", h.getValue());
+            node.put("Value", responseValue(withDecryption, h.getValue(), h.getEncryptedValue()));
             node.put("Type", h.getType());
             if (h.getKeyId() != null) {
                 node.put("KeyId", h.getKeyId());
@@ -1312,11 +1314,16 @@ public class SsmJsonHandler {
         }
     }
 
-    private ObjectNode parameterToNode(Parameter p) {
+    /** A SecureString read without decryption answers the ciphertext PutParameter stored, as AWS does. */
+    private static String responseValue(boolean withDecryption, String value, String encryptedValue) {
+        return withDecryption || encryptedValue == null ? value : encryptedValue;
+    }
+
+    private ObjectNode parameterToNode(Parameter p, boolean withDecryption) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Name", p.getName());
         if (p.getValue() != null) {
-            node.put("Value", p.getValue());
+            node.put("Value", responseValue(withDecryption, p.getValue(), p.getEncryptedValue()));
         }
         node.put("Type", p.getType());
         node.put("Version", p.getVersion());

@@ -225,8 +225,25 @@ or create the AWS RAM resource share AWS makes for a shared parameter.
 
 All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.
 
+`PutParameter` encrypts a `SecureString` with Floci's KMS under the parameter's key
+(`alias/aws/ssm` when none was given), with the encryption context `PARAMETER_ARN` set to the
+parameter's ARN, as AWS does. A read without `WithDecryption` (`GetParameter`, `GetParameters`,
+`GetParametersByPath`, `GetParameterHistory`) returns that ciphertext, the same one on every read
+of a version, and KMS `Decrypt` with that context returns the plaintext. With `WithDecryption`
+the plaintext is returned.
+
 !!! note
-    `SecureString` parameters are stored as-is without actual KMS encryption in Floci. The type is preserved and returned correctly, but the value is not encrypted at rest.
+    The encryption applies to what the API returns, not to storage: Floci saves each
+    `SecureString` version's plaintext alongside its ciphertext, so the plaintext stays readable in
+    the persisted state files.
+
+    A `KeyId` that Floci's KMS cannot use, which AWS would refuse on `PutParameter`, is accepted,
+    and such a parameter is returned unencrypted. So is a value over KMS's 4096-byte limit, and a
+    parameter version stored before Floci encrypted `SecureString` values.
+
+    AWS encrypts every Advanced `SecureString` with the AWS Encryption SDK, so its value is the
+    SDK's encrypted message. Floci encrypts an Advanced value up to 4096 bytes with a plain KMS
+    `Encrypt` instead, the same as a Standard one.
 
 ## Parameter Store Change events
 
