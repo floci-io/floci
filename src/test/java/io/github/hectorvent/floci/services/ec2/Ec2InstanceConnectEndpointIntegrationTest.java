@@ -66,6 +66,24 @@ class Ec2InstanceConnectEndpointIntegrationTest {
                 .body(ITEM + ".securityGroupIdSet.item", containsInAnyOrder(groupA, groupB))
                 .body(ITEM + ".tagSet.item.find { it.key == 'Name' }.value", equalTo(name));
 
+        // The interface the endpoint publishes resolves through DescribeNetworkInterfaces.
+        String eniId = ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1")
+                .formParam("InstanceConnectEndpointId.1", id)
+                .post("/").then().statusCode(200)
+                .extract().path(ITEM + ".networkInterfaceIdSet.item");
+        String eni = "DescribeNetworkInterfacesResponse.networkInterfaceSet.item";
+        ec2("DescribeNetworkInterfaces", "test", "us-east-1")
+                .formParam("NetworkInterfaceId.1", eniId)
+                .post("/").then().statusCode(200)
+                .body(eni + ".networkInterfaceId", equalTo(eniId))
+                .body(eni + ".subnetId", equalTo(subnetId))
+                .body(eni + ".vpcId", equalTo(vpcId))
+                .body(eni + ".interfaceType", equalTo("ec2_instance_connect_endpoint"))
+                .body(eni + ".requesterManaged", equalTo("true"))
+                .body(eni + ".description", equalTo("EC2 Instance Connect Endpoint " + id))
+                .body(eni + ".privateIpAddress", matchesPattern("10\\.81\\.1\\.\\d+"))
+                .body(eni + ".groupSet.item.groupId", containsInAnyOrder(groupA, groupB));
+
         ec2("DeleteInstanceConnectEndpoint", "test", "us-east-1")
                 .formParam("InstanceConnectEndpointId", id)
                 .post("/").then().statusCode(200)
@@ -78,6 +96,10 @@ class Ec2InstanceConnectEndpointIntegrationTest {
                 .formParam("InstanceConnectEndpointId.1", id)
                 .post("/").then().statusCode(400)
                 .body("Response.Errors.Error.Code", equalTo("InvalidInstanceConnectEndpointId.NotFound"));
+        ec2("DescribeNetworkInterfaces", "test", "us-east-1")
+                .formParam("NetworkInterfaceId.1", eniId)
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidNetworkInterfaceID.NotFound"));
 
         deleteAll(List.of(groupA, groupB), subnetId, vpcId);
     }

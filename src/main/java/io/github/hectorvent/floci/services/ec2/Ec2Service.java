@@ -12558,6 +12558,42 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return result;
     }
 
+    /**
+     * The interface an instance connect endpoint owns, built from the endpoint so the id
+     * DescribeInstanceConnectEndpoints publishes in networkInterfaceIdSet resolves in
+     * DescribeNetworkInterfaces for as long as the endpoint exists. Its address is the endpoint's
+     * own, already counted by privateIpsBySubnet from the endpoint record.
+     */
+    private List<NetworkInterface> instanceConnectEndpointNetworkInterfacesOf(InstanceConnectEndpoint endpoint,
+                                                                              String ownerId) {
+        List<NetworkInterface> result = new ArrayList<>();
+        for (String eniId : endpoint.getNetworkInterfaceIds()) {
+            NetworkInterface ni = new NetworkInterface();
+            ni.setNetworkInterfaceId(eniId);
+            ni.setSubnetId(endpoint.getSubnetId());
+            ni.setVpcId(endpoint.getVpcId());
+            ni.setAvailabilityZone(endpoint.getAvailabilityZone());
+            ni.setDescription("EC2 Instance Connect Endpoint " + endpoint.getInstanceConnectEndpointId());
+            ni.setInterfaceType("ec2_instance_connect_endpoint");
+            ni.setRequesterManaged(true);
+            ni.setOwnerId(ownerId);
+            ni.setPrivateIpAddress(endpoint.getPrivateIpAddress());
+            NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
+            primaryIp.setPrivateIpAddress(endpoint.getPrivateIpAddress());
+            primaryIp.setPrimary(true);
+            ni.getPrivateIpAddresses().add(primaryIp);
+            for (String securityGroupId : endpoint.getSecurityGroupIds()) {
+                GroupIdentifier group = new GroupIdentifier();
+                group.setGroupId(securityGroupId);
+                securityGroups.get(key(endpoint.getRegion(), securityGroupId))
+                        .ifPresent(sg -> group.setGroupName(sg.getGroupName()));
+                ni.getGroups().add(group);
+            }
+            result.add(ni);
+        }
+        return result;
+    }
+
     // ─── EC2 Instance Connect Endpoints ─────────────────────────────────────
 
     /** The public suffix every endpoint DNS name ends in; it resolves to 127.0.0.1 in public DNS. */
@@ -12741,6 +12777,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         removeTags(region, id);
+        endpoint.getNetworkInterfaceIds().forEach(eniId -> removeTags(region, eniId));
         endpoint.setState("delete-in-progress");
         return endpoint;
     }
@@ -14721,6 +14758,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     continue;
                 }
                 result.add(natNi);
+            }
+        }
+
+        // The ENI an instance connect endpoint owns, published in its networkInterfaceIdSet.
+        List<InstanceConnectEndpoint> regionEndpoints =
+                instanceConnectEndpoints instanceof AccountAwareStorageBackend<InstanceConnectEndpoint> aware
+                        ? aware.scanForAccount(safeAccount, k -> k.startsWith(region + "::"))
+                        : instanceConnectEndpoints.scan(k -> k.startsWith(region + "::"));
+        for (InstanceConnectEndpoint endpoint : regionEndpoints) {
+            for (NetworkInterface eiceNi : instanceConnectEndpointNetworkInterfacesOf(endpoint, safeAccount)) {
+                String eiceEniId = eiceNi.getNetworkInterfaceId();
+                if (foundIds.contains(eiceEniId)
+                        || !networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(eiceEniId)) {
+                    continue;
+                }
+                foundIds.add(eiceEniId);
+                eiceNi.getTagSet().addAll(tagsOf(safeAccount, region, eiceEniId).orElse(List.of()));
+                if (matchesFilters(eiceNi, filters, region)) {
+                    result.add(eiceNi);
+                }
             }
         }
 
