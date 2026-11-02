@@ -293,7 +293,9 @@ public class TimestreamInfluxDbService implements Resettable {
         if (hasDataPlane(containerId)) {
             instance.setStatus("REBOOTING");
             instances.put(key(region, instance.getId()), instance);
-            restartAsync(DB_INSTANCE, instance.getAccountId(), region, instance.getId(),
+            String clusterId = instance.getDbClusterId();
+            restartAsync(clusterId == null ? DB_INSTANCE : DB_CLUSTER, instance.getAccountId(), region,
+                    clusterId == null ? instance.getId() : clusterId,
                     new InfluxDbEndpoint(containerId, instance.getEndpoint(), instance.getPort()));
         }
         return new Reported<>(instance, "REBOOTING");

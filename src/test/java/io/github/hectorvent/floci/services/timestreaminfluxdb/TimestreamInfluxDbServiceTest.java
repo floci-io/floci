@@ -213,6 +213,41 @@ class TimestreamInfluxDbServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void memberRebootPropagatesTheRediscoveredEndpointToClusterAndMembers(boolean unhealthy) throws Exception {
+        String id = service.createDbCluster(json("""
+                {"name":"moved-cluster","dbInstanceType":"db.influx.large","allocatedStorage":20,
+                 "username":"admin","password":"password123","organization":"org","bucket":"bucket",
+                 "vpcSubnetIds":["subnet-1"],"vpcSecurityGroupIds":["sg-1"]}
+                """), REGION).resource().getId();
+        InfluxDbEndpoint moved = new InfluxDbEndpoint("container-1", "reassigned-host", 28086);
+        when(containerManager.restart("container-1")).thenReturn(moved);
+
+        if (unhealthy) {
+            doThrow(new IllegalStateException("not healthy")).when(containerManager).waitUntilReady(moved);
+        }
+        List<DbInstance> before = service.listDbInstancesForCluster(
+                json("{\"dbClusterId\":\"" + id + "\"}"), REGION).items();
+        assertTrue(before.size() > 1);
+        String memberId = before.getFirst().getId();
+        service.rebootDbInstance(json("{\"identifier\":\"" + memberId + "\"}"), REGION);
+
+        verify(containerManager).waitUntilReady(moved);
+        DbCluster stored = service.getDbCluster(json("{\"dbClusterId\":\"" + id + "\"}"), REGION);
+        assertEquals(unhealthy ? "REBOOT_FAILED" : "AVAILABLE", stored.getStatus());
+        assertEquals("reassigned-host", stored.getEndpoint());
+        assertEquals("reassigned-host", stored.getReaderEndpoint());
+        List<DbInstance> members = service.listDbInstancesForCluster(
+                json("{\"dbClusterId\":\"" + id + "\"}"), REGION).items();
+        assertTrue(!members.isEmpty());
+        for (DbInstance member : members) {
+            assertEquals("reassigned-host", member.getEndpoint());
+            assertEquals(28086, member.getPort());
+            assertEquals(unhealthy ? "REBOOT_FAILED" : "AVAILABLE", member.getStatus());
+        }
+    }
+
     @Test
     void backupCapturesContainerDataAndRestoreLoadsItIntoANewContainer() throws Exception {
         String sourceId = createInstance("backup-db", null).getId();
