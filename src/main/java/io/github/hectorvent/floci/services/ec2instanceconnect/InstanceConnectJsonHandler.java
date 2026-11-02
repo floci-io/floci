@@ -114,7 +114,7 @@ public class InstanceConnectJsonHandler {
         }
 
         String requestId = UUID.randomUUID().toString();
-        String caller = "arn:aws:iam::" + regionResolver.getAccountId() + ":root";
+        String caller = regionResolver.buildGlobalArn("iam", "root");
         keys.add(new InstanceConnectKeys.ActiveKey(instanceId, osUser, publicKey.trim(),
                 clock.instant().plus(InstanceConnectKeys.KEY_LIFETIME), caller, requestId));
 
