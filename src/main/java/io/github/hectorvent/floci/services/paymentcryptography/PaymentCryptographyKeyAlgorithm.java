@@ -71,7 +71,8 @@ enum PaymentCryptographyKeyAlgorithm {
      */
     static List<PaymentCryptographyKeyAlgorithm> allowedOf(String usage) {
         if ("TR31_M1_ISO_9797_1_MAC_KEY".equals(usage)
-                || "TR31_M3_ISO_9797_3_MAC_KEY".equals(usage)) {
+                || "TR31_M3_ISO_9797_3_MAC_KEY".equals(usage)
+                || "TR31_M0_ISO_16609_MAC_KEY".equals(usage)) {
             // The ISO 9797 MACs are defined over Triple DES.
             return List.of(TDES_2KEY, TDES_3KEY);
         }

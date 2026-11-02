@@ -747,6 +747,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             Map.entry("E6", "TR31_E6_EMV_MKEY_OTHER"),
             Map.entry("K0", "TR31_K0_KEY_ENCRYPTION_KEY"),
             Map.entry("K1", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+            Map.entry("M0", "TR31_M0_ISO_16609_MAC_KEY"),
             Map.entry("M1", "TR31_M1_ISO_9797_1_MAC_KEY"),
             Map.entry("M3", "TR31_M3_ISO_9797_3_MAC_KEY"),
             Map.entry("M6", "TR31_M6_ISO_9797_5_CMAC_KEY"),

@@ -437,12 +437,14 @@ class PaymentCryptographyServiceTest {
                 new String[] {"TR31_K0_KEY_ENCRYPTION_KEY", "AES_256"},
                 new String[] {"TR31_K1_KEY_BLOCK_PROTECTION_KEY", "AES_256"},
                 // The ISO 9797 MACs are defined over Triple DES.
+                new String[] {"TR31_M0_ISO_16609_MAC_KEY", "TDES_2KEY"},
                 new String[] {"TR31_M1_ISO_9797_1_MAC_KEY", "TDES_2KEY"},
                 new String[] {"TR31_M3_ISO_9797_3_MAC_KEY", "TDES_2KEY"},
                 new String[] {"TR31_M6_ISO_9797_5_CMAC_KEY", "AES_256"},
                 new String[] {"TR31_M7_HMAC_KEY", "AES_256"},
                 new String[] {"TR31_P0_PIN_ENCRYPTION_KEY", "AES_256"},
                 new String[] {"TR31_P1_PIN_GENERATION_KEY", "AES_256"},
+                new String[] {"TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", "AES_256"},
                 new String[] {"TR31_V1_IBM3624_PIN_VERIFICATION_KEY", "AES_256"},
                 new String[] {"TR31_V2_VISA_PIN_VERIFICATION_KEY", "AES_256"});
 
