@@ -140,6 +140,98 @@ class CopyRecordTransformerTest {
                 applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", true), "a|00/00/00|2003-03-31 18:45:05\n"));
     }
 
+    private static final List<CopyRecordTransformer.ColumnKind> FILL_KINDS = List.of(
+            CopyRecordTransformer.ColumnKind.OTHER,
+            CopyRecordTransformer.ColumnKind.TEXT,
+            CopyRecordTransformer.ColumnKind.DATE,
+            CopyRecordTransformer.ColumnKind.TEXT);
+
+    private static String applyFill(boolean csv, boolean emptyAsNull, String input) {
+        return applyFill(csv, null, new CopyStatementParser.CopyTransforms(
+                false, emptyAsNull, false, false, null, null, null, false, true), input);
+    }
+
+    private static String applyFill(boolean csv, String nullAs, CopyStatementParser.CopyTransforms transforms,
+                                    String input) {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", csv ? "," : "|", 0, false, csv, nullAs, null, false, false, false,
+                transforms);
+        return new String(new CopyRecordTransformer(spec, null, FILL_KINDS)
+                .apply(input.getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void fillRecordUsesTheCustomNullString() {
+        CopyStatementParser.CopyTransforms fill = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, true);
+
+        assertEquals("1|a|NA|\n", applyFill(false, "NA", fill, "1|a\n"));
+    }
+
+    @Test
+    void fillRecordWithAnEmptyNullStringNullsTheCharacterColumnsToo() {
+        CopyStatementParser.CopyTransforms fill = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, true);
+
+        assertEquals("1|a||\n", applyFill(false, "", fill, "1|a\n"));
+        assertEquals("1,a,,\n", applyFill(true, "", fill, "1,a\n"));
+    }
+
+    @Test
+    void fillRecordLeavesARecordWithTooManyFieldsToPostgres() {
+        CopyStatementParser.CopyTransforms fill = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, true);
+
+        assertEquals("1|a|2020-01-01|x|extra\n", applyFill(false, null, fill, "1|a|2020-01-01|x|extra\n"));
+    }
+
+    @Test
+    void fillRecordTreatsABlankLineAsOneEmptyField() {
+        assertEquals("||\\N|\n", applyFill(false, false, "\n"));
+    }
+
+    @Test
+    void fillRecordWorksWithTheDateFormatAndRemoveQuotesOfTheSameCopy() {
+        CopyStatementParser.CopyTransforms both = new CopyStatementParser.CopyTransforms(
+                false, false, true, false, null, CopyTemporalFormat.parse("MM/DD/YYYY", false), null, false, true);
+
+        assertEquals("1|a|2003-03-31|\n", applyFill(false, null, both, "1|\"a\"|03/31/2003\n"));
+        assertEquals("1|a|\\N|\n", applyFill(false, null, both, "1|\"a\"\n"));
+    }
+
+    @Test
+    void fillRecordGivesCharacterColumnsAnEmptyStringAndTheOthersNull() {
+        assertEquals("1|a|\\N|\n2|b|2020-01-01|x\n", applyFill(false, false, "1|a\n2|b|2020-01-01|x\n"));
+        assertEquals("1||\\N|\n", applyFill(false, false, "1\n"));
+    }
+
+    @Test
+    void fillRecordWithEmptyAsNullFillsCharacterColumnsWithNull() {
+        assertEquals("1|a|\\N|\\N\n", applyFill(false, true, "1|a\n"));
+    }
+
+    @Test
+    void fillRecordQuotesTheEmptyStringInCsvWhereAnEmptyFieldIsNull() {
+        assertEquals("1,a,,\"\"\n", applyFill(true, false, "1,a\n"));
+        assertEquals("1,a,,\n", applyFill(true, true, "1,a\n"));
+    }
+
+    @Test
+    void fillRecordLeavesCompleteAndCrlfRecordsAlone() {
+        assertEquals("1|a|2020-01-01|x\n", applyFill(false, false, "1|a|2020-01-01|x\r\n"));
+        assertEquals("1|a|\\N|\n", applyFill(false, false, "1|a\r\n"));
+    }
+
+    @Test
+    void fillRecordFillsAnUnterminatedLastRecord() {
+        assertEquals("1|a|\\N|\n", applyFill(false, false, "1|a"));
+    }
+
+    @Test
+    void aShortRecordIsLeftAloneWithoutFillRecord() {
+        assertEquals("1|a\n", apply("|", false, null, transforms(false, true, false, false, null), "1|a\n"));
+    }
+
     @Test
     void acceptAnyDateWithoutAFormatLoadsIsoValuesAndNullsTheRest() {
         CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
