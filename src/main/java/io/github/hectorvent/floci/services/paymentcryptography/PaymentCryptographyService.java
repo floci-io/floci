@@ -99,8 +99,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /**
      * The service over two stores, with a request context of its own.
      *
-     * <p>The context belongs to a request in the running service, so a caller that is not one —
-     * a test — is given one that resolves its aliases itself.
+     * <p>The context belongs to a request in the running service, so a caller that is not
+     * one, such as a test, is given one that resolves its aliases itself.
      */
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,

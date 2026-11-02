@@ -37,13 +37,13 @@ import java.util.concurrent.ConcurrentHashMap;
  * protects the key differently:
  *
  * <ul>
- *   <li>{@code Tr31KeyBlock} — a TR-31 key block under a key the service holds.
- *   <li>{@code KeyCryptogram} — the key material under the receiver's RSA certificate.
- *   <li>{@code Tr34KeyBlock} — a TR-31 key block, signed by the service and wrapped for the
+ *   <li>{@code Tr31KeyBlock}: a TR-31 key block under a key the service holds.
+ *   <li>{@code KeyCryptogram}: the key material under the receiver's RSA certificate.
+ *   <li>{@code Tr34KeyBlock}: a TR-31 key block, signed by the service and wrapped for the
  *       receiver under their certificate.
- *   <li>{@code DiffieHellmanTr31KeyBlock} — a TR-31 key block under a key the two parties
+ *   <li>{@code DiffieHellmanTr31KeyBlock}: a TR-31 key block under a key the two parties
  *       agreed with ECDH.
- *   <li>{@code As2805KeyCryptogram} — the key material under a key encryption key, bound to
+ *   <li>{@code As2805KeyCryptogram}: the key material under a key encryption key, bound to
  *       its purpose by the AS2805 variant.
  * </ul>
  *
