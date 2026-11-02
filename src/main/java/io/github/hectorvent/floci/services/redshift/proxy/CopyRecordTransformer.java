@@ -221,8 +221,12 @@ final class CopyRecordTransformer {
 
     private void writeField(Field field, int column, ByteArrayOutputStream out) {
         byte[] value = field.value();
+        boolean emptyField = !field.quoted() && value.length == 0;
+        boolean nonCharacter = columnKinds != null && column < columnKinds.size()
+                && columnKinds.get(column) != ColumnKind.TEXT;
         boolean nulled = (transforms.blanksAsNull() && isBlank(value))
-                || (transforms.emptyAsNull() && value.length == 0);
+                || (transforms.emptyAsNull() && value.length == 0)
+                || (emptyField && nonCharacter);
         if (nulled) {
             out.writeBytes(nullMarker);
             return;

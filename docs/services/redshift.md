@@ -801,7 +801,9 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   match its format fails the COPY, as it does with Redshift's default `MAXERROR` of 0; the message names the
   column and the format, and Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
   `NULL` instead; when no format is given it reads the ISO form of a date, with an optional time of day, and
-  turns anything else into `NULL`. Numeric parts with no separator between them, as in `YYYYMMDD`, need their
+  turns anything else into `NULL`. An empty unquoted field of a `DATE`, `TIMESTAMP` or other non-character column
+  is always loaded as `NULL`, as in AWS, without requiring `ACCEPTANYDATE` or `EMPTYASNULL`. Numeric parts with no
+  separator between them, as in `YYYYMMDD`, need their
   full width, a part may be named once, and `HH12` needs `AM` or `PM`; any other format string is not
   recognized.
   Like `TRUNCATECOLUMNS`, these read column types from the catalog, so they work only over the Simple Query

@@ -72,11 +72,33 @@ class CopyRecordTransformerTest {
     }
 
     @Test
-    void emptyTemporalFieldsWithoutAcceptAnyDateFailTheCopy() {
+    void emptyTemporalFieldsWithoutAcceptAnyDateLoadAsNull() {
+        assertEquals("1|2003-03-31|\\N\n",
+                applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY HH:MI:SS", false), "1|03/31/2003|\n"));
+        assertEquals("1|\\N|2003-03-31 12:00:00\n",
+                applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY HH:MI:SS", false), "1||03/31/2003 12:00:00\n"));
+    }
+
+    @Test
+    void unquotedEmptyTemporalFieldsInCsvLoadAsNullWithoutAcceptAnyDate() {
+        assertEquals("1,2003-03-31,\n",
+                applyTemporal(true, temporal("MM/DD/YYYY", "MM/DD/YYYY HH:MI:SS", false), "1,03/31/2003,\n"));
+        assertEquals("1,,2003-03-31 12:00:00\n",
+                applyTemporal(true, temporal("MM/DD/YYYY", "MM/DD/YYYY HH:MI:SS", false), "1,,03/31/2003 12:00:00\n"));
+    }
+
+    @Test
+    void quotedEmptyTemporalFieldsInCsvWithoutAcceptAnyDateFailTheCopy() {
         assertThrows(S3CopySimulator.S3TransferException.class,
-                () -> applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", false), "1|03/31/2003|\n"));
-        assertThrows(S3CopySimulator.S3TransferException.class,
-                () -> applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", false), "1||03/31/2003 12:00:00\n"));
+                () -> applyTemporal(true, temporal("MM/DD/YYYY", "MM/DD/YYYY HH:MI:SS", false),
+                        "1,\"\",03/31/2003 12:00:00\n"));
+    }
+
+    @Test
+    void emptyNonCharacterFieldsLoadAsNull() {
+        assertEquals("\\N|2003-03-31|2003-03-31 12:00:00\n",
+                applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY HH:MI:SS", false),
+                        "|03/31/2003|03/31/2003 12:00:00\n"));
     }
 
     @Test
@@ -187,7 +209,7 @@ class CopyRecordTransformerTest {
 
     @Test
     void fillRecordTreatsABlankLineAsOneEmptyField() {
-        assertEquals("||\\N|\n", applyFill(false, false, "\n"));
+        assertEquals("\\N||\\N|\n", applyFill(false, false, "\n"));
     }
 
     @Test
