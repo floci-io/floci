@@ -33,6 +33,11 @@ public class ApiGatewayExecuteRouteContext {
         return context != null ? context.request().connection().remoteAddress().hostAddress() : "127.0.0.1";
     }
 
+    String localIp() {
+        RoutingContext context = currentVertxRequest != null ? currentVertxRequest.getCurrent() : null;
+        return context != null ? context.request().connection().localAddress().hostAddress() : "127.0.0.1";
+    }
+
     private final Instant requestTime = Instant.now();
     private final String extendedRequestId = UUID.randomUUID().toString();
     private String requestId;
