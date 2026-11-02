@@ -481,7 +481,9 @@ function blankLiterals(src) {
     onToken: (token) => {
       if (token.type.label === 'regexp' && regexStart === -1) regexStart = token.start;
       if (token.type.label === 'string' || token.type.label === 'regexp'
-        || token.type.label === 'template') blank(token.start, token.end);
+        || token.type.label === 'template' || token.type.label === 'invalidTemplate') {
+        blank(token.start, token.end);
+      }
     }
   });
   return { scanned: out.join(''), regexStart };

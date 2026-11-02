@@ -61,6 +61,9 @@ class AppSyncJsResolverDockerIntegrationTest {
               regexKeyword: String
               regexClassThenUnsupported: String
               regexDivision: String
+              taggedRawInvalidEscape: String
+              taggedRawInvalidEscapeHole: String
+              untaggedInvalidEscape: String
               normalizeString: String
             }
             """;
@@ -242,6 +245,29 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
+    private static final String TAGGED_RAW_INVALID_ESCAPE_RESOLVER = """
+            export function request(ctx) {
+              const raw = (parts) => parts.raw[0];
+              return { payload: { value: raw`\\x while` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String TAGGED_RAW_INVALID_ESCAPE_HOLE_RESOLVER = """
+            export function request(ctx) {
+              const raw = (parts, value) => value;
+              return { payload: { value: raw`\\x while ${(() => { while (false) {} return 1; })()}` } };
+            }
+            """;
+
+    private static final String UNTAGGED_INVALID_ESCAPE_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: `\\x while` } };
+            }
+            """;
+
     private String apiId;
     private String apiKey;
     private static final String NORMALIZE_STRING_RESOLVER = """
@@ -295,6 +321,12 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "regexClassThenUnsupported", "local",
                 REGEX_CLASS_UNSUPPORTED_RESOLVER);
         createUnitResolver(apiId, "Query", "regexDivision", "local", REGEX_DIVISION_RESOLVER);
+        createUnitResolver(apiId, "Query", "taggedRawInvalidEscape", "local",
+                TAGGED_RAW_INVALID_ESCAPE_RESOLVER);
+        createUnitResolver(apiId, "Query", "taggedRawInvalidEscapeHole", "local",
+                TAGGED_RAW_INVALID_ESCAPE_HOLE_RESOLVER);
+        createUnitResolver(apiId, "Query", "untaggedInvalidEscape", "local",
+                UNTAGGED_INVALID_ESCAPE_RESOLVER);
         createUnitResolver(apiId, "Query", "normalizeString", "local", NORMALIZE_STRING_RESOLVER);
     }
 
@@ -521,6 +553,30 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.regexDivision", equalTo("3% vs 4%"));
+    }
+
+    @Test
+    void invalidEscapeInTaggedRawTemplateDoesNotExposeKeywordsToSubsetScan() {
+        query("{ taggedRawInvalidEscape }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.taggedRawInvalidEscape", equalTo("\\x while"));
+    }
+
+    @Test
+    void invalidEscapeInUntaggedTemplateRemainsSyntaxError() {
+        query("{ untaggedInvalidEscape }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("SyntaxError"))
+            .body("errors[0].message", containsString("Bad escape sequence"));
+    }
+
+    @Test
+    void invalidEscapeInTaggedRawTemplateStillScansExpressions() {
+        query("{ taggedRawInvalidEscapeHole }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while loops"));
     }
 
     @Test
