@@ -21,6 +21,8 @@ public class GlobalSecondaryIndex {
     private List<String> nonKeyAttributes;
     private Integer onDemandMaxReadRequestUnits;
     private Integer onDemandMaxWriteRequestUnits;
+    // Null until the first UpdateContributorInsights call on this index.
+    private ContributorInsights contributorInsights;
 
     public GlobalSecondaryIndex() {
         this.provisionedThroughput = new ProvisionedThroughput(0, 0);
@@ -71,6 +73,11 @@ public class GlobalSecondaryIndex {
 
     public Integer getOnDemandMaxWriteRequestUnits() { return onDemandMaxWriteRequestUnits; }
     public void setOnDemandMaxWriteRequestUnits(Integer v) { this.onDemandMaxWriteRequestUnits = v; }
+
+    public ContributorInsights getContributorInsights() { return contributorInsights; }
+    public void setContributorInsights(ContributorInsights contributorInsights) {
+        this.contributorInsights = contributorInsights;
+    }
 
     @JsonIgnore
     public String getPartitionKeyName() {
