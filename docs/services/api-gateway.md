@@ -860,7 +860,8 @@ applied: the call to a Cloud Map instance uses plain HTTP.
 `$context.identity.sourceIp` is the address of the TCP connection to Floci, whatever `X-Forwarded-For`
 the client sent. Floci forwards a client's `X-Forwarded-For` to the backend unchanged and does not add
 the client address to it, so map `$context.identity.sourceIp` to a header of your own to pass the
-address on. An ALB or NLB listener integration goes through the listener, which adds its own hop.
+address on. An ALB HTTP or HTTPS listener integration goes through the listener, which adds its own hop.
+An NLB TCP listener relays the request unchanged and does not add a hop.
 
 ### Supported Operations
 
