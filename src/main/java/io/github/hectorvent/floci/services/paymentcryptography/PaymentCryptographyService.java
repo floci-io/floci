@@ -83,6 +83,18 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         this(keyStore, aliasStore, regionResolver, new SecureRandom(), requestContext);
     }
 
+    /**
+     * The service over two stores, with a request context of its own.
+     *
+     * <p>The context belongs to a request in the running service, so a caller that is not one —
+     * a test — is given one that resolves its aliases itself.
+     */
+    PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
+                                StorageBackend<String, PaymentCryptographyAlias> aliasStore,
+                                RegionResolver regionResolver) {
+        this(keyStore, aliasStore, regionResolver, new SecureRandom(), new PaymentCryptographyRequestContext());
+    }
+
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 RegionResolver regionResolver,
@@ -207,7 +219,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                     "KeyClass '" + keyClass + "' is not supported, this service makes "
                             + SUPPORTED_CLASS + " keys", 400);
         }
-        String usage = string(attributes, "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        // The usage says what the key is for, so a key without one is not a key: the service
+        // refuses it rather than guessing a purpose for it.
+        String usage = usage(attributes);
         // The usage binds the key to its purpose, and a key whose algorithm does not serve
         // that purpose is not one the service makes.
         String badAlgorithm = PaymentCryptographyKeyAlgorithm.refusal(usage, algorithm);
