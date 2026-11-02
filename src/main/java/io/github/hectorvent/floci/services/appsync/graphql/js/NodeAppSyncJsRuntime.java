@@ -21,6 +21,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
@@ -36,14 +37,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * Runs {@code APPSYNC_JS} resolver code in a Node sidecar container.
  *
  * <p>The sidecar is one long-lived container per Floci instance, started lazily on the first JS
  * resolver and reused for every evaluation after that, so the Node boot is paid once rather than
- * per request. Its server is {@code appsync/appsync-js-runtime.mjs} on the classpath, handed to the
- * container base64-encoded in its command: no bind mount, which keeps this working when Floci
+ * per request. Its server and parser are classpath resources, handed to the container as compressed
+ * base64 in its command: no bind mount, which keeps this working when Floci
  * itself runs in a container and the host path would not resolve inside the Docker daemon.
  *
  * <p>The image is a stock {@code node:22-alpine} with no {@code npm install} step, so a resolver
@@ -55,8 +57,10 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
 
     private static final Logger LOG = Logger.getLogger(NodeAppSyncJsRuntime.class);
     private static final String SERVER_RESOURCE = "appsync/appsync-js-runtime.mjs";
+    private static final String PARSER_RESOURCE = "appsync/acorn.mjs";
     private static final int CONTAINER_INTERNAL_PORT = 4600;
     private static final String SERVER_PATH = "/tmp/floci-appsync-js-runtime.mjs";
+    private static final String PARSER_PATH = "/tmp/acorn.mjs";
     /** How long an existing container gets to answer before it is treated as unusable. */
     private static final int ADOPT_PROBE_SECONDS = 5;
     /**
@@ -233,29 +237,50 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
     }
 
     /**
-     * The command that materialises the server inside the container. The script is base64-encoded
-     * rather than quoted into the shell: it contains the quotes, backticks and newlines of the
+     * The command that materialises the server and parser inside the container. The assets are
+     * compressed and base64-encoded rather than quoted into the shell, and stay under the Linux
+     * single-argument limit. The server contains the quotes, backticks and newlines of the
      * {@code @aws-appsync/utils} shim it writes, none of which survive shell interpolation.
      */
-    private String startCommand() {
-        String encoded = Base64.getEncoder().encodeToString(serverScript().getBytes(StandardCharsets.UTF_8));
-        return "echo " + encoded + " | base64 -d > " + SERVER_PATH + " && exec node " + SERVER_PATH;
+    String startCommand() {
+        String parser = compressedResource(PARSER_RESOURCE);
+        String server = compressedResource(SERVER_RESOURCE);
+        return "echo " + parser + " | base64 -d | gzip -d > " + PARSER_PATH
+                + " && echo " + server + " | base64 -d | gzip -d > " + SERVER_PATH
+                + " && exec node " + SERVER_PATH;
     }
 
-    /** Digest of the server script this build would start the sidecar with. */
+    /** Digest both assets so an adopted sidecar always has the matching parser. */
     private String scriptDigest() {
-        return Digests.sha256Hex(serverScript()).substring(0, 16);
+        return Digests.sha256Hex(serverScript() + "\0" + resourceText(PARSER_RESOURCE))
+                .substring(0, 16);
     }
 
     private String serverScript() {
+        return resourceText(SERVER_RESOURCE);
+    }
+
+    private String resourceText(String resource) {
         try (InputStream in = Thread.currentThread().getContextClassLoader()
-                .getResourceAsStream(SERVER_RESOURCE)) {
+                .getResourceAsStream(resource)) {
             if (in == null) {
-                throw new IllegalStateException(SERVER_RESOURCE + " is missing from the classpath");
+                throw new IllegalStateException(resource + " is missing from the classpath");
             }
             return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            throw new IllegalStateException("Could not read " + SERVER_RESOURCE, e);
+            throw new IllegalStateException("Could not read " + resource, e);
+        }
+    }
+
+    private String compressedResource(String resource) {
+        byte[] content = resourceText(resource).getBytes(StandardCharsets.UTF_8);
+        try (ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                GZIPOutputStream compressed = new GZIPOutputStream(bytes)) {
+            compressed.write(content);
+            compressed.finish();
+            return Base64.getEncoder().encodeToString(bytes.toByteArray());
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not compress " + resource, e);
         }
     }
 

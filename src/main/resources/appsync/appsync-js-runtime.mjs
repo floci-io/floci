@@ -21,6 +21,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
+// Acorn 8.15.0 (MIT); the vendored distribution and license travel with this script.
+import { parse } from './acorn.mjs';
 
 const PORT = Number(process.env.FLOCI_JS_RUNTIME_PORT || 4600);
 const ROOT = process.env.FLOCI_JS_RUNTIME_DIR || '/tmp/floci-appsync';
@@ -456,74 +458,66 @@ const BANNED_CONSTRUCTS = [
   [/(?<![.\w$])Promise(?![\w$])/, 'promises']
 ];
 
-// Replaces the contents of comments, strings, template text and regex literals with spaces, so a
-// keyword inside one is not mistaken for code. Offsets are preserved, which keeps line numbers
-// honest. Expressions inside a template hole stay as code, because that is what they are.
+const PARSE_FAILURE_BANS = [
+  ["'with' in strict mode", 'with', 'with statements'],
+  ["Cannot use keyword 'await' outside an async function", 'await', 'await'],
+  ["The keyword 'yield' is reserved", 'yield', 'generators']
+];
+
+// Acorn resolves slash as division or regex using full JavaScript syntax, including template
+// holes. Preserve offsets so the existing construct checks report the original line numbers.
 function blankLiterals(src) {
   const out = src.split('');
+  let regexStart = -1;
   const blank = (from, to) => {
     for (let i = from; i < to && i < out.length; i++) {
       if (out[i] !== '\n') out[i] = ' ';
     }
   };
-  let i = 0;
-  while (i < src.length) {
-    const c = src[i];
-    const next = src[i + 1];
-    if (c === '/' && next === '/') {
-      const end = src.indexOf('\n', i);
-      const stop = end === -1 ? src.length : end;
-      blank(i, stop);
-      i = stop;
-      continue;
+  parse(src, {
+    ecmaVersion: 'latest',
+    sourceType: 'module',
+    onComment: (_block, _text, start, end) => blank(start, end),
+    onToken: (token) => {
+      if (token.type.label === 'regexp' && regexStart === -1) regexStart = token.start;
+      if (token.type.label === 'string' || token.type.label === 'regexp'
+        || token.type.label === 'template') blank(token.start, token.end);
     }
-    if (c === '/' && next === '*') {
-      const end = src.indexOf('*/', i + 2);
-      const stop = end === -1 ? src.length : end + 2;
-      blank(i, stop);
-      i = stop;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      let j = i + 1;
-      while (j < src.length && src[j] !== c) {
-        if (src[j] === '\\') j++;
-        j++;
-      }
-      blank(i + 1, j);
-      i = j + 1;
-      continue;
-    }
-    if (c === String.fromCharCode(96)) {
-      i++;
-      let j = i;
-      while (j < src.length) {
-        if (src[j] === '\\') { j += 2; continue; }
-        if (src[j] === String.fromCharCode(96)) { blank(i, j); i = j + 1; break; }
-        if (src[j] === '$' && src[j + 1] === '{') { blank(i, j); i = j + 2; break; }
-        j++;
-      }
-      if (j >= src.length) { blank(i, src.length); i = src.length; }
-      continue;
-    }
-    i++;
-  }
-  return out.join('');
+  });
+  return { scanned: out.join(''), regexStart };
+}
+
+function unsupportedConstruct(description, line) {
+  return {
+    message: 'Unsupported in the APPSYNC_JS runtime: ' + description + ' (line ' + line
+      + '). AWS runs resolvers on a restricted JavaScript runtime, not Node, so this code '
+      + 'would be rejected on deploy.',
+    type: 'UnsupportedFeature'
+  };
 }
 
 function validateAppSyncSubset(code) {
-  const scanned = blankLiterals(code);
+  let literals;
+  try {
+    literals = blankLiterals(code);
+  } catch (error) {
+    // Acorn rejects these constructs before the subset scan can report them.
+    const banned = error instanceof SyntaxError && PARSE_FAILURE_BANS.find(
+      ([message, keyword]) => error.message.startsWith(message)
+        && code.slice(error.pos, error.pos + keyword.length) === keyword);
+    if (!banned) throw error;
+    return unsupportedConstruct(banned[2], error.loc.line);
+  }
   for (const [pattern, description] of BANNED_CONSTRUCTS) {
-    const match = pattern.exec(scanned);
+    const match = pattern.exec(literals.scanned);
     if (match) {
       const line = code.slice(0, match.index).split('\n').length;
-      return {
-        message: 'Unsupported in the APPSYNC_JS runtime: ' + description + ' (line ' + line
-          + '). AWS runs resolvers on a restricted JavaScript runtime, not Node, so this code '
-          + 'would be rejected on deploy.',
-        type: 'UnsupportedFeature'
-      };
+      return unsupportedConstruct(description, line);
     }
+  }
+  if (literals.regexStart !== -1) {
+    const line = code.slice(0, literals.regexStart).split('\n').length;
+    return unsupportedConstruct('regular expressions', line);
   }
   return null;
 }

@@ -52,7 +52,15 @@ class AppSyncJsResolverDockerIntegrationTest {
               asyncResolver: String
               importsNode: String
               loops: String
+              withStatement: String
+              misplacedAwait: String
+              misplacedYield: String
+              malformedSyntax: String
               keywordsInText: String
+              regexLiteral: String
+              regexKeyword: String
+              regexClassThenUnsupported: String
+              regexDivision: String
               normalizeString: String
             }
             """;
@@ -159,12 +167,75 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
+    private static final String WITH_RESOLVER = """
+            export function request(ctx) {
+              with (ctx) { return { payload: { value: "nope" } }; }
+            }
+            """;
+
+    private static final String AWAIT_RESOLVER = """
+            export function request(ctx) {
+              await 1;
+              return { payload: { value: "nope" } };
+            }
+            """;
+
+    private static final String YIELD_RESOLVER = """
+            export function request(ctx) {
+              yield 1;
+              return { payload: { value: "nope" } };
+            }
+            """;
+
+    private static final String MALFORMED_RESOLVER = """
+            export function request(ctx) {
+              // with await yield
+              const text = /with/;
+              const value = ;
+              return { payload: { value } };
+            }
+            """;
+
     /** The same keywords, but only inside a string, a comment and a template: still valid. */
     private static final String KEYWORDS_IN_TEXT_RESOLVER = """
             export function request(ctx) {
               // class while try throw async await this
               const whileActive = "try catch class while";
               return { payload: { value: `${whileActive} ok` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String REGEX_KEYWORD_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: /while/.test("while") } };
+            }
+            export function response(ctx) {
+              return String(ctx.result.value);
+            }
+            """;
+
+    private static final String REGEX_LITERAL_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: /foo/.test("foo") } };
+            }
+            """;
+
+    private static final String REGEX_CLASS_UNSUPPORTED_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: /[//]/.test("/") && this.value } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String REGEX_DIVISION_RESOLVER = """
+            export function request(ctx) {
+              const sum = (value) => value;
+              return { payload: { value: `${sum(6) / 2}% vs ${sum(8) / 2}%` } };
             }
             export function response(ctx) {
               return ctx.result.value;
@@ -214,7 +285,16 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "asyncResolver", "local", ASYNC_RESOLVER);
         createUnitResolver(apiId, "Query", "importsNode", "local", NODE_IMPORT_RESOLVER);
         createUnitResolver(apiId, "Query", "loops", "local", WHILE_RESOLVER);
+        createUnitResolver(apiId, "Query", "withStatement", "local", WITH_RESOLVER);
+        createUnitResolver(apiId, "Query", "misplacedAwait", "local", AWAIT_RESOLVER);
+        createUnitResolver(apiId, "Query", "misplacedYield", "local", YIELD_RESOLVER);
+        createUnitResolver(apiId, "Query", "malformedSyntax", "local", MALFORMED_RESOLVER);
         createUnitResolver(apiId, "Query", "keywordsInText", "local", KEYWORDS_IN_TEXT_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexLiteral", "local", REGEX_LITERAL_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexKeyword", "local", REGEX_KEYWORD_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexClassThenUnsupported", "local",
+                REGEX_CLASS_UNSUPPORTED_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexDivision", "local", REGEX_DIVISION_RESOLVER);
         createUnitResolver(apiId, "Query", "normalizeString", "local", NORMALIZE_STRING_RESOLVER);
     }
 
@@ -376,6 +456,29 @@ class AppSyncJsResolverDockerIntegrationTest {
     }
 
     @Test
+    void strictModeFailuresKeepTheirUnsupportedFeatureDiagnostics() {
+        query("{ withStatement }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("with statements"));
+        query("{ misplacedAwait }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("await"));
+        query("{ misplacedYield }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("generators"));
+    }
+
+    @Test
+    void malformedCodeWithBannedWordsOnlyInLiteralsRemainsSyntaxError() {
+        query("{ malformedSyntax }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("SyntaxError"));
+    }
+
+    @Test
     void theSameKeywordsInStringsAndCommentsAreNotRefused() {
         // The check would be worse than useless if it rejected valid resolvers, so the scan blanks
         // comments, strings and template text before looking for constructs.
@@ -383,6 +486,41 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.keywordsInText", equalTo("try catch class while ok"));
+    }
+
+    @Test
+    void aRegexLiteralIsReportedAsUnsupported() {
+        query("{ regexLiteral }")
+            .statusCode(200)
+            .body("data.regexLiteral", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+    }
+
+    @Test
+    void aKeywordInsideARegexLiteralIsReportedAsUnsupportedRegex() {
+        query("{ regexKeyword }")
+            .statusCode(200)
+            .body("data.regexKeyword", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+    }
+
+    @Test
+    void slashesInsideARegexCharacterClassCannotHideUnsupportedCode() {
+        query("{ regexClassThenUnsupported }")
+            .statusCode(200)
+            .body("data.regexClassThenUnsupported", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
+    }
+
+    @Test
+    void divisionInsideTwoTemplateInterpolationsIsNotReadAsRegex() {
+        query("{ regexDivision }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.regexDivision", equalTo("3% vs 4%"));
     }
 
     @Test
