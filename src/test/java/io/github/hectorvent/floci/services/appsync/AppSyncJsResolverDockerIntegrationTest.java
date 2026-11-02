@@ -176,13 +176,14 @@ class AppSyncJsResolverDockerIntegrationTest {
     private static final String NORMALIZE_STRING_RESOLVER = """
         import { util } from "@aws-appsync/utils";
         export function request(ctx) {
-          const value = "\\uFB01";
+          const value = "\\u00E9";
           return { payload: {
             defaultForm: util.str.normalize(value),
             nfc: util.str.normalize(value, "NFC"),
             nfd: util.str.normalize(value, "NFD"),
             nfkc: util.str.normalize(value, "NFKC"),
-            nfkd: util.str.normalize(value, "NFKD")
+            nfkd: util.str.normalize(value, "NFKD"),
+            lowercaseNfkd: util.str.normalize(value, "nfkd")
           } };
         }
         export function response(ctx) {
@@ -288,7 +289,8 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.normalizeString", equalTo(
-                "{\"defaultForm\":\"ﬁ\",\"nfc\":\"ﬁ\",\"nfd\":\"ﬁ\",\"nfkc\":\"fi\",\"nfkd\":\"fi\"}"
+                "{\"defaultForm\":\"é\",\"nfc\":\"é\",\"nfd\":\"é\","
+                    + "\"nfkc\":\"é\",\"nfkd\":\"é\",\"lowercaseNfkd\":\"é\"}"
             ));
     }
 
