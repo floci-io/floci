@@ -3313,6 +3313,69 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    private String matchingManagedSecretArn(String secretName, Secret.Tag ownerTag, String region) {
+        try {
+            Secret secret = secretsManagerService.describeSecret(secretName, region);
+            if (secret != null && secretName.equals(secret.getName())
+                    && MANAGED_SECRET_OWNING_SERVICE.equals(secret.getOwningService())
+                    && secret.getTags() != null && secret.getTags().contains(ownerTag)) {
+                return secret.getArn();
+            }
+        } catch (AwsException failure) {
+            if (!"ResourceNotFoundException".equals(failure.getErrorCode())) {
+                throw failure;
+            }
+        }
+        return null;
+    }
+
+    private void cleanupFailedCreateManagedSecret(String secretArn, String region) {
+        if (secretArn == null || secretsManagerService == null) {
+            return;
+        }
+        try {
+            secretsManagerService.deleteSecret(secretArn, null, true, region);
+        } catch (AwsException failure) {
+            if (!"ResourceNotFoundException".equals(failure.getErrorCode())) {
+                throw failure;
+            }
+        }
+    }
+
+    private void cleanupFailedCreateManagedSecret(DbInstance instance, String region) {
+        if (secretsManagerService == null) {
+            throw new IllegalStateException("Secrets Manager is required to retry RDS managed secret cleanup");
+        }
+        if (instance.isManagedSecretCleanupRequired() && instance.getMasterUserSecretArn() == null) {
+            instance.setMasterUserSecretArn(matchingManagedSecretArn(
+                    "rds!" + instance.getDbiResourceId(),
+                    new Secret.Tag("aws:rds:primaryDBInstanceArn", instance.getDbInstanceArn()), region));
+        }
+        if (instance.getMasterUserSecretArn() != null) {
+            instance.setManagedSecretCleanupRequired(true);
+            cleanupFailedCreateManagedSecret(instance.getMasterUserSecretArn(), region);
+            instance.setMasterUserSecretArn(null);
+        }
+        instance.setManagedSecretCleanupRequired(false);
+    }
+
+    private void cleanupFailedCreateManagedSecret(DbCluster cluster, String region) {
+        if (secretsManagerService == null) {
+            throw new IllegalStateException("Secrets Manager is required to retry RDS managed secret cleanup");
+        }
+        if (cluster.isManagedSecretCleanupRequired() && cluster.getMasterUserSecretArn() == null) {
+            cluster.setMasterUserSecretArn(matchingManagedSecretArn(
+                    "rds!" + cluster.getDbClusterResourceId(),
+                    new Secret.Tag("aws:rds:primaryDBClusterArn", cluster.getDbClusterArn()), region));
+        }
+        if (cluster.getMasterUserSecretArn() != null) {
+            cluster.setManagedSecretCleanupRequired(true);
+            cleanupFailedCreateManagedSecret(cluster.getMasterUserSecretArn(), region);
+            cluster.setMasterUserSecretArn(null);
+        }
+        cluster.setManagedSecretCleanupRequired(false);
+    }
+
     /**
      * Applies a new KMS key to a cluster's existing managed master user secret. AWS re-encrypts the
      * secret in place on {@code ModifyDBCluster}; silently keeping the old key would make the call
@@ -4846,17 +4909,20 @@ public class RdsService implements Resettable, ResourceProvider {
         detachReadReplicaLinksBeforeDelete(instance);
 
         boolean mock = config.services().rds().mock();
-        if (!mock) {
+        if (!mock || instance.isBackendCleanupRequired()) {
             proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
         }
 
         if (clusterId == null || clusterId.isBlank()) {
-            // Standalone, so stop its container and clean up its Docker volume. Neither exists in
-            // mock mode, and an instance with no container and no reachable daemon has nothing
-            // Docker could clean up, so its delete stays pure metadata.
-            if (!mock && backendCleanupPossible(
-                    instance.getContainerId(), instance.getDbInstanceArn())) {
-                if (instance.getContainerId() != null) {
+            // Standalone, so stop its container and clean up its Docker volume. Current mock mode
+            // skips an ordinary backend, but a persisted cleanup flag still owns a prior backend.
+            // Without either, deletion stays pure metadata.
+            if (instance.isBackendCleanupRequired() || (!mock && backendCleanupPossible(
+                    instance.getContainerId(), instance.getDbInstanceArn()))) {
+                if (instance.isBackendCleanupRequired()) {
+                    containerManager.stopForDelete(
+                            instance.getDbInstanceArn(), resolvedInstanceDockerVolumeName(instance));
+                } else if (instance.getContainerId() != null) {
                     containerManager.stop(buildHandle(instance));
                 } else {
                     containerManager.stopByRuntimeId(instance.getDbInstanceArn());
@@ -4865,8 +4931,16 @@ public class RdsService implements Resettable, ResourceProvider {
                         instance.getDbInstanceArn(),
                         resolvedInstanceStorageResourceId(instance),
                         resolvedInstanceDockerVolumeName(instance));
+                if (instance.isBackendCleanupRequired()) {
+                    instance.setBackendCleanupRequired(false);
+                    putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
+                }
             }
-            detachManagedMasterUserSecret(instance.getMasterUserSecretArn(), effectiveRegion);
+            if (instance.isManagedSecretCleanupRequired()) {
+                cleanupFailedCreateManagedSecret(instance, effectiveRegion);
+            } else {
+                detachManagedMasterUserSecret(instance.getMasterUserSecretArn(), effectiveRegion);
+            }
         } else {
             // Cluster member — remove from cluster's member list
             DbCluster cluster = findClusterForScope(
@@ -4880,8 +4954,19 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         }
 
+        try {
+            deleteInstanceForScope(currentAccountId(), effectiveRegion, id);
+        } catch (RuntimeException | Error failure) {
+            try {
+                putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
+            } catch (RuntimeException | Error restoreFailure) {
+                if (restoreFailure != failure) {
+                    failure.addSuppressed(restoreFailure);
+                }
+            }
+            throw failure;
+        }
         releaseProxyPort(instance.getProxyPort());
-        deleteInstanceForScope(currentAccountId(), effectiveRegion, id);
         reportedMemberRelayFailures.remove(instance.getDbInstanceArn());
         retainReplicatedBackups(instance);
         if (retained != null) {
@@ -5766,15 +5851,23 @@ public class RdsService implements Resettable, ResourceProvider {
                 : retainedClusterBackupOf(cluster, effectiveRegion);
         detachFromGlobalClusterBeforeDelete(cluster);
 
-        detachManagedMasterUserSecret(cluster, effectiveRegion);
+        if (cluster.isManagedSecretCleanupRequired()) {
+            cleanupFailedCreateManagedSecret(cluster, effectiveRegion);
+        } else {
+            detachManagedMasterUserSecret(cluster, effectiveRegion);
+        }
 
         cluster.setStatus(DbInstanceStatus.DELETING);
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
 
-        if (!config.services().rds().mock()) {
+        if (!config.services().rds().mock() || cluster.isBackendCleanupRequired()) {
             proxyManager.stopProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id));
-            if (backendCleanupPossible(cluster.getContainerId(), cluster.getDbClusterArn())) {
-                if (cluster.getContainerId() != null) {
+            if (cluster.isBackendCleanupRequired()
+                    || backendCleanupPossible(cluster.getContainerId(), cluster.getDbClusterArn())) {
+                if (cluster.isBackendCleanupRequired()) {
+                    containerManager.stopForDelete(
+                            cluster.getDbClusterArn(), resolvedClusterDockerVolumeName(cluster));
+                } else if (cluster.getContainerId() != null) {
                     containerManager.stop(buildClusterHandle(cluster));
                 } else {
                     containerManager.stopByRuntimeId(cluster.getDbClusterArn());
@@ -5783,11 +5876,26 @@ public class RdsService implements Resettable, ResourceProvider {
                         cluster.getDbClusterArn(),
                         resolvedClusterStorageResourceId(cluster),
                         resolvedClusterDockerVolumeName(cluster));
+                if (cluster.isBackendCleanupRequired()) {
+                    cluster.setBackendCleanupRequired(false);
+                    putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+                }
             }
         }
 
+        try {
+            deleteClusterForScope(currentAccountId(), effectiveRegion, id);
+        } catch (RuntimeException | Error failure) {
+            try {
+                putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+            } catch (RuntimeException | Error restoreFailure) {
+                if (restoreFailure != failure) {
+                    failure.addSuppressed(restoreFailure);
+                }
+            }
+            throw failure;
+        }
         releaseProxyPort(cluster.getProxyPort());
-        deleteClusterForScope(currentAccountId(), effectiveRegion, id);
         // Custom endpoints belong to their cluster and go with it.
         clusterEndpointsOf(effectiveRegion, id).forEach(endpoint -> clusterEndpoints.delete(
                 clusterEndpointKey(effectiveRegion, endpoint.getDbClusterEndpointIdentifier())));
@@ -10444,21 +10552,17 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Reserves every persisted endpoint port for its owner before any restore allocates one, so a
-     * resource restored earlier without a port cannot take the port of one restored later. When
-     * two records persisted the same port, the first one seen keeps it.
+     * Reserves every persisted endpoint port, including a deleting resource's retained listener,
+     * before any restore allocates one. When two records persisted the same port, the first one
+     * seen keeps it.
      */
     private Map<Integer, String> reservePersistedProxyPorts() {
         Map<Integer, String> owners = new HashMap<>();
         for (DbCluster cluster : allClusters()) {
-            if (cluster.getStatus() != DbInstanceStatus.DELETING) {
-                reservePersistedProxyPort(owners, cluster.getDbClusterArn(), cluster.getProxyPort());
-            }
+            reservePersistedProxyPort(owners, cluster.getDbClusterArn(), cluster.getProxyPort());
         }
         for (DbInstance instance : allInstances()) {
-            if (instance.getStatus() != DbInstanceStatus.DELETING) {
-                reservePersistedProxyPort(owners, instance.getDbInstanceArn(), instance.getProxyPort());
-            }
+            reservePersistedProxyPort(owners, instance.getDbInstanceArn(), instance.getProxyPort());
         }
         for (DbProxy proxy : allProxies()) {
             reservePersistedProxyPort(owners, proxy.getDbProxyArn(), proxy.getProxyPort());

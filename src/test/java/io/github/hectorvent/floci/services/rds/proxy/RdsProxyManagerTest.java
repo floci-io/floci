@@ -14,6 +14,7 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -36,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -280,6 +282,74 @@ class RdsProxyManagerTest {
     }
 
     @Test
+    void failedStartCleanupDoesNotReplaceExistingListenerAndStartRetriesIt() throws Exception {
+        RdsProxyManager manager = manager();
+        int originalPort = FreePorts.anyInterfacePort();
+        try {
+            start(manager, "proxy", originalPort);
+            RdsAuthProxy original = registry(manager).get("proxy");
+            RdsAuthProxy failedCandidate = mock(RdsAuthProxy.class);
+            IllegalStateException stopFailure = new IllegalStateException("candidate stop failed");
+            doThrow(stopFailure).doNothing().when(failedCandidate).stop();
+            RuntimeException startupFailure = new RuntimeException("candidate start failed");
+            recordFailedStart(manager, "proxy", failedCandidate, startupFailure);
+
+            assertSame(stopFailure, startupFailure.getSuppressed()[0]);
+            assertSame(original, registry(manager).get("proxy"));
+            int replacementPort = FreePorts.anyInterfacePort();
+            start(manager, "proxy", replacementPort);
+            verify(failedCandidate, times(2)).stop();
+            assertFalse(pendingRegistry(manager).containsKey("proxy"));
+            assertPortAvailable(originalPort);
+            assertPortUnavailable(replacementPort);
+        } finally {
+            manager.stopAll();
+        }
+    }
+
+    @Test
+    void stopProxyRetainsOnlyFailedPendingCandidateForRetry() throws Exception {
+        RdsProxyManager manager = manager();
+        int originalPort = FreePorts.anyInterfacePort();
+        try {
+            start(manager, "proxy", originalPort);
+            RdsAuthProxy failedCandidate = mock(RdsAuthProxy.class);
+            doThrow(new IllegalStateException("candidate stop failed"))
+                    .doThrow(new IllegalStateException("candidate retry failed"))
+                    .doNothing().when(failedCandidate).stop();
+            recordFailedStart(manager, "proxy", failedCandidate, new RuntimeException("start failed"));
+
+            assertThrows(IllegalStateException.class, () -> manager.stopProxy("proxy"));
+            assertFalse(registry(manager).containsKey("proxy"));
+            assertSame(failedCandidate, pendingRegistry(manager).get("proxy"));
+            assertPortAvailable(originalPort);
+            manager.stopProxy("proxy");
+            assertFalse(pendingRegistry(manager).containsKey("proxy"));
+        } finally {
+            manager.stopAll();
+        }
+    }
+
+    @Test
+    void stopAllRetainsFailedStartCandidateUntilNextAttempt() throws Exception {
+        RdsProxyManager manager = manager();
+        int originalPort = FreePorts.anyInterfacePort();
+        start(manager, "proxy", originalPort);
+        RdsAuthProxy failedCandidate = mock(RdsAuthProxy.class);
+        doThrow(new IllegalStateException("candidate stop failed"))
+                .doThrow(new IllegalStateException("candidate shutdown failed"))
+                .doNothing().when(failedCandidate).stop();
+        recordFailedStart(manager, "proxy", failedCandidate, new RuntimeException("start failed"));
+
+        manager.stopAll();
+        assertFalse(registry(manager).containsKey("proxy"));
+        assertSame(failedCandidate, pendingRegistry(manager).get("proxy"));
+        assertPortAvailable(originalPort);
+        manager.stopAll();
+        assertFalse(pendingRegistry(manager).containsKey("proxy"));
+    }
+
+    @Test
     void stopAllContinuesAndRetainsOnlyFailedListenerOwnership() throws Exception {
         RdsProxyManager manager = manager();
         int successfulPort = FreePorts.anyInterfacePort();
@@ -463,6 +533,31 @@ class RdsProxyManagerTest {
         Field field = RdsProxyManager.class.getDeclaredField("proxies");
         field.setAccessible(true);
         return (ConcurrentHashMap<String, RdsAuthProxy>) field.get(manager);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ConcurrentHashMap<String, RdsAuthProxy> pendingRegistry(
+            RdsProxyManager manager) throws Exception {
+        Field field = RdsProxyManager.class.getDeclaredField("pendingFailedStarts");
+        field.setAccessible(true);
+        return (ConcurrentHashMap<String, RdsAuthProxy>) field.get(manager);
+    }
+
+    private static void recordFailedStart(
+            RdsProxyManager manager, String key, RdsAuthProxy candidate, Throwable failure) throws Exception {
+        Method method;
+        Object[] arguments;
+        try {
+            method = RdsProxyManager.class.getDeclaredMethod(
+                    "cleanupFailedStart", String.class, RdsAuthProxy.class, Throwable.class);
+            arguments = new Object[]{key, candidate, failure};
+        } catch (NoSuchMethodException oldSignature) {
+            method = RdsProxyManager.class.getDeclaredMethod(
+                    "cleanupFailedStart", RdsAuthProxy.class, RuntimeException.class);
+            arguments = new Object[]{candidate, failure};
+        }
+        method.setAccessible(true);
+        method.invoke(manager, arguments);
     }
 
     private static void assertPortAvailable(int port) {

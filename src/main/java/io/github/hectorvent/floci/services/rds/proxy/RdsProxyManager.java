@@ -10,6 +10,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -27,6 +29,7 @@ public class RdsProxyManager {
     private final RdsBackendGate backendGate;
     private final RdsContainerManager containerManager;
     private final ConcurrentHashMap<String, RdsAuthProxy> proxies = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, RdsAuthProxy> pendingFailedStarts = new ConcurrentHashMap<>();
 
     @Inject
     public RdsProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
@@ -89,6 +92,14 @@ public class RdsProxyManager {
                             String masterUsername, String masterPassword, String dbName,
                             RdsAuthProxy.MasterPasswordCheck passwordValidator,
                             RdsProxyBinding binding, RdsAuthProxy.EndpointKind endpointKind) {
+        if (instanceId == null) {
+            throw new IllegalArgumentException("RDS proxy instance ID is required");
+        }
+        RdsAuthProxy pending = pendingFailedStarts.get(instanceId);
+        if (pending != null) {
+            pending.stop();
+            pendingFailedStarts.remove(instanceId, pending);
+        }
         tlsCertificates.ensureHost(advertisedHost);
         EmulatorConfig.RdsServiceConfig rdsConfig = config.services().rds();
         RdsAuthProxy proxy = new RdsAuthProxy(
@@ -103,14 +114,17 @@ public class RdsProxyManager {
             RuntimeException failure = new RuntimeException(
                     "Failed to start RDS proxy for instance " + instanceId
                             + " on port " + proxyPort, e);
-            cleanupFailedStart(proxy, failure);
+            cleanupFailedStart(instanceId, proxy, failure);
             throw failure;
         } catch (RuntimeException e) {
             RuntimeException failure = new RuntimeException(
                     "Failed to register RDS proxy for instance " + instanceId
                             + " on port " + proxyPort, e);
-            cleanupFailedStart(proxy, failure);
+            cleanupFailedStart(instanceId, proxy, failure);
             throw failure;
+        } catch (Error e) {
+            cleanupFailedStart(instanceId, proxy, e);
+            throw e;
         }
         RdsAuthProxy previous;
         try {
@@ -119,17 +133,20 @@ public class RdsProxyManager {
             RuntimeException failure = new RuntimeException(
                     "Failed to register RDS proxy for instance " + instanceId
                             + " on port " + proxyPort, e);
-            cleanupFailedStart(proxy, failure);
+            cleanupFailedStart(instanceId, proxy, failure);
             throw failure;
+        } catch (Error e) {
+            cleanupFailedStart(instanceId, proxy, e);
+            throw e;
         }
         if (previous != null) {
             try {
                 previous.stop();
-            } catch (RuntimeException e) {
+            } catch (RuntimeException | Error e) {
                 proxies.put(instanceId, previous);
                 RuntimeException failure = new RuntimeException(
                         "Failed to replace RDS proxy for instance " + instanceId, e);
-                cleanupFailedStart(proxy, failure);
+                cleanupFailedStart(instanceId, proxy, failure);
                 throw failure;
             }
         }
@@ -152,20 +169,45 @@ public class RdsProxyManager {
     }
 
     public synchronized void stopProxy(String instanceId) {
+        Throwable failure = null;
+        RdsAuthProxy pending = pendingFailedStarts.get(instanceId);
+        if (pending != null) {
+            try {
+                pending.stop();
+                pendingFailedStarts.remove(instanceId, pending);
+            } catch (RuntimeException | Error e) {
+                failure = e;
+            }
+        }
         RdsAuthProxy proxy = proxies.get(instanceId);
         if (proxy != null) {
-            proxy.stop();
-            proxies.remove(instanceId, proxy);
-            LOG.infov("Stopped RDS proxy for instance {0}", instanceId);
+            try {
+                proxy.stop();
+                proxies.remove(instanceId, proxy);
+                LOG.infov("Stopped RDS proxy for instance {0}", instanceId);
+            } catch (RuntimeException | Error e) {
+                if (failure == null) {
+                    failure = e;
+                } else if (failure != e) {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (failure instanceof RuntimeException runtimeFailure) {
+            throw runtimeFailure;
+        }
+        if (failure instanceof Error error) {
+            throw error;
         }
     }
 
     public synchronized void stopAll() {
-        proxies.forEach((instanceId, proxy) -> {
+        Set<String> instanceIds = new HashSet<>(proxies.keySet());
+        instanceIds.addAll(pendingFailedStarts.keySet());
+        instanceIds.forEach(instanceId -> {
             try {
-                proxy.stop();
-                proxies.remove(instanceId, proxy);
-            } catch (RuntimeException e) {
+                stopProxy(instanceId);
+            } catch (RuntimeException | Error e) {
                 LOG.warnv(e, "Failed to stop RDS proxy for instance {0} during shutdown",
                         instanceId);
             }
@@ -173,11 +215,14 @@ public class RdsProxyManager {
         LOG.info("Stopped all RDS proxies");
     }
 
-    private void cleanupFailedStart(RdsAuthProxy proxy, RuntimeException failure) {
+    private void cleanupFailedStart(String instanceId, RdsAuthProxy proxy, Throwable failure) {
         try {
             proxy.stop();
-        } catch (RuntimeException cleanupFailure) {
-            failure.addSuppressed(cleanupFailure);
+        } catch (RuntimeException | Error cleanupFailure) {
+            if (cleanupFailure != failure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            pendingFailedStarts.put(instanceId, proxy);
         }
     }
 }
