@@ -58,6 +58,8 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     private static final Duration READINESS_BUDGET = Duration.ofSeconds(30);
     private static final Scope PROBE = new Scope("000000000000", "us-east-1"); // partition-literal: readiness probe namespace, Local accepts any region
     private static final String REPLICAS_UNSUPPORTED = "Replicas are not supported by the DynamoDB Local backend";
+    private static final String KINESIS_DESTINATIONS_UNSUPPORTED =
+            "Kinesis streaming destinations are not supported by the DynamoDB Local backend";
     private static final Pattern PARTITION = Pattern.compile(AwsArnUtils.PARTITION_REGEX);
     private static final List<String> PUBLIC_ARN_FIELDS = List.of("TableArn", "IndexArn", "LatestStreamArn",
             "StreamArn", "LastEvaluatedStreamArn", "message", "Message");
@@ -534,6 +536,34 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         String name = ownTableName(scope, resourceArn);
         describeTable(scope, name);
         return key(scope.region(), name);
+    }
+
+    /**
+     * DynamoDB Local has no Kinesis forwarding. The three destination calls leave the table as it is
+     * and log a warning, so a template declaring {@code KinesisStreamSpecification} deploys on this
+     * backend without forwarding.
+     */
+    @Override
+    public TableDefinition enableKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                             String precision) {
+        return ignoredKinesisDestinationCall(scope, tableName, streamArn);
+    }
+
+    @Override
+    public TableDefinition disableKinesisStreamingDestination(Scope scope, String tableName, String streamArn) {
+        return ignoredKinesisDestinationCall(scope, tableName, streamArn);
+    }
+
+    @Override
+    public TableDefinition updateKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                             String precision) {
+        return ignoredKinesisDestinationCall(scope, tableName, streamArn);
+    }
+
+    private TableDefinition ignoredKinesisDestinationCall(Scope scope, String tableName, String streamArn) {
+        LOG.warnv("{0}; the destination {1} of table {2} is ignored", KINESIS_DESTINATIONS_UNSUPPORTED, streamArn,
+                tableName);
+        return describeTable(scope, tableName);
     }
 
     @Override

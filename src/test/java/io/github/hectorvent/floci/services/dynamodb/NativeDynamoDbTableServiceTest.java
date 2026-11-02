@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -382,6 +383,45 @@ class NativeDynamoDbTableServiceTest {
                 reenabled.getApproximateCreationDateTimePrecision());
         assertEquals(1, reloadFromDisk().getKinesisStreamingDestinations().size(),
                 "re-enabling reuses the existing destination");
+    }
+
+    @Test
+    void updatingAKinesisDestinationChangesItsPrecisionWithoutDisablingIt() {
+        tableService.createTable(createRequest(null, NO_SETTINGS), "ACTIVE", REGION);
+        tableService.enableKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MILLISECOND, REGION);
+
+        NativeDynamoDbTableService.KinesisDestination updated = tableService.updateKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MICROSECOND, REGION);
+
+        assertEquals("ACTIVE", updated.destinationStatus());
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND, updated.approximateCreationDateTimePrecision());
+        KinesisStreamingDestination persisted = reloadFromDisk().findKinesisStreamingDestination(STREAM_ARN)
+                .orElseThrow();
+        assertEquals("ACTIVE", persisted.getDestinationStatus());
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
+                persisted.getApproximateCreationDateTimePrecision());
+        verify(forwarder, never()).onDestinationDisabled(ACCOUNT, REGION, TABLE, STREAM_ARN);
+    }
+
+    @Test
+    void updatingADisabledOrUnknownKinesisDestinationIsRejected() {
+        tableService.createTable(createRequest(null, NO_SETTINGS), "ACTIVE", REGION);
+
+        AwsException unknown = assertThrows(AwsException.class, () -> tableService.updateKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MICROSECOND, REGION));
+        assertEquals("ResourceNotFoundException", unknown.getErrorCode());
+
+        tableService.enableKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MILLISECOND, REGION);
+        tableService.disableKinesisStreamingDestination(TABLE, STREAM_ARN, REGION);
+
+        assertValidationFailure(() -> tableService.updateKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MICROSECOND, REGION),
+                "Kinesis streaming destination is not active for stream: " + STREAM_ARN);
+        assertEquals(KinesisStreamingDestination.PRECISION_MILLISECOND,
+                reloadFromDisk().findKinesisStreamingDestination(STREAM_ARN).orElseThrow()
+                        .getApproximateCreationDateTimePrecision());
     }
 
     @Test

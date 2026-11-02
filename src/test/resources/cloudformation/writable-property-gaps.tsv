@@ -169,7 +169,6 @@ AWS::DynamoDB::Table	BillingMode	accepted and ignored
 AWS::DynamoDB::Table	ContributorInsightsSpecification	accepted and ignored
 AWS::DynamoDB::Table	DeletionProtectionEnabled	accepted and ignored
 AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
-AWS::DynamoDB::Table	KinesisStreamSpecification	accepted and ignored
 AWS::DynamoDB::Table	OnDemandThroughput	accepted and ignored
 AWS::DynamoDB::Table	PointInTimeRecoverySpecification	accepted and ignored
 AWS::DynamoDB::Table	ProvisionedThroughput	accepted and ignored

@@ -214,7 +214,7 @@ notes:
   AWS::IoT::Policy: 'deleted after detaching it from its principals; on AWS the delete fails with `DeleteConflictException` while the policy is attached'
   AWS::Route53::RecordSetGroup: 'written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group''s hosted zone'
   Custom::DynamoDBReplica: applied natively against DynamoDB, not via a provider Lambda
-  AWS::DynamoDB::Table: '`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one'
+  AWS::DynamoDB::Table: '`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one. `KinesisStreamSpecification` applied on create and update; with the DynamoDB Local backend, `StreamArn` is checked as on AWS but nothing is forwarded'
   AWS::Cognito::UserPool: '`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS, and once `SMS_MFA` is on only `MfaConfiguration: OFF` turns it off'
   AWS::Cognito::UserPoolIdentityProvider: 'Ref returns the ProviderName; changing only `ProviderType` is refused, as on AWS, because the name is always the template''s and the replacement would need the same address'
   AWS::SES::EmailIdentity: 'BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS''s region- and identity-specific zone assignment'

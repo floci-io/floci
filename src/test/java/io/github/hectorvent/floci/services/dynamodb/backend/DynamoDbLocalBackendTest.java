@@ -496,6 +496,24 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
+    void kinesisDestinationCallsLeaveTheTableAsItIs() throws Exception {
+        answerOrdersTable();
+        String streamArn = "arn:aws:kinesis:eu-west-1:123456789012:stream/orders-events";
+
+        TableDefinition enabled = backend.enableKinesisStreamingDestination(SCOPE, "orders", streamArn, "MILLISECOND");
+        TableDefinition updated = backend.updateKinesisStreamingDestination(SCOPE, "orders", streamArn, "MICROSECOND");
+        TableDefinition disabled = backend.disableKinesisStreamingDestination(SCOPE, "orders", streamArn);
+
+        for (TableDefinition table : List.of(enabled, updated, disabled)) {
+            assertEquals("orders", table.getTableName());
+            assertTrue(table.getKinesisStreamingDestinations().isEmpty());
+        }
+        neverSent("EnableKinesisStreamingDestination");
+        neverSent("UpdateKinesisStreamingDestination");
+        neverSent("DisableKinesisStreamingDestination");
+    }
+
+    @Test
     void ensureGlobalTableDescribes() throws Exception {
         answerOrdersTable();
 
