@@ -501,7 +501,8 @@ public final class S3CopySimulator {
                     JsonLinesToCsvConverter.convert(in, targetCols, copyDataOut, spec.jsonAutoIgnoreCase());
                     copyDataOut.flush();
                 } else {
-                    if (i == 0 && spec.headerLines() > 0) {
+                    // Every object has its own header, as in a parallel load of several files.
+                    if (spec.headerLines() > 0) {
                         skipLines(in, spec.headerLines());
                     }
                     InputStream source = in;

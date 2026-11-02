@@ -766,7 +766,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   compatible with output from `UNLOAD ... MANIFEST`. Missing files marked `mandatory: true` abort the load.
   When `mandatory` is omitted, it defaults to `false`. All entries in the manifest must reside in the same S3
   bucket as the manifest file itself; cross-bucket manifest entries are rejected as an intentional deviation.
-- `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
+- `IGNOREHEADER` and `HEADER` skip lines from the start of every resolved object, as AWS does for a parallel load of several files.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
 - `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster (at
   `CreateCluster` or through `ModifyClusterIamRoles`; connections opened before a change keep the
