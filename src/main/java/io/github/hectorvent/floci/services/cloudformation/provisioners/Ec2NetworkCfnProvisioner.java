@@ -386,6 +386,29 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
                 .anyMatch(ip -> CidrCanonicalizer.sameBlock(ip + "/32", privateIpAddress + "/32"));
     }
 
+    /**
+     * Whether the gateway's secondary addresses are the ones the template asks for: the same
+     * Elastic IPs in order, each listed private address at its position, and as many in all.
+     */
+    private static boolean holdsSecondaries(NatGateway nat, List<String> allocationIds, List<String> privateIps,
+                                            int count) {
+        List<NatGatewayAddress> secondaries = nat.getNatGatewayAddresses().stream()
+                .filter(a -> !a.isPrimary())
+                .toList();
+        if (secondaries.size() != Math.max(allocationIds.size(), privateIps.size()) + count
+                || !secondaries.stream().map(NatGatewayAddress::getAllocationId).filter(Objects::nonNull).toList()
+                        .equals(allocationIds)) {
+            return false;
+        }
+        for (int i = 0; i < privateIps.size(); i++) {
+            String held = secondaries.get(i).getPrivateIp();
+            if (held == null || !CidrCanonicalizer.sameBlock(held + "/32", privateIps.get(i) + "/32")) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private ManagedPrefixList findPrefixList(String prefixListId, String region) {
         return tolerateNotFound(() -> ec2Service.describeManagedPrefixLists(region, List.of(prefixListId), Map.of())
                 .stream().findFirst().orElse(null), "InvalidPrefixListID.NotFound", prefixListId);
@@ -603,9 +626,9 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionNatGateway(StackResource r, JsonNode props, ProvisionContext ctx) {
         Ec2Service.requireZonalNatGateway(ctx.resolveOptional(props, "AvailabilityMode"));
-        Ec2Service.requireNoSecondaryNatGatewayAddresses(ctx.resolveStringList(props, "SecondaryAllocationIds"),
-                ctx.resolveStringList(props, "SecondaryPrivateIpAddresses"),
-                ctx.resolveOptional(props, "SecondaryPrivateIpAddressCount"));
+        List<String> secondaryAllocationIds = ctx.resolveStringList(props, "SecondaryAllocationIds");
+        List<String> secondaryPrivateIps = ctx.resolveStringList(props, "SecondaryPrivateIpAddresses");
+        String secondaryCount = ctx.resolveOptional(props, "SecondaryPrivateIpAddressCount");
         String subnetId = ctx.resolveOptional(props, "SubnetId");
         String allocationId = ctx.resolveOptional(props, "AllocationId");
         String privateIpAddress = ctx.resolveOrDefault(props, "PrivateIpAddress", null);
@@ -627,10 +650,14 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         boolean reuse = existing != null && Objects.equals(subnetId, existing.getSubnetId())
                 && Objects.equals(allocationId, existing.getAllocationId())
                 && connectivityType.equalsIgnoreCase(existing.getConnectivityType() == null ? "public" : existing.getConnectivityType())
-                && (privateIpAddress == null || holdsPrivateIp(existing, privateIpAddress));
+                && (privateIpAddress == null || holdsPrivateIp(existing, privateIpAddress))
+                && holdsSecondaries(existing, secondaryAllocationIds, secondaryPrivateIps,
+                        Ec2Service.secondaryPrivateIpCount(secondaryCount, "private".equals(connectivityType)));
+        // ponytail: a changed secondary address replaces the gateway, where AWS updates it in place
+        // through AssociateNatGatewayAddress and its siblings, which Floci does not emulate.
         NatGateway nat = reuse ? existing
                 : ec2Service.createNatGateway(ctx.region(), subnetId, allocationId, connectivityType, privateIpAddress,
-                        tagList(props, ctx));
+                        secondaryAllocationIds, secondaryPrivateIps, secondaryCount, tagList(props, ctx));
         if ("failed".equals(nat.getState())) {
             // The resource fails and its failed gateway is not left behind.
             ec2Service.deleteNatGateway(ctx.region(), nat.getNatGatewayId());
@@ -651,6 +678,15 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         // its public IP.
         if (nat.getSubnetId() != null) {
             r.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "SubnetId", nat.getSubnetId());
+        }
+        // Each secondary Elastic IP is held as the primary one is.
+        r.getAttributes().keySet().removeIf(k -> k.startsWith(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp."));
+        List<String> secondaryPublicIps = nat.getNatGatewayAddresses().stream()
+                .filter(a -> !a.isPrimary() && a.getPublicIp() != null)
+                .map(NatGatewayAddress::getPublicIp)
+                .toList();
+        for (int i = 0; i < secondaryPublicIps.size(); i++) {
+            r.getAttributes().put(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp." + i, secondaryPublicIps.get(i));
         }
         Address eip = allocationId == null || allocationId.isBlank() ? null : findAddress(allocationId, null, ctx.region());
         if (eip != null && eip.getPublicIp() != null) {

@@ -8,11 +8,13 @@ import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * A NAT gateway's natGatewayAddressSet carried only an allocation id. aws_nat_gateway exposes
@@ -240,22 +242,137 @@ class Ec2NatGatewayAddressIntegrationTest {
     }
 
     /**
-     * A gateway gets its primary address only, so the secondary-address parameters are refused
-     * rather than answered with a gateway that has fewer addresses than it was asked for.
+     * A public gateway's secondary Elastic IP is reported after the primary address, on the same
+     * interface, with the private address it was paired with. DescribeAddresses and
+     * DescribeNetworkInterfaces show it held, it cannot be released while the gateway holds it,
+     * and deleting the gateway hands it back.
      */
     @Test
-    void theSecondaryAddressParametersAreRefused() {
+    void aPublicGatewayHoldsItsSecondaryElasticIpUntilDeleted() {
         String subnetId = subnetId();
-        for (Map<String, String> request : List.of(
-                Map.of("SubnetId", subnetId, "AllocationId", allocate(), "SecondaryAllocationId.1", allocate()),
-                Map.of("SubnetId", subnetId, "ConnectivityType", "private", "SecondaryPrivateIpAddress.1", "10.94.1.70"),
-                Map.of("SubnetId", subnetId, "ConnectivityType", "private", "SecondaryPrivateIpAddressCount", "2"))) {
-            createNat(request).then()
+        String primary = allocate();
+        Response secondaryAllocation = allocation();
+        String secondary = secondaryAllocation.path("AllocateAddressResponse.allocationId");
+        String secondaryPublicIp = secondaryAllocation.path("AllocateAddressResponse.publicIp");
+
+        String natGatewayId = createNat(Map.of("SubnetId", subnetId, "AllocationId", primary,
+                "SecondaryAllocationId.1", secondary, "SecondaryPrivateIpAddress.1", "10.94.1.71")).then()
+            .statusCode(200)
+            .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
+
+        Response described = ec2("DescribeNatGateways", ACCOUNT_ID, REGION)
+            .formParam("NatGatewayId.1", natGatewayId).post("/")
+        .then().statusCode(200)
+            .body(ADDRESSES + ".size()", equalTo(2))
+            .body(ADDRESSES + "[0].allocationId", equalTo(primary))
+            .body(ADDRESSES + "[0].isPrimary", equalTo("true"))
+            .body(ADDRESSES + "[1].allocationId", equalTo(secondary))
+            .body(ADDRESSES + "[1].publicIp", equalTo(secondaryPublicIp))
+            .body(ADDRESSES + "[1].privateIp", equalTo("10.94.1.71"))
+            .body(ADDRESSES + "[1].associationId", startsWith("eipassoc-"))
+            .body(ADDRESSES + "[1].isPrimary", equalTo("false"))
+            .body(ADDRESSES + "[1].status", equalTo("succeeded"))
+            .extract().response();
+        String eniId = described.path(ADDRESSES + "[0].networkInterfaceId");
+        String associationId = described.path(ADDRESSES + "[1].associationId");
+        String secondaryEniId = described.path(ADDRESSES + "[1].networkInterfaceId");
+        assertEquals(eniId, secondaryEniId);
+
+        ec2("DescribeNetworkInterfaces", ACCOUNT_ID, REGION).formParam("NetworkInterfaceId.1", eniId).post("/")
+        .then().statusCode(200)
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", equalTo(1))
+            .body(ENI_IPS + ".size()", equalTo(2))
+            .body(ENI_IPS + "[1].privateIpAddress", equalTo("10.94.1.71"))
+            .body(ENI_IPS + "[1].primary", equalTo("false"))
+            .body(ENI_IPS + "[1].association.allocationId", equalTo(secondary));
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", secondary).post("/")
+        .then().statusCode(200)
+            .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(associationId))
+            .body("DescribeAddressesResponse.addressesSet.item.networkInterfaceId", equalTo(eniId))
+            .body("DescribeAddressesResponse.addressesSet.item.privateIpAddress", equalTo("10.94.1.71"));
+        ec2("ReleaseAddress", ACCOUNT_ID, REGION).formParam("AllocationId", secondary).post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidIPAddress.InUse"));
+        // A second gateway cannot take the secondary Elastic IP either.
+        createNat(Map.of("SubnetId", subnetId, "AllocationId", allocate(), "SecondaryAllocationId.1", secondary))
+        .then().statusCode(200)
+            .body("CreateNatGatewayResponse.natGateway.state", equalTo("failed"))
+            .body("CreateNatGatewayResponse.natGateway.failureCode", equalTo("Resource.AlreadyAssociated"));
+
+        ec2("DeleteNatGateway", ACCOUNT_ID, REGION).formParam("NatGatewayId", natGatewayId).post("/")
+        .then().statusCode(200);
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", secondary).post("/")
+        .then().statusCode(200)
+            .body(not(containsString("<associationId>")))
+            .body(not(containsString("<networkInterfaceId>")));
+        ec2("ReleaseAddress", ACCOUNT_ID, REGION).formParam("AllocationId", secondary).post("/")
+        .then().statusCode(200);
+    }
+
+    /**
+     * A private gateway takes listed secondary private addresses and SecondaryPrivateIpAddressCount
+     * more that the subnet picks, every one distinct and none public.
+     */
+    @Test
+    void aPrivateGatewayTakesListedAndCountedSecondaryAddresses() {
+        String subnetId = subnetId();
+        String natGatewayId = createNat(Map.of("SubnetId", subnetId, "ConnectivityType", "private",
+                "SecondaryPrivateIpAddress.1", "10.94.1.80", "SecondaryPrivateIpAddressCount", "2")).then()
+            .statusCode(200)
+            .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
+
+        Response described = ec2("DescribeNatGateways", ACCOUNT_ID, REGION)
+            .formParam("NatGatewayId.1", natGatewayId).post("/")
+        .then().statusCode(200)
+            .body(ADDRESSES + ".size()", equalTo(4))
+            .body(ADDRESSES + ".isPrimary.list()", equalTo(List.of("true", "false", "false", "false")))
+            .body(ADDRESSES + "[1].privateIp", equalTo("10.94.1.80"))
+            .body(not(containsString("<publicIp>")))
+            .extract().response();
+        List<String> privateIps = described.path(ADDRESSES + ".privateIp.list()");
+        assertEquals(4, privateIps.stream().distinct().count(), privateIps.toString());
+        privateIps.forEach(ip -> assertThat(ip, matchesRegex("10\\.94\\.1\\.\\d+")));
+        List<String> enis = described.path(ADDRESSES + ".networkInterfaceId.list()");
+        assertEquals(1, enis.stream().distinct().count(), enis.toString());
+
+        // The subnet now holds them: a later request for one of them fails.
+        createNat(Map.of("SubnetId", subnetId, "ConnectivityType", "private", "PrivateIpAddress", privateIps.get(3)))
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidIPAddress.InUse"));
+    }
+
+    /**
+     * The EC2 API reference marks SecondaryPrivateIpAddressCount "[Private NAT gateway only]" with
+     * a valid range of 1 to 31, and a private gateway takes no Elastic IP. A refused request
+     * creates nothing.
+     */
+    @Test
+    void secondaryAddressesOutsideTheirRulesAreRefused() {
+        String subnetId = subnetId();
+        for (Map.Entry<Map<String, String>, String> c : List.of(
+                Map.entry(Map.of("SubnetId", subnetId, "AllocationId", allocate(), "SecondaryPrivateIpAddressCount", "1"),
+                        "InvalidParameterCombination"),
+                Map.entry(Map.of("SubnetId", subnetId, "ConnectivityType", "private", "SecondaryAllocationId.1", allocate()),
+                        "InvalidParameterCombination"),
+                Map.entry(Map.of("SubnetId", subnetId, "ConnectivityType", "private", "SecondaryPrivateIpAddressCount", "0"),
+                        "InvalidParameterValue"),
+                Map.entry(Map.of("SubnetId", subnetId, "ConnectivityType", "private", "SecondaryPrivateIpAddressCount", "32"),
+                        "InvalidParameterValue"),
+                Map.entry(Map.of("SubnetId", subnetId, "ConnectivityType", "private", "SecondaryPrivateIpAddress.1", "10.94.2.9"),
+                        "InvalidParameterValue"),
+                Map.entry(Map.of("SubnetId", subnetId, "ConnectivityType", "private", "PrivateIpAddress", "10.94.1.90",
+                        "SecondaryPrivateIpAddress.1", "10.94.1.90"), "InvalidIPAddress.InUse"),
+                Map.entry(Map.of("SubnetId", subnetId, "AllocationId", allocate(),
+                        "SecondaryAllocationId.1", "eipalloc-0fedcba9876543210"), "InvalidAllocationID.NotFound"))) {
+            createNat(c.getKey()).then()
                 .statusCode(400)
-                .body("Response.Errors.Error.Code", equalTo("UnsupportedOperation"));
+                .body("Response.Errors.Error.Code", equalTo(c.getValue()));
         }
         assertNatGatewaysIn(subnetId, 0);
     }
+
+    private static final String ADDRESSES = "DescribeNatGatewaysResponse.natGatewaySet.item.natGatewayAddressSet.item";
+    private static final String ENI_IPS = "DescribeNetworkInterfacesResponse.networkInterfaceSet.item.privateIpAddressesSet.item";
 
     private static Response allocation() {
         return ec2("AllocateAddress", ACCOUNT_ID, REGION).formParam("Domain", "vpc").post("/")

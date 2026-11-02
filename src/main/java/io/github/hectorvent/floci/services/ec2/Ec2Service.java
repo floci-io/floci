@@ -4568,6 +4568,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // failed launch is still giving it back keeps it without one.
             if (allocated.isPresent()) {
                 held = privateIpsHeldOnVpcNetwork(region, subnetId);
+                held.addAll(pending);
             }
             List<String> skipped = new ArrayList<>();
             while (allocated.isPresent() && held.contains(allocated.get())) {
@@ -12366,23 +12367,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /**
-     * Refuses the secondary-address parameters. Floci gives a NAT gateway its primary address only,
-     * so a gateway created with them would report fewer addresses than it was asked for.
-     */
-    public static void requireNoSecondaryNatGatewayAddresses(List<String> secondaryAllocationIds,
-                                                             List<String> secondaryPrivateIpAddresses,
-                                                             String secondaryPrivateIpAddressCount) {
-        if (!secondaryAllocationIds.isEmpty() || !secondaryPrivateIpAddresses.isEmpty()
-                || isSet(secondaryPrivateIpAddressCount)) {
-            throw new AwsException("UnsupportedOperation",
-                    "NAT gateways with secondary addresses are not supported.", 400);
-        }
-    }
-
     public NatGateway createNatGateway(String region, String subnetId, String allocationId,
                                        String connectivityType, List<Tag> natGatewayTags) {
         return createNatGateway(region, subnetId, allocationId, connectivityType, null, natGatewayTags);
+    }
+
+    public NatGateway createNatGateway(String region, String subnetId, String allocationId,
+                                       String connectivityType, String privateIpAddress,
+                                       List<Tag> natGatewayTags) {
+        return createNatGateway(region, subnetId, allocationId, connectivityType, privateIpAddress,
+                List.of(), List.of(), null, natGatewayTags);
     }
 
     /**
@@ -12390,25 +12384,41 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      *                         null to let the subnet pick one. It is checked as RunInstances checks
      *                         its own: an assignable address of the subnet that no other resource
      *                         holds.
+     * @param secondaryAllocationIds SecondaryAllocationIds: extra Elastic IPs, public gateways only.
+     *                               Each is paired with the secondary private address at the same
+     *                               position, or one the subnet picks.
+     * @param secondaryPrivateIpAddresses SecondaryPrivateIpAddresses, checked as PrivateIpAddress is
+     * @param secondaryPrivateIpAddressCount SecondaryPrivateIpAddressCount, private gateways only,
+     *                                       1 to 31: that many more addresses the subnet picks
      */
     public NatGateway createNatGateway(String region, String subnetId, String allocationId,
                                        String connectivityType, String privateIpAddress,
+                                       List<String> secondaryAllocationIds,
+                                       List<String> secondaryPrivateIpAddresses,
+                                       String secondaryPrivateIpAddressCount,
                                        List<Tag> natGatewayTags) {
         ensureDefaultResources(region);
         Subnet subnet = requireSubnet(region, subnetId);
         boolean privateGateway = "private".equalsIgnoreCase(connectivityType);
-        if (privateGateway && isSet(allocationId)) {
+        List<String> secondaryEips = secondaryAllocationIds == null ? List.of() : secondaryAllocationIds;
+        if (privateGateway && (isSet(allocationId) || !secondaryEips.isEmpty())) {
             // A private NAT gateway has no route to the internet and so nothing to attach an
             // Elastic IP to. Accepting the pair would have the response report a public address
             // on a gateway that cannot have one.
             throw new AwsException("InvalidParameterCombination",
                     "Elastic IP addresses cannot be associated with private NAT gateways.", 400);
         }
+        int secondaryCount = secondaryPrivateIpCount(secondaryPrivateIpAddressCount, privateGateway);
         if (isSet(allocationId)) {
             getRequiredAddress(region, allocationId);
         }
+        secondaryEips.forEach(id -> getRequiredAddress(region, id));
         String requestedPrivateIp = isSet(privateIpAddress)
                 ? validateRequestedPrivateIp(privateIpAddress, subnet, null, 1) : null;
+        List<String> requestedSecondaryIps = (secondaryPrivateIpAddresses == null ? List.<String>of()
+                : secondaryPrivateIpAddresses).stream()
+                .map(ip -> validateRequestedPrivateIp(ip, subnet, null, 1))
+                .toList();
 
         NatGateway natGateway = new NatGateway();
         natGateway.setNatGatewayId("nat-" + randomHex(17));
@@ -12423,29 +12433,38 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // cannot both see the allocation free. As on AWS, an allocation already held by an
             // instance or another gateway does not fail the call: the gateway is created in state
             // failed, with no interface, and the allocation is left with its holder.
+            List<String> eips = new ArrayList<>();
             if (isSet(allocationId)) {
-                Address held = getRequiredAddress(region, allocationId);
+                eips.add(allocationId);
+            }
+            eips.addAll(secondaryEips);
+            Set<String> seen = new HashSet<>();
+            for (String eipId : eips) {
+                Address held = getRequiredAddress(region, eipId);
                 // The gateway scan covers gateways persisted before the Address record was marked.
-                if (isSet(held.getAssociationId()) || isSet(held.getInstanceId())
-                        || isHeldByNatGateway(region, allocationId)) {
+                if (!seen.add(eipId) || isSet(held.getAssociationId()) || isSet(held.getInstanceId())
+                        || isHeldByNatGateway(region, eipId)) {
                     natGateway.setState("failed");
                     natGateway.setFailureCode("Resource.AlreadyAssociated");
-                    natGateway.setFailureMessage("Elastic IP address " + allocationId + " is already associated");
+                    natGateway.setFailureMessage("Elastic IP address " + eipId + " is already associated");
+                    break;
                 }
             }
             if (!"failed".equals(natGateway.getState())) {
-                NatGatewayAddress gatewayAddress = natGatewayAddress(region, natGateway.getNatGatewayId(),
-                        subnetId, allocationId, requestedPrivateIp);
-                natGateway.getNatGatewayAddresses().add(gatewayAddress);
-                // The Elastic IP is now held by the gateway's interface, so DescribeAddresses has to
+                natGateway.getNatGatewayAddresses().addAll(natGatewayAddresses(region, natGateway.getNatGatewayId(),
+                        subnetId, allocationId, requestedPrivateIp, secondaryEips, requestedSecondaryIps, secondaryCount));
+                // Each Elastic IP is now held by the gateway's interface, so DescribeAddresses has to
                 // say so: an allocation that looks free is one Terraform and the console would offer
                 // to reuse. No instanceId, a NAT gateway is not an instance.
-                if (isSet(allocationId)) {
-                    addresses.get(key(region, allocationId)).ifPresent(eip -> {
+                for (NatGatewayAddress gatewayAddress : natGateway.getNatGatewayAddresses()) {
+                    if (!isSet(gatewayAddress.getAllocationId())) {
+                        continue;
+                    }
+                    addresses.get(key(region, gatewayAddress.getAllocationId())).ifPresent(eip -> {
                         eip.setAssociationId(gatewayAddress.getAssociationId());
                         eip.setNetworkInterfaceId(gatewayAddress.getNetworkInterfaceId());
                         eip.setPrivateIpAddress(gatewayAddress.getPrivateIp());
-                        addresses.put(key(region, allocationId), eip);
+                        addresses.put(key(region, eip.getAllocationId()), eip);
                     });
                 }
             }
@@ -12459,27 +12478,93 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * SecondaryPrivateIpAddressCount as a number, 0 when absent. The EC2 API reference marks it
+     * "[Private NAT gateway only]" with a valid range of 1 to 31.
+     */
+    public static int secondaryPrivateIpCount(String value, boolean privateGateway) {
+        if (!isSet(value)) {
+            return 0;
+        }
+        if (!privateGateway) {
+            throw new AwsException("InvalidParameterCombination",
+                    "SecondaryPrivateIpAddressCount is only valid for private NAT gateways.", 400);
+        }
+        int count;
+        try {
+            count = Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            count = 0;
+        }
+        if (count < 1 || count > 31) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + value + ") for parameter SecondaryPrivateIpAddressCount is invalid. "
+                            + "It must be between 1 and 31.", 400);
+        }
+        return count;
+    }
+
+    /**
+     * The primary address, then each secondary one, all on the gateway's one interface. Every
+     * requested address is checked free before any is assigned, so a request that fails leaves no
+     * lease behind. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private List<NatGatewayAddress> natGatewayAddresses(String region, String natGatewayId, String subnetId,
+                                                        String allocationId, String requestedPrivateIp,
+                                                        List<String> secondaryEips, List<String> requestedSecondaryIps,
+                                                        int secondaryCount) {
+        List<String> requested = new ArrayList<>(requestedSecondaryIps);
+        if (requestedPrivateIp != null) {
+            requested.add(requestedPrivateIp);
+        }
+        Set<String> pending = new HashSet<>();
+        for (String ip : requested) {
+            if (!pending.add(ip)) {
+                throw new AwsException("InvalidIPAddress.InUse", "Address " + ip + " is in use.", 400);
+            }
+            requireRequestedPrivateIpFree(region, subnetId, ip);
+        }
+        List<NatGatewayAddress> result = new ArrayList<>();
+        List<String> assigned = new ArrayList<>();
+        int secondaries = Math.max(secondaryEips.size(), requestedSecondaryIps.size()) + secondaryCount;
+        try {
+            for (int i = -1; i < secondaries; i++) {
+                String eip = i < 0 ? allocationId : i < secondaryEips.size() ? secondaryEips.get(i) : null;
+                String ip = i < 0 ? requestedPrivateIp
+                        : i < requestedSecondaryIps.size() ? requestedSecondaryIps.get(i) : null;
+                if (ip == null) {
+                    ip = assignPrivateIp(region, subnetId, pending);
+                    pending.add(ip);
+                    assigned.add(ip);
+                }
+                NatGatewayAddress address = natGatewayAddress(region, natGatewayId, eip, ip);
+                address.setPrimary(i < 0);
+                result.add(address);
+            }
+        } catch (AwsException e) {
+            if (vpcNetworkManager != null) {
+                assigned.forEach(ip -> vpcNetworkManager.releasePrivateIp(region, subnetId, ip));
+            }
+            throw e;
+        }
+        return result;
+    }
+
+    /**
      * The address a NAT gateway reports. AWS gives every gateway an interface in its subnet with a
      * private address, and a public one additionally carries the Elastic IP it was created with,
      * aws_nat_gateway exposes all three as resource outputs (public_ip, private_ip,
      * network_interface_id), and Gruntwork's VPC modules re-export nat_gateway_public_ips, so an
      * address carrying only an allocation id propagates empty values into dependent modules.
-     * Callers must hold {@link #privateIpAllocationLock}.
+     * Every address of one gateway shares its one interface.
      *
-     * @param requestedPrivateIp the request's PrivateIpAddress, already checked by
-     *                           {@link #validateRequestedPrivateIp}, or null. It takes no lease on
-     *                           the VPC network (see {@link #requireRequestedPrivateIpFree}).
+     * @param privateIp the address, already checked free. A requested one takes no lease on the
+     *                  VPC network (see {@link #requireRequestedPrivateIpFree}).
      */
-    private NatGatewayAddress natGatewayAddress(String region, String natGatewayId, String subnetId,
-                                                String allocationId, String requestedPrivateIp) {
+    private NatGatewayAddress natGatewayAddress(String region, String natGatewayId, String allocationId,
+                                                String privateIp) {
         NatGatewayAddress address = new NatGatewayAddress();
         address.setNetworkInterfaceId(eniIdFromSeed("nat|" + natGatewayId));
-        if (requestedPrivateIp != null) {
-            requireRequestedPrivateIpFree(region, subnetId, requestedPrivateIp);
-            address.setPrivateIp(requestedPrivateIp);
-        } else {
-            address.setPrivateIp(assignPrivateIp(region, subnetId));
-        }
+        address.setPrivateIp(privateIp);
         if (isSet(allocationId)) {
             address.setAllocationId(allocationId);
             address.setAssociationId("eipassoc-" + randomHex(17));
@@ -12504,9 +12589,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (subnet == null) {
             return List.of();
         }
-        List<NetworkInterface> result = new ArrayList<>();
+        Map<String, NetworkInterface> result = new LinkedHashMap<>();
         for (NatGatewayAddress address : natGateway.getNatGatewayAddresses()) {
             if (address.getNetworkInterfaceId() == null) {
+                continue;
+            }
+            NetworkInterfacePrivateIpAddress ip = new NetworkInterfacePrivateIpAddress();
+            ip.setPrivateIpAddress(address.getPrivateIp());
+            ip.setPrimary(address.isPrimary());
+            if (address.getPublicIp() != null) {
+                NetworkInterfaceAssociation assoc = new NetworkInterfaceAssociation();
+                assoc.setPublicIp(address.getPublicIp());
+                assoc.setAllocationId(address.getAllocationId());
+                assoc.setAssociationId(address.getAssociationId());
+                assoc.setIpOwnerId(ownerId);
+                ip.setAssociation(assoc);
+            }
+            // A secondary address sits on the primary address's interface.
+            NetworkInterface existing = result.get(address.getNetworkInterfaceId());
+            if (existing != null) {
+                existing.getPrivateIpAddresses().add(ip);
                 continue;
             }
             NetworkInterface ni = new NetworkInterface();
@@ -12519,21 +12621,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             ni.setRequesterManaged(true);
             ni.setOwnerId(ownerId);
             ni.setPrivateIpAddress(address.getPrivateIp());
-            NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
-            primaryIp.setPrivateIpAddress(address.getPrivateIp());
-            primaryIp.setPrimary(true);
-            if (address.getPublicIp() != null) {
-                NetworkInterfaceAssociation assoc = new NetworkInterfaceAssociation();
-                assoc.setPublicIp(address.getPublicIp());
-                assoc.setAllocationId(address.getAllocationId());
-                assoc.setAssociationId(address.getAssociationId());
-                assoc.setIpOwnerId(ownerId);
-                primaryIp.setAssociation(assoc);
-            }
-            ni.getPrivateIpAddresses().add(primaryIp);
-            result.add(ni);
+            ni.getPrivateIpAddresses().add(ip);
+            result.put(address.getNetworkInterfaceId(), ni);
         }
-        return result;
+        return new ArrayList<>(result.values());
     }
 
     public List<NatGateway> describeNatGateways(String region, List<String> natGatewayIds,
