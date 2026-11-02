@@ -41,11 +41,18 @@ public class ServiceQuotasJsonHandler {
                             stringOrNull(request, "ServiceCode"), stringOrNull(request, "QuotaCode"),
                             stringOrNull(request, "NextToken"), integerOrNull(request, "MaxResults"),
                             region)).build();
+            case "ListServices" -> handleListServices(request, region, accountId);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Unknown operation: ServiceQuotasV20190624." + action))
                     .build();
         };
+    }
+
+    private Response handleListServices(JsonNode request, String region, String accountId) {
+        String nextToken = stringOrNull(request, "NextToken");
+        Integer maxResults = integerOrNull(request, "MaxResults");
+        return Response.ok(service.listServices(nextToken, maxResults, region, accountId)).build();
     }
 
     private Response handleListServiceQuotas(JsonNode request, String region, String accountId, boolean awsDefault) {
