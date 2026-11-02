@@ -141,7 +141,9 @@ public final class Pagination {
                                                   int defaultPageSize, int maxResultsLimit, int maxTokenLength,
                                                   String errorCode, String namespace, boolean tokenMustBeNonEmpty) {
         validatePageSizeAndToken(maxResults, nextToken, maxResultsLimit, maxTokenLength, errorCode,
-                tokenMustBeNonEmpty, tokenLengthMessage(tokenMustBeNonEmpty, maxTokenLength));
+                tokenMustBeNonEmpty, nextToken != null && nextToken.isEmpty()
+                        ? tokenRangeMessage(maxTokenLength)
+                        : "Pagination token must not exceed " + maxTokenLength + " characters.");
         return paginate(all, cursorOf, maxResults == null ? defaultPageSize : maxResults, nextToken, namespace,
                 token -> new AwsException(errorCode, "Invalid pagination token.", 400));
     }
@@ -156,7 +158,7 @@ public final class Pagination {
                                                             int defaultPageSize, int maxResultsLimit,
                                                             int maxTokenLength, String errorCode) {
         validatePageSizeAndToken(maxResults, nextToken, maxResultsLimit, maxTokenLength, errorCode,
-                true, tokenLengthMessage(true, maxTokenLength));
+                true, tokenRangeMessage(maxTokenLength));
         int limit = maxResults == null ? defaultPageSize : maxResults;
         return slice(all, cursorOf, limit, nextToken, "", Function.identity());
     }
@@ -174,10 +176,8 @@ public final class Pagination {
         }
     }
 
-    private static String tokenLengthMessage(boolean tokenMustBeNonEmpty, int maxTokenLength) {
-        return tokenMustBeNonEmpty
-                ? "Pagination token must be between 1 and " + maxTokenLength + " characters."
-                : "Pagination token must not exceed " + maxTokenLength + " characters.";
+    private static String tokenRangeMessage(int maxTokenLength) {
+        return "Pagination token must be between 1 and " + maxTokenLength + " characters.";
     }
 
     /** Reads an optional JSON page size without coercing strings, fractions, or overflowing integers. */

@@ -818,6 +818,22 @@ class SchedulerServiceTest {
     }
 
     @Test
+    void listOperationsRejectOverLengthNextToken() {
+        String overLength = "x".repeat(2049);
+
+        AwsException groups = assertThrows(AwsException.class, () ->
+                service.listScheduleGroups(null, 1, overLength, REGION));
+        assertEquals("ValidationException", groups.getErrorCode());
+        assertEquals(400, groups.getHttpStatus());
+        assertEquals("Pagination token must not exceed 2048 characters.", groups.getMessage());
+        AwsException schedules = assertThrows(AwsException.class, () ->
+                service.listSchedules(null, null, null, 1, overLength, REGION));
+        assertEquals("ValidationException", schedules.getErrorCode());
+        assertEquals(400, schedules.getHttpStatus());
+        assertEquals("Pagination token must not exceed 2048 characters.", schedules.getMessage());
+    }
+
+    @Test
     void createScheduleWithDeadLetterConfig() {
         Target target = new Target("arn:aws:lambda:us-east-1:000000000000:function:my-func",
                 "arn:aws:iam::000000000000:role/my-role", null, null);
