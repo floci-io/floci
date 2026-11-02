@@ -263,7 +263,8 @@ class PaymentCryptographyServiceTest {
         assertEquals("DELETE_PENDING", deleted.getKeyState());
         assertFalse(deleted.isEnabled());
         assertTrue(deleted.getDeletePendingTimestamp() > 0);
-        assertTrue(deleted.getDeleteTimestamp() > 0);
+        assertEquals(0, deleted.getDeleteTimestamp(),
+                "a key that is pending deletion carries no deletion timestamp");
     }
 
     /**

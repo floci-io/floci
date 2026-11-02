@@ -86,6 +86,14 @@ public class PaymentCryptographyJsonHandler {
                 declared.put(entry.getKey(), entry.getValue().asText());
             }
         });
+        // The check value of an AES key is a CMAC, which is the only algorithm this
+        // service computes, so a request naming another one is refused rather than
+        // answered with a check value of another kind.
+        if (request.hasNonNull("KeyCheckValueAlgorithm")
+                && !"CMAC".equals(request.get("KeyCheckValueAlgorithm").asText())) {
+            throw new AwsException("ValidationException",
+                    "KeyCheckValueAlgorithm must be CMAC", 400);
+        }
         // A key may be created disabled, and it may be created with tags.
         boolean enabled = request.has("Enabled") ? request.path("Enabled").asBoolean(true) : true;
         PaymentCryptographyKey key = service.createKey(region, declared, modesOfUse(attributes),
@@ -101,6 +109,10 @@ public class PaymentCryptographyJsonHandler {
 
     /** The tagging operations name their key in {@code ResourceArn}. */
     private static final String RESOURCE_ARN = "ResourceArn";
+
+    /** The modes of use a key has, as the reference names them; the ones not asked for are false. */
+    private static final List<String> MODES_OF_USE = List.of("Encrypt", "Decrypt", "Wrap", "Unwrap", "Generate",
+            "Sign", "Verify", "DeriveKey", "NoRestrictions");
 
     private Map<String, Object> getKey(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region, KEY_IDENTIFIER);
@@ -140,6 +152,12 @@ public class PaymentCryptographyJsonHandler {
 
     private Map<String, Object> createAlias(JsonNode request, String region) {
         String aliasName = aliasName(request);
+        // The model requires only the name of an alias, but the reference refuses one
+        // without a key, so the request is refused the way it refuses it.
+        if (!request.hasNonNull(KEY_ARN)) {
+            throw new AwsException("ValidationException",
+                    "You can't create an alias without a key.", 400);
+        }
         PaymentCryptographyKey key = requiredKey(request, region, KEY_ARN);
         PaymentCryptographyAlias alias = service.createAlias(aliasName, key);
         return Map.of("Alias", aliasObject(alias));
@@ -259,9 +277,25 @@ public class PaymentCryptographyJsonHandler {
         Map<String, Boolean> modes = new LinkedHashMap<>();
         JsonNode declared = attributes.get("KeyModesOfUse");
         if (declared != null && declared.isObject()) {
-            declared.fields().forEachRemaining(entry ->
-                    modes.put(entry.getKey(), entry.getValue().asBoolean()));
+            declared.fields().forEachRemaining(entry -> {
+                if (MODES_OF_USE.contains(entry.getKey())) {
+                    modes.put(entry.getKey(), entry.getValue().asBoolean());
+                }
+            });
         }
+        return modes;
+    }
+
+    /**
+     * The modes of use a key answers with: every mode the reference gives a key, the ones the key does not
+     * have as false, so a caller reading them finds a boolean for each of them and none of them is null.
+     */
+    private static Map<String, Boolean> answeredModes(PaymentCryptographyKey key) {
+        Map<String, Boolean> modes = new LinkedHashMap<>();
+        for (String mode : MODES_OF_USE) {
+            modes.put(mode, Boolean.FALSE);
+        }
+        modes.putAll(key.getKeyModesOfUse());
         return modes;
     }
 
@@ -298,7 +332,7 @@ public class PaymentCryptographyJsonHandler {
         attributes.put("KeyAlgorithm", key.getKeyAlgorithm());
         attributes.put("KeyClass", key.getKeyClass());
         attributes.put("KeyUsage", key.getKeyUsage());
-        attributes.put("KeyModesOfUse", key.getKeyModesOfUse());
+        attributes.put("KeyModesOfUse", answeredModes(key));
         out.put("KeyAttributes", attributes);
         out.put("KeyCheckValue", key.getKeyCheckValue());
         out.put("KeyCheckValueAlgorithm", key.getKeyCheckValueAlgorithm());

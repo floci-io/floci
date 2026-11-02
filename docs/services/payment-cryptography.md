@@ -36,13 +36,17 @@
 - **Tags are the region's:** they are not part of the replication process, so a key in
   another region carries its own tag set, and tagging one leaves the others alone.
 - **Deletion:** `DeleteKey` removes the key and the aliases that name it, and answers
-  with the key, its state `DELETE_PENDING` and the moment it is deleted. A key that
-  is gone does not come back: a tagging request for it is refused. The service deletes
-  a key the moment it is asked to, so the waiting period of `DeleteKeyInDays` is read
-  and checked but not waited for.
+  with the key, its state `DELETE_PENDING` and the moment its deletion takes effect.
+  A key that is gone does not come back: a tagging request for it is refused. The
+  service deletes a key the moment it is asked to, so the waiting period of
+  `DeleteKeyInDays` is read and checked but not waited for.
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled` and `Tags`, and a key
   created disabled or with tags comes back that way. The `KeyUsage` and the
-  `KeyModesOfUse` of the key are required, as the reference requires them.
+  `KeyModesOfUse` of the key are required, as the reference requires them. The answer
+  carries every mode of use the reference gives a key, the ones the key was not made
+  with as false, so a caller reading them finds a boolean for each of them. The check
+  value is a CMAC, which is the only algorithm this service computes, so a request
+  naming another one is refused.
 - **Which key a request may name:** `KeyIdentifier` takes the ARN of a key, the ARN of
   an alias or the name of an alias, while `KeyArn` and `ResourceArn` take the ARN of
   a key alone, as the reference states them. A request naming a key another way is
@@ -50,7 +54,9 @@
 - **Listing by state:** `ListKeys` takes a `KeyState` and answers with the keys in
   that state alone, and with every key when it names none.
 - **An alias may name no key:** `UpdateAlias` names the key of an alias, and an update
-  that names none removes the key the alias names and leaves the alias.
+  that names none removes the key the alias names and leaves the alias. `CreateAlias`
+  refuses an alias without a key, as the reference does, though its model requires
+  only the name.
 - **Paging:** `ListKeys`, `ListAliases` and `ListTagsForResource` take `MaxResults`
   and `NextToken`, and answer with one page and the token that asks for the next.
 - **Not yet emulated:** the data plane (`POST /encrypt` and the rest), the import and

@@ -210,7 +210,6 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setKeyState("DELETE_PENDING");
         key.setEnabled(false);
         key.setDeletePendingTimestamp(now);
-        key.setDeleteTimestamp(now);
         keyStore.delete(key.getKeyId());
         for (PaymentCryptographyAlias alias : aliasStore.scan(a -> true)) {
             if (key.getKeyId().equals(alias.getKeyId())) {

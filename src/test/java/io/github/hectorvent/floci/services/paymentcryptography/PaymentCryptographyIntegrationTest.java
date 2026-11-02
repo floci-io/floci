@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -188,7 +189,7 @@ class PaymentCryptographyIntegrationTest {
                     .body("Key.KeyState", equalTo("DELETE_PENDING"))
                     .body("Key.Enabled", equalTo(false))
                     .body("Key.DeletePendingTimestamp", notNullValue())
-                    .body("Key.DeleteTimestamp", notNullValue());
+                    .body("Key.DeleteTimestamp", nullValue());
     }
 
     /**
@@ -308,6 +309,63 @@ class PaymentCryptographyIntegrationTest {
         call("GetKey", "{\"KeyIdentifier\":\"" + id + "\"}")
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
+    }
+
+    /**
+     * The model of an alias requires only its name, but the reference refuses an alias without a key, so the
+     * request is refused the way it refuses it.
+     */
+    @Test
+    void anAliasMayNotBeCreatedWithoutAKey() {
+        call("CreateAlias", "{\"AliasName\":\"alias/team/reserved\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"))
+                    .body("message", containsString("You can't create an alias without a key."));
+
+        // The name was not taken by the refused request.
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        call("CreateAlias", "{\"AliasName\":\"alias/team/reserved\",\"KeyArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Alias.AliasName", equalTo("alias/team/reserved"))
+                    .body("Alias.KeyArn", equalTo(arn));
+    }
+
+    /**
+     * The check value of an AES key is a CMAC, which is the only algorithm this service computes, so a request
+     * naming another one is refused rather than answered with a check value of another kind.
+     */
+    @Test
+    void aCheckValueAlgorithmOtherThanCmacIsRefused() {
+        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true}},\"KeyCheckValueAlgorithm\":\"ANSI_X9_24\","
+                + "\"Exportable\":true}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+
+        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true}},\"KeyCheckValueAlgorithm\":\"CMAC\","
+                + "\"Exportable\":true}")
+                .then().statusCode(200)
+                    .body("Key.KeyCheckValueAlgorithm", equalTo("CMAC"));
+    }
+
+    /**
+     * The answer carries every mode of use, the ones the request did not ask for as false, so a caller reading them
+     * finds a boolean for each of them.
+     */
+    @Test
+    void everyModeOfUseIsAnswered() {
+        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true}},\"Exportable\":true}")
+                .then().statusCode(200)
+                    .body("Key.KeyAttributes.KeyModesOfUse", aMapWithSize(9))
+                    .body("Key.KeyAttributes.KeyModesOfUse.Encrypt", equalTo(true))
+                    .body("Key.KeyAttributes.KeyModesOfUse.Decrypt", equalTo(false))
+                    .body("Key.KeyAttributes.KeyModesOfUse.NoRestrictions", equalTo(false));
     }
 
     /**
