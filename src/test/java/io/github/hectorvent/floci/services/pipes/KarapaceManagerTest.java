@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.pipes;
 
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -27,10 +28,12 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -79,6 +82,7 @@ class KarapaceManagerTest {
 
     @AfterEach
     void tearDown() {
+        manager.shutdown();
         if (fakeRestServer != null) {
             fakeRestServer.stop(0);
         }
@@ -210,5 +214,61 @@ class KarapaceManagerTest {
 
         verify(lifecycleManager).stopAndRemove("container-1", null);
         verify(portAllocator).release(54321);
+    }
+
+    @Test
+    void managedTeardownStopsEveryTargetAndPredestroyDoesNotStopThemAgain() throws Exception {
+        int hostPort = startFakeRestServer();
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerInfo("container-1", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))),
+                new ContainerInfo("container-2", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))));
+        manager.ensureStarted("broker-1:9092");
+        manager.ensureStarted("broker-2:9092");
+
+        ContainerTeardown teardown = assertInstanceOf(ContainerTeardown.class, manager);
+        teardown.stopManagedContainers();
+        manager.shutdown();
+
+        verify(lifecycleManager, times(1)).stopAndRemove("container-1", null);
+        verify(lifecycleManager, times(1)).stopAndRemove("container-2", null);
+    }
+
+    @Test
+    void managedTeardownClearsCachedTargetBeforeTheNextStart() throws Exception {
+        int hostPort = startFakeRestServer();
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerInfo("container-1", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))),
+                new ContainerInfo("container-2", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))));
+        manager.ensureStarted("broker-1:9092");
+
+        ContainerTeardown teardown = assertInstanceOf(ContainerTeardown.class, manager);
+        teardown.stopManagedContainers();
+        manager.ensureStarted("broker-1:9092");
+        teardown.stopManagedContainers();
+
+        verify(lifecycleManager, times(2)).createAndStart(any());
+        verify(lifecycleManager, times(1)).stopAndRemove("container-1", null);
+        verify(lifecycleManager, times(1)).stopAndRemove("container-2", null);
+    }
+
+    @Test
+    void failedManagedStopDoesNotPreventStoppingAnotherTarget() throws Exception {
+        int hostPort = startFakeRestServer();
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerInfo("container-1", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))),
+                new ContainerInfo("container-2", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))));
+        manager.ensureStarted("broker-1:9092");
+        manager.ensureStarted("broker-2:9092");
+        doThrow(new IllegalStateException("Docker stop failed"))
+                .when(lifecycleManager).stopAndRemove("container-1", null);
+
+        ContainerTeardown teardown = assertInstanceOf(ContainerTeardown.class, manager);
+        teardown.stopManagedContainers();
+
+        verify(lifecycleManager).stopAndRemove("container-1", null);
+        verify(lifecycleManager).stopAndRemove("container-2", null);
     }
 }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.pipes;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -35,7 +36,7 @@ import java.util.stream.Collectors;
  * (multiple Pipes reading the same cluster share one Karapace instance).
  */
 @ApplicationScoped
-class KarapaceManager {
+class KarapaceManager implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(KarapaceManager.class);
     private static final int REST_PORT = 8082;
@@ -207,8 +208,8 @@ class KarapaceManager {
         return Digests.sha256Hex(bootstrapServers).substring(0, 16);
     }
 
-    @PreDestroy
-    void shutdown() {
+    @Override
+    public void stopManagedContainers() {
         containerIdByTarget.values().forEach(containerId -> {
             try {
                 lifecycleManager.stopAndRemove(containerId, null);
@@ -218,5 +219,10 @@ class KarapaceManager {
         });
         containerIdByTarget.clear();
         restBaseUriByTarget.clear();
+    }
+
+    @PreDestroy
+    void shutdown() {
+        stopManagedContainers();
     }
 }
