@@ -152,8 +152,9 @@ class AccountPropertiesIntegrationTest {
             .body(containsString("ValidationError"))
             // IAM's own form, captured from a real account on 2026-10-31 against the Status the
             // four credential operations share: "1 validation error detected: Value at 'status'
-            // failed to satisfy constraint: Member must not be null". SNS, which quotes its
-            // values, carries a null where the value would go; IAM leaves it out with the rest.
+            // failed to satisfy constraint: Member must not be null". Nothing captured covers this
+            // member, so leaving the word out here is that reading carried over. SNS, which quotes
+            // its values, carries a null where the value would go.
             .body(containsString("1 validation error detected"))
             // The apostrophes around the member name come back XML-escaped, so the assertion
             // stops at the parts that survive escaping.

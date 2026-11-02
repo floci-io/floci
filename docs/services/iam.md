@@ -325,10 +325,17 @@ whatever it breaks. Other services do quote a list, Lambda's `Value '[x86_64, ar
 A required member the request leaves out reads the same way, `Value at 'status' failed to satisfy
 constraint: Member must not be null`, with no `null` standing where the value would. That was the
 one message carrying a word in the value's place until 2026-10-31, when a capture from a real
-account answered an omitted `Status` and showed the word gone with every other value this service
-leaves out. The form is chosen in one place, so the capture moved it in one edit rather than across
-the service, and the services that do quote their values, STS among them, still write `Value null at
-'<member>'`.
+account answered an omitted `Status` without it.
+
+What that capture settles is one member. `Status`, on the four credential operations that share it,
+is the only omitted member any recording covers. Every other one this service answers, the members
+checked by hand and each required member the model walk reads, carries that form on Floci's reading
+rather than on a capture: the word `null` was never a value AWS sent, an absent member having none
+to carry, so one rendering for the whole service is the likelier reading of a message that names the
+member and nothing else. The form is chosen in one place, which is what let the capture move it in
+one edit rather than across the service, and a capture of some other omitted member would confirm it
+or split `Status` from the rest in one edit too. The services that do quote their values, STS among
+them, still write `Value null at '<member>'`.
 
 ### Two answers the model carries since a capture settled them
 
