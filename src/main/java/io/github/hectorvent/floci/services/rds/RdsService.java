@@ -980,9 +980,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             try {
                                 deleteInstanceForScope(accountId, effectiveRegion, id);
                             } catch (RuntimeException | Error rollbackFailure) {
-                                if (rollbackFailure != failure) {
-                                    failure.addSuppressed(rollbackFailure);
-                                }
+                                addSuppressedUnlessSelf(failure, rollbackFailure);
                             }
                         }
                         throw failure;
@@ -1026,9 +1024,7 @@ public class RdsService implements Resettable, ResourceProvider {
         try {
             putInstanceForScope(accountId, region, id, instance);
         } catch (RuntimeException | Error persistenceFailure) {
-            if (persistenceFailure != failure) {
-                failure.addSuppressed(persistenceFailure);
-            }
+            addSuppressedUnlessSelf(failure, persistenceFailure);
             return;
         }
 
@@ -1040,9 +1036,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 proxyStopped = true;
             } catch (RuntimeException | Error cleanupFailure) {
                 cleanupComplete = false;
-                if (cleanupFailure != failure) {
-                    failure.addSuppressed(cleanupFailure);
-                }
+                addSuppressedUnlessSelf(failure, cleanupFailure);
             }
         }
         if (!mock && instance.getDockerVolumeName() != null) {
@@ -1060,9 +1054,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 instance.setBackendCleanupRequired(false);
             } catch (RuntimeException | Error cleanupFailure) {
                 cleanupComplete = false;
-                if (cleanupFailure != failure) {
-                    failure.addSuppressed(cleanupFailure);
-                }
+                addSuppressedUnlessSelf(failure, cleanupFailure);
             }
         }
         if (managedPassword && (instance.getMasterUserSecretArn() != null
@@ -1071,9 +1063,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 cleanupFailedCreateManagedSecret(instance, region);
             } catch (RuntimeException | Error cleanupFailure) {
                 cleanupComplete = false;
-                if (cleanupFailure != failure) {
-                    failure.addSuppressed(cleanupFailure);
-                }
+                addSuppressedUnlessSelf(failure, cleanupFailure);
             }
         }
         if (proxyStopped) {
@@ -1085,24 +1075,18 @@ public class RdsService implements Resettable, ResourceProvider {
             try {
                 putInstanceForScope(accountId, region, id, instance);
             } catch (RuntimeException | Error persistenceFailure) {
-                if (persistenceFailure != failure) {
-                    failure.addSuppressed(persistenceFailure);
-                }
+                addSuppressedUnlessSelf(failure, persistenceFailure);
             }
             return;
         }
         try {
             deleteInstanceForScope(accountId, region, id);
         } catch (RuntimeException | Error deletionFailure) {
-            if (deletionFailure != failure) {
-                failure.addSuppressed(deletionFailure);
-            }
+            addSuppressedUnlessSelf(failure, deletionFailure);
             try {
                 putInstanceForScope(accountId, region, id, instance);
             } catch (RuntimeException | Error persistenceFailure) {
-                if (persistenceFailure != failure) {
-                    failure.addSuppressed(persistenceFailure);
-                }
+                addSuppressedUnlessSelf(failure, persistenceFailure);
             }
         }
     }
@@ -5110,9 +5094,7 @@ public class RdsService implements Resettable, ResourceProvider {
             try {
                 putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
             } catch (RuntimeException | Error restoreFailure) {
-                if (restoreFailure != failure) {
-                    failure.addSuppressed(restoreFailure);
-                }
+                addSuppressedUnlessSelf(failure, restoreFailure);
             }
             throw failure;
         }
@@ -5379,9 +5361,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     clusterRemoved = !scopedKeyExists(
                             clusters, clusterAccountId, dbResourceKey(effectiveRegion, id));
                 } catch (RuntimeException verificationFailure) {
-                    if (verificationFailure != e) {
-                        e.addSuppressed(verificationFailure);
-                    }
+                    addSuppressedUnlessSelf(e, verificationFailure);
                 }
             }
             if (clusterRemoved) {
@@ -5391,9 +5371,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         proxyManager.stopProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id));
                         proxyStopped = true;
                     } catch (RuntimeException cleanupFailure) {
-                        if (cleanupFailure != e) {
-                            e.addSuppressed(cleanupFailure);
-                        }
+                        addSuppressedUnlessSelf(e, cleanupFailure);
                     }
                     if (cluster.getContainerId() != null) {
                         attemptRollback(e, () -> containerManager.stop(buildClusterHandle(cluster)));
@@ -6039,9 +6017,7 @@ public class RdsService implements Resettable, ResourceProvider {
             try {
                 putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
             } catch (RuntimeException | Error restoreFailure) {
-                if (restoreFailure != failure) {
-                    failure.addSuppressed(restoreFailure);
-                }
+                addSuppressedUnlessSelf(failure, restoreFailure);
             }
             throw failure;
         }
@@ -9017,9 +8993,13 @@ public class RdsService implements Resettable, ResourceProvider {
         try {
             rollback.run();
         } catch (RuntimeException rollbackFailure) {
-            if (rollbackFailure != failure) {
-                failure.addSuppressed(rollbackFailure);
-            }
+            addSuppressedUnlessSelf(failure, rollbackFailure);
+        }
+    }
+
+    private static void addSuppressedUnlessSelf(Throwable failure, Throwable extra) {
+        if (extra != failure) {
+            failure.addSuppressed(extra);
         }
     }
 

@@ -92,7 +92,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
@@ -1245,18 +1244,20 @@ class RdsServiceTest {
                         "db.t3.micro", 20, false, null, null, null))));
         try {
             assertTrue(cleanupEntered.await(10, TimeUnit.SECONDS));
-            CountDownLatch deleteStarted = new CountDownLatch(1);
+            AtomicReference<Thread> deleteThread = new AtomicReference<>();
             Future<?> delete = executor.submit(() -> {
-                deleteStarted.countDown();
+                deleteThread.set(Thread.currentThread());
                 try {
                     service.deleteDbInstance("failed-instance");
                 } catch (AwsException e) {
                     assertEquals("DBInstanceNotFound", e.getErrorCode());
                 }
             });
-            assertTrue(deleteStarted.await(10, TimeUnit.SECONDS));
-            assertThrows(TimeoutException.class, () -> delete.get(1, TimeUnit.SECONDS),
-                    "delete must wait while failed-create rollback owns the instance");
+            await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(5)).until(() ->
+                    delete.isDone() || (deleteThread.get() != null
+                            && deleteThread.get().getState() == Thread.State.BLOCKED));
+            assertFalse(delete.isDone(), "delete must wait while failed-create rollback owns the instance");
+            assertEquals(Thread.State.BLOCKED, deleteThread.get().getState());
 
             allowCleanup.countDown();
             create.get(10, TimeUnit.SECONDS);
