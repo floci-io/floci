@@ -49,6 +49,15 @@ class EmrSparkStepsTest {
     }
 
     @Test
+    void aCustomJarAtEmrsStreamingJarPathRunsTheImagesCopy() {
+        assertEquals(List.of("/usr/lib/hadoop/hadoop-streaming.jar", "-input", "s3://bucket/in/"),
+                EmrSparkSteps.application(step("/usr/lib/hadoop-mapreduce/hadoop-streaming.jar", null, "-input",
+                        "s3://bucket/in/")));
+        assertEquals(List.of("/home/hadoop/hadoop-streaming.jar"),
+                EmrSparkSteps.application(step("/home/hadoop/hadoop-streaming.jar", null)));
+    }
+
+    @Test
     void stepsOtherThanSparkAreNotRun() {
         assertNull(EmrSparkSteps.application(step("command-runner.jar", null, "hive-script", "--run-hive-script")));
         assertNull(EmrSparkSteps.application(step("command-runner.jar", null)));
@@ -229,6 +238,32 @@ class EmrSparkStepsTest {
         assertEquals(Map.of("rootLogger.level", "warn", "logger.app.name", "com.example.app",
                 "logger.app.level", "debug"), EmrSparkSteps.sparkLog4j2(configurations, objectMapper));
         assertEquals(Map.of(), EmrSparkSteps.sparkLog4j2(null, objectMapper));
+    }
+
+    @Test
+    void theClustersHadoopClassificationsComeFromItsConfigurations() {
+        // The Release Guide's mapred-site and hadoop-env examples, the later configuration winning.
+        String configurations = """
+                [{"Classification": "mapred-site", "Properties": {"mapred.tasktracker.map.tasks.maximum": "2",
+                  "mapreduce.map.sort.spill.percent": "0.90"}},
+                 {"Classification": "hadoop-log4j", "Properties": {"log4j.logger.org.apache.hadoop": "WARN"}},
+                 {"Classification": "hadoop-env", "Properties": {"IGNORED": "1"}, "Configurations": [
+                   {"Classification": "export", "Properties": {"HADOOP_USER_CLASSPATH_FIRST": "true",
+                    "HADOOP_CLASSPATH": "/path/to/my.jar"}}]},
+                 {"Classification": "mapred-site", "Properties": {"mapreduce.map.sort.spill.percent": "0.80"}},
+                 {"Classification": "spark-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"PYSPARK_PYTHON": "/usr/bin/python3.11"}}]}]
+                """;
+
+        assertEquals(Map.of("mapred.tasktracker.map.tasks.maximum", "2", "mapreduce.map.sort.spill.percent", "0.80"),
+                EmrSparkSteps.mapredSite(configurations, objectMapper));
+        assertEquals(Map.of("log4j.logger.org.apache.hadoop", "WARN"),
+                EmrSparkSteps.hadoopLog4j(configurations, objectMapper));
+        assertEquals(Map.of("HADOOP_USER_CLASSPATH_FIRST", "true", "HADOOP_CLASSPATH", "/path/to/my.jar"),
+                EmrSparkSteps.hadoopEnvironment(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.mapredSite(null, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.hadoopLog4j(null, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.hadoopEnvironment(null, objectMapper));
     }
 
     @Test
