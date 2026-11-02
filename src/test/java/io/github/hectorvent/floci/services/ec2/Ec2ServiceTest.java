@@ -2626,6 +2626,63 @@ class Ec2ServiceTest {
     }
 
     /**
+     * CreateTags writes a NAT gateway back under the gateway's tag lock, which DeleteNatGateway
+     * does not take, so a tag write that read the gateway before a delete stores the record the
+     * delete marked deleted. A secondary-address update must refuse that record rather than hold
+     * Elastic IPs for it.
+     */
+    @Test
+    void aSecondaryAddressUpdateRefusesAGatewayStoredAsDeleted() throws Exception {
+        CountDownLatch putReached = new CountDownLatch(1);
+        CountDownLatch deleteDone = new CountDownLatch(1);
+        AtomicReference<Boolean> pausePut = new AtomicReference<>(false);
+        InMemoryStorage<String, NatGateway> rawGateways = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, NatGateway value) {
+                if (pausePut.getAndSet(false)) {
+                    putReached.countDown();
+                    try {
+                        assertTrue(deleteDone.await(5, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                super.put(key, value);
+            }
+        };
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-nat-gateways.json",
+                        new AccountAwareStorageBackend<>(rawGateways, null, "000000000000"))));
+        String region = "us-east-1";
+        String subnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String primary = service.allocateAddress(region).getAllocationId();
+        String added = service.allocateAddress(region).getAllocationId();
+        String natId = service.createNatGateway(region, subnetId, primary, "public", List.of()).getNatGatewayId();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            pausePut.set(true);
+            Future<?> tagging = worker.submit(() -> service.createTags(region, List.of(natId),
+                    List.of(new Tag("k", "v"))));
+            assertTrue(putReached.await(5, TimeUnit.SECONDS), "the tag write reaches its put");
+            service.deleteNatGateway(region, natId);
+            deleteDone.countDown();
+            tagging.get(5, TimeUnit.SECONDS);
+            assertEquals("deleted", rawGateways.scan(k -> true).getFirst().getState(),
+                    "the tag write stored the deleted gateway");
+
+            AwsException e = assertThrows(AwsException.class, () -> service.updateNatGatewaySecondaryAddresses(
+                    region, natId, List.of(added), List.of(), null));
+            assertEquals("NatGatewayNotFound", e.getErrorCode());
+            assertNull(service.describeAddresses(region, List.of(added), Map.of()).getFirst().getAssociationId(),
+                    "the requested Elastic IP is not held for the deleted gateway");
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
      * A gateway persisted before account isolation (unprefixed key) still holds its Elastic IP:
      * a second gateway is created failed, and ReleaseAddress answers InvalidIPAddress.InUse.
      */
