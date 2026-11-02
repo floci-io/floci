@@ -16,6 +16,7 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -151,8 +152,19 @@ public final class RedshiftRoleAccess {
      */
     public static void authorizeSessionAction(S3Service s3, IamService iamService, RoleSession session,
                                               String roleArn, String action, String resourceArn) {
+        authorizeSessionAction(s3, iamService, session, roleArn, action, resourceArn, Map.of());
+    }
+
+    /**
+     * @param conditionContext the condition keys the request itself offers, such as {@code s3:prefix}; for an
+     *                         access key the keys that say who is calling are added, so a policy that matches
+     *                         on {@code aws:PrincipalArn} sees the same principal as on a signed request
+     */
+    public static void authorizeSessionAction(S3Service s3, IamService iamService, RoleSession session,
+                                              String roleArn, String action, String resourceArn,
+                                              Map<String, List<String>> conditionContext) {
         if (roleArn != null) {
-            authorizeRoleAction(s3, iamService, roleArn, action, resourceArn);
+            authorizeRoleAction(s3, iamService, roleArn, action, resourceArn, conditionContext);
             return;
         }
         if (!s3.isAuthEnforced()) {
@@ -164,8 +176,11 @@ public final class RedshiftRoleAccess {
                     "S3 access denied for access key '" + session.accessKeyId() + "': " + action + " on "
                             + resourceArn, null);
         }
+        Map<String, List<String>> context = new HashMap<>(conditionContext);
+        iamService.resolveCallerArns(session.accessKeyId())
+                .ifPresent(callerArns -> callerArns.putPrincipalKeys(context));
         IamPolicyEvaluator.SimulationDecision decision =
-                ROLE_POLICY_EVALUATOR.simulatePrincipalPolicy(caller, action, resourceArn, Map.of());
+                ROLE_POLICY_EVALUATOR.simulatePrincipalPolicy(caller, action, resourceArn, context);
         if (decision != IamPolicyEvaluator.SimulationDecision.ALLOWED) {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "S3 access denied for access key '" + session.accessKeyId() + "': " + action + " on "

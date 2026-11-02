@@ -163,6 +163,78 @@ class S3CopySimulatorTest {
         verify(s3, never()).authorizeSignedListBucket(any(), any(), any());
     }
 
+    private static String policy(String statements) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}";
+    }
+
+    private IamService knownKey() {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.of("secret"));
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(s3.objectExists("bucket", "data.csv")).thenReturn(true);
+        return iamService;
+    }
+
+    @Test
+    void aConditionalDenyOnThePrincipalArnStillAppliesToTheKeysCopy() {
+        IamService iamService = knownKey();
+        String arn = "arn:aws:iam::111111111111:user/alice";
+        when(iamService.resolveCallerArns("ASIAEXAMPLE")).thenReturn(Optional.of(
+                new IamService.CallerArns(arn, arn)));
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"},"
+                        + "{\"Effect\":\"Deny\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\","
+                        + "\"Condition\":{\"ArnEquals\":{\"aws:PrincipalArn\":\"" + arn + "\"}}}"))));
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("42501", error.sqlState());
+    }
+
+    @Test
+    void anAllowThatRequiresTheListedPrefixMatchesTheCopyPrefix() {
+        IamService iamService = knownKey();
+        when(s3.objectExists("bucket", "data.csv")).thenReturn(false);
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("data.csv"), any(), anyInt(), any(), any()))
+                .thenReturn(null);
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:ListBucket\",\"Resource\":\"*\","
+                        + "\"Condition\":{\"StringLike\":{\"s3:prefix\":\"data*\"}}},"
+                        + "{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}"))));
+
+        // The listing is authorized (no 42501); the empty prefix then finds no object.
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertTrue(error.getMessage().contains("not found"), error.getMessage());
+    }
+
+    @Test
+    void keysAuthorizeAgainstTheArnsOfTheBucketsPartition() {
+        IamService iamService = knownKey();
+        when(s3.getBucketRegion("bucket")).thenReturn("cn-north-1");
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:*\","
+                        + "\"Resource\":[\"arn:aws-cn:s3:::bucket\",\"arn:aws-cn:s3:::bucket/*\"]}"))));
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
+
+        assertEquals(List.of("data.csv"), input.keys());
+    }
+
+    @Test
+    void theOwnerOfTheKeyIsLookedUpAcrossAccounts() {
+        IamService iamService = knownKey();
+        when(iamService.findAccountForAccessKeyId("ASIAEXAMPLE")).thenReturn(Optional.of("222222222222"));
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}"))));
+
+        S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
+
+        verify(iamService).findAccountForAccessKeyId("ASIAEXAMPLE");
+    }
+
     @Test
     void copyIgnoresPlaceholderKeysWhenS3AuthorizationIsOff() {
         IamService iamService = mock(IamService.class);
