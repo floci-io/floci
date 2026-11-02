@@ -90,6 +90,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     private final Map<String, String> activeStorageOwners = new ConcurrentHashMap<>();
     private final Set<String> claimedRuntimes = ConcurrentHashMap.newKeySet();
     private final Set<String> cleanupPending = ConcurrentHashMap.newKeySet();
+    private final Set<String> preCreateCleanupPending = ConcurrentHashMap.newKeySet();
     private final Set<String> parameterGroupRefusals = ConcurrentHashMap.newKeySet();
     private volatile boolean dockerUnavailableLogged;
     // Auto-pause state of every running container, by runtime id. The timer thread only keeps
@@ -260,7 +261,8 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
     private void discardNeverCreatedIdentity(String runtimeId, String containerName) {
         RdsContainerHandle retained = activeContainers.get(runtimeId);
-        if (retained == null || retained.getHost() != null
+        if (retained == null || !preCreateCleanupPending.contains(runtimeId)
+                || retained.getHost() != null
                 || !retained.getContainerId().equals(containerName)) {
             return;
         }
@@ -350,6 +352,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         }
 
         String cleanupContainerId = containerName;
+        boolean createAttempted = false;
         RdsContainerHandle handle = null;
         try {
             // Remove any stale container with the same name only after storage ownership is
@@ -406,6 +409,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             // The fixed name remains a valid cleanup identity if create succeeds but its response
             // is lost before Docker returns the generated ID.
             cleanupContainerId = containerName;
+            createAttempted = true;
             String createdContainerId = lifecycleManager.create(spec);
             cleanupContainerId = createdContainerId;
             if (needsMasterGrant(engine, masterUsername)) {
@@ -468,6 +472,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                             null, 0, storageKey, containerKey);
                     activeContainers.put(effectiveRuntimeId, retained);
                     cleanupPending.add(effectiveRuntimeId);
+                    if (!createAttempted) {
+                        preCreateCleanupPending.add(effectiveRuntimeId);
+                    }
                     LOG.errorv(cleanupFailure,
                             "Failed to clean up RDS container {0}; retaining storage ownership for {1}",
                             cleanupContainerId, effectiveRuntimeId);
@@ -544,6 +551,44 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         RdsContainerHandle active = activeContainers.get(runtimeId);
         if (active != null) {
             stop(active);
+        }
+    }
+
+    /** Removes a failed creation's container even after its transient Docker handle is lost. */
+    public void stopForDelete(String runtimeId, String dockerVolumeName) {
+        stopByRuntimeId(runtimeId);
+        String exactVolumeName = requireSafeStorageComponent(dockerVolumeName, "Docker volume name");
+        String currentName = ContainerStorageHelper.dockerName(config, exactVolumeName);
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, exactVolumeName);
+        String currentKey = "container:" + currentName;
+        String legacyKey = legacyName.equals(currentName) ? null : "container:" + legacyName;
+        if (!claimedRuntimes.add(runtimeId)) {
+            throw new IllegalStateException("RDS runtime " + runtimeId + " already has an active container");
+        }
+        boolean cleanupPendingForRetry = false;
+        String cleanupName = currentName;
+        try {
+            claimStorage(currentKey, runtimeId);
+            if (legacyKey != null) {
+                claimStorage(legacyKey, runtimeId);
+            }
+            try {
+                lifecycleManager.removeIfExistsStrict(currentName);
+                if (legacyKey != null) {
+                    cleanupName = legacyName;
+                    lifecycleManager.removeIfExistsStrict(legacyName);
+                }
+            } catch (RuntimeException | Error e) {
+                activeContainers.put(runtimeId, new RdsContainerHandle(
+                        cleanupName, runtimeId, runtimeId, null, 0, currentKey, legacyKey));
+                cleanupPending.add(runtimeId);
+                cleanupPendingForRetry = true;
+                throw e;
+            }
+        } finally {
+            if (!cleanupPendingForRetry) {
+                releaseOwnership(currentKey, legacyKey, runtimeId);
+            }
         }
     }
 
@@ -1341,6 +1386,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         }
         claimedRuntimes.remove(runtimeId);
         cleanupPending.remove(runtimeId);
+        preCreateCleanupPending.remove(runtimeId);
     }
 
     private static String requireSafeStorageComponent(String value, String label) {
