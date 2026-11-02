@@ -126,7 +126,7 @@ public class ElbV2HealthChecker implements Resettable {
         return "healthy".equals(state) || "initial".equals(state);
     }
 
-    private void probeAll(String tgArn, TargetGroup tg) {
+    void probeAll(String tgArn, TargetGroup tg) {
         Map<String, TargetState> tgStates = states.get(tgArn);
         if (tgStates == null || !Boolean.TRUE.equals(tg.getHealthCheckEnabled())) {
             return;
