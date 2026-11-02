@@ -1837,6 +1837,19 @@ class SsoAdminServiceTest {
                 () -> service.getAssignmentOperation(service.getInstanceArn(), operation.requestId()));
     }
 
+    @Test
+    void permissionSetFindsItsInstanceInThePartitionItWasMintedIn() {
+        SsoAdminService china = emptyService("cn-north-1");
+        ObjectNode request = mapper.createObjectNode()
+                .put("InstanceArn", china.getInstanceArn())
+                .put("Name", "ChinaAdmins");
+        PermissionSet permissionSet = china.createPermissionSet(request);
+
+        assertTrue(permissionSet.arn().startsWith("arn:aws-cn:sso:::permissionSet/"));
+        assertEquals(china.getInstanceArn(),
+                china.instanceForPermissionSetForPortal(permissionSet.arn()).instanceArn());
+    }
+
     /** The seeded instance lives in the deployment's home region, so its ARN takes that partition. */
     @Test
     void seededInstanceTakesTheHomeRegionsPartition() {
