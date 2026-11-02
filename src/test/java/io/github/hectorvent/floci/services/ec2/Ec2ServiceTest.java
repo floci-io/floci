@@ -123,6 +123,7 @@ import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_FINGERPRINT;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_KEY;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.TRUNCATED_RSA_KEY;
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -2577,9 +2578,7 @@ class Ec2ServiceTest {
      */
     @Test
     void aSecondaryAddressUpdateDoesNotBringBackAGatewayDeletedUnderIt() throws Exception {
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Ec2Service service = mockModeService();
         String region = "us-east-1";
         String subnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
         String primary = service.allocateAddress(region).getAllocationId();
@@ -2600,8 +2599,7 @@ class Ec2ServiceTest {
                     updater.set(Thread.currentThread());
                     service.updateNatGatewaySecondaryAddresses(region, natId, List.of(added), List.of(), null);
                 });
-                Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> updating.isDone()
-                        || (updater.get() != null && updater.get().getState() == Thread.State.BLOCKED));
+                awaitBlockedOrDone(updater, updating);
                 assertFalse(updating.isDone(), "the update must wait for the allocation lock");
                 service.deleteNatGateway(region, natId);
                 other = service.createNatGateway(region, subnetId, primary, "public", List.of()).getNatGatewayId();
@@ -2623,6 +2621,50 @@ class Ec2ServiceTest {
             worker.shutdownNow();
             assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
         }
+    }
+
+    /**
+     * A NAT gateway whose addresses run out part way gives back the lease it took on the VPC
+     * network. The subnet is a /28, eleven assignable addresses, and 31 more are asked for.
+     */
+    @Test
+    void aNatGatewayCreateThatRunsOutOfAddressesGivesBackTheLeaseItTook() {
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
+        String subnetId = tinyNatSubnet(service);
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("10.60.0.5"), Optional.empty());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.createNatGateway("us-east-1", subnetId,
+                null, "private", null, List.of(), List.of(), "31", List.of()));
+        assertEquals("InsufficientFreeAddressesInSubnet", e.getErrorCode());
+        verify(vpcNetworks).releasePrivateIp("us-east-1", subnetId, "10.60.0.5");
+        assertTrue(service.describeNatGateways("us-east-1", List.of(), Map.of()).isEmpty());
+    }
+
+    /** The same on a secondary-address update, which also leaves the gateway as it was. */
+    @Test
+    void aNatGatewayUpdateThatRunsOutOfAddressesGivesBackTheLeaseItTook() {
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
+        String subnetId = tinyNatSubnet(service);
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("10.60.0.6"), Optional.of("10.60.0.7"), Optional.empty());
+        NatGateway nat = service.createNatGateway("us-east-1", subnetId, null, "private", List.of());
+        assertEquals("10.60.0.6", nat.getNatGatewayAddresses().getFirst().getPrivateIp());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateNatGatewaySecondaryAddresses(
+                "us-east-1", nat.getNatGatewayId(), List.of(), List.of(), "31"));
+        assertEquals("InsufficientFreeAddressesInSubnet", e.getErrorCode());
+        verify(vpcNetworks).releasePrivateIp("us-east-1", subnetId, "10.60.0.7");
+        assertEquals(List.of("10.60.0.6"), service.describeNatGateways("us-east-1", List.of(nat.getNatGatewayId()),
+                Map.of()).getFirst().getNatGatewayAddresses().stream().map(NatGatewayAddress::getPrivateIp).toList(),
+                "the gateway keeps only its primary address");
+    }
+
+    private static String tinyNatSubnet(Ec2Service service) {
+        String vpcId = service.createVpc("us-east-1", "10.60.0.0/16", false).getVpcId();
+        return service.createSubnet("us-east-1", vpcId, "10.60.0.0/28", "us-east-1a").getSubnetId();
     }
 
     /**
