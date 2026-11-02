@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
@@ -196,7 +198,7 @@ public final class S3CopySimulator {
     private static String copyBucketArn(CopyStatementParser.S3CopyFrom spec) {
         return spec.iamRoleArn() != null
                 ? RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket())
-                : "arn:aws:s3:::" + spec.bucket();
+                : AwsArnUtils.Arn.global(AwsRegions.partitionFor(null), "s3", "", spec.bucket()).toString();
     }
 
     private static String copyObjectArn(CopyStatementParser.S3CopyFrom spec, String key) {
