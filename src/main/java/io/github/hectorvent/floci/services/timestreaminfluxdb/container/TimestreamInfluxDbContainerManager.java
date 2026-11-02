@@ -189,7 +189,7 @@ public class TimestreamInfluxDbContainerManager implements ContainerTeardown {
     public InfluxDbEndpoint restart(String containerId) {
         lifecycleManager.getDockerClient().restartContainerCmd(containerId).exec();
         EndpointInfo endpoint = lifecycleManager.resolveEndpoint(containerId, INFLUX_PORT,
-                config.services().timestreamInfluxdb().dockerNetwork().orElse(null));
+                containerBuilder.resolveDockerNetwork(config.services().timestreamInfluxdb().dockerNetwork()).orElse(null));
         return new InfluxDbEndpoint(containerId, endpoint.host(), endpoint.port());
     }
 
