@@ -399,6 +399,34 @@ class EsmIntegrationTest {
         }
     }
 
+    /** 2^64 + 1 is a whole number that wraps to 1 when narrowed to long, so each range check must see it first. */
+    @Test
+    void createEventSourceMappingRejectsIntegerOptionsBeyondLong() {
+        String beyondLong = "18446744073709551617";
+        List<String[]> cases = List.of(
+                new String[] {QUEUE_ARN, "\"MaximumBatchingWindowInSeconds\": " + beyondLong},
+                new String[] {QUEUE_ARN, "\"ScalingConfig\": {\"MaximumConcurrency\": " + beyondLong + "}"},
+                new String[] {STREAM_ARN, "\"StartingPosition\": \"LATEST\", \"MaximumRetryAttempts\": " + beyondLong},
+                new String[] {STREAM_ARN, "\"StartingPosition\": \"LATEST\", \"MaximumRecordAgeInSeconds\": " + beyondLong});
+        for (String[] c : cases) {
+            given()
+                    .contentType("application/json")
+                    .body("""
+                            {
+                              "FunctionName": "%s",
+                              "EventSourceArn": "%s",
+                              "Enabled": false,
+                              %s
+                            }
+                            """.formatted(FUNCTION_NAME, c[0], c[1]))
+                    .when()
+                    .post(LAMBDA_BASE + "/event-source-mappings")
+                    .then()
+                    .statusCode(400)
+                    .body("message", containsString("(got " + beyondLong + ")"));
+        }
+    }
+
     @Test
     void createEventSourceMappingRejectsParallelizationFactorOnSqsSource() {
         given()
