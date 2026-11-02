@@ -249,13 +249,15 @@ botocore-bump: ## Bump the botocore pin to VERSION, move local/aws/botocore to t
 	$(MAKE) --no-print-directory aws-data-sync-botocore
 	$(MAKE) --no-print-directory aws-data-check-botocore
 
-aws-data-sync: aws-data-sync-botocore ## Regenerate src/main/resources/aws/*.json and the IAM managed-policy catalog from local/aws (commit the result)
+aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-policy catalog from local/aws (commit the result)
+	$(PYTHON) tools/aws/regen_partitions.py
+	$(MAKE) --no-print-directory aws-data-sync-botocore
 	$(PYTHON) tools/aws/regen_region_facts.py
 	$(PYTHON) tools/aws/regen_rds_ca_certificates.py
 	$(PYTHON) tools/aws/regen_managed_policies.py
 
 aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, so a bump picks up nothing from the other local/aws sources
-	$(PYTHON) tools/aws/regen_partitions.py
+	$(PYTHON) tools/aws/regen_partitions.py --carry-region-flags
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
 	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
@@ -273,6 +275,12 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_iam_paginators.py
 
 aws-data-check: aws-data-check-botocore ## CI gate: the vendored AWS data must match a fresh generation
+	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/partitions.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_region_facts.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/region-facts.json is out of date or malformed."; \
@@ -299,7 +307,7 @@ aws-data-check: aws-data-check-botocore ## CI gate: the vendored AWS data must m
 	}
 
 aws-data-check-botocore: ## The AWS data derived from botocore must match a fresh generation
-	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
+	@$(PYTHON) tools/aws/regen_partitions.py --check --carry-region-flags || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/partitions.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \

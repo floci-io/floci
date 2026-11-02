@@ -356,7 +356,8 @@ regions, opt-in flags, global endpoints) is generated from botocore's published 
 a newer botocore with `make botocore-bump VERSION=<release>`: it sets the pin in
 `tools/aws/requirements.txt`, moves `local/aws/botocore` to that release's tag, then regenerates
 and checks only the botocore-derived data, so the bump and its regenerated files land in one pull
-request with nothing from the other `local/aws` sources. Dependabot does not track
+request with nothing from the other `local/aws` sources: the region flags `partitions.json` takes
+from `local/aws/aws-cdk` stay as they are until a `make aws-data-sync`. Dependabot does not track
 botocore for that reason: its bump alone fails `make aws-data-check`. `make aws-data-sync` also
 regenerates the IAM managed-policy catalog (`src/main/resources/iam/managed-polic*`) from the
 `local/aws/iam-dataset` checkout; without that checkout, as in CI, `make aws-data-check` only
