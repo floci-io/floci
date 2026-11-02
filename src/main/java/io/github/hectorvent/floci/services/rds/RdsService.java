@@ -11402,6 +11402,19 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
+    public synchronized DbCluster setBackupRetentionPeriod(String region, String clusterId, int backupRetentionPeriod) {
+        if (backupRetentionPeriod < 1 || backupRetentionPeriod > 35) {
+            throw new AwsException("InvalidParameterValue",
+                    "BackupRetentionPeriod must be between 1 and 35.", 400);
+        }
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        cluster.setBackupRetentionPeriod(backupRetentionPeriod);
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        LOG.infov("Backup retention period set to {0} for DB cluster {1}", backupRetentionPeriod,
+                cluster.getDbClusterIdentifier());
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
     private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql");
 
     /**
