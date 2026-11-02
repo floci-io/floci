@@ -144,6 +144,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             return keyOfAlias(region, identifier);
         }
         if (AwsArnUtils.looksLikeArn(identifier)) {
+            Optional<String> resource = AwsArnUtils.resourceIfArnFor(identifier, SERVICE);
+            if (resource.isPresent() && resource.get().startsWith("alias/")) {
+                return keyOfAlias(region, "alias/" + resource.get().substring("alias/".length()));
+            }
             for (PaymentCryptographyKey key : keyStore.scan(k -> true)) {
                 if (identifier.equals(key.getArn()) && region.equals(key.getRegion())) {
                     return key;

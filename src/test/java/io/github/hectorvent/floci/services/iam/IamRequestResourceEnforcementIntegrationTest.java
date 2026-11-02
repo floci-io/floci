@@ -30,6 +30,7 @@ import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -524,6 +525,27 @@ class IamRequestResourceEnforcementIntegrationTest {
         user.policy(allowOn("payment-cryptography:GetKey", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
                 + "\"payment-cryptography:GetKey\",\"Resource\":\"" + key + "\"}");
         refusedJson(getPaymentKey(user, alias), "payment-cryptography:GetKey");
+    }
+
+    /**
+     * A tagging request names its key by the ARN of one, as the reference takes it there, so a request naming it by
+     * its id names no key for the check and is refused: a deny on the key is not skipped by naming it another way.
+     */
+    @Test
+    void aTaggingRequestNamesItsKeyByItsArn() {
+        String key = createPaymentKey();
+        String id = key.substring(key.lastIndexOf('/') + 1);
+
+        User user = user("res-key-tag");
+        user.policy(allowOn("payment-cryptography:TagResource", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"payment-cryptography:TagResource\",\"Resource\":\"" + key + "\"}");
+        // The key's own ARN is checked on the key, and the deny holds.
+        refusedJson(tagPaymentKey(user, key), "payment-cryptography:TagResource");
+        // Its id names no ARN for the check, so the request is refused rather than tagging the denied key.
+        tagPaymentKey(user, id).statusCode(400).body(containsString("ValidationException"));
+        admin("payment-cryptography").header("X-Amz-Target", "PaymentCryptographyControlPlane.ListTagsForResource")
+                .contentType("application/x-amz-json-1.0").body("{\"ResourceArn\":\"" + key + "\"}")
+                .post("/").then().statusCode(200).body("Tags", hasSize(0));
     }
 
     /** A repository is checked on the ARN its name gives, whether or not it exists. */
@@ -1558,6 +1580,13 @@ class IamRequestResourceEnforcementIntegrationTest {
         return admin("payment-cryptography").header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateAlias")
                 .contentType("application/x-amz-json-1.0")
                 .body("{\"AliasName\":\"" + alias + "\",\"KeyArn\":\"" + key + "\"}").post("/").then();
+    }
+
+    /** A tagging request naming its key the way the request gives it. */
+    private static ValidatableResponse tagPaymentKey(User user, String resource) {
+        return user.json("payment-cryptography", "PaymentCryptographyControlPlane.TagResource", "1.0")
+                .body("{\"ResourceArn\":\"" + resource + "\",\"Tags\":[{\"Key\":\"owner\",\"Value\":\"team\"}]}")
+                .post("/").then();
     }
 
     /** A read of the key a request names by its id, its alias or its ARN. */

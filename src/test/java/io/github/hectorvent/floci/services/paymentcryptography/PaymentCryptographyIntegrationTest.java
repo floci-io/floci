@@ -6,6 +6,8 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
@@ -129,7 +131,8 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void aKeyThatDoesNotExistIsNotFound() {
-        call("GetKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:000000000000:key/NOPE\"}")
+        call("GetKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:000000000000:key/"
+                + "0123456789abcdef0123456789abcdef\"}")
                 .then().statusCode(400)
                     .body("__type", containsString("ResourceNotFoundException"));
     }
@@ -280,6 +283,52 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(200)
                     .body("Tags", hasSize(1));
         call("ListTagsForResource", "{\"ResourceArn\":\"" + named + "\"}")
+                .then().statusCode(200)
+                    .body("Tags", hasSize(0));
+    }
+
+    /**
+     * The key operations name their key by the ARN of a key, the ARN of an alias or the name of an alias, as the
+     * reference takes it there, so a bare id names no key and is refused.
+     */
+    @Test
+    void aKeyIsNamedByItsArnOrByAnAliasAndNotByABareId() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        String id = arn.substring(arn.lastIndexOf('/') + 1);
+        call("CreateAlias", "{\"AliasName\":\"alias/team/named\",\"KeyArn\":\"" + arn + "\"}")
+                .then().statusCode(200);
+        String aliasArn = "arn:aws:payment-cryptography:us-east-1:000000000000:alias/team/named";
+
+        for (String named : List.of(arn, "alias/team/named", aliasArn)) {
+            call("GetKey", "{\"KeyIdentifier\":\"" + named + "\"}")
+                    .then().statusCode(200)
+                        .body("Key.KeyArn", equalTo(arn));
+        }
+        call("GetKey", "{\"KeyIdentifier\":\"" + id + "\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    /**
+     * The tagging operations name their key by the ARN of one, as the reference takes it there, so a request naming
+     * it by its id or by an alias names no key for the permission check and is refused.
+     */
+    @Test
+    void aTaggingRequestNamingItsKeyByAnIdOrAnAliasIsRefused() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        String id = arn.substring(arn.lastIndexOf('/') + 1);
+        call("CreateAlias", "{\"AliasName\":\"alias/team/tagged\",\"KeyArn\":\"" + arn + "\"}")
+                .then().statusCode(200);
+
+        for (String named : List.of(id, "alias/team/tagged")) {
+            call("TagResource", "{\"ResourceArn\":\"" + named + "\","
+                    + "\"Tags\":[{\"Key\":\"owner\",\"Value\":\"team\"}]}")
+                    .then().statusCode(400)
+                        .body("__type", containsString("ValidationException"));
+        }
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\"}")
                 .then().statusCode(200)
                     .body("Tags", hasSize(0));
     }

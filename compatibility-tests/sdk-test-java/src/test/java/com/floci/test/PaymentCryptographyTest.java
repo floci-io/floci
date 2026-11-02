@@ -252,7 +252,8 @@ class PaymentCryptographyTest {
         Key key = createAesKey();
         PaymentCryptographyClient elsewhere = TestFixtures.paymentCryptographyClient(anotherRegion());
         try {
-            assertThatThrownBy(() -> elsewhere.getKey(k -> k.keyIdentifier(keyIdOf(key.keyArn()))))
+            // The key is named by its ARN, as the model takes it: a bare id names no key at all.
+            assertThatThrownBy(() -> elsewhere.getKey(k -> k.keyIdentifier(key.keyArn())))
                     .isInstanceOf(AwsServiceException.class)
                     .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
                             .errorCode()).isEqualTo("ResourceNotFoundException"));

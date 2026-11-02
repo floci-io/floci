@@ -22,6 +22,7 @@ import regen_ecr_shapes
 import regen_ecs_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
+import regen_payment_cryptography_shapes
 import regen_resource_groups_shapes
 import regen_sesv2_shapes
 import regen_sts_shapes
@@ -353,7 +354,8 @@ def vendored(script) -> tuple[str, ...]:
 
 
 @pytest.mark.parametrize("script", [
-    regen_ecr_shapes, regen_iam_shapes, regen_resource_groups_shapes, regen_sts_shapes,
+    regen_ecr_shapes, regen_iam_shapes, regen_payment_cryptography_shapes,
+    regen_resource_groups_shapes, regen_sts_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
@@ -372,3 +374,28 @@ def test_ecr_shapes_name_the_ecr_model_and_its_registry_setting_actions():
     assert regen_ecr_shapes.MODEL == Path("ecr/2015-09-21")
     assert regen_ecr_shapes.OUTPUT.name == "ecr-request-shapes.json"
     assert "PutReplicationConfiguration" in regen_ecr_shapes.OPERATIONS
+
+
+def test_payment_cryptography_shapes_name_its_model_and_its_control_plane_actions():
+    assert regen_payment_cryptography_shapes.MODEL == Path("payment-cryptography/2021-09-14")
+    assert regen_payment_cryptography_shapes.OUTPUT.name == "payment-cryptography-request-shapes.json"
+    assert "TagResource" in regen_payment_cryptography_shapes.OPERATIONS
+    assert "UpdateAlias" in regen_payment_cryptography_shapes.OPERATIONS
+
+
+def test_payment_cryptography_shapes_widen_the_partition_the_model_writes():
+    doc = json.loads(regen_payment_cryptography_shapes.OUTPUT.read_text(encoding="utf-8"))
+
+    # The model writes the commercial partition; the service writes every partition it serves.
+    assert regen_payment_cryptography_shapes.COMMERCIAL not in doc["shapes"]["KeyArn"]["pattern"]
+    assert regen_payment_cryptography_shapes.EVERY_PARTITION in doc["shapes"]["KeyArn"]["pattern"]
+    assert regen_payment_cryptography_shapes.EVERY_PARTITION in doc["shapes"]["ResourceArn"]["pattern"]
+
+
+def test_payment_cryptography_shapes_take_the_key_an_arn_only_member_names():
+    doc = json.loads(regen_payment_cryptography_shapes.OUTPUT.read_text(encoding="utf-8"))
+
+    # KeyArn and ResourceArn take the ARN of a key alone; KeyIdentifier also takes an alias.
+    assert doc["shapes"]["KeyArn"]["pattern"].endswith("key/[0-9a-zA-Z]{16,64}")
+    assert "alias/" not in doc["shapes"]["KeyArn"]["pattern"]
+    assert "alias/" in doc["shapes"]["KeyArnOrKeyAliasType"]["pattern"]

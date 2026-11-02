@@ -43,6 +43,10 @@
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled` and `Tags`, and a key
   created disabled or with tags comes back that way. The `KeyUsage` and the
   `KeyModesOfUse` of the key are required, as the reference requires them.
+- **Which key a request may name:** `KeyIdentifier` takes the ARN of a key, the ARN of
+  an alias or the name of an alias, while `KeyArn` and `ResourceArn` take the ARN of
+  a key alone, as the reference states them. A request naming a key another way is
+  refused, and the permission check reads the same member the request does.
 - **Listing by state:** `ListKeys` takes a `KeyState` and answers with the keys in
   that state alone, and with every key when it names none.
 - **An alias may name no key:** `UpdateAlias` names the key of an alias, and an update

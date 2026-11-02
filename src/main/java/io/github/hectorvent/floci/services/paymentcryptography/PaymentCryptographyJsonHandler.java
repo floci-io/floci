@@ -35,7 +35,16 @@ public class PaymentCryptographyJsonHandler {
         this.service = service;
     }
 
+    /** The actions whose requests are checked against the vendored model constraints first. */
+    private static final Set<String> MODEL_CHECKED = Set.of(
+            "CreateKey", "GetKey", "ListKeys", "DeleteKey",
+            "CreateAlias", "GetAlias", "ListAliases", "UpdateAlias", "DeleteAlias",
+            "TagResource", "UntagResource", "ListTagsForResource");
+
     public Response handle(String action, JsonNode request, String region) {
+        if (MODEL_CHECKED.contains(action)) {
+            PaymentCryptographyRequestShapes.check(action, request);
+        }
         return switch (action) {
             case "CreateKey" -> Response.ok(createKey(request, region)).build();
             case "GetKey" -> Response.ok(getKey(request, region)).build();
@@ -93,17 +102,14 @@ public class PaymentCryptographyJsonHandler {
     /** The tagging operations name their key in {@code ResourceArn}. */
     private static final String RESOURCE_ARN = "ResourceArn";
 
-    /** The states a key is in, as the reference names them. */
-    private static final Set<String> KEY_STATES =
-            Set.of("CREATE_IN_PROGRESS", "CREATE_COMPLETE", "DELETE_PENDING", "DELETE_COMPLETE");
-
     private Map<String, Object> getKey(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region, KEY_IDENTIFIER);
         return Map.of("Key", keyObject(key));
     }
 
     private Map<String, Object> listKeys(JsonNode request, String region) {
-        PaginatedResult<PaymentCryptographyKey> page = service.listKeys(region, keyState(request),
+        String state = request.hasNonNull("KeyState") ? request.get("KeyState").asText() : null;
+        PaginatedResult<PaymentCryptographyKey> page = service.listKeys(region, state,
                 Pagination.parseMaxResults(request, "MaxResults", PAGINATION_ERROR),
                 Pagination.parseNextToken(request, "NextToken", PAGINATION_ERROR));
         List<Map<String, Object>> keys = new ArrayList<>();
@@ -119,49 +125,15 @@ public class PaymentCryptographyJsonHandler {
     }
 
     /**
-     * The state the request names the keys by, or none when it names no state.
-     *
-     * <p>The service knows four states, and a request naming another one is
-     * refused rather than answered with every key.
-     */
-    private static String keyState(JsonNode request) {
-        if (!request.hasNonNull("KeyState")) {
-            return null;
-        }
-        String state = request.get("KeyState").asText();
-        if (!KEY_STATES.contains(state)) {
-            throw new AwsException("ValidationException",
-                    "KeyState '" + state + "' is not a state of a key", 400);
-        }
-        return state;
-    }
-
-    /**
      * Deletes a key and answers with the key, as the reference does.
      *
-     * <p>The waiting period the reference offers is read and checked, and the
-     * key is deleted at once all the same: the service deletes a key the
-     * moment it is asked to.
+     * <p>The waiting period the reference offers is read, and the key is
+     * deleted at once all the same: the service deletes a key the moment it
+     * is asked to.
      */
     private Map<String, Object> deleteKey(JsonNode request, String region) {
-        deleteInDays(request);
         PaymentCryptographyKey key = service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
         return Map.of("Key", keyObject(key));
-    }
-
-    /**
-     * The waiting period the request names, which the reference reads between
-     * three and a hundred and eighty days.
-     */
-    private static void deleteInDays(JsonNode request) {
-        if (!request.hasNonNull("DeleteKeyInDays")) {
-            return;
-        }
-        int days = request.get("DeleteKeyInDays").asInt();
-        if (days < 3 || days > 180) {
-            throw new AwsException("ValidationException",
-                    "DeleteKeyInDays must be between 3 and 180", 400);
-        }
     }
 
     // ---- aliases ------------------------------------------------------------
@@ -316,16 +288,7 @@ public class PaymentCryptographyJsonHandler {
     }
 
     private static String aliasName(JsonNode request) {
-        String aliasName = request.path("AliasName").asText();
-        if (aliasName.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "AliasName is required and must match alias/[A-Za-z0-9/_-]+", 400);
-        }
-        if (!aliasName.matches("alias/[A-Za-z0-9/_-]+")) {
-            throw new AwsException("ValidationException",
-                    "AliasName is required and must match alias/[A-Za-z0-9/_-]+", 400);
-        }
-        return aliasName;
+        return request.path("AliasName").asText();
     }
 
     private static Map<String, Object> keyObject(PaymentCryptographyKey key) {
