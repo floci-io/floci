@@ -1477,6 +1477,29 @@ class CodeArtifactServiceTest {
                 "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", null);
 
         assertEquals(described.getRevision(), asset.packageVersionRevision());
+        InOrder order = inOrder(verdaccioClient);
+        order.verify(verdaccioClient).beginUse(repoId);
+        order.verify(verdaccioClient).packageVersionExists(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(verdaccioClient).endUse(repoId);
+        order.verify(verdaccioClient).beginUse(repoId);
+        order.verify(verdaccioClient).fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "my-pkg-1.0.0.tgz");
+        order.verify(verdaccioClient).endUse(repoId);
+    }
+
+    @Test
+    void describePackageBracketsVerdaccioExistenceCheckWithUse() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.packageExists(repoId, "dom", "repo", null, "my-pkg")).thenReturn(true);
+
+        service.describePackage(REGION, "dom", null, "repo", "npm", null, "my-pkg");
+
+        InOrder order = inOrder(verdaccioClient);
+        order.verify(verdaccioClient).beginUse(repoId);
+        order.verify(verdaccioClient).packageExists(repoId, "dom", "repo", null, "my-pkg");
+        order.verify(verdaccioClient).endUse(repoId);
     }
 
     @Test
@@ -3964,7 +3987,8 @@ class CodeArtifactServiceTest {
     @Test
     void getPackageVersionAssetReturns404WhenTheSidecarHasNoSuchAssetForAContainerBackedFormat() {
         service.createDomain(REGION, "dom", null, Map.of());
-        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("pypi");
         when(pypiserverClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
                 eq("my-pkg"), eq("1.0.0"), eq("missing.whl"))).thenReturn(Optional.empty());
 
@@ -3973,6 +3997,11 @@ class CodeArtifactServiceTest {
         assertEquals("ResourceNotFoundException", e.getErrorCode());
         assertEquals("missing.whl", e.getExtendedData().get("resourceId"));
         assertEquals("asset", e.getExtendedData().get("resourceType"));
+        InOrder order = inOrder(pypiserverClient);
+        order.verify(pypiserverClient).beginUse(repoId);
+        order.verify(pypiserverClient).fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "missing.whl");
+        order.verify(pypiserverClient).endUse(repoId);
     }
 
     @Test
@@ -4361,7 +4390,33 @@ class CodeArtifactServiceTest {
         InOrder order = inOrder(pypiserverClient);
         order.verify(pypiserverClient).beginUse(repoId);
         order.verify(pypiserverClient).listPackageVersions(repoId, "dom", "repo", null, "my-pkg");
+        order.verify(pypiserverClient).preferredDisplayVersion(repoId, "dom", "repo", null, "my-pkg");
         order.verify(pypiserverClient).endUse(repoId);
+    }
+
+    @Test
+    void listPackageVersionAssetsKeepsUseThroughFetchingThePage() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.packageVersionExists(repoId, "dom", "repo", null, "my-pkg", "1.0.0"))
+                .thenReturn(true);
+        when(verdaccioClient.listPackageVersionAssetNames(repoId, "dom", "repo", null, "my-pkg", "1.0.0"))
+                .thenReturn(List.of("my-pkg-1.0.0.tgz"));
+        when(verdaccioClient.fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "my-pkg-1.0.0.tgz")).thenReturn(Optional.of(new byte[] {1, 2, 3}));
+
+        CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "npm", null, "my-pkg", "1.0.0", null, null);
+
+        assertEquals(1, result.assets().size());
+        InOrder order = inOrder(verdaccioClient);
+        order.verify(verdaccioClient).beginUse(repoId);
+        order.verify(verdaccioClient).packageVersionExists(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(verdaccioClient).listPackageVersionAssetNames(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(verdaccioClient).fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "my-pkg-1.0.0.tgz");
+        order.verify(verdaccioClient).endUse(repoId);
     }
 
     @Test

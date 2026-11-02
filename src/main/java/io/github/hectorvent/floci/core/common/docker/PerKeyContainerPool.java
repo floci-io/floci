@@ -127,9 +127,10 @@ public class PerKeyContainerPool {
         }
         Object lock = startLocks.computeIfAbsent(key, k -> new Object());
         synchronized (lock) {
-            StartedContainer container = containers.remove(key);
+            StartedContainer container = containers.get(key);
             if (container != null) {
                 lifecycleManager.stopAndRemove(container.containerId(), null);
+                containers.remove(key, container);
             }
         }
     }

@@ -696,9 +696,10 @@ public class CodeArtifactService implements Resettable {
      * sidecar cleanup, so a delete can never run its cleanup in the gap between resolving
      * {@code repoId} and registering use of it. Used by every caller of {@link
      * #ensureFormatContainerId} whose sidecar call is bracketed by {@code beginUse}/{@code
-     * endUse} at all: {@link #listPackageVersions} and {@link #listPackages}.
+     * endUse}. Exposed so the npm data plane can register use under this service's lock
+     * before its asynchronous fetch starts.
      */
-    private synchronized String resolveContainerIdAndBeginUse(String format, String region, String domain,
+    public synchronized String resolveContainerIdAndBeginUse(String format, String region, String domain,
             String domainOwner, String repository, RepositorySidecarManager manager) {
         String id = ensureFormatContainerId(format, region, domain, domainOwner, repository);
         manager.beginUse(id);
@@ -1078,36 +1079,40 @@ public class CodeArtifactService implements Resettable {
         PaginatedResult<AssetSummary> page;
         String revision;
         if (CONTAINER_BACKED_FORMATS.contains(format)) {
-            String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
             RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
                     .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
                             + "' was not found.", version, "package-version"));
-            if (!manager.packageVersionExists(repoId, domain, repository, namespace, packageName, version)) {
-                throw notFound("Package version '" + version + "' of package '" + packageName
-                        + "' was not found.", version, "package-version");
-            }
-            List<String> assetNames;
+            String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
             try {
-                assetNames = manager.listPackageVersionAssetNames(repoId, domain, repository, namespace,
-                        packageName, version);
-            } catch (UnsupportedOperationException e) {
-                throw new AwsException("InternalServerException", "Listing a " + format + " package version's "
-                        + "assets is not yet supported by this emulator.", 500);
+                if (!manager.packageVersionExists(repoId, domain, repository, namespace, packageName, version)) {
+                    throw notFound("Package version '" + version + "' of package '" + packageName
+                            + "' was not found.", version, "package-version");
+                }
+                List<String> assetNames;
+                try {
+                    assetNames = manager.listPackageVersionAssetNames(repoId, domain, repository, namespace,
+                            packageName, version);
+                } catch (UnsupportedOperationException e) {
+                    throw new AwsException("InternalServerException", "Listing a " + format + " package version's "
+                            + "assets is not yet supported by this emulator.", 500);
+                }
+                PaginatedResult<String> namePage = Pagination.paginate(assetNames, Function.identity(), maxResults,
+                        nextToken, 100, 1000, "ValidationException");
+                List<AssetSummary> pageAssets = new ArrayList<>();
+                for (String assetName : namePage.items()) {
+                    byte[] content = manager.fetchPackageVersionAsset(repoId, domain, repository, namespace,
+                                    packageName, version, assetName)
+                            .orElseThrow(() -> new AwsException("InternalServerException", "Could not list version '"
+                                    + version + "' of package '" + packageName + "': its asset '" + assetName
+                                    + "' disappeared between listing and fetching it.", 500));
+                    pageAssets.add(new AssetSummary(assetName, content.length, computeHashes(content)));
+                }
+                page = new PaginatedResult<>(pageAssets, namePage.nextToken());
+                revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
+                        packageName, version, repoId).revision();
+            } finally {
+                manager.endUse(repoId);
             }
-            PaginatedResult<String> namePage = Pagination.paginate(assetNames, Function.identity(), maxResults,
-                    nextToken, 100, 1000, "ValidationException");
-            List<AssetSummary> pageAssets = new ArrayList<>();
-            for (String assetName : namePage.items()) {
-                byte[] content = manager.fetchPackageVersionAsset(repoId, domain, repository, namespace,
-                                packageName, version, assetName)
-                        .orElseThrow(() -> new AwsException("InternalServerException", "Could not list version '"
-                                + version + "' of package '" + packageName + "': its asset '" + assetName
-                                + "' disappeared between listing and fetching it.", 500));
-                pageAssets.add(new AssetSummary(assetName, content.length, computeHashes(content)));
-            }
-            page = new PaginatedResult<>(pageAssets, namePage.nextToken());
-            revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
-                    packageName, version, repoId).revision();
         } else {
             String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
             CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key)
@@ -1199,23 +1204,25 @@ public class CodeArtifactService implements Resettable {
             // this call gets a chance to register itself as using repoId.
             String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
             List<RepositorySidecarManager.PackageVersionTimestamp> raw;
+            Map<String, PackageVersionStatusOverride> overridesByVersion;
             try {
-                raw = manager.listPackageVersions(repoId, domain, repository, namespace, packageName);
-            } catch (UnsupportedOperationException e) {
-                throw new AwsException("InternalServerException", "Listing " + format + " package versions is not "
-                        + "yet supported by this emulator.", 500);
+                try {
+                    raw = manager.listPackageVersions(repoId, domain, repository, namespace, packageName);
+                } catch (UnsupportedOperationException e) {
+                    throw new AwsException("InternalServerException", "Listing " + format + " package versions is not "
+                            + "yet supported by this emulator.", 500);
+                }
+                // Disposed deletes a version's real sidecar content, so the sidecar's own listing
+                // stops naming it. Overrides are the remaining record that it existed.
+                overridesByVersion = containerBackedOverridesForPackage(owner, region, domain, repository, format,
+                        namespace, packageName);
+                if (raw.isEmpty() && overridesByVersion.isEmpty() && !hasOriginConfig) {
+                    throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
+                }
+                preferredDisplayVersion = manager.preferredDisplayVersion(repoId, domain, repository, namespace,
+                        packageName).orElse(null);
             } finally {
                 manager.endUse(repoId);
-            }
-            // Disposed deletes a version's real sidecar content, so the sidecar's own listing
-            // (raw, above) stops naming it at all; overridesByVersion is this emulator's only
-            // remaining record that the version ever existed, and AWS's own documented behavior
-            // is that ListPackageVersions still reports a disposed version (status=Disposed) with
-            // status=Disposed, not silently drop it the moment its assets are gone.
-            Map<String, PackageVersionStatusOverride> overridesByVersion = containerBackedOverridesForPackage(owner,
-                    region, domain, repository, format, namespace, packageName);
-            if (raw.isEmpty() && overridesByVersion.isEmpty() && !hasOriginConfig) {
-                throw notFound("Package '" + packageName + "' was not found.", packageName, "package");
             }
             Set<String> coveredVersions = raw.stream().map(RepositorySidecarManager.PackageVersionTimestamp::version)
                     .collect(Collectors.toSet());
@@ -1242,8 +1249,6 @@ public class CodeArtifactService implements Resettable {
                                 origin.externalConnectionName());
                     });
             entries = Stream.concat(fromSidecar, disposedOnly).toList();
-            preferredDisplayVersion = manager.preferredDisplayVersion(repoId, domain, repository, namespace,
-                    packageName).orElse(null);
         } else {
             List<CodeArtifactPackageVersion> versions = genericPackageVersions(region, domain, owner, repository,
                     format, namespace, packageName);
@@ -2489,31 +2494,35 @@ public class CodeArtifactService implements Resettable {
     private CodeArtifactPackageVersion describeContainerBackedPackageVersion(String region, String domain,
             String owner, String repository, String format, String namespace, String packageName, String version) {
         validatePackageCoordinates(format, namespace, packageName, "describing a version of");
-        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
         RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
                 .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
                         + "' was not found.", version, "package-version"));
-        if (!containerBackedVersionExists(manager, owner, region, domain, repository, format, namespace, packageName,
-                version, repoId)) {
-            throw notFound("Package version '" + version + "' of package '" + packageName
-                    + "' was not found.", version, "package-version");
+        String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
+        try {
+            if (!containerBackedVersionExists(manager, owner, region, domain, repository, format, namespace,
+                    packageName, version, repoId)) {
+                throw notFound("Package version '" + version + "' of package '" + packageName
+                        + "' was not found.", version, "package-version");
+            }
+            PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain,
+                    repository, format, namespace, packageName, version, repoId);
+            CodeArtifactPackageVersion pv = new CodeArtifactPackageVersion();
+            pv.setDomainName(domain);
+            pv.setDomainOwner(owner);
+            pv.setRegion(region);
+            pv.setRepositoryName(repository);
+            pv.setFormat(format);
+            pv.setNamespace(namespace);
+            pv.setPackageName(packageName);
+            pv.setVersion(version);
+            pv.setStatus(state.status());
+            pv.setRevision(state.revision());
+            pv.setOriginType(versionOriginType(region, domain, owner, repository, format, namespace, packageName,
+                    version));
+            return pv;
+        } finally {
+            manager.endUse(repoId);
         }
-        PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain, repository,
-                format, namespace, packageName, version, repoId);
-        CodeArtifactPackageVersion pv = new CodeArtifactPackageVersion();
-        pv.setDomainName(domain);
-        pv.setDomainOwner(owner);
-        pv.setRegion(region);
-        pv.setRepositoryName(repository);
-        pv.setFormat(format);
-        pv.setNamespace(namespace);
-        pv.setPackageName(packageName);
-        pv.setVersion(version);
-        pv.setStatus(state.status());
-        pv.setRevision(state.revision());
-        pv.setOriginType(versionOriginType(region, domain, owner, repository, format, namespace, packageName,
-                version));
-        return pv;
     }
 
     /**
@@ -3350,10 +3359,16 @@ public class CodeArtifactService implements Resettable {
 
     private boolean containerBackedPackageExists(String region, String domain, String owner, String repository,
             String format, String namespace, String packageName) {
-        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
-        return sidecarRegistry.forFormat(format)
-                .map(manager -> manager.packageExists(repoId, domain, repository, namespace, packageName))
-                .orElse(false);
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format).orElse(null);
+        if (manager == null) {
+            return false;
+        }
+        String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
+        try {
+            return manager.packageExists(repoId, domain, repository, namespace, packageName);
+        } finally {
+            manager.endUse(repoId);
+        }
     }
 
     private boolean genericPackageExists(String region, String domain, String owner, String repository,
@@ -3615,33 +3630,37 @@ public class CodeArtifactService implements Resettable {
         if ("maven".equals(format) && (namespace == null || namespace.isBlank())) {
             throw validation("namespace is required when requesting an asset from a maven package version.");
         }
-        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
         RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
                 .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
                         + "' was not found.", version, "package-version"));
-        // No separate existence check needed here the way describeContainerBackedPackageVersion
-        // needs one: fetchPackageVersionAsset's own empty result already 404s a version that never
-        // existed at all (see below), and requireAssetDownloadable below already blocks a version
-        // this emulator knows is Archived/Disposed purely from the override map, with no sidecar
-        // round trip required to tell the two cases apart.
-        PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain, repository,
-                format, namespace, packageName, version, repoId);
-        String revision = state.revision();
-        if (packageVersionRevision != null && !packageVersionRevision.equals(revision)) {
-            throw notFound("Package version '" + version + "' was not found at revision '"
-                    + packageVersionRevision + "'.", version, "package-version");
+        String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
+        try {
+            // No separate existence check needed here the way describeContainerBackedPackageVersion
+            // needs one: fetchPackageVersionAsset's own empty result already 404s a version that never
+            // existed at all (see below), and requireAssetDownloadable below already blocks a version
+            // this emulator knows is Archived/Disposed purely from the override map, with no sidecar
+            // round trip required to tell the two cases apart.
+            PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain, repository,
+                    format, namespace, packageName, version, repoId);
+            String revision = state.revision();
+            if (packageVersionRevision != null && !packageVersionRevision.equals(revision)) {
+                throw notFound("Package version '" + version + "' was not found at revision '"
+                        + packageVersionRevision + "'.", version, "package-version");
+            }
+            requireAssetDownloadable(state.status(), version);
+            byte[] content = manager.fetchPackageVersionAsset(repoId, domain, repository, namespace, packageName,
+                            version, assetName)
+                    .orElseThrow(() -> notFound("Asset '" + assetName + "' was not found on package version '"
+                            + version + "'.", assetName, "asset"));
+            PackageAsset asset = new PackageAsset();
+            asset.setName(assetName);
+            asset.setSize(content.length);
+            asset.setContent(content);
+            asset.setHashes(computeHashes(content));
+            return new PackageVersionAssetResult(asset, revision);
+        } finally {
+            manager.endUse(repoId);
         }
-        requireAssetDownloadable(state.status(), version);
-        byte[] content = manager.fetchPackageVersionAsset(repoId, domain, repository, namespace, packageName,
-                        version, assetName)
-                .orElseThrow(() -> notFound("Asset '" + assetName + "' was not found on package version '"
-                        + version + "'.", assetName, "asset"));
-        PackageAsset asset = new PackageAsset();
-        asset.setName(assetName);
-        asset.setSize(content.length);
-        asset.setContent(content);
-        asset.setHashes(computeHashes(content));
-        return new PackageVersionAssetResult(asset, revision);
     }
 
     /**

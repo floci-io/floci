@@ -15,6 +15,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Starts and stops one Verdaccio container per CodeArtifact npm repository, unlike Reposilite's one
@@ -58,6 +59,14 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
+    private final ConcurrentHashMap<String, UseState> uses = new ConcurrentHashMap<>();
+
+    private static final class UseState {
+        private int active;
+        private boolean releasing;
+        private boolean stopping;
+        private boolean stopped;
+    }
 
     @Inject
     public VerdaccioSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
@@ -79,7 +88,58 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
 
     /** Stops and removes the container for one npm repository, if one was ever started. */
     public void release(String npmRepositoryId) {
-        pool.stopContainer(npmRepositoryId);
+        UseState use = uses.computeIfAbsent(npmRepositoryId, key -> new UseState());
+        synchronized (use) {
+            use.releasing = true;
+        }
+        stopIfUnused(npmRepositoryId, use);
+    }
+
+    /** Registers a call that may use this repository's sidecar before it touches the container. */
+    public void beginUse(String npmRepositoryId) {
+        UseState use = uses.computeIfAbsent(npmRepositoryId, key -> new UseState());
+        synchronized (use) {
+            if (use.releasing) {
+                throw new IllegalStateException("Verdaccio sidecar is being released for repository "
+                        + npmRepositoryId);
+            }
+            use.active++;
+        }
+    }
+
+    /** Completes a prior {@link #beginUse}, stopping a released container after its last use. */
+    public void endUse(String npmRepositoryId) {
+        UseState use = uses.get(npmRepositoryId);
+        if (use == null) {
+            throw new IllegalStateException("No Verdaccio sidecar use for repository " + npmRepositoryId);
+        }
+        synchronized (use) {
+            if (use.active == 0) {
+                throw new IllegalStateException("No active Verdaccio sidecar use for repository "
+                        + npmRepositoryId);
+            }
+            use.active--;
+        }
+        stopIfUnused(npmRepositoryId, use);
+    }
+
+    private void stopIfUnused(String npmRepositoryId, UseState use) {
+        synchronized (use) {
+            if (!use.releasing || use.active != 0 || use.stopping || use.stopped) {
+                return;
+            }
+            use.stopping = true;
+        }
+        boolean stopped = false;
+        try {
+            pool.stopContainer(npmRepositoryId);
+            stopped = true;
+        } finally {
+            synchronized (use) {
+                use.stopped = stopped;
+                use.stopping = false;
+            }
+        }
     }
 
     /**
