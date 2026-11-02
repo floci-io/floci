@@ -147,6 +147,25 @@ def test_a_create_naming_others_marks_what_it_makes():
     assert r.with_made([parent, webhook], "svc:PutWebhook", formats) == [parent, dict(webhook, made=True)]
 
 
+def test_a_type_made_in_another_takes_that_ones_id_from_the_arn_member_named_after_it():
+    formats = {"instance": "arn:${Partition}:svc:::instance/${InstanceId}",
+               "set": "arn:${Partition}:svc:::set/${InstanceId}/${SetId}",
+               "pool": FORMATS["pool"]}
+    made = {"type": "set", "fill": {}, "made": True}
+    instance = {"types": ["instance", "set"], "arn": "InstanceArn"}
+    assert r.with_parent_ids([instance, made], formats, ["instance", "set"], members("InstanceArn", "Name")) == [
+        instance, {"type": "set", "fill": {"InstanceId": "InstanceArn"}, "arnOf": {"InstanceArn": "instance"},
+                   "made": True}]
+    # Not from a type the action does not act on, a member in a structure, or with two ARN members to pick from,
+    # and not over a variable a member fills already.
+    assert r.with_parent_ids([made], formats, ["set"], members("InstanceArn")) == [made]
+    assert r.with_parent_ids([made], formats, ["instance", "set"], {"InstanceArn": "Config.InstanceArn"}) == [made]
+    assert r.with_parent_ids([made], formats, ["instance", "set"],
+                             members("InstanceArn", "SourceInstanceArn")) == [made]
+    filled = {"type": "set", "fill": {"InstanceId": "InstanceId"}}
+    assert r.with_parent_ids([filled], formats, ["instance", "set"], members("InstanceArn", "InstanceId")) == [filled]
+
+
 def test_stems_drop_the_suffixes_names_carry():
     assert r.stem("TargetGroupArns") == "targetgroup"
     assert r.stem("DBInstanceIdentifier") == "dbinstance"
@@ -228,6 +247,17 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
                           ["registryId"]) == [{"type": "catalog", "fill": {}}]
     # Two account members, either of which it could be, give none.
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
+
+
+def test_a_format_whose_account_is_an_account_id_variable_takes_the_account_every_other_format_does():
+    documents = [reference("svc", {}, {"agent": "arn:${Partition}:svc:${Region}:${AccountId}:agent/${AgentId}",
+                                       "account": "arn:${Partition}:svc:::account/${AccountId}",
+                                       "thing": FORMATS["thing"]})]
+    # An account id in the resource, past the account, stays a variable a member fills.
+    assert r.arn_formats(documents, {"svc"}) == {"svc": {
+        "account": "arn:${Partition}:svc:::account/${AccountId}",
+        "agent": "arn:${Partition}:svc:${Region}:${Account}:agent/${AgentId}",
+        "thing": FORMATS["thing"]}}
 
 
 def test_a_file_that_is_not_json_is_reported_and_not_read(corrections, tmp_path, capsys):
@@ -437,9 +467,12 @@ def test_a_well_formed_document_validates():
     document = good_document()
     document["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace", "Id"])
     assert r.validate(document) == []
-    # A resource named through a member naming another of its service's own, which it runs on.
+    # A resource named through a member naming another of its service's own, which it runs on, or through each
+    # value of a list's field when another member is absent.
     document = good_document()
-    document["operations"]["svc:A"]["resources"] = [{"types": ["thing"], "through": "SessionId"}]
+    document["operations"]["svc:A"]["resources"] = [{"types": ["thing"], "through": "SessionId"},
+                                                    {"types": ["thing"], "through": "Parts[].PartId",
+                                                     "when": {"ThingName": [None]}}]
     assert r.validate(document) == []
 
 
@@ -454,10 +487,14 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(types=["pool"]), "not resource types"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b.c"), "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a[][]"), "no member"),
-    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "Ids[]"}),
-     "no member of one value"),
-    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "a.b"}),
-     "no member of one value"),
+    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "Ids[][]"}),
+     "no member"),
+    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "a.b.c"}),
+     "no member"),
+    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "SessionId",
+                                                                     "when": {"Ids[]": ["a"]}}), "no member's values"),
+    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "SessionId",
+                                                                     "unless": {"Id": ["a"]}}), "neither an ARN member"),
     (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["pool"], "through": "SessionId"}),
      "not resource types"),
     (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "SessionId",

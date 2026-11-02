@@ -50,7 +50,7 @@ final class RequestResourceMembers {
     /** The keys a resource found by members does not take: it is read no other way, in the caller's account. */
     private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "account", "fixed", "before");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
-    private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "endpoint");
+    private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
 
     /**
      * A top-level request member that holds a string, or a list of them when {@code list}, or, with a
@@ -103,6 +103,14 @@ final class RequestResourceMembers {
             return arn.substring(0, at);
         }
 
+        /**
+         * Whether AWS owns the type's resources, its format's account being {@code aws}
+         * ({@code arn:${Partition}:sso::aws:applicationProvider/...}), so an ARN of one names none of the caller's.
+         */
+        boolean awsOwned() {
+            return "aws".equals(format.split(":", 6)[4]); // partition-literal: the account AWS owns resources in
+        }
+
         /** The one variable of a format whose resource ends in it ({@code event-bus/${EventBusName}}), from an ARN of it. */
         String variable(String arn) {
             String resource = format.split(":", 6)[5];
@@ -134,8 +142,10 @@ final class RequestResourceMembers {
      * scalable dimension). A resource with an {@code endpoint} applies only to a request the service of that endpoint
      * prefix serves, where two APIs share the operation's name and nothing in a request tells them apart
      * (EventBridge's {@code events} and EventBridge V2's {@code eventsv2}); null for every request. A resource of one
-     * of {@code types} may be named {@code through} a member of one value naming a resource of its service's own the
-     * table gives no type, which runs on it (a Data API session, by its {@code SessionId}), and read no other way.
+     * of {@code types} may be named {@code through} a member naming, by each of its values, a resource of its
+     * service's own that runs on it, is in it or reaches it (a Data API session, by its {@code SessionId}; an EMR
+     * instance group, by its {@code InstanceGroups[].InstanceGroupId}), {@code when} the request gives the values it
+     * names, and read no other way.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
@@ -266,15 +276,15 @@ final class RequestResourceMembers {
         }
         if (resource.has("through")) {
             List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
-            Member through = member(operation, resource.path("through").asText(""));
-            if (types.isEmpty() || !formats.keySet().containsAll(types) || through.list() || resource.properties()
+            Member through = fillMember(operation, resource.path("through").asText(""));
+            if (types.isEmpty() || !formats.keySet().containsAll(types) || resource.properties()
                     .stream().map(Map.Entry::getKey).anyMatch(key -> !THROUGH_KEYS.contains(key))) {
                 throw new IllegalStateException(RESOURCE_NAME + " names a resource of " + operation + " through "
-                        + resource.path("through") + ", no member of one value naming types with a format, or beside "
+                        + resource.path("through") + ", no member naming types with a format, or beside "
                         + "members reading it otherwise");
             }
-            return new Resource(types, null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(),
-                    false, List.of(), endpoint, through);
+            return new Resource(types, null, Map.of(), values(operation, String.join(", ", types), resource.path("when")),
+                    Map.of(), Map.of(), Map.of(), null, null, Map.of(), false, List.of(), endpoint, through);
         }
         if (resource.has("arn")) {
             List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();

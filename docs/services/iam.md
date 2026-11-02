@@ -1649,7 +1649,8 @@ Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazo
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
-Timestream for InfluxDB and the Amazon Redshift Data API they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Timestream for InfluxDB, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
+Amazon Rekognition and IAM Identity Center they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1696,6 +1697,17 @@ ARN its `Export.ExportArn` gives, which is the new export's own. CloudTrail's `S
 `StopLogging` and `GetTrailStatus` are checked on the trail their bare `Name` names, by name or by
 ARN, its tag operations on the resource whose ARN their `ResourceId` gives, and its dashboard
 operations on the dashboard their `DashboardId` names, by name or by ARN.
+Amazon EMR's requests naming a cluster by its job flow id, in `JobFlowId` or `JobFlowIds`, are checked on
+`cluster/<id>`, as when they name it by `ClusterId`, and `AddTags` and `RemoveTags` on the cluster their
+`ResourceId` names, the one Floci tags, not on one their `ClusterId` gives. A `ModifyInstanceGroups`
+naming its instance groups with no `ClusterId`, or a null one, is checked on the cluster each group is
+in, the one EMR finds it in. A Rekognition stream processor is checked on `streamprocessor/<name>`, the ARN its `Name`
+gives. IAM Identity Center's `CreateAccountAssignment`, `DeleteAccountAssignment` and
+`ProvisionPermissionSet` are checked on the account their `TargetId` names, `account/<id>`, beside the
+instance and the permission set, and a `ProvisionPermissionSet` for `ALL_PROVISIONED_ACCOUNTS` on each
+account the permission set is provisioned to. AWS does not document which accounts such a request is
+authorized on, so checking each one it provisions is Floci's reading. A permission set, an application or a trusted token issuer
+a create makes has the id of the instance its `InstanceArn` names, `permissionSet/<instance id>/*`.
 Cost Explorer's `GetAnomalyMonitors` and `GetAnomalySubscriptions` are checked on each ARN their
 `MonitorArnList` or `SubscriptionArnList` gives, and Timestream for InfluxDB's `RebootDbCluster` on the
 cluster and on each member instance its `instanceIds` names. Global
@@ -1732,7 +1744,8 @@ an execution started through one is the state machine's. An ARN naming another a
 Region than the request's is checked as given and as each resource of that name a handler may act
 on instead, in the ARN's account or the caller's and in the ARN's Region or the request's (ECR's
 tag handlers keep the ARN's account in the request's Region), and the request is refused if any is
-denied. Every other request is checked on `*`, as is an operation whose action acts on no
+denied; one of a type AWS owns, whose ARN's account is `aws` (an IAM Identity Center application
+provider), is checked in that account alone. Every other request is checked on `*`, as is an operation whose action acts on no
 resource type or whose request names none, where AWS checks `*` too. `make
 iam-request-resources-check` re-derives the table from the pinned botocore, `make
 iam-request-resources-verify` checks it against AWS, and the namespaces it does not read yet are
