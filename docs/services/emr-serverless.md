@@ -133,7 +133,9 @@ AWS runtime for Apache Spark releases, `emr-spark-8.0.0` on), and runs
   which replace the application's whole `spark-defaults` classification. From `emr-spark-8.1.0` the
   two are merged by property instead, the run's winning. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases before 7.10.0
   too, where `s3://` would otherwise be EMRFS; the entry point and its files can be read from there.
-  The Glue Data Catalog client is pointed at Floci's Glue.
+  The Glue Data Catalog client is pointed at Floci's Glue, with the run's account as its
+  `hive.metastore.glue.catalogid` (from `emr-7.10.0` the client would otherwise ask STS for it), which a
+  `spark.hadoop.hive.metastore.glue.catalogid` in the `spark-defaults` replaces.
 * **Driver environment and archives**: a `spark.emr-serverless.driverEnv.<KEY>` property, from the
   `spark-defaults` above or a `--conf` in `sparkSubmitParameters`, which wins, is an environment variable
   of the container, replacing one of Floci's own of that name, such as the user guide's `JAVA_HOME` for

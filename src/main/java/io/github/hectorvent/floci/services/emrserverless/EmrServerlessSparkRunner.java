@@ -741,7 +741,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         return escaped.toString();
     }
 
-    // Floci's Hadoop settings: S3A on Floci's S3, and the Glue Data Catalog client on Floci's Glue.
+    // Floci's Hadoop settings: S3A on Floci's S3, and the Glue Data Catalog client on Floci's Glue, in the job's
+    // account. Given none, the client from emr-7.10.0 asks STS for it, through a client no setting points at Floci.
     private static List<SparkSetting> hadoopSettings(Job job, String flociEndpoint) {
         return List.of(
                 new SparkSetting("fs.s3a.endpoint", flociEndpoint),
@@ -751,6 +752,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 new SparkSetting("fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"),
                 new SparkSetting("fs.AbstractFileSystem.s3.impl", "org.apache.hadoop.fs.s3a.S3A"),
                 new SparkSetting("aws.glue.endpoint", flociEndpoint),
+                new SparkSetting("hive.metastore.glue.catalogid", job.accountId()),
                 new SparkSetting("aws.region", job.region()));
     }
 
