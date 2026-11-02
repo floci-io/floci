@@ -514,6 +514,10 @@ function blankLiterals(src) {
     const parens = [];
     const braces = [];
     const switchBodies = [];
+    const atCaseLabelDepth = () => caseLabelDepth !== null
+      && caseLabelDepth.braces === braces.length
+      && caseLabelDepth.parens === parens.length
+      && caseLabelDepth.brackets === bracketDepth;
     while (i < src.length) {
       const c = src[i];
       const next = src[i + 1];
@@ -653,10 +657,7 @@ function blankLiterals(src) {
         statementStart = false;
         labelCandidate = false;
       } else if (c === ':') {
-        const atCaseLevel = caseLabelDepth !== null
-          && caseLabelDepth.braces === braces.length
-          && caseLabelDepth.parens === parens.length
-          && caseLabelDepth.brackets === bracketDepth;
+        const atCaseLevel = atCaseLabelDepth();
         const caseSeparator = atCaseLevel && caseTernaryDepth === 0;
         statementColon = caseSeparator || labelCandidate;
         if (caseSeparator) caseLabelDepth = null;
@@ -713,10 +714,7 @@ function blankLiterals(src) {
           i++;
           canEndExpression = false;
           lastToken = c;
-          if (c === '?' && caseLabelDepth !== null
-            && caseLabelDepth.braces === braces.length
-            && caseLabelDepth.parens === parens.length
-            && caseLabelDepth.brackets === bracketDepth) caseTernaryDepth++;
+          if (c === '?' && atCaseLabelDepth()) caseTernaryDepth++;
           statementStart = c === ';';
           labelCandidate = false;
         }

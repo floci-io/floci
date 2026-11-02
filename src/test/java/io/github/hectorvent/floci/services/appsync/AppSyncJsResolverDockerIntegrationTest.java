@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync;
 
+import com.fasterxml.jackson.core.io.JsonStringEncoder;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -279,7 +280,7 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
-    private static final String COMMENT_CR_RESOLVER = """
+    static final String COMMENT_CR_RESOLVER = """
             export function request(ctx) {
               // comment\rwhile(false) {}
               return { payload: { value: "unreachable" } };
@@ -833,7 +834,7 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200);
     }
 
-    private static String escape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+    static String escape(String value) {
+        return new String(JsonStringEncoder.getInstance().quoteAsString(value));
     }
 }
