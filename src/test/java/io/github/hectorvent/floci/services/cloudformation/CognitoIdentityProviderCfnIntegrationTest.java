@@ -155,6 +155,23 @@ class CognitoIdentityProviderCfnIntegrationTest {
     }
 
     @Test
+    void theOriginalProviderUpdatesInPlaceAfterARolledBackTypeAndNameReplacement() throws Exception {
+        String pool = createPool();
+        createStack(template(pool, NAME, "OIDC", "original-client"));
+        ObjectNode saml = template(pool, "ExampleSAML", "SAML", "original-client");
+        ((ObjectNode) saml.path("Resources").path("Idp").path("Properties").path("ProviderDetails"))
+                .put("MetadataURL", "https://issuer.example.com/saml/metadata");
+        addFailingDependentResource(saml);
+        updateStack(saml, "UPDATE_ROLLBACK_COMPLETE");
+        assertProviderGone(pool, "ExampleSAML");
+
+        updateStack(template(pool, NAME, "OIDC", "updated-client"), "UPDATE_COMPLETE");
+
+        assertEquals(NAME, output("ProviderRef"));
+        assertClientId(pool, NAME, "updated-client");
+    }
+
+    @Test
     void aFailedDependentResourceRestoresThePriorInPlaceConfiguration() throws Exception {
         String pool = createPool();
         createStack(template(pool, NAME, "OIDC", "original-client"));

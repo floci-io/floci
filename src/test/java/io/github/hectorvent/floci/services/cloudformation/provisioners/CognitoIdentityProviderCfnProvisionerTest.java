@@ -37,7 +37,6 @@ class CognitoIdentityProviderCfnProvisionerTest {
     private static final String NEW_POOL = "us-east-1_replacement";
     private static final String NAME = "ExampleOIDC";
     private static final String POOL_ATTR = "__FlociIdentityProviderPoolId";
-    private static final String TYPE_ATTR = "__FlociIdentityProviderType";
 
     private final CognitoService cognito = mock(CognitoService.class);
     private final CognitoIdentityProviderCfnProvisioner provisioner = new CognitoIdentityProviderCfnProvisioner(cognito);
@@ -104,7 +103,6 @@ class CognitoIdentityProviderCfnProvisionerTest {
         resource.setAttributes(new HashMap<>());
         if (poolId != null) {
             resource.getAttributes().put(POOL_ATTR, poolId);
-            resource.getAttributes().put(TYPE_ATTR, "OIDC");
         }
         return resource;
     }
@@ -138,7 +136,6 @@ class CognitoIdentityProviderCfnProvisionerTest {
                 Map.of("email", "email"), List.of("example.com"));
         assertEquals(NAME, resource.getPhysicalId());
         assertEquals(POOL, resource.getAttributes().get(POOL_ATTR));
-        assertEquals("OIDC", resource.getAttributes().get(TYPE_ATTR));
         assertFalse(resource.getAttributes().containsKey("ProviderName"));
     }
 
@@ -226,7 +223,8 @@ class CognitoIdentityProviderCfnProvisionerTest {
     }
 
     @Test
-    void changingOnlyTheProviderTypeIsRefusedBeforeCallingCognito() {
+    void changingOnlyTheProviderTypeIsRefusedBeforeChangingAnything() {
+        when(cognito.describeIdentityProvider(POOL, NAME)).thenReturn(provider(POOL, NAME, "client"));
         StackResource resource = resource(NAME, POOL);
         HashMap<String, String> priorAttributes = new HashMap<>(resource.getAttributes());
 
@@ -237,7 +235,9 @@ class CognitoIdentityProviderCfnProvisionerTest {
         assertTrue(failure.getMessage().contains("custom-named resource requires replacing"));
         assertEquals(NAME, resource.getPhysicalId());
         assertEquals(priorAttributes, resource.getAttributes());
-        verifyNoInteractions(cognito);
+        verify(cognito, never()).createIdentityProvider(any(), any(), any(), any(), any(), any());
+        verify(cognito, never()).updateIdentityProvider(any(), any(), any(), any(), any());
+        verify(cognito, never()).deleteIdentityProvider(any(), any());
     }
 
     @Test
@@ -247,9 +247,24 @@ class CognitoIdentityProviderCfnProvisionerTest {
         provisioner.provision(resource, properties(POOL, "ExampleSAML", "SAML", "client"), ctx(NAME));
 
         verify(cognito).createIdentityProvider(POOL, "ExampleSAML", "SAML", details("client"), null, null);
-        assertEquals("SAML", resource.getAttributes().get(TYPE_ATTR));
         assertTrue(provisioner.completeUpdate(resource).complete());
         verify(cognito).deleteIdentityProvider(POOL, NAME);
+    }
+
+    @Test
+    void theOriginalTypeUpdatesInPlaceAfterARolledBackTypeAndNameReplacement() {
+        when(cognito.describeIdentityProvider(POOL, NAME)).thenReturn(provider(POOL, NAME, "client"));
+        StackResource resource = resource(NAME, POOL);
+        resource.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        provisioner.provision(resource, properties(POOL, "ExampleSAML", "SAML", "client"), ctx(NAME));
+        assertTrue(provisioner.rollbackUpdate(resource));
+        assertEquals(NAME, resource.getPhysicalId());
+
+        provisioner.provision(resource, oidc(POOL, NAME, "updated-client"), ctx(NAME));
+
+        verify(cognito).deleteIdentityProvider(POOL, "ExampleSAML");
+        verify(cognito).updateIdentityProvider(POOL, NAME, details("updated-client"), null, null);
+        verify(cognito, never()).createIdentityProvider(eq(POOL), eq(NAME), any(), any(), any(), any());
     }
 
     @Test
