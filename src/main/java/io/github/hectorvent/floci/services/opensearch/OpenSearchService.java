@@ -161,12 +161,12 @@ public class OpenSearchService implements ResourceProvider {
 
         if (config.services().opensearch().mock()) {
             domain.setProcessing(false);
-            domain.setEndpoint(synthesizedEndpoint(domainName, region));
+            domain.setEndpoint(synthesizedEndpoint(domain, region));
         } else {
             domain.setProcessing(true);
             if (!domainManager.tryStartDomain(domain)) {
                 domain.setProcessing(false);
-                domain.setEndpoint(synthesizedEndpoint(domainName, region));
+                domain.setEndpoint(synthesizedEndpoint(domain, region));
             }
         }
 
@@ -181,15 +181,17 @@ public class OpenSearchService implements ResourceProvider {
      * {@link OpenSearchDomainManager#tryStartDomain} returns false rather than rethrowing.
      *
      * <p>It reports an AWS-shaped endpoint in place of a blank one,
-     * {@code search-<domain>-<suffix>.<region>.es.<dnsSuffix>}, taking the DNS suffix from the
-     * region's partition rather than assuming the commercial one, with the name suffix derived from the
-     * domain name so it survives a restart. A domain reporting {@code Processing false} alongside
+     * {@code search-<domain>-<suffix>.<region>.es.<dnsSuffix>}, or {@code vpc-<domain>-...} for a domain in a
+     * VPC, taking the DNS suffix from the region's partition rather than assuming the commercial one, with the
+     * name suffix derived from the domain name so it survives a restart. A domain reporting {@code Processing false} alongside
      * {@code Endpoint ""} describes a state AWS never returns, and a client that reads the endpoint
      * to address the domain gets an empty string to connect to.
      */
-    private static String synthesizedEndpoint(String domainName, String region) {
+    private static String synthesizedEndpoint(Domain domain, String region) {
+        String domainName = domain.getDomainName();
         String suffix = Integer.toHexString(domainName.hashCode() & 0x7fffffff);
-        return "search-" + domainName + "-" + suffix + "." + region + ".es."
+        String prefix = domain.getVpcOptions() != null ? "vpc-" : "search-";
+        return prefix + domainName + "-" + suffix + "." + region + ".es."
                 + AwsRegions.dnsSuffixFor(region);
     }
 
@@ -197,6 +199,20 @@ public class OpenSearchService implements ResourceProvider {
         return findDomain(regionResolver.getAccountId(), region, domainName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Domain not found: " + domainName, 409));
+    }
+
+    /** The domain called {@code domainName} in the caller's account and {@code region}, empty when there is none. */
+    public Optional<Domain> findDomain(String domainName, String region) {
+        return findDomain(regionResolver.getAccountId(), region, domainName);
+    }
+
+    /** The domain an ARN names in the caller's account, empty when there is none. */
+    public Optional<Domain> findDomainByArn(String arn) {
+        try {
+            return Optional.of(findByArn(arn));
+        } catch (AwsException e) {
+            return Optional.empty();
+        }
     }
 
     public List<Domain> describeDomains(List<String> domainNames, String region) {
