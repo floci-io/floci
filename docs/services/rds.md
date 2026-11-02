@@ -929,7 +929,10 @@ a partial export only for such names. Every database that accepts connections is
 is absent. As on RDS, temporary and unlogged tables, views and materialized views are not exported,
 a partitioned table is exported once through its parent, and a table with a `/` in its name, or a
 column name holding a space or one of `, ; { } ( ) = \n \t`, is skipped. Floci also skips a table
-whose database or schema name has a `/`, which would split its path in the bucket. A table that
+whose database or schema name has a `/`, which would split its path in the bucket, and a table
+with two column names that differ only in case, such as `"Foo"` and `"foo"`, which its Parquet
+writer, DuckDB, cannot keep apart; both are named in `WarningMessage`. A column of a type or domain
+of the user's own is exported as a string, whatever its name. A table that
 others inherit from (`INHERITS`) is exported with its own rows only, since each child is exported as
 a table of its own.
 

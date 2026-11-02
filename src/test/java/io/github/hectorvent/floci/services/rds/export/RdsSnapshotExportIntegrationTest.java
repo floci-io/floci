@@ -37,6 +37,7 @@ import java.util.UUID;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -227,6 +228,60 @@ class RdsSnapshotExportIntegrationTest {
                     assertThat(table.getKey(), rows, hasSize(1));
                     assertEquals(table.getValue(), ((Number) rows.getFirst().get("id")).intValue());
                 }
+            } finally {
+                rds.deleteDBInstance(request -> request.dbInstanceIdentifier(dbId).skipFinalSnapshot(true));
+            }
+        }
+    }
+
+    @Test
+    void aTypeOfTheUsersOwnIsExportedAsTextAndCaseCollidingColumnsSkipTheirTable() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String dbId = "export-case-" + suffix;
+        String bucket = "rds-export-" + suffix;
+        String taskId = "export-" + suffix;
+        s3Service.createBucket(bucket, "us-east-1");
+        try (RdsClient rds = rdsClient()) {
+            DBInstance instance = rds.createDBInstance(request -> request
+                    .dbInstanceIdentifier(dbId)
+                    .engine("postgres")
+                    .masterUsername(MASTER_USER)
+                    .masterUserPassword(MASTER_PASSWORD)
+                    .dbName("appdb")
+                    .allocatedStorage(20)
+                    .dbInstanceClass("db.t3.micro")).dbInstance();
+            try {
+                asMaster(instance.endpoint().port(),
+                        "CREATE DOMAIN public.int4 AS text",
+                        "CREATE TABLE labelled (id int, label public.int4)",
+                        "INSERT INTO labelled VALUES (7, 'not a number')",
+                        "CREATE TABLE mixed (\"Foo\" int, \"foo\" text)",
+                        "INSERT INTO mixed VALUES (7, 'seven')");
+                String snapshotArn = rds.createDBSnapshot(request -> request
+                        .dbInstanceIdentifier(dbId)
+                        .dbSnapshotIdentifier(dbId + "-snap")).dbSnapshot().dbSnapshotArn();
+
+                rds.startExportTask(request -> request
+                        .exportTaskIdentifier(taskId)
+                        .sourceArn(snapshotArn)
+                        .s3BucketName(bucket)
+                        .iamRoleArn("arn:aws:iam::000000000000:role/export")
+                        .kmsKeyId("alias/export")
+                        .exportOnly("appdb.public.labelled", "appdb.public.mixed"));
+                ExportTask finished = awaitTerminal(rds, taskId);
+                assertThat(finished.failureCause(), finished.status(), equalTo("COMPLETE"));
+                assertThat(finished.warningMessage(), containsString("appdb.public.mixed was skipped"));
+                assertThat(s3Service.listObjects(bucket, taskId + "/appdb/public.mixed/", null, 1000), hasSize(0));
+
+                String dataKey = s3Service.listObjects(bucket, taskId + "/appdb/public.labelled/", null, 1000)
+                        .stream().map(S3Object::getKey).findFirst().orElseThrow();
+                List<Map<String, Object>> rows = duckClient.query(
+                        "SELECT typeof(id) AS id_type, typeof(label) AS label_type, label FROM read_parquet('s3://"
+                                + bucket + "/" + dataKey + "')", null);
+                assertThat(rows, hasSize(1));
+                assertEquals("INTEGER", rows.getFirst().get("id_type"));
+                assertEquals("VARCHAR", rows.getFirst().get("label_type"));
+                assertEquals("not a number", rows.getFirst().get("label"));
             } finally {
                 rds.deleteDBInstance(request -> request.dbInstanceIdentifier(dbId).skipFinalSnapshot(true));
             }

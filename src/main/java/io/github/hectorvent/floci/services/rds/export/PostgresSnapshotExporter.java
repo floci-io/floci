@@ -27,9 +27,12 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Exports a PostgreSQL snapshot the way RDS does: the snapshot is restored into a database of its
@@ -53,7 +56,8 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
     // Ordinary and partitioned tables, but not a partition on its own, since reading the parent
     // reads its partitions. Temporary and unlogged tables are skipped, as RDS skips them.
     private static final String COLUMNS_SQL = "SELECT json_build_object('schema', n.nspname, "
-            + "'table', c.relname, 'kind', c.relkind, 'column', a.attname, 'type', t.typname) "
+            + "'table', c.relname, 'kind', c.relkind, 'column', a.attname, 'type', t.typname, "
+            + "'builtin', t.typnamespace = 'pg_catalog'::regnamespace) "
             + "FROM pg_class c "
             + "JOIN pg_namespace n ON n.oid = c.relnamespace "
             + "JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped "
@@ -132,6 +136,11 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
                             + " table name, or a column name, has characters RDS cannot export.");
                     continue;
                 }
+                if (hasColumnsDifferingOnlyInCase(table)) {
+                    warnings.add("The table " + table.target() + " was skipped because two of its column names"
+                            + " differ only in case, which the Parquet writer cannot keep apart.");
+                    continue;
+                }
                 tables.add(table);
             }
         }
@@ -171,9 +180,20 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
             tables.computeIfAbsent(schema + "\u0000" + name,
                             key -> new Table(database, schema, name, partitioned, new ArrayList<>()))
                     .columns()
-                    .add(new ExportColumn(row.get("column").asText(), row.get("type").asText()));
+                    .add(new ExportColumn(row.get("column").asText(), row.get("type").asText(),
+                            row.path("builtin").asBoolean(true)));
         }
         return List.copyOf(tables.values());
+    }
+
+    private static boolean hasColumnsDifferingOnlyInCase(Table table) {
+        Set<String> names = new HashSet<>();
+        for (ExportColumn column : table.columns()) {
+            if (!names.add(column.name().toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -282,6 +282,35 @@ class PostgresSnapshotExporterTest {
     }
 
     @Test
+    void aTableWithColumnNamesDifferingOnlyInCaseIsSkippedWithAWarning() {
+        when(containerManager.queryPostgres(eq("restore-container"), eq("master"), eq("appdb"),
+                argThat(sql -> sql.contains("pg_attribute"))))
+                .thenReturn("{\"schema\":\"public\",\"table\":\"items\",\"column\":\"Foo\",\"type\":\"int4\"}\n"
+                        + "{\"schema\":\"public\",\"table\":\"items\",\"column\":\"foo\",\"type\":\"text\"}\n");
+
+        SnapshotExporter.Outcome outcome = exporter.export(task(), source, progress);
+
+        assertThat(outcome.warnings(), contains(containsString("appdb.public.items was skipped because two of its"
+                + " column names differ only in case")));
+        verify(s3Service, never()).putObject(eq("exports"),
+                argThat(key -> key.endsWith(".parquet")), any(), anyString(), any());
+    }
+
+    @Test
+    void aColumnOfATypeOfTheUsersOwnIsReadAsText() {
+        when(containerManager.queryPostgres(eq("restore-container"), eq("master"), eq("appdb"),
+                argThat(sql -> sql.contains("pg_attribute"))))
+                .thenReturn("{\"schema\":\"public\",\"table\":\"items\",\"column\":\"label\",\"type\":\"int4\","
+                        + "\"builtin\":false}\n");
+
+        exporter.export(task(), source, progress);
+
+        verify(containerManager).queryPostgres(eq("restore-container"), eq("master"), eq("appdb"),
+                argThat(sql -> sql.startsWith("SELECT row_to_json(r) FROM (SELECT \"label\"::text AS \"label\" ")),
+                any(OutputStream.class), eq(PostgresSnapshotExporter.TABLE_READ_TIMEOUT_SECONDS));
+    }
+
+    @Test
     void aTableInADatabaseWithASlashIsSkippedWithAWarning() {
         when(containerManager.queryPostgres(eq("restore-container"), eq("master"), eq("postgres"), anyString()))
                 .thenReturn("\"app/db\"\n");

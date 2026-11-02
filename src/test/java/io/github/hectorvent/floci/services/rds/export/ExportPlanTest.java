@@ -89,6 +89,18 @@ class ExportPlanTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"int4", "int8", "bool", "bytea"})
+    void aTypeOfTheUsersOwnIsAStringWhateverItsName(String pgType) {
+        ExportColumn column = new ExportColumn("c", pgType, false);
+
+        assertThat(column.parquetType(), equalTo("VARCHAR"));
+        assertThat(column.stagedType(), equalTo("VARCHAR"));
+        assertThat(column.parquetTypeName(), equalTo("STRING"));
+        assertThat(column.extractExpression(), equalTo("\"c\"::text"));
+        assertThat(column.writeExpression(), equalTo("\"c\""));
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"has space", "a,b", "a;b", "a=b", "a(b)", "a{b}", "a\tb"})
     void columnNamesRdsSkipsAreFlagged(String name) {
         assertFalse(new ExportColumn(name, "text").hasExportableName());
