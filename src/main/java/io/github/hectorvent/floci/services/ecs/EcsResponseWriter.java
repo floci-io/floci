@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
@@ -300,7 +301,7 @@ public class EcsResponseWriter {
                 ObjectNode mpNode = objectMapper.createObjectNode();
                 mpNode.put("sourceVolume", mp.sourceVolume());
                 mpNode.put("containerPath", mp.containerPath());
-                mpNode.put("readOnly", mp.readOnly());
+                if (mp.readOnly() != null) { mpNode.put("readOnly", mp.readOnly()); }
                 mps.add(mpNode);
             }
             n.set("mountPoints", mps);
@@ -310,7 +311,7 @@ public class EcsResponseWriter {
             for (VolumeFrom volumeFrom : def.getVolumesFrom()) {
                 ObjectNode volumeFromNode = objectMapper.createObjectNode();
                 volumeFromNode.put("sourceContainer", volumeFrom.sourceContainer());
-                volumeFromNode.put("readOnly", volumeFrom.readOnly());
+                if (volumeFrom.readOnly() != null) { volumeFromNode.put("readOnly", volumeFrom.readOnly()); }
                 volumesFrom.add(volumeFromNode);
             }
             n.set("volumesFrom", volumesFrom);
@@ -1167,7 +1168,7 @@ public class EcsResponseWriter {
     /** ECS timestamps go on the wire as epoch seconds with a fractional part. */
     private static void putInstant(ObjectNode target, String field, Instant value) {
         if (value != null) {
-            target.put(field, value.toEpochMilli() / 1000.0);
+            target.put(field, EpochSeconds.fromInstant(value));
         }
     }
 }

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateContactListRequest;
@@ -41,6 +42,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("SES V2 TagResource / UntagResource / ListTagsForResource")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("ses-account")
 class SesTagResourceTest {
 
     private static SesV2Client sesV2;

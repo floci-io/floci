@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.HttpParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
+import io.github.hectorvent.floci.services.eventbridge.model.RedshiftDataParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
@@ -276,6 +277,11 @@ public class EventBridgeHandler {
                 if (!ecsParamsNode.isMissingNode() && ecsParamsNode.isObject()) {
                     target.setEcsParameters(objectMapper.convertValue(ecsParamsNode, EcsParameters.class));
                 }
+                JsonNode redshiftParamsNode = t.path("RedshiftDataParameters");
+                if (!redshiftParamsNode.isMissingNode() && redshiftParamsNode.isObject()) {
+                    target.setRedshiftDataParameters(
+                            objectMapper.convertValue(redshiftParamsNode, RedshiftDataParameters.class));
+                }
                 JsonNode retryPolicyNode = t.path("RetryPolicy");
                 if (retryPolicyNode.isObject()) {
                     target.setRetryPolicy(objectMapper.convertValue(retryPolicyNode, Target.RetryPolicy.class));
@@ -351,6 +357,9 @@ public class EventBridgeHandler {
             }
             if (t.getEcsParameters() != null) {
                 node.set("EcsParameters", objectMapper.valueToTree(t.getEcsParameters()));
+            }
+            if (t.getRedshiftDataParameters() != null) {
+                node.set("RedshiftDataParameters", objectMapper.valueToTree(t.getRedshiftDataParameters()));
             }
             if (t.getRetryPolicy() != null) {
                 node.set("RetryPolicy", objectMapper.valueToTree(t.getRetryPolicy()));

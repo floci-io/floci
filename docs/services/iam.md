@@ -291,13 +291,14 @@ the emulator rather than by a request, a seeded configuration or a role template
 in those same words.
 
 Some refusals stay as this service answers them, and the members behind them are left out of the
-vendored shapes so the walk cannot reword them. A service-linked role's principal and suffix answer
-`InvalidInput` rather than a validation error at all, and so does an empty `ServiceNamespaces` on
-`ListPoliciesGrantingServiceAccess`. An account alias carries AWS's own sentence about its own
-bounds, which is why neither alias operation is read at all. `statusType`, on all four operations
-that take it, is answered without the offending value and without the permitted set, which is what
-the recorded refusal carries and what the walk would spell out. `Encoding` on `GetSSHPublicKey`
-answers the modelled `UnrecognizedPublicKeyEncoding` rather than a constraint violation. And
+vendored shapes so the walk cannot reword them. A service-linked role's custom suffix answers
+`InvalidInput` rather than a validation error at all, "Custom suffix is not allowed for
+`<service>`", which is a recorded refusal across roughly eighty principals, and so does an empty
+`ServiceNamespaces` on `ListPoliciesGrantingServiceAccess`. The principal beside that suffix is
+read off the model, which the section below sets out. An
+account alias carries AWS's own sentence about its own bounds, which is why neither alias operation
+is read at all. `Encoding` on `GetSSHPublicKey` answers the modelled
+`UnrecognizedPublicKeyEncoding` rather than a constraint violation. And
 `TagKeys` on the eight untag operations is answered against the list as a whole, `Value at
 'tagKeys' failed to satisfy constraint: Member must satisfy constraint: [...]`, where the walk
 names the member that broke it under its own index: both forms are readings, nothing recorded
@@ -321,10 +322,48 @@ was already this service's choice for a list over its limit, and it is now what 
 whatever it breaks. Other services do quote a list, Lambda's `Value '[x86_64, arm64]' at
 'architectures'` being a captured one, which is why this is IAM's reading and not a rule.
 
-The one message that still carries a word where the value would go is the required member a request
-leaves out, `Value null at '<member>'`, which no capture covers in either form. The form is chosen
-in one place, so a direct capture that ever shows IAM carrying its values again moves it back in one
-edit rather than across the service.
+A required member the request leaves out reads the same way, `Value at 'status' failed to satisfy
+constraint: Member must not be null`, with no `null` standing where the value would. That was the
+one message carrying a word in the value's place until 2026-10-31, when a capture from a real
+account answered an omitted `Status` and showed the word gone with every other value this service
+leaves out. The form is chosen in one place, so the capture moved it in one edit rather than across
+the service, and the services that do quote their values, STS among them, still write `Value null at
+'<member>'`.
+
+### Two answers the model carries since a capture settled them
+
+`statusType` and `CreateServiceLinkedRole`'s `AWSServiceName` were answered by hand here until
+2026-10-31, each on the reading that AWS worded them differently from the model. Captures from a
+real account, on [#6042](https://github.com/floci-io/floci/issues/6042), showed otherwise, so both
+are read off the vendored shapes with everything else.
+
+A `Status` outside the set is `Value at 'status' failed to satisfy constraint: Member must satisfy
+enum value set: [Expired, Active, Inactive]`, naming the set where this service named none, and an
+omitted one is the required-member violation rather than the same enum sentence, which is what one
+hand-written check could not tell apart. Both read the same on all four operations that share the
+shape. The set is listed in the order AWS lists it, which is not the order the vendored model
+declares: the values are the model's and only their order is read from the capture.
+
+A principal that breaks `AWSServiceName`'s pattern is `Value at 'aWSServiceName' failed to satisfy
+constraint: Member must satisfy regular expression pattern: [\w+=.@-]*`, where this service
+answered `InvalidInput` with a sentence about the member's bounds. An omitted one is the
+required-member violation, a principal over 128 characters the maximum, and one sent empty breaks
+both the minimum and the pattern, which is what every other string member here answers for an empty
+value. A principal that satisfies the pattern and names no service AWS has is still `InvalidInput`,
+"The request must include a valid AWSServiceName, for example es.amazonaws.com.", which is the
+layering the capture leaves in place: the shape first, then whether the service exists.
+
+The pattern quoted there is the one AWS quotes, not the one the shape declares, and those differ.
+botocore aliases `AWSServiceName` to the shape it gives a group name, `[\w+=,.@-]+` at 1 to 128
+characters, while AWS's message gives `[\w+=.@-]*`: the comma is gone and a `*` stands where the
+model sets a minimum of 1. Only the message is in hand rather than the shape, so the vendored shape
+records AWS's text beside its own and the walk quotes the capture while holding a value to the
+model. A comma is therefore still admitted, and an empty principal is still refused. That is the
+same split the enum order above takes, the captured rendering over the model's, and one object
+decides which text any violation quotes, so no other member moves with it.
+
+What a second capture would settle is the comma: `CreateServiceLinkedRole` with one in the
+principal, which AWS either refuses as a pattern violation or takes.
 
 ### Permission Boundaries
 
@@ -420,10 +459,11 @@ the user resolved from the signing access key, the same fallback `GetUser` uses.
 `Status` takes any of the three values `statusType` publishes, `Active`, `Inactive` and `Expired`,
 which is what the reference's Valid Values line on `UpdateAccessKey` lists, and it is held to that
 set the same way `UpdateSigningCertificate`, `UpdateSSHPublicKey` and
-`UpdateServiceSpecificCredential` hold theirs. It is read before the key is looked up, so a status
-outside the set answers `ValidationError` whether or not the key exists. The `AWS::IAM::AccessKey`
-CloudFormation resource takes the same three, its Allowed values line reading "Active | Inactive |
-Expired" as well.
+`UpdateServiceSpecificCredential` hold theirs, all four from the model since the capture above. It
+is read before the key is looked up, so a status outside the set answers `ValidationError` whether
+or not the key exists, and an omitted one answers the required member it is. The
+`AWS::IAM::AccessKey` CloudFormation resource takes the same three, its Allowed values line
+reading "Active | Inactive | Expired" as well.
 
 ### Account Aliases
 
@@ -1560,6 +1600,11 @@ Setting `enforcement-enabled: true` activates the policy evaluator as a JAX-RS r
 
 The startup banner reports the effective state (`IAM: policy enforcement enabled` / `disabled`). If requests you expect to be denied keep succeeding, check that line first: the flag is only read under the name below, and any other spelling (for example `FLOCI_IAM_STRICT_VALIDATION`, which does not exist) is silently ignored, leaving the permissive default in place.
 
+Direct calls include `aws:ViaAWSService=false` in the shared authorization context,
+including calls made with service-role credentials or directly by service principals.
+This makes Boolean conditions distinguish direct access from forward access sessions.
+Forward access session propagation is not implemented by this context default.
+
 ### Enable enforcement
 
 **Environment variable:**
@@ -1595,9 +1640,9 @@ SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Schedul
 Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
-AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
-AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator and Amazon
-Timestream for InfluxDB they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
+AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
+Timestream for InfluxDB and the Amazon Redshift Data API they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1636,7 +1681,8 @@ naming no workgroup is checked on `workgroup/primary`, where `StartQueryExecutio
 `ListQueryExecutions` and `ListNamedQueries` list, and `GetWorkGroup` answers. Athena's
 `ListDatabases`, `ListTableMetadata` and `GetTableMetadata` are checked on the catalog their
 `CatalogName` names and on `datacatalog/AwsDataCatalog`, the Glue Data Catalog Floci reads whichever
-catalog they name. Cost Explorer's cost and usage reads are checked on `*`, not on the billing view
+catalog they name, and a `GetDataCatalog` naming no catalog on `datacatalog/AwsDataCatalog`, the one it
+answers. Cost Explorer's cost and usage reads are checked on `*`, not on the billing view
 their `BillingViewArn` gives: Floci serves no billing views and answers the account's costs whichever
 one is named. Data Exports' `CreateExport` is not checked on the
 ARN its `Export.ExportArn` gives, which is the new export's own. CloudTrail's `StartLogging`,
@@ -1658,7 +1704,17 @@ so one entry for a bus the caller may not publish to refuses the whole request, 
 User Guide gives it for every entry. A connection or an API destination, whose ARN
 EventBridge follows with an id it mints after the name, `connection/<name>/<id>`, is checked on
 the ARN it is stored under when the request names it, and on `connection/<name>/*` when there is
-none yet, as for its create. EventBridge V2's API, which Floci does not serve, is not read. A
+none yet, as for its create. An Application Auto Scaling scalable target, whose ARN ends in the id
+Application Auto Scaling assigns it, `scalable-target/<id>`, while its requests name it by
+`ServiceNamespace`, `ResourceId` and `ScalableDimension`, is checked on the ARN it is stored under, and
+on `scalable-target/*` when there is none yet, as for a `RegisterScalableTarget` registering a new one;
+its tag operations name it by its ARN. A Redshift Data API request is checked on the cluster its
+`ClusterIdentifier` names, or on the ARN of the Redshift Serverless workgroup its `WorkgroupName`
+names by name or by ARN, which ends in the id Redshift Serverless gives it, `workgroup/<id>`, and on
+`workgroup/*` when there is no such workgroup; one naming its session, by `SessionId`, on the
+cluster or workgroup the caller's session runs on, and on `*` when the caller has no such session.
+EventBridge V2's requests are read beside EventBridge's, each checked on the resources the API serving
+it names (an EventBridge V2 `PutEvents` on the bus its `EventBusArn` names). A
 state machine's version or alias
 (`stateMachine:<name>:<qualifier>`) is checked on the state machine's ARN, as Step Functions
 authorizes it, so a grant or a deny on `stateMachine:<name>` covers its versions and aliases, and

@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -731,8 +730,10 @@ public class Route53ResolverService {
         if (arn == null || arn.isBlank()) {
             throw new AwsException(INVALID_PARAMETER, "ResourceArn is required", 400);
         }
-        AwsArnUtils.Arn parsed = resolverArnIn(arn, region);
-        String resource = parsed != null && parsed.accountId().equals(accountId) ? parsed.resource() : "";
+        String resource = AwsArnUtils.parseIfArnIn(arn, "route53resolver", region)
+                .filter(parsed -> parsed.accountId().equals(accountId))
+                .map(AwsArnUtils.Arn::resource)
+                .orElse("");
         int slash = resource.indexOf('/');
         StorageBackend<String, ObjectNode> store = slash < 0 ? null : switch (resource.substring(0, slash)) {
             case "resolver-endpoint" -> endpointStore;
@@ -745,16 +746,6 @@ public class Route53ResolverService {
                         stored -> arn.equals(text(stored, "Arn"))))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource not found: " + arn, 400));
-    }
-
-    /** The parsed ARN when it is a Route 53 Resolver ARN in {@code region} and its partition, else null. */
-    private static AwsArnUtils.Arn resolverArnIn(String arn, String region) {
-        if (!AwsArnUtils.isArnFor(arn, "route53resolver")) {
-            return null;
-        }
-        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-        return parsed.partition().equals(AwsRegions.partitionFor(region)) && parsed.region().equals(region)
-                ? parsed : null;
     }
 
     /**
@@ -867,7 +858,8 @@ public class Route53ResolverService {
         }
         return store.scan(key -> true).stream()
                 .filter(existing -> creatorRequestId.equals(text(existing, "CreatorRequestId")))
-                .filter(existing -> resolverArnIn(text(existing, "Arn"), region) != null)
+                .filter(existing -> AwsArnUtils.parseIfArnIn(text(existing, "Arn"), "route53resolver", region)
+                        .isPresent())
                 .findFirst()
                 .map(ObjectNode::deepCopy);
     }

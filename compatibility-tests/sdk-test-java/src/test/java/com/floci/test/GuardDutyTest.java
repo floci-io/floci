@@ -2,6 +2,7 @@ package com.floci.test;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.guardduty.GuardDutyClient;
 import software.amazon.awssdk.services.guardduty.model.AccountDetail;
 import software.amazon.awssdk.services.guardduty.model.AdminStatus;
@@ -35,6 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("GuardDuty")
+@ResourceLock("organizations")
 class GuardDutyTest {
 
     @Test

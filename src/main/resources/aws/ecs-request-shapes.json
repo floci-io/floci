@@ -1,14 +1,16 @@
 {
   "_source": {
     "generator": "tools/aws/regen_ecs_shapes.py",
-    "botocore": "botocore 1.43.113 (installed package)"
+    "botocore": "botocore 1.43.118 (local/aws/botocore)"
   },
   "operations": {
+    "AssociateGatewayWithCluster": "AssociateGatewayWithClusterRequest",
     "ContinueServiceDeployment": "ContinueServiceDeploymentRequest",
     "CreateCapacityProvider": "CreateCapacityProviderRequest",
     "CreateCluster": "CreateClusterRequest",
     "CreateDaemon": "CreateDaemonRequest",
     "CreateExpressGatewayService": "CreateExpressGatewayServiceRequest",
+    "CreateGateway": "CreateGatewayRequest",
     "CreateService": "CreateServiceRequest",
     "CreateTaskSet": "CreateTaskSetRequest",
     "DeleteAccountSetting": "DeleteAccountSettingRequest",
@@ -18,6 +20,7 @@
     "DeleteDaemon": "DeleteDaemonRequest",
     "DeleteDaemonTaskDefinition": "DeleteDaemonTaskDefinitionRequest",
     "DeleteExpressGatewayService": "DeleteExpressGatewayServiceRequest",
+    "DeleteGateway": "DeleteGatewayRequest",
     "DeleteService": "DeleteServiceRequest",
     "DeleteTaskDefinitions": "DeleteTaskDefinitionsRequest",
     "DeleteTaskSet": "DeleteTaskSetRequest",
@@ -31,12 +34,16 @@
     "DescribeDaemonRevisions": "DescribeDaemonRevisionsRequest",
     "DescribeDaemonTaskDefinition": "DescribeDaemonTaskDefinitionRequest",
     "DescribeExpressGatewayService": "DescribeExpressGatewayServiceRequest",
+    "DescribeGateway": "DescribeGatewayRequest",
+    "DescribeGatewayResources": "DescribeGatewayResourcesRequest",
+    "DescribeGatewayRoute": "DescribeGatewayRouteRequest",
     "DescribeServiceDeployments": "DescribeServiceDeploymentsRequest",
     "DescribeServiceRevisions": "DescribeServiceRevisionsRequest",
     "DescribeServices": "DescribeServicesRequest",
     "DescribeTaskDefinition": "DescribeTaskDefinitionRequest",
     "DescribeTaskSets": "DescribeTaskSetsRequest",
     "DescribeTasks": "DescribeTasksRequest",
+    "DisassociateGatewayFromCluster": "DisassociateGatewayFromClusterRequest",
     "DiscoverPollEndpoint": "DiscoverPollEndpointRequest",
     "ExecuteCommand": "ExecuteCommandRequest",
     "GetTaskProtection": "GetTaskProtectionRequest",
@@ -47,6 +54,9 @@
     "ListDaemonDeployments": "ListDaemonDeploymentsRequest",
     "ListDaemonTaskDefinitions": "ListDaemonTaskDefinitionsRequest",
     "ListDaemons": "ListDaemonsRequest",
+    "ListGatewayClusterAssociations": "ListGatewayClusterAssociationsRequest",
+    "ListGatewayRoutes": "ListGatewayRoutesRequest",
+    "ListGateways": "ListGatewaysRequest",
     "ListServiceDeployments": "ListServiceDeploymentsRequest",
     "ListServices": "ListServicesRequest",
     "ListServicesByNamespace": "ListServicesByNamespaceRequest",
@@ -77,6 +87,7 @@
     "UpdateContainerInstancesState": "UpdateContainerInstancesStateRequest",
     "UpdateDaemon": "UpdateDaemonRequest",
     "UpdateExpressGatewayService": "UpdateExpressGatewayServiceRequest",
+    "UpdateGateway": "UpdateGatewayRequest",
     "UpdateService": "UpdateServiceRequest",
     "UpdateServicePrimaryTaskSet": "UpdateServicePrimaryTaskSetRequest",
     "UpdateTaskProtection": "UpdateTaskProtectionRequest",
@@ -118,6 +129,13 @@
       "type": "list",
       "member": "AcceleratorType"
     },
+    "AccessType": {
+      "type": "string"
+    },
+    "AccessTypeList": {
+      "type": "list",
+      "member": "AccessType"
+    },
     "AdvancedConfiguration": {
       "type": "structure",
       "members": {
@@ -139,6 +157,13 @@
     },
     "AssignPublicIp": {
       "type": "string"
+    },
+    "AssociateGatewayWithClusterRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "cluster": "String"
+      }
     },
     "AttachmentStateChange": {
       "type": "structure",
@@ -503,6 +528,18 @@
         "taskDefinitionArn": "String"
       }
     },
+    "CreateGatewayRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "infrastructureRoleArn": "String",
+        "clientToken": "String",
+        "deletionProtection": "BoxedBoolean",
+        "configuration": "GatewayConfiguration",
+        "tags": "Tags",
+        "propagateTags": "PropagateGatewayTags"
+      }
+    },
     "CreateManagedInstancesProviderConfiguration": {
       "type": "structure",
       "members": {
@@ -542,6 +579,7 @@
         "serviceConnectConfiguration": "ServiceConnectConfiguration",
         "volumeConfigurations": "ServiceVolumeConfigurations",
         "vpcLatticeConfigurations": "VpcLatticeConfigurations",
+        "gatewayConnectors": "GatewayConnectorList",
         "monitoring": "MonitoringConfiguration"
       }
     },
@@ -711,6 +749,12 @@
       "type": "structure",
       "members": {
         "serviceArn": "String"
+      }
+    },
+    "DeleteGatewayRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String"
       }
     },
     "DeleteServiceRequest": {
@@ -896,6 +940,26 @@
         "include": "ExpressGatewayServiceIncludeList"
       }
     },
+    "DescribeGatewayRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String"
+      }
+    },
+    "DescribeGatewayResourcesRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "DescribeGatewayRouteRequest": {
+      "type": "structure",
+      "members": {
+        "gatewayRouteArn": "String"
+      }
+    },
     "DescribeServiceDeploymentsRequest": {
       "type": "structure",
       "members": {
@@ -961,6 +1025,13 @@
     "DevicesList": {
       "type": "list",
       "member": "Device"
+    },
+    "DisassociateGatewayFromClusterRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "cluster": "String"
+      }
     },
     "DiscoverPollEndpointRequest": {
       "type": "structure",
@@ -1184,6 +1255,126 @@
     "FirelensConfigurationType": {
       "type": "string"
     },
+    "GatewayAlbDesyncMitigationMode": {
+      "type": "string"
+    },
+    "GatewayAlbProtocol": {
+      "type": "string"
+    },
+    "GatewayAlbTestTrafficRules": {
+      "type": "structure",
+      "members": {
+        "header": "GatewayTestTrafficHeader"
+      }
+    },
+    "GatewayClusterAssociationStatus": {
+      "type": "string"
+    },
+    "GatewayClusterAssociationStatusList": {
+      "type": "list",
+      "member": "GatewayClusterAssociationStatus"
+    },
+    "GatewayConfiguration": {
+      "type": "structure",
+      "members": {
+        "hostSharedAlb": "HostSharedAlbConfiguration"
+      }
+    },
+    "GatewayConnector": {
+      "type": "structure",
+      "members": {
+        "portName": "String",
+        "healthCheck": "GatewayConnectorHealthCheck",
+        "filters": "GatewayConnectorFilters"
+      }
+    },
+    "GatewayConnectorFilters": {
+      "type": "structure",
+      "members": {
+        "accessTypes": "AccessTypeList"
+      }
+    },
+    "GatewayConnectorHealthCheck": {
+      "type": "structure",
+      "members": {
+        "healthCheckProtocol": "GatewayConnectorHealthCheckProtocol",
+        "healthCheckPort": "BoxedInteger",
+        "healthCheckPath": "String",
+        "healthCheckTimeoutSeconds": "BoxedInteger",
+        "healthCheckIntervalSeconds": "BoxedInteger",
+        "healthyThresholdCount": "BoxedInteger",
+        "unhealthyThresholdCount": "BoxedInteger",
+        "matcher": "GatewayConnectorHealthCheckMatcher"
+      }
+    },
+    "GatewayConnectorHealthCheckMatcher": {
+      "type": "structure",
+      "members": {
+        "httpCode": "String",
+        "grpcCode": "String"
+      }
+    },
+    "GatewayConnectorHealthCheckProtocol": {
+      "type": "string"
+    },
+    "GatewayConnectorList": {
+      "type": "list",
+      "member": "GatewayConnector"
+    },
+    "GatewayElbAccessLogConfiguration": {
+      "type": "structure",
+      "members": {
+        "destination": "GatewayElbAccessLogDestination"
+      }
+    },
+    "GatewayElbAccessLogDestination": {
+      "type": "structure",
+      "members": {
+        "s3": "GatewayElbAccessLogS3Destination"
+      }
+    },
+    "GatewayElbAccessLogS3Destination": {
+      "type": "structure",
+      "members": {
+        "bucket": "String",
+        "prefix": "String"
+      }
+    },
+    "GatewayElbIpAddressType": {
+      "type": "string"
+    },
+    "GatewayElbNetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "inboundSecurityGroup": "String",
+        "subnets": "StringList",
+        "ipAddressType": "GatewayElbIpAddressType"
+      }
+    },
+    "GatewayElbScheme": {
+      "type": "string"
+    },
+    "GatewayRouteStatus": {
+      "type": "string"
+    },
+    "GatewayRouteStatusList": {
+      "type": "list",
+      "member": "GatewayRouteStatus"
+    },
+    "GatewayStatus": {
+      "type": "string"
+    },
+    "GatewayStatusList": {
+      "type": "list",
+      "member": "GatewayStatus"
+    },
+    "GatewayTestTrafficHeader": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "values": "StringList"
+      }
+    },
     "GetTaskProtectionRequest": {
       "type": "structure",
       "members": {
@@ -1218,6 +1409,20 @@
     "HostEntryList": {
       "type": "list",
       "member": "HostEntry"
+    },
+    "HostSharedAlbConfiguration": {
+      "type": "structure",
+      "members": {
+        "networkConfiguration": "GatewayElbNetworkConfiguration",
+        "scheme": "GatewayElbScheme",
+        "webACLArn": "String",
+        "accessLogs": "GatewayElbAccessLogConfiguration",
+        "port": "BoxedInteger",
+        "protocol": "GatewayAlbProtocol",
+        "maxAlbCount": "BoxedInteger",
+        "httpDesync": "GatewayAlbDesyncMitigationMode",
+        "testTrafficRules": "GatewayAlbTestTrafficRules"
+      }
     },
     "HostVolumeProperties": {
       "type": "structure",
@@ -1432,6 +1637,37 @@
       "members": {
         "clusterArn": "String",
         "capacityProviderArns": "StringList",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "ListGatewayClusterAssociationsRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "cluster": "String",
+        "status": "GatewayClusterAssociationStatusList",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "ListGatewayRoutesRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "cluster": "String",
+        "service": "String",
+        "serviceContainerPortName": "String",
+        "status": "GatewayRouteStatusList",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "ListGatewaysRequest": {
+      "type": "structure",
+      "members": {
+        "names": "StringList",
+        "status": "GatewayStatusList",
         "maxResults": "BoxedInteger",
         "nextToken": "String"
       }
@@ -1778,6 +2014,9 @@
     "PortNumber": {
       "type": "integer"
     },
+    "PropagateGatewayTags": {
+      "type": "string"
+    },
     "PropagateMITags": {
       "type": "string"
     },
@@ -2015,8 +2254,22 @@
         "namespace": "String",
         "services": "ServiceConnectServiceList",
         "logConfiguration": "LogConfiguration",
-        "accessLogConfiguration": "ServiceConnectAccessLogConfiguration"
+        "accessLogConfiguration": "ServiceConnectAccessLogConfiguration",
+        "containerConfigurations": "ServiceConnectContainerConfigurations"
       }
+    },
+    "ServiceConnectContainerConfiguration": {
+      "type": "structure",
+      "members": {
+        "logLevel": "ServiceConnectContainerLogLevel"
+      }
+    },
+    "ServiceConnectContainerConfigurations": {
+      "type": "list",
+      "member": "ServiceConnectContainerConfiguration"
+    },
+    "ServiceConnectContainerLogLevel": {
+      "type": "string"
     },
     "ServiceConnectIncludeQueryParameters": {
       "type": "string"
@@ -2482,6 +2735,39 @@
         "taskDefinitionArn": "String"
       }
     },
+    "UpdateGatewayAlbConfiguration": {
+      "type": "structure",
+      "members": {
+        "networkConfiguration": "UpdateGatewayNetworkConfiguration",
+        "maxAlbCount": "BoxedInteger",
+        "webACLArn": "String",
+        "accessLogs": "GatewayElbAccessLogConfiguration",
+        "httpDesync": "GatewayAlbDesyncMitigationMode",
+        "testTrafficRules": "GatewayAlbTestTrafficRules"
+      }
+    },
+    "UpdateGatewayConfiguration": {
+      "type": "structure",
+      "members": {
+        "hostSharedAlb": "UpdateGatewayAlbConfiguration"
+      }
+    },
+    "UpdateGatewayNetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "inboundSecurityGroup": "String"
+      }
+    },
+    "UpdateGatewayRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "infrastructureRoleArn": "String",
+        "deletionProtection": "BoxedBoolean",
+        "configuration": "UpdateGatewayConfiguration",
+        "propagateTags": "PropagateGatewayTags"
+      }
+    },
     "UpdateManagedInstancesProviderConfiguration": {
       "type": "structure",
       "members": {
@@ -2525,6 +2811,7 @@
         "serviceConnectConfiguration": "ServiceConnectConfiguration",
         "volumeConfigurations": "ServiceVolumeConfigurations",
         "vpcLatticeConfigurations": "VpcLatticeConfigurations",
+        "gatewayConnectors": "GatewayConnectorList",
         "monitoring": "MonitoringConfiguration"
       }
     },

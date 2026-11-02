@@ -11,8 +11,11 @@ import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
  * split in one place. {@code docs/services/iam.md} records the reading and the captures behind it.
  *
  * <p>A message AWS itself writes with the value is not forced through here: a list checked as a
- * whole carries the list, and a required member the request leaves out reads
- * {@code Value null at '<member>'}, which no capture here covers either way.
+ * whole carries the list. A required member the request leaves out used to read
+ * {@code Value null at '<member>'} for want of a capture either way; one arrived on 2026-10-31,
+ * answering an omitted {@code Status} as {@code Value at 'status' failed to satisfy constraint:
+ * Member must not be null}, so the word {@code null} comes out with every other value this service
+ * leaves out and {@link #notNull} is where that is decided.
  */
 final class IamValidationErrors {
 
@@ -21,6 +24,15 @@ final class IamValidationErrors {
             SmithyValidationErrors.Violations.WITHOUT_VALUES;
 
     private IamValidationErrors() {
+    }
+
+    /**
+     * The 400 {@code ValidationError} for a required member the request leaves out, named with no
+     * value and no {@code null} beside it. Captured from a real account on 2026-10-31 against the
+     * {@code Status} the four credential operations share.
+     */
+    static AwsException notNull(String path) {
+        return SmithyValidationErrors.validationError(MESSAGES.notNull(path));
     }
 
     /**

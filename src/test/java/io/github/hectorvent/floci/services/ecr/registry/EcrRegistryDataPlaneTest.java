@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecr.registry;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.testutil.FreePorts;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -453,22 +454,24 @@ class EcrRegistryDataPlaneTest {
     }
 
     /**
-     * Two manifest PUTs to one repository on one HTTP/2 connection: the first holds the
-     * repository's write lock and is parked mid-body at the registry, the second waits for the
-     * lock. The second push's body must not sit unread in the connection's flow-control
-     * window, where it would keep the first push's remaining bytes from ever arriving: the
-     * first could not finish, would never release the lock, and both would wait forever. The
-     * data plane drains a waiting manifest body, so the second push's whole body reaches the
-     * data plane while the first is still parked, and both pushes then complete, in order,
-     * once the registry answers.
+     * Two manifest PUTs to one repository on one HTTP/2 connection. The first holds the
+     * repository's write lock and is parked at the registry, which has read its body and holds
+     * the answer. The second waits for the lock. The second push's body must not sit unread in
+     * the connection's flow-control window, where it would keep a first push still sending its
+     * body from ever finishing: it would never release the lock, and both would wait forever.
+     * The data plane drains a waiting manifest body, so the second push's whole body reaches
+     * the data plane while the first is still parked, and both pushes then complete, in order,
+     * once the registry answers. The registry reads the parked body rather than pausing it,
+     * because a paused body's unread bytes would hold the window themselves, and how many of
+     * them the loopback socket buffers absorb depends on the OS.
      */
     @Test
     void concurrentManifestPushesOnOneConnectionDoNotDeadlock() throws Exception {
         int parkedBodyBytes = 4 * 1024 * 1024;
         int waitingBodyBytes = 2 * 1024 * 1024;
         CountDownLatch parkedArrived = new CountDownLatch(1);
-        CountDownLatch parkedAnswered = new CountDownLatch(1);
         AtomicReference<HttpServerRequest> parkedRequest = new AtomicReference<>();
+        AtomicReference<Context> parkedContext = new AtomicReference<>();
         AtomicInteger order = new AtomicInteger();
         AtomicInteger parkedAnsweredAt = new AtomicInteger(-1);
         AtomicInteger waitingArrivedAt = new AtomicInteger(-1);
@@ -477,9 +480,12 @@ class EcrRegistryDataPlaneTest {
         HttpServer registry = vertx.createHttpServer()
                 .requestHandler(request -> {
                     if (request.path().endsWith("/manifests/first")) {
-                        parkedRequest.set(request);
-                        request.pause();
-                        parkedArrived.countDown();
+                        request.bodyHandler(body -> {
+                            registryParkedBodyBytes.set(body.length());
+                            parkedRequest.set(request);
+                            parkedContext.set(Vertx.currentContext());
+                            parkedArrived.countDown();
+                        });
                         return;
                     }
                     if (!request.path().endsWith("/manifests/second")) {
@@ -530,20 +536,16 @@ class EcrRegistryDataPlaneTest {
                 writes.add(waiting.write(Buffer.buffer(new byte[64 * 1024])));
             }
 
+            // The waiting push's whole body reaches the data plane while the push holding the
+            // lock is still parked.
             Future.join(writes).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
-            assertEquals(1, parkedAnswered.getCount(),
-                    "the waiting push's whole body must reach the data plane while the push"
-                            + " holding the lock is still parked");
             waiting.end();
 
             HttpServerRequest parked = parkedRequest.get();
-            parked.bodyHandler(body -> {
-                registryParkedBodyBytes.set(body.length());
+            parkedContext.get().runOnContext(ignored -> {
                 parkedAnsweredAt.set(order.incrementAndGet());
                 parked.response().setStatusCode(201).end();
-                parkedAnswered.countDown();
             });
-            parked.resume();
 
             assertEquals(201, first.toCompletionStage().toCompletableFuture()
                     .get(10, TimeUnit.SECONDS).statusCode());

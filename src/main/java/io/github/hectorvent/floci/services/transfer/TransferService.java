@@ -4,7 +4,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.transfer.model.HomeDirectoryMapping;
@@ -31,6 +34,7 @@ public class TransferService {
     private final AccountAwareStorageBackend<User> userStore;
     private final AccountAwareStorageBackend<Map<String, String>> tagStore;
     private final RegionResolver regionResolver;
+    private final SignedMarkers listMarkers = new SignedMarkers();
 
     @Inject
     public TransferService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -110,25 +114,13 @@ public class TransferService {
         }
     }
 
-    public List<Server> listServers(String nextToken, int maxResults) {
+    public PaginatedResult<Server> listServers(String nextToken, int maxResults) {
         migrateLegacyServers(currentAccount(), currentRegion());
         List<Server> all = new ArrayList<>(serverStore.scanForAccount(currentAccount(),
                 k -> k.startsWith(currentRegion() + "/")));
-        all.sort((a, b) -> a.getServerId().compareTo(b.getServerId()));
-        if (nextToken != null && !nextToken.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getServerId().equals(nextToken)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxResults > 0 && all.size() > maxResults) {
-            return all.subList(0, maxResults);
-        }
-        return all;
+        String scope = "transfer:servers:" + currentAccount() + ":" + currentRegion() + ":";
+        return Pagination.paginate(all, Server::getServerId, maxResults, nextToken, listMarkers,
+                scope, token -> new AwsException("InvalidNextTokenException", "Invalid NextToken.", 400));
     }
 
     public Server startServer(String serverId) {
@@ -247,26 +239,14 @@ public class TransferService {
         deleteUserRecord(getUser(serverId, userName));
     }
 
-    public List<User> listUsers(String serverId, String nextToken, int maxResults) {
+    public PaginatedResult<User> listUsers(String serverId, String nextToken, int maxResults) {
         getServer(serverId);
         migrateLegacyUsers(currentAccount(), currentRegion(), serverId);
         List<User> all = new ArrayList<>(userStore.scanForAccount(currentAccount(),
                 k -> k.startsWith(scopedKey(currentRegion(), serverId) + "/")));
-        all.sort((a, b) -> a.getUserName().compareTo(b.getUserName()));
-        if (nextToken != null && !nextToken.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getUserName().equals(nextToken)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxResults > 0 && all.size() > maxResults) {
-            return all.subList(0, maxResults);
-        }
-        return all;
+        String scope = "transfer:users:" + currentAccount() + ":" + currentRegion() + ":" + serverId + ":";
+        return Pagination.paginate(all, User::getUserName, maxResults, nextToken, listMarkers,
+                scope, token -> new AwsException("InvalidNextTokenException", "Invalid NextToken.", 400));
     }
 
     public User updateUser(String serverId, String userName, String role,

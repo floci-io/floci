@@ -100,12 +100,17 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import java.util.function.LongPredicate;
 import java.util.function.Predicate;
@@ -136,6 +141,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final String baseUrl;
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
     private volatile ScheduledExecutorService reconciler = newReconciler();
+    /**
+     * Docker stops the task stopper runs at once. Each holds its thread for the containers' whole
+     * {@code stopTimeout}, up to two minutes a container, so this bounds that work without making
+     * unrelated services take turns behind one slow task.
+     */
+    private static final int TASK_STOP_CONCURRENCY = 8;
+    // Runs the service scheduler's Docker stops (see stopInBackground). A container teardown drains
+    // and shuts it down, and afterReset() replaces it, as with the reconciler.
+    private volatile ExecutorService taskStopper = newTaskStopper();
     private final Object reconcilerLock = new Object();
     private final Object reconciliationPassLock = new Object();
     // False until a previous run's task containers are confirmed gone; no task starts before.
@@ -153,6 +167,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final Map<String, EcsTask> tasks = new ConcurrentHashMap<>();
     // taskArn → EcsTaskHandle (running containers or pending resource cleanup)
     private final Map<String, EcsTaskHandle> taskHandles = new ConcurrentHashMap<>();
+    // taskArn → the Docker stop the task stopper is running for that task, until the stop has landed.
+    private final Map<String, CompletableFuture<Void>> taskStops = new ConcurrentHashMap<>();
     private final Set<String> shutdownCleanupTasks = ConcurrentHashMap.newKeySet();
     // region::clusterName/serviceName → EcsServiceModel
     private Map<String, EcsServiceModel> services = new ConcurrentHashMap<>();
@@ -341,6 +357,22 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 r -> { Thread t = new Thread(r, "ecs-reconciler"); t.setDaemon(true); return t; });
     }
 
+    /**
+     * Its threads exist only while there is something to stop. The queue is unbounded, but
+     * {@link #taskStops} admits one stop per task, so it never holds more stops than there are tasks.
+     */
+    private static ExecutorService newTaskStopper() {
+        AtomicInteger threads = new AtomicInteger();
+        ThreadPoolExecutor stopper = new ThreadPoolExecutor(TASK_STOP_CONCURRENCY, TASK_STOP_CONCURRENCY,
+                30, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), r -> {
+                    Thread t = new Thread(r, "ecs-task-stopper-" + threads.incrementAndGet());
+                    t.setDaemon(true);
+                    return t;
+                });
+        stopper.allowCoreThreadTimeOut(true);
+        return stopper;
+    }
+
     void initializeStorage() {
         if (storageFactory == null) {
             return; // keeps non-CDI unit tests working
@@ -401,8 +433,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      * state reset. Task state is transient (memory-only), so without this the containers
      * outlive the process as orphans. The reconciler is shut down first, and any in-flight
      * tick awaited, so it cannot restart drained tasks between this teardown and the final
-     * storage flush. A reset brings it back in {@link #afterReset()}. Handles are claimed
-     * atomically to avoid racing an explicit StopTask.
+     * storage flush. A reset brings it back in {@link #afterReset()}. The stops the task stopper
+     * already has are let finish, since each owns its task's handle until it lands. The remaining
+     * handles are claimed atomically to avoid racing an explicit StopTask.
      */
     @Override
     public void stopManagedContainers() {
@@ -413,7 +446,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        drainTaskStopper();
         for (String taskArn : new ArrayList<>(taskHandles.keySet())) {
+            if (taskStops.containsKey(taskArn)) {
+                // Only after an interrupted drain: stopping its containers beside that stop would race it.
+                LOG.warnv("Leaving ECS task {0} to the stop still running for it", taskArn);
+                continue;
+            }
             EcsTaskHandle claimed = taskHandles.remove(taskArn);
             if (claimed == null) {
                 continue;
@@ -444,6 +483,23 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /**
+     * Lets every stop handed to the task stopper finish, queued ones included, and land its task
+     * as usual, rather than stopping the same containers again beside it. The stopper takes no new
+     * stop until {@link #afterReset()} replaces it. The wait is no longer than stopping those tasks
+     * here would have taken: each stop is bounded by its containers' stop timeouts and Docker's API
+     * timeout, and they run side by side.
+     */
+    private void drainTaskStopper() {
+        ExecutorService current = taskStopper;
+        current.shutdown();
+        try {
+            current.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     @Override
     public void clear() {
         // The stores hold the ECS state and afterReset() restarts the reconciler. The reset also
@@ -454,14 +510,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Runs at the end of every state reset, never on shutdown. The reset's teardown stopped the
-     * reconciler, so without a new one no service would be reconciled again until the emulator
-     * restarted. This hook rather than {@code clear()} because the controller runs it even when
-     * the storage wipe or another service's {@code clear()} threw, and a failed reset must not
-     * leave ECS without a reconciler for good.
+     * reconciler and the task stopper, so without new ones no service would be reconciled again,
+     * nor any of its tasks stopped, until the emulator restarted. This hook rather than
+     * {@code clear()} because the controller runs it even when the storage wipe or another
+     * service's {@code clear()} threw, and a failed reset must not leave ECS without a reconciler
+     * for good. The stopper comes back first, so the new reconciler's first tick has one.
      */
     @Override
     public void afterReset() {
         synchronized (reconcilerLock) {
+            if (taskStopper.isShutdown()) {
+                taskStopper = newTaskStopper();
+            }
             if (reconciler.isShutdown()) {
                 ScheduledExecutorService replacement = newReconciler();
                 scheduleReconciliation(replacement);
@@ -1575,7 +1635,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     synchronized (task) {
                         taskHandles.put(taskArn, handle);
                         markTaskRunning(task);
-                        cluster.setRunningTasksCount(cluster.getRunningTasksCount() + 1);
+                        adjustRunningTasksCount(cluster, 1);
                         LOG.infov("Started ECS task (docker): {0}", taskArn);
                         stopRequested = TaskStatus.STOPPED.name().equals(task.getDesiredStatus());
                         if (!stopRequested) {
@@ -1616,7 +1676,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             } else {
                 task.setContainers(mockContainers(task, taskDef, region));
                 markTaskRunning(task);
-                cluster.setRunningTasksCount(cluster.getRunningTasksCount() + 1);
+                adjustRunningTasksCount(cluster, 1);
                 LOG.infov("Started ECS task (mock): {0}", taskArn);
                 if (eventPublisher != null) {
                     eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
@@ -1676,6 +1736,20 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         task.setConnectivityAt(Instant.now());
         task.setHealthStatus(HEALTH_STATUS_UNKNOWN);
         task.bumpVersion();
+    }
+
+    /**
+     * Moves a cluster's running task count by {@code delta}, never below zero, and says whether it
+     * moved. Launches, the reconciler and the task stopper's threads all change it, so it is read
+     * and written under the cluster's monitor rather than one update overwriting another.
+     */
+    private static boolean adjustRunningTasksCount(EcsCluster cluster, int delta) {
+        synchronized (cluster) {
+            int count = Math.max(0, cluster.getRunningTasksCount() + delta);
+            boolean moved = count != cluster.getRunningTasksCount();
+            cluster.setRunningTasksCount(count);
+            return moved;
+        }
     }
 
     /**
@@ -1981,20 +2055,44 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     private EcsTask stopTask(String clusterRef, String taskRef, String reason, String stopCode, String region) {
         EcsTask task = resolveTaskOrThrow(taskRef, region);
+        while (true) {
+            CompletableFuture<Void> running;
+            synchronized (task) {
+                running = taskStops.get(task.getTaskArn());
+                if (running == null) {
+                    return stopTaskLocked(task, reason, stopCode, region, false);
+                }
+            }
+            // The service scheduler is already stopping it. Waiting for that stop, outside the
+            // monitor it lands under, answers as a stop queued behind another always has: with the
+            // task STOPPED, or by retrying a stop that failed. A stop that failed can be retried by
+            // a tick before this thread takes the monitor back, so that retry is waited for too.
+            running.join();
+        }
+    }
+
+    /** A stop the service scheduler decides on, whose Docker side runs in the background. */
+    private void stopServiceTask(EcsTask task, String reason, String region) {
         synchronized (task) {
-            return stopTaskLocked(task, reason, stopCode, region);
+            stopTaskLocked(task, reason, STOP_CODE_SERVICE_SCHEDULER_INITIATED, region, true);
         }
     }
 
     private void stopServiceTaskIfUnprotected(EcsTask task, String reason, String region) {
         synchronized (task) {
             if (!isTaskProtected(task, clock.instant())) {
-                stopTaskLocked(task, reason, STOP_CODE_SERVICE_SCHEDULER_INITIATED, region);
+                stopTaskLocked(task, reason, STOP_CODE_SERVICE_SCHEDULER_INITIATED, region, true);
             }
         }
     }
 
-    private EcsTask stopTaskLocked(EcsTask task, String reason, String stopCode, String region) {
+    /**
+     * @param inBackground run the Docker stop on the task stopper and return with the task still
+     *                     STOPPING, as the reconciler must (see {@link #stopInBackground}); otherwise
+     *                     run it on this thread and return once it has landed, as StopTask does
+     */
+    private EcsTask stopTaskLocked(EcsTask task, String reason, String stopCode, String region,
+                                   boolean inBackground) {
         if (TaskStatus.STOPPED.name().equals(task.getLastStatus())) {
             return task;
         }
@@ -2009,50 +2107,126 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             deregisterTaskFromServiceDiscovery(task, region);
         }
 
-        Map<String, Integer> exitCodes = Map.of();
-        Map<String, Instant> finishedAt = Map.of();
-        if (dockerMode) {
-            EcsTaskHandle handle = taskHandles.get(task.getTaskArn());
-            if (handle == null) {
-                handle = recoverTaskHandle(task, region);
-                if (handle == null) {
-                    LOG.warnv("Cannot stop ECS task {0}: no Docker container IDs are available", task.getTaskArn());
-                    return task;
-                }
-            }
-            try {
-                exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
-            } catch (Exception e) {
-                LOG.warnv(e, "Could not stop ECS task {0}; retrying on the next reconciliation tick",
-                        task.getTaskArn());
-                return task;
-            }
-            if (exitCodes.size() != handle.getContainerIds().size()
-                    || !handle.allContainersRemoved()) {
-                LOG.warnv("ECS task {0} still has containers pending removal; retrying on the next reconciliation tick",
-                        task.getTaskArn());
-                return task;
-            }
-            taskHandles.remove(task.getTaskArn(), handle);
-            retainPendingCleanupHandle(task.getTaskArn(), handle);
-            finishedAt = handle.getFinishedAt();
+        if (!dockerMode) {
+            markTaskStopped(task, Map.of(), Map.of(), region);
+            return task;
         }
+        if (taskStops.containsKey(task.getTaskArn())) {
+            return task; // the stop already running for it lands it
+        }
+        EcsTaskHandle handle = taskHandles.get(task.getTaskArn());
+        if (handle == null) {
+            handle = recoverTaskHandle(task, region);
+            if (handle == null) {
+                LOG.warnv("Cannot stop ECS task {0}: no Docker container IDs are available", task.getTaskArn());
+                return task;
+            }
+        }
+        if (inBackground) {
+            stopInBackground(task, handle, region);
+            return task;
+        }
+        Map<String, Integer> exitCodes;
+        try {
+            exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
+        } catch (Exception e) {
+            LOG.warnv(e, "Could not stop ECS task {0}; retrying on the next reconciliation tick",
+                    task.getTaskArn());
+            return task;
+        }
+        landDockerStop(task, handle, exitCodes, region);
+        return task;
+    }
 
+    /**
+     * Hands a task's Docker stop to the task stopper. The stop waits out each container's
+     * {@code stopTimeout}, up to two minutes a container; run on the reconciler thread, it held up
+     * every other task and service for that long, one slow task after another. The task is
+     * already STOPPING and deregistered; the stop lands it STOPPED once Docker is done, or leaves
+     * it STOPPING for a later tick to retry, as a failed stop always has. {@link #taskStops} keeps
+     * the ticks in between from starting it again. Called holding the task's monitor, which the
+     * stop takes only to land: nothing holds it while Docker works.
+     */
+    private void stopInBackground(EcsTask task, EcsTaskHandle handle, String region) {
+        String taskArn = task.getTaskArn();
+        String accountId = taskAccountId(taskArn);
+        CompletableFuture<Void> stop = new CompletableFuture<>();
+        // Recorded before it can run, so its own removal below always comes after this.
+        taskStops.put(taskArn, stop);
+        try {
+            taskStopper.execute(() -> {
+                try {
+                    // A stopper thread has no request context, and account-aware storage reads the
+                    // account from it.
+                    RequestScopes.runAs(accountId, () -> runBackgroundStop(task, handle, region));
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Could not finish stopping ECS task {0}: {1}", taskArn, e.getMessage());
+                } finally {
+                    taskStops.remove(taskArn, stop);
+                    stop.complete(null);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // Only while a container teardown has the stopper shut down. The task keeps its handle,
+            // so that teardown, or the first tick after a reset, stops it instead.
+            taskStops.remove(taskArn, stop);
+            stop.complete(null);
+            LOG.debugv("ECS task stopper is shut down, leaving task {0} STOPPING: {1}", taskArn, e.getMessage());
+        }
+    }
+
+    /** The task stopper's half of {@link #stopInBackground}: the Docker stop, then its landing. */
+    private void runBackgroundStop(EcsTask task, EcsTaskHandle handle, String region) {
+        Map<String, Integer> exitCodes;
+        try {
+            exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
+        } catch (Exception e) {
+            LOG.warnv(e, "Could not stop ECS task {0}; retrying on the next reconciliation tick",
+                    task.getTaskArn());
+            return;
+        }
+        synchronized (task) {
+            // Nothing else takes a task out of STOPPING while its stop runs here; checked all the
+            // same, so a stop can never land a task twice.
+            if (TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
+                landDockerStop(task, handle, exitCodes, region);
+            }
+        }
+    }
+
+    /**
+     * Lands a Docker stop that came back: STOPPED once every container is gone, still STOPPING
+     * otherwise, for a later reconciliation tick to retry. Called holding the task's monitor.
+     */
+    private void landDockerStop(EcsTask task, EcsTaskHandle handle, Map<String, Integer> exitCodes,
+                                String region) {
+        if (exitCodes.size() != handle.getContainerIds().size()
+                || !handle.allContainersRemoved()) {
+            LOG.warnv("ECS task {0} still has containers pending removal; retrying on the next reconciliation tick",
+                    task.getTaskArn());
+            return;
+        }
+        taskHandles.remove(task.getTaskArn(), handle);
+        retainPendingCleanupHandle(task.getTaskArn(), handle);
+        markTaskStopped(task, exitCodes, handle.getFinishedAt(), region);
+    }
+
+    /** The STOPPED half of a stop, with what Docker reported about each container. */
+    private void markTaskStopped(EcsTask task, Map<String, Integer> exitCodes, Map<String, Instant> finishedAt,
+                                 String region) {
         task.setLastStatus(TaskStatus.STOPPED.name());
         task.setStoppedAt(Instant.now());
         task.setExecutionStoppedAt(Instant.now());
         task.bumpVersion();
         containerManager.releaseTaskNetwork(task, region);
         if (task.getContainers() != null) {
-            final Map<String, Integer> codes = exitCodes;
-            final Map<String, Instant> finishTimes = finishedAt;
             task.getContainers().forEach(c -> {
                 c.setLastStatus("STOPPED");
-                Integer code = codes.get(c.getName());
+                Integer code = exitCodes.get(c.getName());
                 if (code != null) {
                     c.setExitCode(code);
                 }
-                Instant finished = finishTimes.get(c.getName());
+                Instant finished = finishedAt.get(c.getName());
                 if (finished != null) {
                     c.setFinishedAt(finished);
                 }
@@ -2060,8 +2234,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
 
         EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
-        if (cluster != null && cluster.getRunningTasksCount() > 0) {
-            cluster.setRunningTasksCount(cluster.getRunningTasksCount() - 1);
+        if (cluster != null && adjustRunningTasksCount(cluster, -1)) {
             persistCluster(region, cluster);
         }
 
@@ -2069,7 +2242,6 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (eventPublisher != null) {
             eventPublisher.emitTaskLadder(task, TaskStatus.RUNNING, TaskStatus.STOPPED, region);
         }
-        return task;
     }
 
     /** Registers a freshly-started task's containers as ELBv2 targets if its service is load-balanced. */
@@ -5004,7 +5176,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private void reconcileTaskLocked(String taskArn, EcsTask task) {
         if (TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
-            stopTask(task.getClusterArn(), taskArn, task.getStoppedReason(), task.getStopCode(), taskRegion(task));
+            // Never stopTask(...), which waits for a stop already running: that stop lands under
+            // this task's monitor, held here.
+            stopTaskLocked(task, task.getStoppedReason(), task.getStopCode(), taskRegion(task), true);
             return;
         }
 
@@ -5075,8 +5249,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         task.bumpVersion();
 
         EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
-        if (cluster != null && cluster.getRunningTasksCount() > 0) {
-            cluster.setRunningTasksCount(cluster.getRunningTasksCount() - 1);
+        if (cluster != null) {
+            adjustRunningTasksCount(cluster, -1);
         }
 
         LOG.infov("ECS task {0} reconciled to STOPPED (all containers exited)", taskArn);
@@ -5271,10 +5445,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 continue; // teardown already in flight
             }
             try {
-                stopTask(clusterName, t.getTaskArn(), instanceArn == null || !activeArns.contains(instanceArn)
+                stopServiceTask(t, instanceArn == null || !activeArns.contains(instanceArn)
                         ? "Daemon task's container instance is no longer active"
-                        : "Daemon service already has a task on this container instance",
-                        STOP_CODE_SERVICE_SCHEDULER_INITIATED, region);
+                        : "Daemon service already has a task on this container instance", region);
             } catch (Exception e) {
                 LOG.warnv("Service reconciler failed to stop daemon task {0}: {1}", t.getTaskArn(), e.getMessage());
             }

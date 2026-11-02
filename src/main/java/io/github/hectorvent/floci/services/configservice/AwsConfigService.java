@@ -686,7 +686,8 @@ public class AwsConfigService {
 
     public void putConfigurationRecorder(String region, ConfigurationRecorder recorder) {
         String name = (recorder.name() == null || recorder.name().isEmpty()) ? "default" : recorder.name();
-        ConfigurationRecorder stored = new ConfigurationRecorder(name, recorder.roleARN(), recorder.recordingGroup());
+        ConfigurationRecorder stored = new ConfigurationRecorder(name, recorder.roleARN(), recorder.recordingGroup(),
+                recorder.recordingMode());
         configurationRecorders.put(region, stored);
     }
 

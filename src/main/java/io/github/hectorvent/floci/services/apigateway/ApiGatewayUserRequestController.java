@@ -58,8 +58,9 @@ public class ApiGatewayUserRequestController {
     public Response handleDelete(@Context HttpHeaders headers, @Context UriInfo uriInfo,
                                  @PathParam("apiId") String apiId,
                                  @PathParam("stageName") String stageName,
-                                 @PathParam("proxy") String proxy) {
-        return executeController.dispatch("DELETE", apiId, stageName, proxy, headers, uriInfo, null);
+                                 @PathParam("proxy") String proxy,
+                                 byte[] body) {
+        return executeController.dispatch("DELETE", apiId, stageName, proxy, headers, uriInfo, body);
     }
 
     @PATCH

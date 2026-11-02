@@ -1347,4 +1347,108 @@ class EcsIntegrationTest {
                 .body("__type", containsString("ClientException"))
                 .body("message", containsString("HealthCheck command is required."));
     }
+
+    @Test
+    @Order(72)
+    void registerAndDescribeTaskDefinitionKeepsReadOnlyAbsentWhenItWasNeverSent() {
+        String arn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "readonly-absent-roundtrip",
+                    "volumes": [{"name": "v"}],
+                    "containerDefinitions": [
+                        {
+                            "name": "a",
+                            "image": "nginx:latest",
+                            "memory": 128,
+                            "essential": true,
+                            "mountPoints": [{"sourceVolume": "v", "containerPath": "/a"}]
+                        },
+                        {
+                            "name": "b",
+                            "image": "nginx:latest",
+                            "memory": 128,
+                            "essential": false,
+                            "volumesFrom": [{"sourceContainer": "a"}]
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].mountPoints[0]"
+                    + ".sourceVolume", equalTo("v"))
+            .body("taskDefinition.containerDefinitions[0].mountPoints[0]"
+                    + ".containerPath", equalTo("/a"))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0]"
+                    + ".sourceContainer", equalTo("a"))
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(arn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].mountPoints[0]", not(hasKey("readOnly")))
+            .body("taskDefinition.containerDefinitions[1].volumesFrom[0]", not(hasKey("readOnly")));
+    }
+
+    @Test
+    @Order(73)
+    void registerAndDescribeTaskDefinitionEchoesAnExplicitReadOnly() {
+        String arn = ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "readonly-explicit-roundtrip",
+                    "volumes": [{"name": "v"}],
+                    "containerDefinitions": [
+                        {
+                            "name": "a",
+                            "image": "nginx:latest",
+                            "memory": 128,
+                            "essential": true,
+                            "mountPoints": [
+                                {"sourceVolume": "v", "containerPath": "/ro", "readOnly": true},
+                                {"sourceVolume": "v", "containerPath": "/rw", "readOnly": false}
+                            ],
+                            "volumesFrom": [
+                                {"sourceContainer": "b", "readOnly": true},
+                                {"sourceContainer": "b", "readOnly": false}
+                            ]
+                        },
+                        {
+                            "name": "b",
+                            "image": "nginx:latest",
+                            "memory": 128,
+                            "essential": false
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+        .extract()
+            .path("taskDefinition.taskDefinitionArn");
+
+        ecs("DescribeTaskDefinition")
+            .body("""
+                {"taskDefinition": "%s"}
+                """.formatted(arn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.containerDefinitions[0].mountPoints[0].readOnly", equalTo(true))
+            .body("taskDefinition.containerDefinitions[0].mountPoints[1].readOnly", equalTo(false))
+            .body("taskDefinition.containerDefinitions[0].volumesFrom[0].readOnly", equalTo(true))
+            .body("taskDefinition.containerDefinitions[0].volumesFrom[1].readOnly", equalTo(false));
+    }
 }

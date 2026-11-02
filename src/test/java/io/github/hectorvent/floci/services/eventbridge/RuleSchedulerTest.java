@@ -218,7 +218,7 @@ class RuleSchedulerTest {
         }
 
         @Override
-        public void invokeTarget(Target target, String eventJson, String region) {
+        public void invokeTarget(Target target, String eventJson, String region, String ruleArn) {
             invocationCount.incrementAndGet();
             onDelivery.run();
         }

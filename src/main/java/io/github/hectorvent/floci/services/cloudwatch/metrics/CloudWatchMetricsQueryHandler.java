@@ -98,11 +98,11 @@ public class CloudWatchMetricsQueryHandler {
         String metricName = params.getFirst("MetricName");
         List<Dimension> dimensions = parseDimensionFilters(params);
 
-        List<CloudWatchMetricsService.MetricIdentity> metrics =
-                metricsService.listMetrics(namespace, metricName, dimensions, region);
+        PaginatedResult<CloudWatchMetricsService.MetricIdentity> page =
+                metricsService.listMetricsPage(namespace, metricName, dimensions, params.getFirst("NextToken"), region);
 
         XmlBuilder xml = new XmlBuilder().start("Metrics");
-        for (CloudWatchMetricsService.MetricIdentity m : metrics) {
+        for (CloudWatchMetricsService.MetricIdentity m : page.items()) {
             XmlBuilder member = xml.start("member")
                     .elem("Namespace", m.namespace())
                     .elem("MetricName", m.metricName())
@@ -116,6 +116,9 @@ public class CloudWatchMetricsQueryHandler {
             xml.end("Dimensions").end("member");
         }
         xml.end("Metrics");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListMetrics", null, xml.build())).build();
     }
 

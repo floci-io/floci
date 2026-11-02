@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.DeleteBucketRequest;
+import software.amazon.awssdk.services.s3.model.DeletePublicAccessBlockRequest;
 import software.amazon.awssdk.services.s3.model.GetBucketPolicyStatusRequest;
 import software.amazon.awssdk.services.s3.model.GetBucketPolicyStatusResponse;
 import software.amazon.awssdk.services.s3.model.PutBucketPolicyRequest;
@@ -25,6 +26,7 @@ class S3PolicyStatusTest {
 
         try (S3Client s3 = TestFixtures.s3Client()) {
             s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+            s3.deletePublicAccessBlock(DeletePublicAccessBlockRequest.builder().bucket(bucket).build());
             s3.putBucketPolicy(PutBucketPolicyRequest.builder().bucket(bucket).policy(policy).build());
 
             GetBucketPolicyStatusResponse response = s3.getBucketPolicyStatus(

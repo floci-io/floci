@@ -320,12 +320,13 @@ public class ApiGatewayExecuteController {
     public Response handleDelete(@Context HttpHeaders headers, @Context UriInfo uriInfo,
                                  @PathParam("apiId") String apiId,
                                  @PathParam("stageName") String stageName,
-                                 @PathParam("proxy") String proxy) {
+                                 @PathParam("proxy") String proxy,
+                                 byte[] body) {
         if (isWebSocketConnectionRequest(apiId, proxy)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handleDeleteConnection(connectionId);
         }
-        return dispatch("DELETE", apiId, stageName, proxy, headers, uriInfo, null);
+        return dispatch("DELETE", apiId, stageName, proxy, headers, uriInfo, body);
     }
 
     @PATCH
@@ -2999,7 +3000,7 @@ public class ApiGatewayExecuteController {
         Map<String, Object> authorizerContext = lambdaAuthorizerContext == null
                 ? Map.of() : objectMapper.convertValue(lambdaAuthorizerContext, MAP_TYPE);
 
-        String sourceIp = requestHeaders.getOrDefault("X-Forwarded-For", "127.0.0.1");
+        String sourceIp = routeContext.sourceIp();
         io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
                 new io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext(
                         apiId, stageName, httpMethod, path,

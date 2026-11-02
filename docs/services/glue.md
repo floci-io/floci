@@ -254,6 +254,21 @@ Blueprints are not emulated.
 | UpdateClassifier | Partially updates a classifier without changing its type. |
 | DeleteClassifier | Deletes a classifier by name. |
 
+#### Data quality rulesets
+
+| Action | Description |
+|--------|-------------|
+| CreateDataQualityRuleset | Stores a named DQDL ruleset, optionally with a `TargetTable` and tags. |
+| GetDataQualityRuleset | Returns a ruleset with its `CreatedOn` and `LastModifiedOn`. |
+| UpdateDataQualityRuleset | Replaces the `Description` or `Ruleset` the request sets and keeps the rest. |
+| DeleteDataQualityRuleset | Deletes a ruleset and its tags. |
+| ListDataQualityRulesets | Lists rulesets in name order with `RuleCount`, filtered by `Filter` (name, description, target table, created and last modified times) and `Tags`, paged by `MaxResults` (1 to 1000) and `NextToken`. |
+
+Rulesets are stored, not evaluated: there are no recommendation or evaluation runs, so
+`RecommendationRunId` is never set. `RuleCount` is the number of entries in the ruleset's
+top level `Rules = [ ... ]` list, with a composite rule counted once. Rulesets are tagged by
+ARN `arn:aws:glue:<region>:<account>:dataQualityRuleset/<name>`.
+
 ### Schema Registry
 
 #### Registries

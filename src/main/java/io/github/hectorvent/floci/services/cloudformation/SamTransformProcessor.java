@@ -121,6 +121,9 @@ class SamTransformProcessor {
             }
         });
 
+        expandServerlessLayers(expanded, expandedResources, globals, parameterValues);
+        samLogicalIds.removeIf(id -> !expandedResources.has(id));
+
         // Collect implicit-API routes from function Api events before the functions are expanded.
         List<ApiRoute> apiRoutes = collectApiRoutes(samLogicalIds, resources);
 
@@ -128,6 +131,7 @@ class SamTransformProcessor {
         // AWS::Serverless::HttpApi via ApiId: {Ref: <logicalId>}) before either side is expanded,
         // so expansion order between the Function and the HttpApi resource doesn't matter.
         List<HttpApiRoute> httpApiRoutes = collectHttpApiRoutes(samLogicalIds, resources);
+        Map<String, String> generatedReferences = new LinkedHashMap<>();
 
         for (String logicalId : samLogicalIds) {
             JsonNode resDef = resources.get(logicalId);
@@ -141,8 +145,11 @@ class SamTransformProcessor {
             // copyResourceLevelAttributes runs once per arm, right after that arm builds its node.
             switch (type) {
                 case "AWS::Serverless::Function" -> {
-                    expandServerlessFunction(logicalId, mergeGlobals(globals, "Function", properties),
+                    String aliasId = expandServerlessFunction(logicalId, mergeGlobals(globals, "Function", properties),
                             resDef, expanded, expandedResources, parameterValues);
+                    if (aliasId != null) {
+                        generatedReferences.put(logicalId + ".Alias", aliasId);
+                    }
                     copyResourceLevelAttributes(resDef, (ObjectNode) expandedResources.path(logicalId));
                 }
                 case "AWS::Serverless::SimpleTable" -> {
@@ -180,7 +187,180 @@ class SamTransformProcessor {
             generateImplicitApi(apiRoutes, globals(template), expandedResources);
         }
 
+        rewriteGeneratedReferences(expanded, generatedReferences);
         return expanded;
+    }
+
+    private void rewriteGeneratedReferences(JsonNode node, Map<String, String> generatedReferences) {
+        if (node.isObject()) {
+            ObjectNode object = (ObjectNode) node;
+            if (object.size() == 1 && object.path("Ref").isTextual()) {
+                String generatedId = generatedReferences.get(object.path("Ref").asText());
+                if (generatedId != null) {
+                    object.put("Ref", generatedId);
+                }
+                return;
+            }
+            object.elements().forEachRemaining(child -> rewriteGeneratedReferences(child, generatedReferences));
+        } else if (node.isArray()) {
+            for (JsonNode child : node) {
+                rewriteGeneratedReferences(child, generatedReferences);
+            }
+        }
+    }
+
+    private void expandServerlessLayers(ObjectNode template, ObjectNode resources, JsonNode globals,
+                                        Map<String, String> parameterValues) {
+        Map<String, String> layerIds = new LinkedHashMap<>();
+        List<String> ids = new ArrayList<>();
+        resources.fieldNames().forEachRemaining(ids::add);
+        for (String id : ids) {
+            JsonNode source = resources.path(id);
+            if (!"AWS::Serverless::LayerVersion".equals(source.path("Type").asText())) {
+                continue;
+            }
+            JsonNode properties = source.path("Properties");
+            JsonNode resolvedProperties = resolveParameterRefs(properties, template, parameterValues);
+            // Deploy with the original ContentUri expressions so CloudFormation resolves parameters
+            // once, at deploy: a resolved value that itself holds a ${...} would resolve twice. The
+            // resolved copy is what SAM hashes, so a versioned package still changes the logical id.
+            JsonNode uri = properties.path("ContentUri");
+            ObjectNode content = objectMapper.createObjectNode();
+            if (uri.isObject() && uri.hasNonNull("Bucket") && uri.hasNonNull("Key")) {
+                copyRenamed(uri, "Bucket", content, "S3Bucket");
+                copyRenamed(uri, "Key", content, "S3Key");
+                copyRenamed(uri, "Version", content, "S3ObjectVersion");
+            } else {
+                // A plain location is split as written, and a whole ContentUri reference resolves to
+                // the location itself, so the resolved value is what gets split. The object form
+                // above keeps its expressions for the template engine to resolve at deploy.
+                JsonNode resolvedUri = resolvedProperties.path("ContentUri");
+                String location = null;
+                if (uri.isTextual()) {
+                    location = uri.asText();
+                } else if (resolvedUri.isTextual()) {
+                    location = resolvedUri.asText();
+                }
+                if (location == null) {
+                    throw invalidResource(id, "'ContentUri' requires Bucket and Key properties to be specified.");
+                }
+                Matcher match = S3_DEFINITION_URI.matcher(location);
+                if (!match.matches()) {
+                    throw invalidResource(id, "'ContentUri' must specify a packaged S3 location.");
+                }
+                content.put("S3Bucket", match.group("bucket"));
+                content.put("S3Key", match.group("key"));
+                if (match.group("version") != null) {
+                    content.put("S3ObjectVersion", match.group("version"));
+                }
+            }
+            String retention = resolvedProperties.path("RetentionPolicy").asText(null);
+            if (retention != null && !List.of("Retain", "Delete").contains(retention)) {
+                throw invalidResource(id, "'RetentionPolicy' must be 'Retain' or 'Delete'.");
+            }
+            ObjectNode layer = objectMapper.createObjectNode();
+            layer.put("Type", "AWS::Lambda::LayerVersion");
+            copyResourceLevelAttributes(source, layer);
+            if (retention != null || !layer.has("DeletionPolicy")) {
+                layer.put("DeletionPolicy", retention == null ? "Retain" : retention);
+            }
+            ObjectNode target = layer.putObject("Properties");
+            target.set("Content", content);
+            target.set("LayerName", properties.hasNonNull("LayerName")
+                    ? properties.get("LayerName").deepCopy() : TextNode.valueOf(id));
+            for (String key : List.of("Description", "LicenseInfo", "CompatibleRuntimes", "CompatibleArchitectures")) {
+                copyIfPresent(properties, key, target);
+            }
+            ObjectNode hashResource = source.deepCopy();
+            hashResource.set("Properties", resolvedProperties);
+            hashResource.remove(List.of("Metadata", "DeletionPolicy", "UpdateReplacePolicy"));
+            ObjectNode hashInput = objectMapper.createObjectNode();
+            hashInput.set(id, hashResource);
+            String generatedId = id + samHashSuffix(hashInput, id);
+            if (resources.has(generatedId)) {
+                throw invalidResource(id, "Generated layer logical id conflicts with resource '" + generatedId + "'.");
+            }
+            resources.remove(id);
+            resources.set(generatedId, layer);
+            layerIds.put(id, generatedId);
+        }
+        if (!layerIds.isEmpty()) {
+            rewriteLayerReferences(template, layerIds);
+            rewriteLayerReferences(globals, layerIds);
+            resources.elements().forEachRemaining(resource -> {
+                if (resource instanceof ObjectNode object) {
+                    rewriteLayerDependencies(object, layerIds);
+                }
+            });
+        }
+    }
+
+    private void rewriteLayerReferences(JsonNode node, Map<String, String> ids) {
+        if (node instanceof ObjectNode object) {
+            if (object.path("Ref").isTextual() && ids.containsKey(object.path("Ref").asText())) {
+                object.put("Ref", ids.get(object.path("Ref").asText()));
+            }
+            JsonNode getAtt = object.path("Fn::GetAtt");
+            if (getAtt instanceof ArrayNode array && !array.isEmpty() && ids.containsKey(array.get(0).asText())) {
+                array.set(0, TextNode.valueOf(ids.get(array.get(0).asText())));
+            } else if (getAtt.isTextual()) {
+                object.put("Fn::GetAtt", rewriteLayerName(getAtt.asText(), ids));
+            }
+            JsonNode sub = object.path("Fn::Sub");
+            if (sub.isTextual()) {
+                object.put("Fn::Sub", rewriteLayerSub(sub.asText(), ids, objectMapper.createObjectNode()));
+            } else if (sub instanceof ArrayNode array && array.size() == 2 && array.get(0).isTextual()) {
+                array.set(0, TextNode.valueOf(rewriteLayerSub(array.get(0).asText(), ids, array.get(1))));
+                // Only the map's values are intrinsic contexts; its keys are local variable names
+                // that may themselves be spelled Ref, so walk the values, never the map container.
+                if (array.get(1) instanceof ObjectNode variables) {
+                    variables.elements().forEachRemaining(value -> rewriteLayerReferences(value, ids));
+                }
+            }
+            // The Fn::Sub node is fully handled above, so skip it here; recursing into its variables
+            // map would treat a variable literally named Ref as a Ref-intrinsic and rewrite it.
+            List<String> keys = new ArrayList<>();
+            object.fieldNames().forEachRemaining(keys::add);
+            for (String key : keys) {
+                if (!"Fn::Sub".equals(key)) {
+                    rewriteLayerReferences(object.get(key), ids);
+                }
+            }
+        } else if (node.isArray()) {
+            node.forEach(child -> rewriteLayerReferences(child, ids));
+        }
+    }
+
+    private static void rewriteLayerDependencies(ObjectNode object, Map<String, String> ids) {
+        JsonNode dependsOn = object.path("DependsOn");
+        if (dependsOn.isTextual() && ids.containsKey(dependsOn.asText())) {
+            object.put("DependsOn", ids.get(dependsOn.asText()));
+        } else if (dependsOn instanceof ArrayNode array) {
+            for (int i = 0; i < array.size(); i++) {
+                String replacement = ids.get(array.get(i).asText());
+                if (replacement != null) {
+                    array.set(i, TextNode.valueOf(replacement));
+                }
+            }
+        }
+    }
+
+    private static String rewriteLayerName(String name, Map<String, String> ids) {
+        int dot = name.indexOf('.');
+        String id = dot < 0 ? name : name.substring(0, dot);
+        return ids.getOrDefault(id, id) + (dot < 0 ? "" : name.substring(dot));
+    }
+
+    private static String rewriteLayerSub(String text, Map<String, String> ids, JsonNode variables) {
+        Matcher matcher = SUB_REFERENCE.matcher(text);
+        StringBuilder result = new StringBuilder();
+        while (matcher.find()) {
+            String name = matcher.group(1);
+            String replacement = variables.has(name) ? name : rewriteLayerName(name, ids);
+            matcher.appendReplacement(result, Matcher.quoteReplacement("${" + replacement + "}"));
+        }
+        matcher.appendTail(result);
+        return result.toString();
     }
 
     private JsonNode globals(JsonNode template) {
@@ -919,8 +1099,8 @@ class SamTransformProcessor {
      *
      * <p>Nested objects (e.g. {@code Environment.Variables}, {@code Tags}) are merged key-wise, so a
      * resource only overrides the individual keys it sets and global entries are preserved — matching
-     * SAM's map-merge behavior. Scalar and array-valued properties (e.g. {@code Policies},
-     * {@code Layers}) are overridden wholesale; SAM's additive list-append for those is not implemented.
+     * SAM's map-merge behavior. Lists append global entries first, except
+     * {@code Function.Architectures}, which the resource replaces; scalars are overridden.
      */
     private JsonNode mergeGlobals(JsonNode globals, String section, JsonNode properties) {
         JsonNode sectionGlobals = globals.path(section);
@@ -930,12 +1110,17 @@ class SamTransformProcessor {
         if (!properties.isObject()) {
             return sectionGlobals.deepCopy();
         }
-        return deepMerge((ObjectNode) sectionGlobals.deepCopy(), (ObjectNode) properties);
+        ObjectNode merged = (ObjectNode) sectionGlobals.deepCopy();
+        if ("Function".equals(section) && properties.has("Architectures")) {
+            merged.remove("Architectures");
+        }
+        return deepMerge(merged, (ObjectNode) properties);
     }
 
     /**
      * Recursively merges {@code override} into {@code base}: when both sides hold an object for the
-     * same key, the objects are merged key-wise; otherwise the override value replaces the base value.
+     * same key, plain objects are merged key-wise; lists are appended with base entries first;
+     * intrinsic function objects and scalar values are replaced by the override value.
      * {@code base} is mutated and returned.
      */
     private ObjectNode deepMerge(ObjectNode base, ObjectNode override) {
@@ -943,8 +1128,11 @@ class SamTransformProcessor {
             String key = entry.getKey();
             JsonNode overrideValue = entry.getValue();
             JsonNode baseValue = base.get(key);
-            if (baseValue != null && baseValue.isObject() && overrideValue.isObject()) {
+            if (baseValue != null && baseValue.isObject() && overrideValue.isObject()
+                    && !isIntrinsicObject(baseValue) && !isIntrinsicObject(overrideValue)) {
                 base.set(key, deepMerge((ObjectNode) baseValue, (ObjectNode) overrideValue));
+            } else if (baseValue instanceof ArrayNode baseArray && overrideValue.isArray()) {
+                baseArray.addAll((ArrayNode) overrideValue.deepCopy());
             } else {
                 base.set(key, overrideValue.deepCopy());
             }
@@ -952,7 +1140,15 @@ class SamTransformProcessor {
         return base;
     }
 
-    private void expandServerlessFunction(String logicalId, JsonNode properties, JsonNode source,
+    private static boolean isIntrinsicObject(JsonNode value) {
+        if (!value.isObject() || value.size() != 1) {
+            return false;
+        }
+        String key = value.fieldNames().next();
+        return key.equals("Ref") || key.startsWith("Fn::");
+    }
+
+    private String expandServerlessFunction(String logicalId, JsonNode properties, JsonNode source,
                                           ObjectNode template, ObjectNode resources,
                                           Map<String, String> parameterValues) {
         resources.remove(logicalId);
@@ -984,6 +1180,7 @@ class SamTransformProcessor {
                 expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources);
             }
         }
+        return aliasLogicalId;
     }
 
     /**
@@ -1180,19 +1377,7 @@ class SamTransformProcessor {
                 hashed.set("SnapStart", snapStart.deepCopy());
             }
         }
-        String hashInput;
-        try {
-            hashInput = objectMapper.writer()
-                    .with(JsonNodeFeature.WRITE_PROPERTIES_SORTED)
-                    .with(JsonWriteFeature.ESCAPE_NON_ASCII)
-                    .without(JsonWriteFeature.WRITE_HEX_UPPER_CASE)
-                    .writeValueAsString(hashed)
-                    // ESCAPE_NON_ASCII leaves DEL as it is; SAM's hash input escapes DEL as well.
-                    .replace("\u007f", "\\u007f");
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Cannot serialize the version hash input of " + functionLogicalId, e);
-        }
-        return functionLogicalId + "Version" + Digests.sha1Hex(hashInput).substring(0, 10);
+        return functionLogicalId + "Version" + samHashSuffix(hashed, functionLogicalId);
     }
 
     /**
@@ -1226,11 +1411,15 @@ class SamTransformProcessor {
             JsonNode sub = node.get("Fn::Sub");
             ObjectNode resolved = objectMapper.createObjectNode();
             if (sub.isTextual()) {
-                resolved.put("Fn::Sub", substituteParameters(sub.asText(), template, parameterValues));
+                resolved.put("Fn::Sub", substituteParameters(sub.asText(), template, parameterValues, Set.of()));
             } else if (sub.isArray() && !sub.isEmpty() && sub.get(0).isTextual()) {
+                Set<String> localVariables = new LinkedHashSet<>();
+                if (sub.size() > 1 && sub.get(1).isObject()) {
+                    sub.get(1).fieldNames().forEachRemaining(localVariables::add);
+                }
                 ArrayNode arguments = (ArrayNode) resolveParameterRefs(sub, template, parameterValues);
                 arguments.set(0, TextNode.valueOf(substituteParameters(sub.get(0).asText(), template,
-                        parameterValues)));
+                        parameterValues, localVariables)));
                 resolved.set("Fn::Sub", arguments);
             } else {
                 resolved.set("Fn::Sub", resolveParameterRefs(sub, template, parameterValues));
@@ -1251,12 +1440,17 @@ class SamTransformProcessor {
         return node;
     }
 
-    /** {@code text} with each {@code ${Name}} naming a template parameter replaced by its value. */
-    private static String substituteParameters(String text, JsonNode template, Map<String, String> parameterValues) {
+    /**
+     * {@code text} with each {@code ${Name}} naming a template parameter replaced by its value. Names that
+     * the same {@code Fn::Sub} localizes in its variable map are left for the template engine to resolve.
+     */
+    private static String substituteParameters(String text, JsonNode template, Map<String, String> parameterValues,
+                                               Set<String> localVariables) {
         Matcher matcher = SUB_REFERENCE.matcher(text);
         StringBuilder substituted = new StringBuilder();
         while (matcher.find()) {
-            String value = parameterValue(matcher.group(1), template, parameterValues);
+            String name = matcher.group(1);
+            String value = localVariables.contains(name) ? null : parameterValue(name, template, parameterValues);
             matcher.appendReplacement(substituted, Matcher.quoteReplacement(value == null ? matcher.group() : value));
         }
         matcher.appendTail(substituted);
@@ -1526,6 +1720,27 @@ class SamTransformProcessor {
                 .add(objectMapper.createObjectNode().set("Condition", conditionRef(propertyCondition))));
         conditions(context.template()).set(name, and);
         return name;
+    }
+
+    /**
+     * The first ten hex digits of the SHA-1 of SAM's canonical form of {@code hashInput}: properties
+     * sorted, non-ASCII escaped, and DEL escaped as well, because ESCAPE_NON_ASCII leaves DEL as it is
+     * while SAM's hash input escapes it. A generated logical id is its subject plus this suffix, so a
+     * layer version and a function version hash their input exactly alike.
+     */
+    private String samHashSuffix(JsonNode hashInput, String subject) {
+        String serialized;
+        try {
+            serialized = objectMapper.writer()
+                    .with(JsonNodeFeature.WRITE_PROPERTIES_SORTED)
+                    .with(JsonWriteFeature.ESCAPE_NON_ASCII)
+                    .without(JsonWriteFeature.WRITE_HEX_UPPER_CASE)
+                    .writeValueAsString(hashInput)
+                    .replace("\u007f", "\\u007f");
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Cannot serialize the hash input of " + subject, e);
+        }
+        return Digests.sha1Hex(serialized).substring(0, 10);
     }
 
     /**

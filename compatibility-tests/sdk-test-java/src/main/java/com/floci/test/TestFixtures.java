@@ -66,6 +66,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalanci
 import software.amazon.awssdk.services.emr.EmrClient;
 import software.amazon.awssdk.services.emrserverless.EmrServerlessClient;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.fis.FisClient;
 import software.amazon.awssdk.services.globalaccelerator.GlobalAcceleratorClient;
@@ -105,6 +106,7 @@ import software.amazon.awssdk.services.neptune.NeptuneClient;
 import software.amazon.awssdk.services.oam.OamClient;
 import software.amazon.awssdk.services.opensearch.OpenSearchClient;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
+import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.ram.RamClient;
 import software.amazon.awssdk.services.rds.RdsClient;
@@ -1084,6 +1086,23 @@ public final class TestFixtures {
                 .build();
     }
 
+    /**
+     * The Payment Cryptography control plane. The real service is an awsJson 1.0 service
+     * that signs for {@code payment-cryptography}, and the SDK talks to it through the
+     * {@code PaymentCryptographyControlPlane} target prefix.
+     */
+    public static PaymentCryptographyClient paymentCryptographyClient() {
+        return paymentCryptographyClient(REGION);
+    }
+
+    public static PaymentCryptographyClient paymentCryptographyClient(Region region) {
+        return PaymentCryptographyClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(region)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static SecretsManagerClient secretsManagerClient() {
         return SecretsManagerClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1160,6 +1179,14 @@ public final class TestFixtures {
 
     public static EventBridgeClient eventBridgeClient() {
         return EventBridgeClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static EventBridgeV2Client eventBridgeV2Client() {
+        return EventBridgeV2Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

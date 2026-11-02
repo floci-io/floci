@@ -41,6 +41,7 @@ class Ec2InstanceTypeCatalogTest {
                 "t3.medium",
                 "t3a.nano",
                 "m5.large",
+                "r5.large",
                 "t4g.micro",
                 "t4g.small",
                 "t4g.medium",

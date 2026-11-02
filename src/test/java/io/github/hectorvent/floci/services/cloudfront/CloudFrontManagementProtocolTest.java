@@ -439,6 +439,100 @@ class CloudFrontManagementProtocolTest {
             .body(hasXPath("//*[local-name()='Code']/text()", equalTo("InvalidArgument")));
     }
 
+    @ParameterizedTest(name = "{0} name is the root Name, not an item Name")
+    @CsvSource({"cache-policy, CachePolicy", "origin-request-policy, OriginRequestPolicy"})
+    void policyNameIgnoresItemNamesThatPrecedeIt(String endpoint, String type) {
+        String name = "name-order-" + UUID.randomUUID();
+        String items = """
+                <Quantity>1</Quantity><Items><Name>Session-ID</Name></Items>""";
+        String params = """
+                <HeadersConfig><HeaderBehavior>whitelist</HeaderBehavior>
+                  <Headers><Quantity>1</Quantity><Items><Name>X-Hdr</Name></Items></Headers></HeadersConfig>
+                <CookiesConfig><CookieBehavior>whitelist</CookieBehavior>
+                  <Cookies>%s</Cookies></CookiesConfig>
+                <QueryStringsConfig><QueryStringBehavior>whitelist</QueryStringBehavior>
+                  <QueryStrings>%s</QueryStrings></QueryStringsConfig>
+                """.formatted(items, items);
+        String config = endpoint.equals("cache-policy")
+                ? "<ParametersInCacheKeyAndForwardedToOrigin>"
+                  + "<EnableAcceptEncodingGzip>false</EnableAcceptEncodingGzip>" + params
+                  + "</ParametersInCacheKeyAndForwardedToOrigin><MinTTL>0</MinTTL>"
+                : params;
+        String body = "<" + type + "Config xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">"
+                + config + "<Comment>real-comment</Comment><Name>" + name + "</Name></" + type + "Config>";
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + endpoint);
+        created.then().statusCode(201);
+        String id = XmlParser.extractFirst(created.asString(), "Id", null);
+        String etag = created.header("ETag");
+        try {
+            given().when().get(API + endpoint + "/" + id + "/config").then().statusCode(200)
+                    .body(hasXPath("/*/*[local-name()='Name']/text()", equalTo(name)))
+                    .body(hasXPath("/*/*[local-name()='Comment']/text()", equalTo("real-comment")));
+            given().when().get(API + endpoint).then().statusCode(200)
+                    .body(hasXPath("//*[local-name()='" + type + "Summary']/*[local-name()='" + type
+                            + "']/*[local-name()='" + type + "Config']/*[local-name()='Name' and text()='"
+                            + name + "']"));
+        } finally {
+            given().header("If-Match", etag).when().delete(API + endpoint + "/" + id)
+                    .then().statusCode(204);
+        }
+    }
+
+    @ParameterizedTest(name = "{0} keeps the Comment's surrounding whitespace")
+    @ValueSource(strings = {"cache-policy", "origin-request-policy", "response-headers-policy"})
+    void policyCommentRoundTripsWithSurroundingWhitespace(String endpoint) {
+        String name = "padded-" + UUID.randomUUID();
+        String comment = "\n  padded comment  \n";
+        String body = switch (endpoint) {
+            case "cache-policy" -> cachePolicyBody(name, comment, "3600", "session");
+            case "origin-request-policy" -> originRequestPolicyBody(name, comment, "X-Hdr");
+            default -> "<ResponseHeadersPolicyConfig xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">"
+                    + "<Name>" + name + "</Name><Comment>" + comment + "</Comment></ResponseHeadersPolicyConfig>";
+        };
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + endpoint);
+        created.then().statusCode(201);
+        String id = XmlParser.extractFirst(created.asString(), "Id", null);
+        try {
+            given().when().get(API + endpoint + "/" + id + "/config").then().statusCode(200)
+                    .body(hasXPath("/*/*[local-name()='Comment']/text()", equalTo(comment)));
+        } finally {
+            given().header("If-Match", created.header("ETag")).when().delete(API + endpoint + "/" + id)
+                    .then().statusCode(204);
+        }
+    }
+
+    @ParameterizedTest(name = "{0} keeps the Name's surrounding whitespace")
+    @ValueSource(strings = {"cache-policy", "origin-request-policy"})
+    void policyNameRoundTripsWithSurroundingWhitespace(String endpoint) {
+        String name = "  padded-" + UUID.randomUUID() + "  ";
+        String body = endpoint.equals("cache-policy")
+                ? cachePolicyBody(name, "c", "3600", "session")
+                : originRequestPolicyBody(name, "c", "X-Hdr");
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + endpoint);
+        created.then().statusCode(201);
+        String id = XmlParser.extractFirst(created.asString(), "Id", null);
+        try {
+            given().when().get(API + endpoint + "/" + id + "/config").then().statusCode(200)
+                    .body(hasXPath("/*/*[local-name()='Name']/text()", equalTo(name)));
+        } finally {
+            given().header("If-Match", created.header("ETag")).when().delete(API + endpoint + "/" + id)
+                    .then().statusCode(204);
+        }
+    }
+
+    @Test
+    void responseHeadersPolicyRejectsNameWithSurroundingWhitespace() {
+        // Name pattern [A-Za-z0-9_-]{1,128} has no spaces; trimming would wrongly accept it.
+        given().contentType("application/xml")
+                .body("<ResponseHeadersPolicyConfig xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">"
+                        + "<Name>  padded-" + UUID.randomUUID() + "  </Name></ResponseHeadersPolicyConfig>")
+                .when().post(API + "response-headers-policy")
+                .then().statusCode(400);
+    }
+
     @Test
     void cachePolicyReadFillsAwsTtlDefaults() {
         String name = "default-ttl-cache-policy-" + UUID.randomUUID();

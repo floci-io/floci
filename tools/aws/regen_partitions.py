@@ -38,8 +38,9 @@ from two sources and a rule:
   legacy `s3-website-<region>` endpoint form, and commercial regions after
   `RULE_CLASSIC_PARTITION_BECOMES_OPT_IN` are opt-in (DescribeRegions omits them by default).
   botocore publishes neither fact. Read from `--cdk` or `local/aws/aws-cdk`; when the checkout
-  is absent (CI), the two flags are carried over from the existing output file, and a region
-  with nothing to carry is an error rather than a guess.
+  is absent (CI), or with `--carry-region-flags` (`make botocore-bump`, so a bump takes nothing
+  from aws-cdk), the two flags are carried over from the existing output file, and a region with
+  nothing to carry is an error rather than a guess.
 
 Run from anywhere in the repo:
     python3 tools/aws/regen_partitions.py            # rewrite the vendored file in place
@@ -342,8 +343,9 @@ def build(partitions_doc: dict, endpoints_doc: dict, entities: list[str] | None,
             elif region_id in carried_flags:
                 opt_in, dash = carried_flags[region_id]
             else:
-                raise ValueError(f"{region_id}: no aws-cdk checkout to derive optIn/s3WebsiteDashForm from and "
-                                 f"nothing to carry over from {OUTPUT.name}; run with local/aws/aws-cdk present")
+                raise ValueError(f"{region_id}: optIn/s3WebsiteDashForm come from the aws-cdk checkout and there is "
+                                 f"nothing to carry over from {OUTPUT.name}; run tools/aws/regen_partitions.py "
+                                 f"with local/aws/aws-cdk present")
             regions.append({
                 "id": region_id,
                 "description": descriptions[region_id],
@@ -422,9 +424,12 @@ def generate(botocore_data: Path, provenance: str, cdk_root: Path | None, existi
     if cdk_root is not None and (cdk_root / CDK_ENTITIES).exists():
         entities = parse_cdk_entities((cdk_root / CDK_ENTITIES).read_text(encoding="utf-8"))
     carried = load_json(existing) if existing.exists() else None
-    return build(partitions_doc, endpoints_doc, entities, carried, provenance, collect_signing_names(botocore_data),
-                 collect_ruleset_partitions(botocore_data), collect_self_signed_prefixes(botocore_data),
-                 collect_signin_hosts(botocore_data))
+    document = build(partitions_doc, endpoints_doc, entities, carried, provenance, collect_signing_names(botocore_data),
+                     collect_ruleset_partitions(botocore_data), collect_self_signed_prefixes(botocore_data),
+                     collect_signin_hosts(botocore_data))
+    if cdk_root is None and carried is not None and "regionFlags" in carried.get("_source", {}):
+        document["_source"]["regionFlags"] = carried["_source"]["regionFlags"]
+    return document
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -432,11 +437,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored file differs from a fresh generation")
     parser.add_argument("--botocore-data", type=Path, help="botocore data directory (partitions.json, endpoints.json)")
     parser.add_argument("--cdk", type=Path, default=LOCAL_CDK, help="aws-cdk checkout root (default: local/aws/aws-cdk)")
+    parser.add_argument("--carry-region-flags", action="store_true",
+                        help="keep the existing optIn and s3WebsiteDashForm flags instead of reading the aws-cdk checkout")
     parser.add_argument("--output", type=Path, default=OUTPUT, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     botocore_data, provenance = resolve_botocore_data(args.botocore_data)
-    document = generate(botocore_data, provenance, args.cdk, args.output)
+    document = generate(botocore_data, provenance, None if args.carry_region_flags else args.cdk, args.output)
     rendered = render(document)
     rel = args.output.relative_to(REPO_ROOT) if args.output.is_relative_to(REPO_ROOT) else args.output
 

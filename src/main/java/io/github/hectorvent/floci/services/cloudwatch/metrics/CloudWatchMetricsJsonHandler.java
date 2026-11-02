@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
@@ -45,11 +46,11 @@ public class CloudWatchMetricsJsonHandler {
 
     /**
      * The operations served through the console's {@code CloudWatchVersion20130116.} target, each
-     * with the request members accepted there: some of the ones this handler honours, plus
-     * {@code NextToken} and {@code MaxRecords}, which change nothing because every result comes
-     * back at once. DescribeAlarms' {@code StateValue}, {@code ActionPrefix},
-     * {@code ChildrenOfAlarmName} and {@code ParentsOfAlarmName} stay refused here until the
-     * console's API is known to give them the same shapes.
+     * with the request members accepted there: some of the ones this handler honours. ListMetrics
+     * honours {@code NextToken}; DescribeAlarms' {@code MaxRecords} and {@code NextToken} still
+     * change nothing because every alarm comes back at once. DescribeAlarms' {@code StateValue},
+     * {@code ActionPrefix}, {@code ChildrenOfAlarmName} and {@code ParentsOfAlarmName}
+     * stay refused here until the console's API is known to give them the same shapes.
      */
     private static final Map<String, Set<String>> CONSOLE_TARGET_OPERATIONS = Map.of(
             "ListMetrics", Set.of("Namespace", "MetricName", "Dimensions", "NextToken"),
@@ -176,12 +177,17 @@ public class CloudWatchMetricsJsonHandler {
         String metricName = request.has("MetricName") ? request.path("MetricName").asText() : null;
         List<Dimension> dimensions = parseDimensionsJson(request.path("Dimensions"));
 
-        List<CloudWatchMetricsService.MetricIdentity> metrics =
-                metricsService.listMetrics(namespace, metricName, dimensions, region);
+        JsonNode tokenNode = request.get("NextToken");
+        if (tokenNode != null && !tokenNode.isNull() && !tokenNode.isTextual()) {
+            throw CloudWatchMetricsException.invalidParameterValue("Invalid NextToken.");
+        }
+        String nextToken = tokenNode == null || tokenNode.isNull() ? null : tokenNode.textValue();
+        PaginatedResult<CloudWatchMetricsService.MetricIdentity> page =
+                metricsService.listMetricsPage(namespace, metricName, dimensions, nextToken, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode metricsArray = response.putArray("Metrics");
-        for (CloudWatchMetricsService.MetricIdentity m : metrics) {
+        for (CloudWatchMetricsService.MetricIdentity m : page.items()) {
             ObjectNode mNode = metricsArray.addObject();
             mNode.put("Namespace", m.namespace());
             mNode.put("MetricName", m.metricName());
@@ -191,6 +197,9 @@ public class CloudWatchMetricsJsonHandler {
                     dims.addObject().put("Name", d.name()).put("Value", d.value());
                 }
             }
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
@@ -457,7 +466,7 @@ public class CloudWatchMetricsJsonHandler {
                     .put("HistoryData", item.historyData())
                     .put("HistoryItemType", item.historyItemType())
                     .put("HistorySummary", item.historySummary())
-                    .put("Timestamp", item.timestamp() / 1000.0);
+                    .put("Timestamp", EpochSeconds.fromMillis(item.timestamp()));
         }
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());

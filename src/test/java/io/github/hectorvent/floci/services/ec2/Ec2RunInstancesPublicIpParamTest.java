@@ -124,7 +124,7 @@ class Ec2RunInstancesPublicIpParamTest {
 
     private static Ec2QueryHandler handler(Ec2Service service) {
         return new Ec2QueryHandler(service, mock(EmulatorConfig.class), mock(FlowLogService.class),
-                mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                mock(Ec2EbsEncryptionService.class), mock(Ec2BlockPublicAccessService.class),
                 mock(Ec2IpamService.class), mock(RegionResolver.class));
     }
 

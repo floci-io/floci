@@ -46,6 +46,8 @@ floci:
         flush-interval-ms: 60000
       cloudwatchmetrics:
         flush-interval-ms: 60000
+      paymentcryptography:
+        flush-interval-ms: 60000
       secretsmanager:
         flush-interval-ms: 60000
       acm:
@@ -214,6 +216,8 @@ floci:
       automated-snapshots-enabled: false
       cloudwatch-metrics-enabled: true
       snapshot-sweep-interval-seconds: 60
+      snapshot-copy-enabled: false
+      snapshot-copy-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
       poll-interval-ms: 1000
@@ -264,6 +268,8 @@ floci:
       default-image: "tinkerpop/gremlin-server:3.7.3"
     eventbridge:
       enabled: true
+    eventbridgev2:
+      enabled: true
     cloudmap:
       enabled: true
     emr:
@@ -276,6 +282,8 @@ floci:
       enabled: true
       max-events-per-query: 10000
     cloudwatchmetrics:
+      enabled: true
+    paymentcryptography:
       enabled: true
     secretsmanager:
       enabled: true

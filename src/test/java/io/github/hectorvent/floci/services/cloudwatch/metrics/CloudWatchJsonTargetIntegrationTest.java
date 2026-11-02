@@ -196,7 +196,7 @@ class CloudWatchJsonTargetIntegrationTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
-            ListMetrics         | {"Namespace":"json-target-none","MetricName":"Requests","Dimensions":[{"Name":"Host","Value":"a"}],"NextToken":"t"}
+            ListMetrics         | {"Namespace":"json-target-none","MetricName":"Requests","Dimensions":[{"Name":"Host","Value":"a"}]}
             DescribeAlarms      | {"AlarmNames":["json-target-none"],"MaxRecords":10,"NextToken":"t"}
             DescribeAlarms      | {"AlarmNamePrefix":"json-target-none-","MaxRecords":10}
             GetMetricStatistics | {"Namespace":"json-target-none","MetricName":"Requests","Dimensions":[{"Name":"Host","Value":"a"}],"StartTime":1761091200,"EndTime":1761094800,"Period":60,"Statistics":["Sum"],"Unit":"Count"}

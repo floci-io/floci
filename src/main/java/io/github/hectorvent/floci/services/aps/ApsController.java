@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.aps;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -208,8 +209,8 @@ public class ApsController {
         node.put("name", namespace.getName());
         node.set("status", namespaceStatusNode(namespace));
         node.set("tags", objectMapper.valueToTree(namespace.getTags()));
-        node.put("createdAt", namespace.getCreatedAt().toEpochMilli() / 1000.0);
-        node.put("modifiedAt", namespace.getModifiedAt().toEpochMilli() / 1000.0);
+        node.put("createdAt", EpochSeconds.fromInstant(namespace.getCreatedAt()));
+        node.put("modifiedAt", EpochSeconds.fromInstant(namespace.getModifiedAt()));
         return node;
     }
 
@@ -237,7 +238,7 @@ public class ApsController {
         node.set("status", statusNode(workspace));
         // Smithy restJson1 timestamps with no timestampFormat trait are epoch-seconds; an ISO
         // string here fails deserialization inside the AWS SDKs.
-        node.put("createdAt", workspace.getCreatedAt().toEpochMilli() / 1000.0);
+        node.put("createdAt", EpochSeconds.fromInstant(workspace.getCreatedAt()));
         node.set("tags", objectMapper.valueToTree(workspace.getTags()));
         if (workspace.getKmsKeyArn() != null) {
             node.put("kmsKeyArn", workspace.getKmsKeyArn());

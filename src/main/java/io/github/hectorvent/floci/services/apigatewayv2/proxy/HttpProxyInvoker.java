@@ -344,7 +344,6 @@ public class HttpProxyInvoker {
 
         switch (method.toUpperCase()) {
             case "GET" -> hrb.GET();
-            case "DELETE" -> hrb.DELETE();
             case "HEAD" -> hrb.method("HEAD", HttpRequest.BodyPublishers.noBody());
             case "OPTIONS" -> hrb.method("OPTIONS", HttpRequest.BodyPublishers.noBody());
             default -> hrb.method(method.toUpperCase(),

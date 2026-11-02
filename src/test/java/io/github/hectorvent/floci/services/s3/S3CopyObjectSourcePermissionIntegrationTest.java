@@ -569,6 +569,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
     }
 
     private static void putPublicObjectAsRoot(String bucket, String key, String body) {
+        deletePublicAccessBlockAsRoot(bucket, ROOT_SIGNER);
         given()
                 .filter(ROOT_SIGNER)
                 .header("x-amz-acl", "public-read")
@@ -610,6 +611,7 @@ class S3CopyObjectSourcePermissionIntegrationTest {
 
     private static void putBucketPolicyAsRoot(
             String bucket, String policy, S3RequestSigner signer) {
+        deletePublicAccessBlockAsRoot(bucket, signer);
         given()
                 .filter(signer)
                 .contentType("application/json")
@@ -618,6 +620,10 @@ class S3CopyObjectSourcePermissionIntegrationTest {
                 .put("/" + bucket + "?policy")
         .then()
                 .statusCode(200);
+    }
+
+    private static void deletePublicAccessBlockAsRoot(String bucket, S3RequestSigner signer) {
+        given().filter(signer).when().delete("/" + bucket + "?publicAccessBlock").then().statusCode(204);
     }
 
     private static String denyGetObjectPolicy(String bucket) {

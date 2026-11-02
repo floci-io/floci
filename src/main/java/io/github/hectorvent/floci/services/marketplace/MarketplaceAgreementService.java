@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -771,7 +772,7 @@ public class MarketplaceAgreementService implements Resettable {
             return Double.parseDouble(value);
         } catch (NumberFormatException e) {
             try {
-                return Instant.parse(value).toEpochMilli() / 1000.0d;
+                return EpochSeconds.fromInstant(Instant.parse(value));
             } catch (Exception ignored) {
                 throw validation("Time filters must be valid timestamps.");
             }
@@ -792,7 +793,7 @@ public class MarketplaceAgreementService implements Resettable {
     }
 
     private static double epoch() {
-        return Instant.now().toEpochMilli() / 1000.0d;
+        return EpochSeconds.fromInstant(Instant.now());
     }
 
     private static String compactId() {

@@ -181,6 +181,7 @@ class StsIssuedSessionEnforcementIntegrationTest {
         iam("DeleteUserPolicy", "UserName", userName, "PolicyName", "inline");
         iam("DeleteUser", "UserName", userName);
         iam("CreateUser", "UserName", userName);
+        given().filter(admin).when().delete("/" + bucket + "?publicAccessBlock").then().statusCode(204);
         given().filter(admin).contentType("application/json").body("""
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*",
                   "Action":"s3:GetObject","Resource":"arn:aws:s3:::%s/*"}]}""".formatted(bucket))

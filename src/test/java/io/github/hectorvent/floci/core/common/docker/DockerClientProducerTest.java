@@ -264,7 +264,7 @@ class DockerClientProducerTest {
     // therefore be genuinely separate DockerClient instances (and thus separate pools),
     // not the same instance handed out under two qualifiers.
     @Test
-    void dockerClientAndStreamingDockerClient_areDistinctInstances() {
+    void dockerClientAndStreamingDockerClient_areDistinctInstances() throws IOException {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
         when(config.docker()).thenReturn(docker);
@@ -277,13 +277,13 @@ class DockerClientProducerTest {
 
         DockerClientProducer producer = new DockerClientProducer(config);
 
-        DockerClient controlPlaneClient = producer.dockerClient();
-        DockerClient streamingClient = producer.streamingDockerClient();
-
-        assertNotNull(controlPlaneClient);
-        assertNotNull(streamingClient);
-        assertNotSame(controlPlaneClient, streamingClient,
-                "Control-plane and streaming DockerClient beans must use separate connection pools");
+        try (DockerClient controlPlaneClient = producer.dockerClient();
+             DockerClient streamingClient = producer.streamingDockerClient()) {
+            assertNotNull(controlPlaneClient);
+            assertNotNull(streamingClient);
+            assertNotSame(controlPlaneClient, streamingClient,
+                    "Control-plane and streaming DockerClient beans must use separate connection pools");
+        }
     }
 
     private static void writeContextFixture(Path dockerConfigDir, String contextName, String host)

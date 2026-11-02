@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.route53.model.AliasTarget;
 import io.github.hectorvent.floci.services.route53.model.ChangeInfo;
+import io.github.hectorvent.floci.services.route53.model.DelegationSet;
 import io.github.hectorvent.floci.services.route53.model.HealthCheck;
 import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
@@ -22,6 +23,7 @@ import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.math.BigInteger;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -48,6 +50,7 @@ public class Route53Service implements Resettable {
     private record OwnedZone(String accountId, HostedZone zone) {}
 
     private final StorageBackend<String, HostedZone> zoneStore;
+    private final StorageBackend<String, DelegationSet> delegationSetStore;
     private final StorageBackend<String, List<ResourceRecordSet>> recordStore;
     private final StorageBackend<String, HealthCheck> healthCheckStore;
     private final StorageBackend<String, ChangeInfo> changeStore;
@@ -68,6 +71,8 @@ public class Route53Service implements Resettable {
                           Ec2Service ec2Service) {
         this.zoneStore = factory.create("route53", "route53-zones.json",
                 new TypeReference<Map<String, HostedZone>>() {});
+        this.delegationSetStore = factory.create("route53", "route53-delegation-sets.json",
+                new TypeReference<Map<String, DelegationSet>>() {});
         this.recordStore = factory.create("route53", "route53-records.json",
                 new TypeReference<Map<String, List<ResourceRecordSet>>>() {});
         this.healthCheckStore = factory.create("route53", "route53-health-checks.json",
@@ -96,10 +101,127 @@ public class Route53Service implements Resettable {
         }
     }
 
+    public synchronized DelegationSet createReusableDelegationSet(String callerReference, String hostedZoneId) {
+        if (callerReference == null || callerReference.isEmpty() || callerReference.length() > 128) {
+            throw new AwsException("InvalidInput", "CallerReference must contain between 1 and 128 characters.", 400);
+        }
+        for (DelegationSet existing : delegationSetStore.scan(k -> true)) {
+            if (existing.callerReference().equals(callerReference)) {
+                throw new AwsException("DelegationSetAlreadyCreated",
+                        "A reusable delegation set with this caller reference already exists.", 400);
+            }
+        }
+        if (delegationSetStore.keys().size() >= 100) {
+            throw new AwsException("LimitsExceeded", "The reusable delegation set limit has been reached.", 400);
+        }
+        HostedZone source = null;
+        if (hostedZoneId != null) {
+            String zoneId = hostedZoneId.startsWith("/hostedzone/") ? hostedZoneId.substring(12) : hostedZoneId;
+            if (zoneId.isEmpty() || zoneId.length() > 32) {
+                throw new AwsException("InvalidInput", "HostedZoneId must contain between 1 and 32 characters.", 400);
+            }
+            try {
+                source = getHostedZoneOwnedByCaller(zoneId);
+            } catch (AwsException e) {
+                if (!"NoSuchHostedZone".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                throw new AwsException("HostedZoneNotFound", "The specified hosted zone cannot be found.", 400);
+            }
+            if (source.isPrivateZone()) {
+                throw new AwsException("InvalidArgument", "A private hosted zone cannot have a reusable delegation set.", 400);
+            }
+            if (source.getDelegationSetId() != null) {
+                throw new AwsException("DelegationSetAlreadyReusable", "The hosted zone's delegation set is already reusable.", 400);
+            }
+        }
+        String id = "N" + generateZoneId().substring(1);
+        DelegationSet set = new DelegationSet(id, callerReference,
+                source == null ? nameServers : assignedNameServers(source));
+        delegationSetStore.put(id, set);
+        if (source != null) {
+            source.setDelegationSetId(id);
+            source.setDelegationNameServers(set.nameServers());
+            zoneStore.put(source.getId(), source);
+        }
+        return set;
+    }
+
+    public DelegationSet getReusableDelegationSet(String id) {
+        String cleanId = delegationSetId(id);
+        return delegationSetStore.get(cleanId).orElseThrow(() ->
+                new AwsException("NoSuchDelegationSet", "No reusable delegation set found with ID: " + cleanId, 400));
+    }
+
+    public synchronized void deleteReusableDelegationSet(String id) {
+        DelegationSet set = getReusableDelegationSet(id);
+        if (zoneStore.scan(k -> true).stream().anyMatch(zone -> set.id().equals(zone.getDelegationSetId()))) {
+            throw new AwsException("DelegationSetInUse", "The reusable delegation set is associated with a hosted zone.", 400);
+        }
+        delegationSetStore.delete(set.id());
+    }
+
+    public DelegationSet getDelegationSet(HostedZone zone) {
+        return zone.getDelegationSetId() == null ? new DelegationSet(null, null, nameServers)
+                : getReusableDelegationSet(zone.getDelegationSetId());
+    }
+
+    public long getReusableDelegationSetCount() {
+        return delegationSetStore.keys().size();
+    }
+
+    Route53Pagination.Page<DelegationSet> pageReusableDelegationSets(String marker, String maxItems) {
+        if (marker != null && marker.length() > 64) {
+            throw new AwsException("InvalidInput", "Marker must contain at most 64 characters.", 400);
+        }
+        int pageSize;
+        try {
+            BigInteger requested = new BigInteger(maxItems);
+            if (requested.signum() <= 0) {
+                throw new NumberFormatException("Nonpositive page size");
+            }
+            pageSize = requested.min(BigInteger.valueOf(100)).intValueExact();
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidInput", "MaxItems must be a positive integer.", 400);
+        }
+        List<DelegationSet> sets = delegationSetStore.scan(k -> true).stream()
+                .filter(set -> marker == null || set.id().compareTo(marker) >= 0)
+                .sorted(Comparator.comparing(DelegationSet::id)).toList();
+        return Route53Pagination.page(sets, null, pageSize, DelegationSet::id);
+    }
+
+    private List<String> assignedNameServers(HostedZone zone) {
+        if (zone.getDelegationSetId() != null) {
+            return getReusableDelegationSet(zone.getDelegationSetId()).nameServers();
+        }
+        if (!zone.getDelegationNameServers().isEmpty()) {
+            return zone.getDelegationNameServers();
+        }
+        // Older zones did not store their assignment separately from the apex NS records.
+        List<String> stored = recordStore.get(zone.getId()).orElse(List.of()).stream()
+                .filter(record -> "NS".equals(record.getType()) && isApexSoaOrNs(record, zone.getName()))
+                .flatMap(record -> record.getRecords().stream()).map(ResourceRecord::getValue)
+                .map(Route53Service::delegationName).toList();
+        return stored.size() == 4 ? stored : nameServers;
+    }
+
+    private static String delegationSetId(String id) {
+        String cleanId = id == null ? "" : id.startsWith("/delegationset/") ? id.substring(15) : id;
+        if (cleanId.isEmpty() || cleanId.length() > 32) {
+            throw new AwsException("InvalidInput", "DelegationSetId must contain between 1 and 32 characters.", 400);
+        }
+        return cleanId;
+    }
+
     // ── Hosted Zones ──────────────────────────────────────────────────────────
 
     public synchronized CreateZoneResult createHostedZone(String name, String callerReference,
                                                            String comment, VpcAssociation vpcAssociation) {
+        return createHostedZone(name, callerReference, comment, vpcAssociation, null);
+    }
+
+    public synchronized CreateZoneResult createHostedZone(String name, String callerReference, String comment,
+                                                           VpcAssociation vpcAssociation, String delegationSetId) {
         String normalizedName = normalizeName(name);
 
         for (HostedZone existing : zoneStore.scan(k -> true)) {
@@ -109,25 +231,57 @@ public class Route53Service implements Resettable {
             }
         }
 
+        DelegationSet set = null;
+        if (delegationSetId != null) {
+            if (vpcAssociation != null) {
+                throw new AwsException("InvalidInput", "A private hosted zone cannot use a reusable delegation set.", 400);
+            }
+            set = getReusableDelegationSet(delegationSetId);
+            validateDelegationSetForZone(set, normalizedName);
+        }
         String id = generateZoneId();
         String callerAccountId = callerAccountId();
         validateVpcOwnershipIfKnown(vpcAssociation, callerAccountId);
         HostedZone zone = new HostedZone(id, normalizedName, callerReference, comment, vpcAssociation);
         zone.setOwnerAccountId(callerAccountId);
+        zone.setDelegationSetId(set == null ? null : set.id());
+        zone.setDelegationNameServers(set == null ? nameServers : set.nameServers());
         if (vpcAssociation != null) {
             vpcAssociation.setOwnerAccountId(callerAccountId);
         }
         zoneNameCounts(zone.isPrivateZone()).merge(normalizedName.toLowerCase(), 1, Integer::sum);
         zoneStore.put(id, zone);
-        recordStore.put(id, buildDefaultRecords(normalizedName));
+        recordStore.put(id, buildDefaultRecords(normalizedName, zone.getDelegationNameServers()));
         ChangeInfo change = newChange(null);
         return new CreateZoneResult(zone, change);
     }
 
+    private void validateDelegationSetForZone(DelegationSet set, String name) {
+        String accountId = callerAccountId();
+        List<HostedZone> zones = allHostedZonesAcrossAccounts().stream()
+                .filter(owned -> accountId.equals(owned.accountId()) && accountId.equals(ownerAccountId(owned.zone())))
+                .map(OwnedZone::zone).toList();
+        if (zones.stream().filter(zone -> set.id().equals(zone.getDelegationSetId())).count() >= 100) {
+            throw new AwsException("TooManyHostedZones", "The hosted zone limit for this reusable delegation set has been reached.", 400);
+        }
+        String normalizedName = normalizeRecordName(name);
+        for (HostedZone existing : zones) {
+            if (existing.isPrivateZone()) {
+                continue;
+            }
+            String existingName = normalizeRecordName(existing.getName());
+            boolean related = DomainNames.isWithin(normalizedName, existingName)
+                    || DomainNames.isWithin(existingName, normalizedName);
+            if (related && assignedNameServers(existing).stream().anyMatch(ns ->
+                    set.nameServers().stream().anyMatch(candidate -> ns.equalsIgnoreCase(candidate)))) {
+                throw new AwsException("ConflictingDomainExists",
+                        "The domain overlaps a public hosted zone that uses the same name servers.", 400);
+            }
+        }
+    }
+
     public HostedZone getHostedZone(String id) {
-        HostedZone zone = zoneStore.get(id).orElseThrow(() ->
-                new AwsException("NoSuchHostedZone",
-                        "No hosted zone found with ID: " + id, 404));
+        HostedZone zone = getHostedZoneOwnedByCaller(id);
         zone.setResourceRecordSetCount(recordCount(id));
         return zone;
     }
@@ -167,7 +321,15 @@ public class Route53Service implements Resettable {
     }
 
     Route53Pagination.Page<HostedZone> pageHostedZones(String marker, int maxItems) {
+        return pageHostedZones(marker, maxItems, null);
+    }
+
+    Route53Pagination.Page<HostedZone> pageHostedZones(String marker, int maxItems, String delegationSetId) {
+        String selected = delegationSetId == null ? null : getReusableDelegationSet(delegationSetId).id();
         List<HostedZone> all = new ArrayList<>(zoneStore.scan(k -> true));
+        if (selected != null) {
+            all.removeIf(zone -> !selected.equals(zone.getDelegationSetId()));
+        }
         all.sort(Comparator.comparing(HostedZone::getName).thenComparing(HostedZone::getId));
         for (HostedZone zone : all) {
             zone.setResourceRecordSetCount(recordCount(zone.getId()));
@@ -831,7 +993,8 @@ public class Route53Service implements Resettable {
             return zone;
         }
 
-        HostedZone zone = getHostedZone(zoneId);
+        HostedZone zone = zoneStore.get(zoneId).orElseThrow(() ->
+                new AwsException("NoSuchHostedZone", "No hosted zone found with ID: " + zoneId, 404));
         if (!ownerAccountId(zone).equals(callerAccountId)) {
             throw new AwsException("NoSuchHostedZone",
                     "No hosted zone found with ID: " + zoneId, 404);
@@ -952,7 +1115,7 @@ public class Route53Service implements Resettable {
         return change;
     }
 
-    private List<ResourceRecordSet> buildDefaultRecords(String zoneName) {
+    private List<ResourceRecordSet> buildDefaultRecords(String zoneName, List<String> zoneNameServers) {
         List<ResourceRecordSet> records = new ArrayList<>();
 
         ResourceRecordSet soa = new ResourceRecordSet();
@@ -960,14 +1123,14 @@ public class Route53Service implements Resettable {
         soa.setType("SOA");
         soa.setTtl(900L);
         soa.setRecords(List.of(new ResourceRecord(
-                normalizeName(nameServers.get(0)) + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400")));
+                normalizeName(zoneNameServers.get(0)) + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400")));
         records.add(soa);
 
         ResourceRecordSet ns = new ResourceRecordSet();
         ns.setName(zoneName);
         ns.setType("NS");
         ns.setTtl(172800L);
-        ns.setRecords(nameServers.stream()
+        ns.setRecords(zoneNameServers.stream()
                 .map(n -> new ResourceRecord(normalizeName(n)))
                 .toList());
         records.add(ns);

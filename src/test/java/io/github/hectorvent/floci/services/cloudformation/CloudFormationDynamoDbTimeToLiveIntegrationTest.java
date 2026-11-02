@@ -291,6 +291,63 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
         deleteStack(stack);
     }
 
+    /** As measured on AWS: a block that is not an object fails the create, and no table is left. */
+    @Test
+    void aTimeToLiveBlockThatIsNotAnObjectFailsTheCreateAndLeavesNoTable() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-scalar-" + suffix;
+        String table = "ttl-scalar-table-" + suffix;
+
+        cloudFormation(stack, "CreateStack",
+                TEMPLATE.formatted(table, "dev", ",\n\"TimeToLiveSpecification\": false", ""));
+        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        describeStackEvents(stack).body(containsString("<ResourceStatusReason>Property [TimeToLiveSpecification]"
+                + " expected type: JSONObject, found: String</ResourceStatusReason>"));
+        dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(400)
+            .body("__type", containsString("ResourceNotFoundException"));
+
+        deleteStack(stack);
+    }
+
+    /** A block that is not an object is refused, not read as a removed block that turns TTL off. */
+    @Test
+    void anUpdateWithATimeToLiveBlockThatIsNotAnObjectKeepsTimeToLiveEnabled() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-scalar-up-" + suffix;
+        String table = "ttl-scalar-up-table-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", TTL_ENABLED, ""));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        cloudFormation(stack, "UpdateStack",
+                TEMPLATE.formatted(table, "dev", ",\n\"TimeToLiveSpecification\": [\"expiresAt\"]", ""));
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        describeStackEvents(stack).body(containsString("<ResourceStatusReason>Property [TimeToLiveSpecification]"
+                + " expected type: JSONObject, found: JSONArray</ResourceStatusReason>"));
+        describeTimeToLive(table)
+            .body("TimeToLiveDescription.TimeToLiveStatus", equalTo("ENABLED"))
+            .body("TimeToLiveDescription.AttributeName", equalTo("expiresAt"));
+
+        deleteStack(stack);
+    }
+
+    @Test
+    void aTimeToLiveBlockLeftOutWithNoValueIsNotRefused() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-novalue-" + suffix;
+        String table = "ttl-novalue-table-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev",
+                ",\n\"TimeToLiveSpecification\": {\"Ref\": \"AWS::NoValue\"}", ""));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        describeTimeToLive(table).body("TimeToLiveDescription.TimeToLiveStatus", equalTo("DISABLED"));
+
+        deleteStack(stack);
+    }
+
     private ValidatableResponse describeStackEvents(String stack) {
         return given()
             .contentType("application/x-www-form-urlencoded")

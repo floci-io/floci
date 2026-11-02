@@ -155,6 +155,31 @@ class QueryConstraintCheckTest {
                         "Status", "Pending")));
     }
 
+    /**
+     * One member quotes a pattern AWS gives for it rather than the one the model declares, which
+     * the vendored shape records beside it. What a value is held to stays the model's: the comma
+     * the model admits and the quoted text does not is still admitted.
+     */
+    @Test
+    void aShapeRecordingACapturedPatternQuotesItAndStillMatchesTheModels() throws Exception {
+        QueryConstraintCheck check = QueryConstraintCheck.of(MAPPER.readTree("""
+                {
+                  "operations": {"Link": "LinkRequest"},
+                  "shapes": {
+                    "LinkRequest": {"type": "structure", "required": ["Principal"], "members": {
+                      "Principal": "principalType"}},
+                    "principalType": {"type": "string", "min": 1, "max": 128,
+                      "pattern": "[\\\\w+=,.@-]+", "quotedPattern": "[\\\\w+=.@-]*"}
+                  }
+                }
+                """));
+
+        assertEquals(List.of("Value 'not a principal' at 'principal' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [\\w+=.@-]*"),
+                check.violations("Link", params("Principal", "not a principal")));
+        assertEquals(List.of(), check.violations("Link", params("Principal", "es,amazonaws.com")));
+    }
+
     /** A number is held to its range, and one that is no number at all is left to the operation. */
     @Test
     void aNumberIsHeldToItsRangeAndANonNumberIsLeftToTheOperation() throws Exception {
@@ -274,6 +299,35 @@ class QueryConstraintCheckTest {
         assertEquals(List.of("Value '' at 'node.name' failed to satisfy constraint: Member must"
                 + " have length greater than or equal to 1"),
                 QueryConstraintCheck.of(holdsItself).violations("Put", params("Node.Name", "")));
+    }
+
+    /**
+     * A pattern is compiled through {@link VendoredPatterns}, so a model that writes a code point
+     * above U+FFFF as a five-digit escape is read as the code point it spells: a supplementary
+     * character the class admits is not refused, and a C1 control it excludes still is. Compiled
+     * as the model writes it, Java would answer both the other way round.
+     */
+    @Test
+    void aPatternCarryingAWideEscapeIsCompiledAsTheModelMeansIt() throws Exception {
+        QueryConstraintCheck check = QueryConstraintCheck.of(MAPPER.readTree("""
+                {
+                  "operations": {"Put": "PutRequest"},
+                  "shapes": {
+                    "PutRequest": {"type": "structure", "members": {"Name": "wideType"}},
+                    "wideType": {"type": "string",
+                      "pattern": "[\\\\u0020-\\\\u007E\\\\u10000-\\\\u10FFFF]+"}
+                  }
+                }
+                """));
+
+        assertEquals(List.of(), check.violations("Put",
+                params("Name", "ok" + Character.toString(0x1F600))));
+
+        assertEquals(List.of("Value 'ok" + Character.toString(0x81) + "' at 'name' failed to satisfy"
+                + " constraint: Member must satisfy regular expression pattern:"
+                + " [\\u0020-\\u007E\\u10000-\\u10FFFF]+"),
+                check.violations("Put", params("Name", "ok" + Character.toString(0x81))),
+                "the message quotes the pattern as the model wrote it");
     }
 
     /**

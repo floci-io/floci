@@ -889,6 +889,19 @@ class S3ServiceTest {
     }
 
     @Test
+    void aSuspendedDeleteFiresDeleteMarkerCreatedWithoutAVersionId() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-suspended-delete");
+        service.putBucketVersioning("test-bucket", "Suspended");
+
+        service.deleteObject("test-bucket", "k.txt");
+
+        JsonNode record = onlyRecordedS3Event(lambdaInvoker);
+        assertEquals("ObjectRemoved:DeleteMarkerCreated", record.path("eventName").asText());
+        assertTrue(record.path("s3").path("object").path("versionId").isMissingNode());
+    }
+
+    @Test
     void deleteObjectVersionThatDoesNotExistFiresNoNotification() {
         RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
         S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-delete-missing-version");

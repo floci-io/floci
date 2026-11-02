@@ -73,9 +73,19 @@ public class FlociDuckClient {
      * default account.
      */
     public void execute(String sql, String setupDdl, String outputS3Path, String accessKeyId) {
+        execute(sql, setupDdl, outputS3Path, accessKeyId, null, null);
+    }
+
+    /**
+     * Variant of {@link #execute(String, String, String, String)} that passes
+     * explicit credentials (including session token for SigV4 authentication).
+     */
+    public void execute(String sql, String setupDdl, String outputS3Path,
+                        String accessKeyId, String secretAccessKey, String sessionToken) {
         String duckUrl = duckManager.ensureReady();
 
-        Map<String, Object> body = buildBaseBody(sql, setupDdl, accessKeyId);
+        String effectiveSetup = injectSessionToken(setupDdl, sessionToken);
+        Map<String, Object> body = buildBaseBody(sql, effectiveSetup, accessKeyId, secretAccessKey);
         if (outputS3Path != null) {
             body.put("output_s3_path", outputS3Path);
         }
@@ -101,21 +111,43 @@ public class FlociDuckClient {
      * {@link #execute(String, String, String, String)} for details.
      */
     public List<Map<String, Object>> query(String sql, String setupDdl, String accessKeyId) {
+        return query(sql, setupDdl, accessKeyId, null, null);
+    }
+
+    /**
+     * Variant of {@link #query(String, String, String)} that passes
+     * explicit credentials (including session token for SigV4 authentication).
+     */
+    public List<Map<String, Object>> query(String sql, String setupDdl,
+                                           String accessKeyId, String secretAccessKey, String sessionToken) {
         String duckUrl = duckManager.ensureReady();
 
-        Map<String, Object> body = buildBaseBody(sql, setupDdl, accessKeyId);
+        String effectiveSetup = injectSessionToken(setupDdl, sessionToken);
+        Map<String, Object> body = buildBaseBody(sql, effectiveSetup, accessKeyId, secretAccessKey);
 
         String responseBody = post(duckUrl + "/query", body, "query");
         return parseQueryRows(responseBody);
     }
 
+    static String injectSessionToken(String setupDdl, String sessionToken) {
+        if (sessionToken == null || sessionToken.isBlank()) {
+            return setupDdl;
+        }
+        String setToken = "SET s3_session_token = '" + sessionToken.replace("'", "''") + "';\n";
+        return setupDdl == null || setupDdl.isBlank() ? setToken : setToken + setupDdl;
+    }
+
     // ── internals ─────────────────────────────────────────────────────────────
 
     private Map<String, Object> buildBaseBody(String sql, String setupDdl) {
-        return buildBaseBody(sql, setupDdl, null);
+        return buildBaseBody(sql, setupDdl, null, null);
     }
 
     private Map<String, Object> buildBaseBody(String sql, String setupDdl, String accessKeyId) {
+        return buildBaseBody(sql, setupDdl, accessKeyId, null);
+    }
+
+    private Map<String, Object> buildBaseBody(String sql, String setupDdl, String accessKeyId, String secretAccessKey) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("sql", sql);
         if (setupDdl != null && !setupDdl.isBlank()) {
@@ -127,7 +159,7 @@ public class FlociDuckClient {
         // matching account partition for any S3 read/write the SQL performs.
         // Anything else falls back to the configured default account.
         body.put("s3_access_key", accessKeyId == null || accessKeyId.isEmpty() ? "test" : accessKeyId);
-        body.put("s3_secret_key", "test");
+        body.put("s3_secret_key", secretAccessKey == null || secretAccessKey.isEmpty() ? "test" : secretAccessKey);
         body.put("s3_url_style", "path");
         return body;
     }

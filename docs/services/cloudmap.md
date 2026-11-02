@@ -12,10 +12,14 @@ Asynchronous operations (`CreateHttpNamespace`, `CreatePublicDnsNamespace`,
 `CreatePrivateDnsNamespace`, `DeleteNamespace`, `RegisterInstance`,
 `DeregisterInstance`) apply their effect synchronously and return an operation
 id. The operation reaches `SUCCESS` immediately by default, so a follow-up
-`GetOperation` call returns a completed operation without polling. No Route 53
-hosted zones are created: public and private DNS namespaces are assigned a
-synthetic `HostedZoneId` so SDK and CLI clients can exercise the full Cloud Map
-control flow locally.
+`GetOperation` call returns a completed operation without polling.
+
+Public and private DNS namespaces create a real Route 53 hosted zone named after
+the namespace (private zones are associated with the namespace's VPC and region)
+and report its id as `HostedZoneId`, so `route53 get-hosted-zone` and
+`aws_route53_record` against it work. `DeleteNamespace` deletes the zone with the
+namespace; if you added records of your own to the zone, the delete fails with
+`HostedZoneNotEmpty` and the namespace is kept. HTTP namespaces have no zone.
 
 `ListNamespaces`, `ListServices`, and `ListOperations` accept `MaxResults` from
 1 to 100 (default 100) and an opaque `NextToken`. Final and empty collections
@@ -84,11 +88,11 @@ containers, not to processes on the host.
 | Operation | Notes |
 |-----------|-------|
 | `CreateHttpNamespace` | Creates an `HTTP` namespace; returns an operation id |
-| `CreatePublicDnsNamespace` | Creates a `DNS_PUBLIC` namespace with a synthetic `HostedZoneId` |
-| `CreatePrivateDnsNamespace` | Creates a `DNS_PRIVATE` namespace; requires `Vpc`, assigns a `HostedZoneId` |
+| `CreatePublicDnsNamespace` | Creates a `DNS_PUBLIC` namespace and a public Route 53 hosted zone, reported as `HostedZoneId` |
+| `CreatePrivateDnsNamespace` | Creates a `DNS_PRIVATE` namespace and a private Route 53 hosted zone associated with `Vpc` (required), reported as `HostedZoneId` |
 | `GetNamespace` | Returns a namespace by `Id` |
 | `ListNamespaces` | Lists namespaces in the current region |
-| `DeleteNamespace` | Deletes an empty namespace; fails with `ResourceInUse` if it still has services |
+| `DeleteNamespace` | Deletes an empty namespace and its hosted zone; fails with `ResourceInUse` if it still has services, `HostedZoneNotEmpty` if the zone holds records you added |
 | `CreateService` | Creates a service (optionally under a namespace), tracks revision and instance count |
 | `GetService` | Returns a service by `Id` |
 | `ListServices` | Lists services, optionally filtered by `NamespaceId` |
@@ -199,7 +203,7 @@ print(found["Instances"])
 
 ## Out of Scope
 
-- Route 53 hosted zone / record set creation.
+- Route 53 record sets managed by Cloud Map. A namespace's hosted zone exists, but instances are answered from Cloud Map state rather than written into it as records.
 - Route 53 health checks backing `HealthCheckConfig` (custom health status is stored, not actively probed).
 - `AWS_INIT_HEALTH_STATUS` and `AWS_EC2_INSTANCE_ID` on `RegisterInstance`. Every instance registers `HEALTHY`, which is AWS's own initial status when `AWS_INIT_HEALTH_STATUS` is absent, so only a caller that explicitly asks for `UNHEALTHY` sees a difference.
 - Cross-region namespace and service discovery. A DNS query carries no region, so a name resolves through whichever namespace copy holds instances.

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iot;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iot.model.IotDomainConfiguration;
 import io.github.hectorvent.floci.services.iot.model.IotDomainConfiguration.AuthorizerConfig;
@@ -137,7 +138,7 @@ public class IotDomainConfigurationController {
         response.put("serviceType", configuration.getServiceType());
         response.put("domainType", configuration.getDomainType());
         if (configuration.getLastStatusChangeDate() != null) {
-            response.put("lastStatusChangeDate", configuration.getLastStatusChangeDate().toEpochMilli() / 1000.0);
+            response.put("lastStatusChangeDate", EpochSeconds.fromInstant(configuration.getLastStatusChangeDate()));
         }
         if (configuration.getTlsConfig() != null) {
             putIfPresent(response.putObject("tlsConfig"), "securityPolicy", configuration.getTlsConfig().securityPolicy());

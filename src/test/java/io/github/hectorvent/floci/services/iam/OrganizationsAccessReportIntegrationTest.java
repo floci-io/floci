@@ -316,7 +316,7 @@ class OrganizationsAccessReportIntegrationTest {
         iam(MANAGEMENT_ACCOUNT, "GenerateOrganizationsAccessReport")
         .when().post("/").then().statusCode(400)
                 .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value"
-                        + " null at 'entityPath' failed to satisfy constraint: Member must not be"
+                        + " at 'entityPath' failed to satisfy constraint: Member must not be"
                         + " null"));
     }
 

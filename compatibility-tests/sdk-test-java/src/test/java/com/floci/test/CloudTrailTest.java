@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.cloudtrail.model.CreateTrailResponse;
 import software.amazon.awssdk.services.cloudtrail.model.DescribeTrailsResponse;
@@ -14,6 +15,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("CloudTrail")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@Isolated
 class CloudTrailTest {
 
     private static CloudTrailClient cloudTrail;

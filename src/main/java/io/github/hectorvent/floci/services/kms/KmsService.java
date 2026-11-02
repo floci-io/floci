@@ -2258,9 +2258,16 @@ public class KmsService implements ResourceProvider {
             ensureAwsManagedKeys(region);
         }
         if (AwsArnUtils.isArnFor(keyIdOrArn, "kms")) {
-            String arnRegion = AwsArnUtils.parse(keyIdOrArn).region();
-            if (!region.equals(arnRegion)) {
-                throw new AwsException("NotFoundException", "Invalid arn " + arnRegion, 400);
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(keyIdOrArn);
+            if (!region.equals(arn.region())) {
+                throw new AwsException("NotFoundException", "Invalid arn " + arn.region(), 400);
+            }
+            // Floci does not evaluate key policies, so another account's key is never usable here;
+            // without this the store would answer with the caller's own key or alias of that name.
+            if (!arn.accountId().equals(regionResolver.getAccountId())) {
+                throw new AwsException("NotFoundException", arn.resource().startsWith("alias/")
+                        ? "Alias " + keyIdOrArn + " is not found."
+                        : "Key '" + keyIdOrArn + "' does not exist", 400);
             }
         }
         String id = keyIdOrArn;

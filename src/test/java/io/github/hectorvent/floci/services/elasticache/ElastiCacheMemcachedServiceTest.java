@@ -129,6 +129,27 @@ class ElastiCacheMemcachedServiceTest {
     }
 
     @Test
+    void createClusterKeepsRequestedEngineVersionAndAutoMinorVersionUpgrade() {
+        CacheCluster created = service.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                "pinned", "memcached", "1.5.16", null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null, null,
+                "us-east-1", null, false));
+        assertEquals("1.5.16", created.getEngineVersion());
+        assertFalse(created.isAutoMinorVersionUpgrade());
+
+        CacheCluster stored = service.getCacheCluster("pinned");
+        assertEquals("1.5.16", stored.getEngineVersion());
+        assertFalse(stored.isAutoMinorVersionUpgrade());
+    }
+
+    @Test
+    void createClusterDefaultsAutoMinorVersionUpgradeToTrue() {
+        service.createCacheCluster(request("plain-upgrade"));
+
+        assertTrue(service.getCacheCluster("plain-upgrade").isAutoMinorVersionUpgrade());
+    }
+
+    @Test
     void createClusterDefaultsToOneNodeOfADefaultType() {
         service.createCacheCluster(request("plain"));
 

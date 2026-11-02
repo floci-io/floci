@@ -5063,15 +5063,23 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setStorageEncrypted(storageEncrypted);
         cluster.setContainerStorageResourceId(clusterResourceId);
         if (!mock) {
-            String image = imageForEngine(engine, engineVersion);
-            String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
-            String clusterDockerVolumeName = newVolumeName(
-                    clusterVolumeId, clusterResourceId);
-            RdsContainerHandle handle = containerManager.tryStart(
-                    clusterArn, id, clusterResourceId, clusterDockerVolumeName,
-                    engine, image,
-                    masterUsername, masterPassword, databaseName,
-                    clusterEngineParameters(currentAccountId(), effectiveRegion, paramGroupName));
+            String clusterVolumeId;
+            String clusterDockerVolumeName;
+            RdsContainerHandle handle;
+            try {
+                String image = imageForEngine(engine, engineVersion);
+                clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
+                clusterDockerVolumeName = newVolumeName(
+                        clusterVolumeId, clusterResourceId);
+                handle = containerManager.tryStart(
+                        clusterArn, id, clusterResourceId, clusterDockerVolumeName,
+                        engine, image,
+                        masterUsername, masterPassword, databaseName,
+                        clusterEngineParameters(currentAccountId(), effectiveRegion, paramGroupName));
+            } catch (RuntimeException | Error e) {
+                releaseProxyPort(proxyPort);
+                throw e;
+            }
             if (handle != null) {
                 cluster.setContainerId(handle.getContainerId());
                 cluster.setContainerHost(handle.getHost());
@@ -5097,32 +5105,71 @@ public class RdsService implements Resettable, ResourceProvider {
             attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
         }
 
+        String clusterAccountId = currentAccountId();
+        boolean clusterWriteStarted = false;
+        boolean proxyStartupCleanupFailed = false;
         try {
             if (!mock && hasBackend(cluster.getContainerHost(), cluster.getContainerPort())) {
                 String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
                 final String accountId = accountIdFromArn(cluster.getDbClusterArn());
                 final String clusterRegion = regionFromArn(cluster.getDbClusterArn());
-                proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
-                    cluster.getDbClusterArn(),
-                        engine, iamEnabled, proxyPort,
-                        cluster.getContainerHost(), cluster.getContainerPort(),
-                        cluster.getEndpoint().address(),
-                        effectiveMasterUser, masterPassword, databaseName,
-                        (user, pw) -> validateDbClusterPasswordForScope(
-                                accountId, clusterRegion, id, user, pw),
-                        proxyBinding(engine, cluster.getEndpoint().address(), cluster.getEndpoint().port(),
-                                clusterRegion, accountId, cluster.getDbClusterResourceId()));
+                try {
+                    proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
+                            cluster.getDbClusterArn(),
+                            engine, iamEnabled, proxyPort,
+                            cluster.getContainerHost(), cluster.getContainerPort(),
+                            cluster.getEndpoint().address(),
+                            effectiveMasterUser, masterPassword, databaseName,
+                            (user, pw) -> validateDbClusterPasswordForScope(
+                                    accountId, clusterRegion, id, user, pw),
+                            proxyBinding(engine, cluster.getEndpoint().address(), cluster.getEndpoint().port(),
+                                    clusterRegion, accountId, cluster.getDbClusterResourceId()));
+                } catch (RuntimeException startupFailure) {
+                    // A failed stop before proxy registration leaves no listener for stopProxy to find.
+                    proxyStartupCleanupFailed = startupFailure.getSuppressed().length > 0;
+                    throw startupFailure;
+                }
             }
 
             cluster.setServerlessV2MinCapacity(serverlessV2MinCapacity);
             cluster.setServerlessV2MaxCapacity(serverlessV2MaxCapacity);
             cluster.setServerlessV2SecondsUntilAutoPause(effectiveAutoPauseSeconds);
-            putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+            clusterWriteStarted = true;
+            putClusterForScope(clusterAccountId, effectiveRegion, id, cluster);
         } catch (RuntimeException e) {
-            // The cluster is not persisted, so DeleteDBCluster cannot reach the secret we just
-            // created: roll it back here rather than leave an orphaned RDS-owned secret.
-            if (manageMasterUserPassword) {
-                detachManagedMasterUserSecret(cluster, effectiveRegion);
+            boolean clusterRemoved = !clusterWriteStarted;
+            if (clusterWriteStarted) {
+                attemptRollback(e, () -> deleteClusterForScope(clusterAccountId, effectiveRegion, id));
+                try {
+                    clusterRemoved = !scopedKeyExists(
+                            clusters, clusterAccountId, dbResourceKey(effectiveRegion, id));
+                } catch (RuntimeException verificationFailure) {
+                    if (verificationFailure != e) {
+                        e.addSuppressed(verificationFailure);
+                    }
+                }
+            }
+            if (clusterRemoved) {
+                boolean proxyStopped = mock;
+                if (!mock) {
+                    try {
+                        proxyManager.stopProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id));
+                        proxyStopped = true;
+                    } catch (RuntimeException cleanupFailure) {
+                        if (cleanupFailure != e) {
+                            e.addSuppressed(cleanupFailure);
+                        }
+                    }
+                    if (cluster.getContainerId() != null) {
+                        attemptRollback(e, () -> containerManager.stop(buildClusterHandle(cluster)));
+                    }
+                }
+                if (manageMasterUserPassword) {
+                    attemptRollback(e, () -> detachManagedMasterUserSecret(cluster, effectiveRegion));
+                }
+                if (proxyStopped && !proxyStartupCleanupFailed) {
+                    releaseProxyPort(proxyPort);
+                }
             }
             throw e;
         }
@@ -7524,11 +7571,10 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public Collection<DbParameterGroup> listDbParameterGroups(
             String filterName, String region) {
-        String effectiveRegion = effectiveRegion(region);
         if (filterName != null && !filterName.isBlank()) {
-            DbParameterGroup group = findParameterGroupForRegion(filterName, effectiveRegion);
-            return group != null ? List.of(group) : List.of();
+            return List.of(getDbParameterGroup(filterName, region));
         }
+        String effectiveRegion = effectiveRegion(region);
         Map<String, DbParameterGroup> unique = new LinkedHashMap<>();
         List<DbParameterGroup> storedGroups;
         if (parameterGroups instanceof AccountAwareStorageBackend<DbParameterGroup> aware) {
@@ -11163,6 +11209,15 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.getAssociatedRoles().add(new DbRoleAssociation(roleArn, blankToNull(featureName)));
         putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
         LOG.infov("Role {0} associated with DB cluster {1}", roleArn, clusterId);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
+    /** Stores the KmsKeyId a CreateDBCluster request carries, which {@code createDbCluster} has no argument for. */
+    public synchronized DbCluster setNewDbClusterKmsKeyId(String region, String clusterId, String kmsKeyId) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        cluster.setKmsKeyId(kmsKeyId);
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 

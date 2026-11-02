@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.AccessDetail;
 import software.amazon.awssdk.services.iam.model.AddRoleToInstanceProfileRequest;
@@ -125,6 +126,7 @@ import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("IAM Identity and Access Management")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("organizations")
 class IamTest {
 
     private static IamClient iam;

@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.ListRecommendationsFilterKey;
@@ -28,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * rather than a sentence.
  */
 @DisplayName("SES v2 Recommendations")
+@ResourceLock("ses-account")
 class SesRecommendationTest {
 
     private static final String DOMAIN = TestFixtures.uniqueName("compat-advisor") + ".example.com";

@@ -158,6 +158,10 @@ class S3OwnerIdentityIntegrationTest {
         .then().statusCode(200);
 
         given().header("Authorization", authorization(ACCOUNT_TWO))
+        .when().delete("/" + bucket + "?publicAccessBlock")
+        .then().statusCode(204);
+
+        given().header("Authorization", authorization(ACCOUNT_TWO))
                 .header("x-amz-acl", "public-read")
         .when().put("/" + bucket + "/public.txt")
         .then().statusCode(200);

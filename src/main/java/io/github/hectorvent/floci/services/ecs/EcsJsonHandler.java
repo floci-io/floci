@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ecs.container.HostVolumePolicy;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
@@ -1140,9 +1141,9 @@ public class EcsJsonHandler {
             brief.put("serviceArn", d.getServiceArn());
             brief.put("clusterArn", d.getClusterArn());
             brief.put("status", d.getStatus());
-            if (d.getCreatedAt() != null) { brief.put("createdAt", d.getCreatedAt().toEpochMilli() / 1000.0); }
-            if (d.getStartedAt() != null) { brief.put("startedAt", d.getStartedAt().toEpochMilli() / 1000.0); }
-            if (d.getFinishedAt() != null) { brief.put("finishedAt", d.getFinishedAt().toEpochMilli() / 1000.0); }
+            if (d.getCreatedAt() != null) { brief.put("createdAt", EpochSeconds.fromInstant(d.getCreatedAt())); }
+            if (d.getStartedAt() != null) { brief.put("startedAt", EpochSeconds.fromInstant(d.getStartedAt())); }
+            if (d.getFinishedAt() != null) { brief.put("finishedAt", EpochSeconds.fromInstant(d.getFinishedAt())); }
             if (d.getTargetServiceRevisionArn() != null) {
                 brief.put("targetServiceRevisionArn", d.getTargetServiceRevisionArn());
             }
@@ -1381,7 +1382,7 @@ public class EcsJsonHandler {
         for (JsonNode item : node) {
             result.add(new VolumeFrom(
                     item.path("sourceContainer").asText(),
-                    item.path("readOnly").asBoolean(false)));
+                    item.hasNonNull("readOnly") ? item.get("readOnly").asBoolean() : null));
         }
         return result;
     }
@@ -1559,7 +1560,7 @@ public class EcsJsonHandler {
             result.add(new MountPoint(
                     item.path("sourceVolume").asText(),
                     item.path("containerPath").asText(),
-                    item.path("readOnly").asBoolean(false)));
+                    item.hasNonNull("readOnly") ? item.get("readOnly").asBoolean() : null));
         }
         return result;
     }

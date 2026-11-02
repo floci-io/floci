@@ -1717,8 +1717,8 @@ class IamIntegrationTest {
         .when().post("/").then()
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value null"
-                    + " at 'roleName' failed to satisfy constraint: Member must not be null"));
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at"
+                    + " 'roleName' failed to satisfy constraint: Member must not be null"));
 
         given()
             .formParam("Action", "CreateRole")

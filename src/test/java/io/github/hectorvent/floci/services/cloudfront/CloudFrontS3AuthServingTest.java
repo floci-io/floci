@@ -153,6 +153,7 @@ class CloudFrontS3AuthServingTest {
         s3Service.putObject(bucket, "index.html", body.getBytes(StandardCharsets.UTF_8),
                 "text/html", Map.of());
         if (publicRead) {
+            s3Service.deletePublicAccessBlock(bucket);
             s3Service.putBucketPolicy(bucket, publicReadPolicy(bucket));
         }
 
