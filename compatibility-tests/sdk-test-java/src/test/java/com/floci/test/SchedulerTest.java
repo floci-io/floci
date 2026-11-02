@@ -644,12 +644,17 @@ class SchedulerTest {
             for (String name : new String[]{"s-1", "s-2"}) {
                 try {
                     scheduler.deleteSchedule(DeleteScheduleRequest.builder().name(name).groupName(groupA).build());
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                    // Best-effort cleanup: the schedule is absent when the test failed before creating it,
+                    // and a cleanup error must not mask that original failure.
+                }
             }
             for (String group : new String[]{groupA, groupB}) {
                 try {
                     scheduler.deleteScheduleGroup(DeleteScheduleGroupRequest.builder().name(group).build());
-                } catch (Exception ignored) {}
+                } catch (Exception ignored) {
+                    // Best-effort cleanup, as above: the group may never have been created.
+                }
             }
         }
     }

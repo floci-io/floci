@@ -809,10 +809,12 @@ class SchedulerServiceTest {
                 service.listScheduleGroups(null, 1, "", REGION));
         assertEquals("ValidationException", emptyGroups.getErrorCode());
         assertEquals(400, emptyGroups.getHttpStatus());
+        assertEquals("Pagination token must be between 1 and 2048 characters.", emptyGroups.getMessage());
         AwsException emptySchedules = assertThrows(AwsException.class, () ->
                 service.listSchedules(null, null, null, 1, "", REGION));
         assertEquals("ValidationException", emptySchedules.getErrorCode());
         assertEquals(400, emptySchedules.getHttpStatus());
+        assertEquals("Pagination token must be between 1 and 2048 characters.", emptySchedules.getMessage());
     }
 
     @Test
