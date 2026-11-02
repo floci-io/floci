@@ -6,6 +6,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
@@ -791,6 +794,48 @@ class ExpressionEvaluatorTest {
                     ExpressionEvaluator.validateExpression("a AND OR b", "ConditionExpression", null, null));
             assertEquals("ValidationException", e.getErrorCode());
             assertTrue(e.getMessage().contains("Invalid ConditionExpression: Syntax error"), e.getMessage());
+        }
+
+        @ParameterizedTest
+        @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+                attribute_not_exists(       | <EOF>           | (
+                a = = b                     | =               | = = b
+                `  ) a`                     | )               | `  ) a`
+                a = :v b                    | b               | :v b
+                a IN :v                     | :v              | IN :v
+                a BETWEEN :v OR :v          | OR              | :v OR :v
+                a                           | <EOF>           | a
+                `   `                       | <EOF>           | `   `
+                `attribute_not_exists(   `  | <EOF>           | `(   `
+                a.b. = :v                   | =               | . = :v
+                a[x] = :v                   | x               | [x]
+                a[1 = :v                    | =               | 1 = :v
+                a = 1.5                     | 1               | = 1.
+                _a = :v                     | _               | _a
+                a\u00e9 = :v                | \u00e9          | a\u00e9 =
+                a = :                       | :               | = :
+                a = :v \uD83D\uDE00         | \uD83D\uDE00    | :v \uD83D\uDE00
+                `a\u3000= :v`               | `\u3000`        | `a\u3000=`
+                a = :v AND $ = = b          | $               | AND $ =
+                """)
+        void syntaxErrorsNameTheTokenAndTheTextAroundIt(String expression, String token, String near) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> ExpressionEvaluator.validateSyntax(expression, "ConditionExpression"));
+            assertEquals("Invalid ConditionExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"",
+                    e.getMessage());
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"a[ 1 ] = :v", "a [1] = :v", "a_b = :v"})
+        void spacesInAListIndexAndUnderscoresInsideANameAreAccepted(String expression) {
+            assertDoesNotThrow(() -> ExpressionEvaluator.validateSyntax(expression, "ConditionExpression"));
+        }
+
+        @Test
+        void redundantParenthesesAreReportedBeforeAnUnknownCharacter() {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> ExpressionEvaluator.validateSyntax("((a = :v)) $", "ConditionExpression"));
+            assertEquals("Invalid ConditionExpression: The expression has redundant parentheses;", e.getMessage());
         }
     }
 }

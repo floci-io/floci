@@ -2427,6 +2427,8 @@ class NativeDynamoDbJsonHandlerTest {
             [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":""}}] | Invalid ConditionExpression: The expression can not be empty;
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"","ConditionExpression":""}}] | Invalid ConditionExpression: The expression can not be empty;
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":""}}] | Invalid UpdateExpression: The expression can not be empty;
+            [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":"   "}}] | Invalid ConditionExpression: Syntax error; token: "<EOF>", near: "   "
+            [{"Put":{"TableName":"Missing","Item":{}}},{"ConditionCheck":{"TableName":"Missing","Key":{},"ConditionExpression":"attribute_not_exists("}}] | Invalid ConditionExpression: Syntax error; token: "<EOF>", near: "("
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :zz","ConditionExpression":"a = :yy"}}] | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :yy
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :zz","ConditionExpression":"contains(a, a)"}}] | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [a]
             [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":"attribute_not_exists(a)","ExpressionAttributeNames":{"#n":"n"},"ExpressionAttributeValues":{":v":{"S":"x"}}}}] | Value provided in ExpressionAttributeNames unused in expressions: keys: {#n}

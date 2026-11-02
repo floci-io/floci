@@ -198,13 +198,13 @@ class DynamoDbAccessPathValidatorTest {
     void rejectsMalformedKeyAndFilterExpressions() {
         AwsException keyError = assertThrows(AwsException.class,
                 () -> validateExpression(tablePath, "pk ="));
-        assertEquals("Invalid KeyConditionExpression: Syntax error", keyError.getMessage());
+        assertEquals("Invalid KeyConditionExpression: Syntax error; token: \"<EOF>\", near: \"=\"", keyError.getMessage());
 
         AwsException filterError = assertThrows(AwsException.class,
                 () -> DynamoDbAccessPathValidator.validateQuery(
                         table, tablePath, null, "pk = :pk", "status =", null, null,
                         expressionValues(":pk")));
-        assertEquals("Invalid FilterExpression: Syntax error", filterError.getMessage());
+        assertEquals("Invalid FilterExpression: Syntax error; token: \"<EOF>\", near: \"=\"", filterError.getMessage());
     }
 
     @Test
