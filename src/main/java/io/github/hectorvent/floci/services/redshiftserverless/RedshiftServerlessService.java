@@ -1234,6 +1234,27 @@ public class RedshiftServerlessService implements Resettable {
         }
     }
 
+    /** The namespace a namespace ARN names in the Region, empty when there is none. */
+    public Optional<Namespace> findNamespaceByArn(String namespaceArn, String region) {
+        return namespaceArn == null ? Optional.empty() : namespaceByArn(namespaceArn, region);
+    }
+
+    /**
+     * The live connection details of the workgroup that serves the namespace a namespace ARN names. A
+     * namespace has at most one workgroup, so this is how a zero-ETL integration that targets a
+     * namespace reaches its database.
+     */
+    public WorkgroupTarget getNamespaceWorkgroupTarget(String namespaceArn, String region) {
+        Namespace namespace = findNamespaceByArn(namespaceArn, region)
+                .orElseThrow(() -> resourceNotFound(namespaceArn));
+        Workgroup workgroup = workgroups.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(candidate -> namespace.getNamespaceName().equals(candidate.getNamespaceName()))
+                .findFirst()
+                .orElseThrow(() -> ServerlessSupport.validation(
+                        "Namespace " + namespace.getNamespaceName() + " has no workgroup."));
+        return getWorkgroupTarget(workgroup.getWorkgroupName(), region);
+    }
+
     /** The workgroup a workgroup name or ARN names in the Region, as the Data API reads either; empty when none. */
     public Optional<Workgroup> findWorkgroupByNameOrArn(String nameOrArn, String region) {
         return AwsArnUtils.looksLikeArn(nameOrArn) ? workgroupByArn(nameOrArn, region)

@@ -140,7 +140,7 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `DeleteTags` | Remove tags by key from a resource |
 | `DescribeTags` | List tagged resources and their tags |
 | `CreateClusterSubnetGroup` | Register a cluster subnet group (metadata only) |
-| `CreateIntegration` | Create a DynamoDB Streams to provisioned Redshift zero-ETL integration. Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
+| `CreateIntegration` | Create a DynamoDB zero-ETL integration from a table (or a stream) to a Redshift Serverless namespace (or a provisioned cluster). Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
 | `DescribeIntegrations` | List integrations with `Filters`, `MaxRecords` and `Marker` pagination, or the one an `IntegrationArn` names |
 | `DeleteIntegration` | Remove a zero-ETL integration |
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
@@ -375,9 +375,28 @@ Set `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED=false` to turn publishin
 
 ## DynamoDB zero-ETL
 
-The supported zero-ETL path is DynamoDB Streams to a provisioned Redshift cluster. The source ARN
-must identify an enabled local DynamoDB stream, and the target ARN must identify an existing
-provisioned Redshift cluster.
+As in AWS, `SourceArn` is a DynamoDB table ARN and `TargetArn` is a Redshift Serverless namespace
+ARN. Floci also accepts a DynamoDB stream ARN as the source and a provisioned cluster ARN
+(`arn:aws:redshift:<region>:<account>:cluster:<identifier>`) as the target. A source table or stream
+that does not exist is refused with `IntegrationSourceNotFoundFault`, and a namespace that does not
+exist with `IntegrationTargetNotFoundFault`. A provisioned cluster target that does not exist is
+refused with `ClusterNotFound`.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift create-integration \
+  --integration-name orders-zero-etl \
+  --source-arn arn:aws:dynamodb:us-east-1:000000000000:table/orders \
+  --target-arn arn:aws:redshift-serverless:us-east-1:000000000000:namespace/<namespace-id>
+```
+
+A namespace target is written through the namespace's workgroup, into the namespace's database as
+its admin user. Until the namespace has a workgroup, polling fails and the integration reports
+`failed`; it becomes `active` on the first poll after the workgroup exists.
+
+AWS reads the changes of a table source without DynamoDB Streams. Floci reads them from the table's
+latest stream, so a table source replicates changes only while the table has one, and a table that
+never had a stream gets its initial backfill only. The integration picks up a stream turned on after
+it was created, and moves to the new stream when streams are turned off and on again.
 
 Each stream record is written to a stable landing table named `floci_zetl_<integration-id>`.
 The landing table stores the event id, event name, source, region, sequence number, creation time,
@@ -422,8 +441,9 @@ data-type, pause and resume, serverless restore and modification events do not o
 is best effort. It is skipped when the EventBridge service is disabled, a refused or failed
 delivery is logged, and neither changes the outcome of the Redshift operation.
 
-Serverless Redshift targets, schema inference, and relational projection are not supported in this
-first implementation.
+Schema inference, relational projection and `CREATE DATABASE ... FROM INTEGRATION` are not
+supported, and a provisioned cluster's namespace ARN (`arn:aws:redshift:<region>:<account>:namespace:<id>`)
+is not accepted as a target.
 
 ## CloudFormation
 

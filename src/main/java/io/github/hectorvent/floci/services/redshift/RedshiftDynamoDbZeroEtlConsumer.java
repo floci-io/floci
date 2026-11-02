@@ -26,6 +26,7 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -137,13 +138,19 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         if (targetPaused(integration)) {
             return;
         }
-        writer.createLandingTable(integration.getAccountId(), integration.getTargetClusterIdentifier(),
+        writer.createLandingTable(integration.getAccountId(), integration.getTargetArn(),
                 integration.getLandingTableName());
         if (!integration.isBackfillCompleted()) {
             pollBackfillPage(integration);
             return;
         }
-        DynamoDbStreamReader.Stream stream = DynamoDbStreamReader.Stream.of(integration.getSourceStreamArn());
+        String streamArn = followedStream(integration);
+        if (streamArn == null) {
+            // A table that never had a stream has nothing to replicate after its backfill.
+            redshiftService.recoverIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn());
+            return;
+        }
+        DynamoDbStreamReader.Stream stream = DynamoDbStreamReader.Stream.of(streamArn);
         Set<String> finished = finishedShards.computeIfAbsent(integration.getIntegrationArn(),
                 ignored -> ConcurrentHashMap.newKeySet());
         // ponytail: a shard whose read or write throws ends the tick for the shards after it; the next
@@ -159,7 +166,37 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         }
     }
 
+    /**
+     * The stream to read changes from. A stream source is that stream. A table source follows the
+     * table's latest stream: none until streams are first turned on, and a new one each time they are
+     * turned on again. A disabled stream stays readable, so its last records still land. Shard ids repeat
+     * across a table's streams, so moving to another stream drops the checkpoints of the old one; the new
+     * stream is then read from its trim horizon, and records already landed are skipped by their event id.
+     */
+    private String followedStream(Integration integration) {
+        String sourceArn = integration.getSourceArn();
+        if (sourceArn == null || RedshiftZeroEtlEndpoints.isStreamArn(sourceArn)) {
+            return integration.getSourceStreamArn();
+        }
+        String region = AwsArnUtils.parse(sourceArn).region();
+        String current = RequestScopes.callAs(integration.getAccountId(), region, () -> {
+            TableDefinition table = dynamoDb.tables().describeTable(new Scope(integration.getAccountId(), region),
+                    RedshiftZeroEtlEndpoints.tableName(sourceArn));
+            return table.getStreamArn();
+        });
+        if (!Objects.equals(current, integration.getSourceStreamArn())) {
+            integration.getShardSequenceNumbers().clear();
+            finishedShards.remove(integration.getIntegrationArn());
+            integration.setSourceStreamArn(current);
+        }
+        return current;
+    }
+
     private boolean targetPaused(Integration integration) {
+        if (integration.getTargetClusterIdentifier() == null) {
+            // Only a provisioned cluster pauses.
+            return false;
+        }
         try {
             return redshiftService.describeClustersForAccount(integration.getAccountId(),
                             integration.getTargetClusterIdentifier()).stream()
@@ -196,7 +233,7 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
             }
             return false;
         }
-        writer.writeBatch(integration.getAccountId(), integration.getTargetClusterIdentifier(),
+        writer.writeBatch(integration.getAccountId(), integration.getTargetArn(),
                 integration.getLandingTableName(),
                 records.stream().map(DynamoDbStreamReader.Record::awsRecord).toList());
         committed.put(shardId, records.get(records.size() - 1).sequenceNumber());
@@ -207,8 +244,10 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
 
     private void pollBackfillPage(Integration integration) {
         RequestScopes.runAs(integration.getAccountId(), () -> {
-            String tableName = extractTableName(integration.getSourceStreamArn());
-            String region = AwsArnUtils.parse(integration.getSourceStreamArn()).region();
+            String sourceArn = integration.getSourceArn() != null
+                    ? integration.getSourceArn() : integration.getSourceStreamArn();
+            String tableName = RedshiftZeroEtlEndpoints.tableName(sourceArn);
+            String region = AwsArnUtils.parse(sourceArn).region();
             Scope scope = new Scope(integration.getAccountId(), region);
             TableDefinition table = dynamoDb.tables().describeTable(scope, tableName);
             JsonNode exclusiveStartKey = parseBackfillKey(integration.getBackfillLastEvaluatedKey());
@@ -219,7 +258,7 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
                 List<JsonNode> records = result.items().stream()
                         .map(item -> toBackfillRecord(integration, item, table))
                         .toList();
-                writer.writeBatch(integration.getAccountId(), integration.getTargetClusterIdentifier(),
+                writer.writeBatch(integration.getAccountId(), integration.getTargetArn(),
                         integration.getLandingTableName(), records);
             }
 
@@ -248,11 +287,6 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
         dynamodb.set("Keys", keys);
         dynamodb.set("NewImage", item);
         return record;
-    }
-
-    private static String extractTableName(String sourceStreamArn) {
-        String resource = AwsArnUtils.parse(sourceStreamArn).resource();
-        return resource.substring("table/".length(), resource.indexOf("/stream/"));
     }
 
     private JsonNode parseBackfillKey(String backfillLastEvaluatedKey) {
