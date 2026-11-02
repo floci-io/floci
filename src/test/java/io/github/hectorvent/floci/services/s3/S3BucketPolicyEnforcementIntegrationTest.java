@@ -869,8 +869,8 @@ class S3BucketPolicyEnforcementIntegrationTest {
                 .put("/" + fixture.bucket() + "/plain-copy.txt")
                 .then().statusCode(403).body(containsString("<Code>AccessDenied</Code>"));
         given().filter(fixture.user().signer()).header("x-amz-copy-source", source)
-                .header("x-amz-server-side-encryption", "aws:kms")
-                .header("x-amz-server-side-encryption-aws-kms-key-id", BUCKET_KEY)
+                .header(SSE, "aws:kms")
+                .header(SSE_KEY, BUCKET_KEY)
                 .put("/" + fixture.bucket() + "/encrypted-copy.txt")
                 .then().statusCode(200);
     }
@@ -893,49 +893,199 @@ class S3BucketPolicyEnforcementIntegrationTest {
         assertEncryptedPut(fixture, "no-key.txt", "aws:kms", null, 403);
     }
 
-    private record EncryptionFixture(String bucket, Credentials user) {
+    /**
+     * A multipart upload under the same two statements. A part sends neither header, so it is judged
+     * by what its upload recorded. AWS does not document this; it was measured on S3 on 2026-10-30,
+     * each case here as S3 answered it. A case whose upload is opened before the policy stands uses a
+     * bucket with no default encryption: S3 records the bucket's default on an upload that asks for
+     * none, where Floci records only what the request asks for, so on a bucket defaulting to
+     * {@code aws:kms} such a part is admitted on S3 and refused here.
+     */
+    @Test
+    void anUploadOpenedWithTheBucketsKeyHasItsPartsAdmittedAndStandsUnderThatKey() {
+        EncryptionFixture fixture = kmsOnlyBucket();
+        S3RequestSigner user = fixture.user().signer();
+
+        String uploadId = given().filter(user).header(SSE, "aws:kms").header(SSE_KEY, BUCKET_KEY)
+                .post("/" + fixture.bucket() + "/large.bin?uploads")
+                .then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String etag = uploadPart(user, fixture, "large.bin", uploadId)
+                .then().statusCode(200).extract().header("ETag");
+        given().filter(user).contentType("application/xml")
+                .body("<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + etag
+                        + "</ETag></Part></CompleteMultipartUpload>")
+                .post("/" + fixture.bucket() + "/large.bin?uploadId=" + uploadId)
+                .then().statusCode(200);
+
+        given().filter(user).head("/" + fixture.bucket() + "/large.bin")
+                .then().statusCode(200)
+                .header(SSE, equalTo("aws:kms"))
+                .header(SSE_KEY, equalTo(BUCKET_KEY));
     }
+
+    @Test
+    void anUploadOpenedWithNoEncryptionUnderThePolicyIsRefusedAndNoObjectStands() {
+        EncryptionFixture fixture = kmsOnlyBucket();
+
+        given().filter(fixture.user().signer()).post("/" + fixture.bucket() + "/plain.bin?uploads")
+                .then().statusCode(403).body(containsString("AccessDenied"));
+
+        given().filter(fixture.owner()).head("/" + fixture.bucket() + "/plain.bin").then().statusCode(404);
+    }
+
+    @Test
+    void aPartOfAnUploadThatRecordedNoEncryptionIsRefusedAndNoObjectStands() {
+        EncryptionFixture fixture = bucketWithoutDefaultEncryption();
+        String uploadId = given().filter(fixture.user().signer()).post("/" + fixture.bucket() + "/plain.bin?uploads")
+                .then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        putKmsOnlyPolicy(fixture);
+
+        uploadPart(fixture.user().signer(), fixture, "plain.bin", uploadId)
+                .then().statusCode(403).body(containsString("AccessDenied"));
+
+        given().filter(fixture.owner()).head("/" + fixture.bucket() + "/plain.bin").then().statusCode(404);
+        given().filter(fixture.owner()).delete("/" + fixture.bucket() + "/plain.bin?uploadId=" + uploadId)
+                .then().statusCode(204);
+    }
+
+    @Test
+    void aPartOfAnUploadThatRecordedAnotherEncryptionIsRefused() {
+        EncryptionFixture fixture = bucketWithoutDefaultEncryption();
+        String uploadId = given().filter(fixture.user().signer()).header(SSE, "AES256")
+                .post("/" + fixture.bucket() + "/aes.bin?uploads")
+                .then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        putKmsOnlyPolicy(fixture);
+
+        uploadPart(fixture.user().signer(), fixture, "aes.bin", uploadId)
+                .then().statusCode(403).body(containsString("AccessDenied"));
+
+        given().filter(fixture.owner()).delete("/" + fixture.bucket() + "/aes.bin?uploadId=" + uploadId)
+                .then().statusCode(204);
+    }
+
+    @Test
+    void aPartNamingAnUploadNotHeldAnswersNoSuchUpload() {
+        EncryptionFixture fixture = kmsOnlyBucket();
+
+        uploadPart(fixture.user().signer(), fixture, "unknown.bin", "no-such-upload")
+                .then().statusCode(404).body(containsString("NoSuchUpload"));
+    }
+
+    @Test
+    void aPutNamingAnUploadButNoPartIsAnObjectWriteAndIsChecked() {
+        EncryptionFixture fixture = kmsOnlyBucket();
+        S3RequestSigner unpermitted = encryptionUser("unpermitted-" + suffix(), null).signer();
+
+        given().filter(unpermitted).contentType("text/plain").body("a write")
+                .put("/" + fixture.bucket() + "/written.txt?uploadId=no-such-upload")
+                .then().statusCode(403).body(containsString("AccessDenied"));
+
+        given().filter(fixture.owner()).head("/" + fixture.bucket() + "/written.txt").then().statusCode(404);
+    }
+
+    @Test
+    void aPutNamingAHeldUploadButNoPartIsJudgedByItsOwnHeaders() {
+        EncryptionFixture fixture = kmsOnlyBucket();
+        S3RequestSigner kmsOnly = encryptionUser("kms-only-identity-" + suffix(), """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:*","Resource":"*",
+                   "Condition":{"StringEquals":{"s3:x-amz-server-side-encryption":"aws:kms"}}}]}""").signer();
+        String uploadId = given().filter(kmsOnly).header(SSE, "aws:kms").header(SSE_KEY, BUCKET_KEY)
+                .post("/" + fixture.bucket() + "/held.bin?uploads")
+                .then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given().filter(kmsOnly).contentType("text/plain").body("a write")
+                .put("/" + fixture.bucket() + "/written.txt?uploadId=" + uploadId)
+                .then().statusCode(403).body(containsString("AccessDenied"));
+
+        given().filter(fixture.owner()).delete("/" + fixture.bucket() + "/held.bin?uploadId=" + uploadId)
+                .then().statusCode(204);
+    }
+
+    @Test
+    void aPartCopyNamingAnUploadNotHeldIsChecked() {
+        EncryptionFixture fixture = kmsOnlyBucket();
+        S3RequestSigner unpermitted = encryptionUser("unpermitted-" + suffix(), null).signer();
+
+        given().filter(unpermitted).header("x-amz-copy-source", "/" + fixture.bucket() + "/source.txt")
+                .put("/" + fixture.bucket() + "/copied.bin?partNumber=1&uploadId=no-such-upload")
+                .then().statusCode(403).body(containsString("AccessDenied"));
+    }
+
+    private record EncryptionFixture(String bucket, S3RequestSigner owner, Credentials user) {
+    }
+
+    private static final String SSE = "x-amz-server-side-encryption";
+    private static final String SSE_KEY = "x-amz-server-side-encryption-aws-kms-key-id";
+    private static final String ALLOW_S3_AND_KMS = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*","kms:*"],"Resource":"*"}]}""";
 
     private static void assertEncryptedPut(EncryptionFixture fixture, String key, String encryption, String kmsKeyId,
                                            int status) {
         RequestSpecification request = given().filter(fixture.user().signer()).contentType("text/plain").body(key);
         if (encryption != null) {
-            request.header("x-amz-server-side-encryption", encryption);
+            request.header(SSE, encryption);
         }
         if (kmsKeyId != null) {
-            request.header("x-amz-server-side-encryption-aws-kms-key-id", kmsKeyId);
+            request.header(SSE_KEY, kmsKeyId);
         }
         request.put("/" + fixture.bucket() + "/" + key).then().statusCode(status);
     }
 
+    private static Response uploadPart(S3RequestSigner signer, EncryptionFixture fixture, String key, String uploadId) {
+        return given().filter(signer).contentType("application/octet-stream").body("a part".getBytes())
+                .put("/" + fixture.bucket() + "/" + key + "?partNumber=1&uploadId=" + uploadId);
+    }
+
     /** A bucket defaulting to {@code aws:kms} that denies any other put, and a user allowed {@code s3:*} and {@code kms:*}. */
     private EncryptionFixture kmsOnlyBucket() {
-        String suffix = UUID.randomUUID().toString().substring(0, 8);
-        Credentials user = encryptionUser("kms-only-user-" + suffix, """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*","kms:*"],"Resource":"*"}]}""");
-        String bucket = encryptionBucket("kms-only-" + suffix, """
+        String suffix = suffix();
+        EncryptionFixture fixture = encryptionBucket("kms-only-" + suffix,
+                encryptionUser("kms-only-user-" + suffix, ALLOW_S3_AND_KMS), suffix, true);
+        putKmsOnlyPolicy(fixture);
+        return fixture;
+    }
+
+    /** A bucket with no default encryption and no policy yet, and a user allowed {@code s3:*} and {@code kms:*}. */
+    private EncryptionFixture bucketWithoutDefaultEncryption() {
+        String suffix = suffix();
+        return encryptionBucket("multipart-" + suffix,
+                encryptionUser("multipart-user-" + suffix, ALLOW_S3_AND_KMS), suffix, false);
+    }
+
+    /** Denies a put that does not name {@code aws:kms}, or names a key other than the bucket's. */
+    private static void putKmsOnlyPolicy(EncryptionFixture fixture) {
+        putBucketPolicyAs(fixture.bucket(), """
                 {"Version":"2012-10-17","Statement":[
                   {"Sid":"DenyUnencryptedPuts","Effect":"Deny","Principal":"*","Action":"s3:PutObject",
-                   "Resource":"arn:aws:s3:::kms-only-%1$s/*",
+                   "Resource":"arn:aws:s3:::%1$s/*",
                    "Condition":{"StringNotEquals":{"s3:x-amz-server-side-encryption":"aws:kms"}}},
                   {"Sid":"DenyWrongKmsKey","Effect":"Deny","Principal":"*","Action":"s3:PutObject",
-                   "Resource":"arn:aws:s3:::kms-only-%1$s/*",
+                   "Resource":"arn:aws:s3:::%1$s/*",
                    "Condition":{"StringNotEqualsIfExists":{"s3:x-amz-server-side-encryption-aws-kms-key-id":"%2$s"}}}]}
-                """.formatted(suffix, BUCKET_KEY), suffix);
-        return new EncryptionFixture(bucket, user);
+                """.formatted(fixture.bucket(), BUCKET_KEY), fixture.owner());
     }
 
     /** A bucket whose policy alone allows a user with no identity policy, on {@code key} being {@code value}. */
     private EncryptionFixture allowOnlyBucket(String key, String value) {
-        String suffix = UUID.randomUUID().toString().substring(0, 8);
-        Credentials user = encryptionUser("allow-only-user-" + suffix, null);
-        String bucket = encryptionBucket("allow-only-" + suffix, """
+        String suffix = suffix();
+        EncryptionFixture fixture = encryptionBucket("allow-only-" + suffix,
+                encryptionUser("allow-only-user-" + suffix, null), suffix, true);
+        putBucketPolicyAs(fixture.bucket(), """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Principal":{"AWS":"%s"},"Action":"s3:PutObject",
-                   "Resource":"arn:aws:s3:::allow-only-%s/*",
+                   "Resource":"arn:aws:s3:::%s/*",
                    "Condition":{"StringEquals":{"%s":"%s"}}}]}
-                """.formatted(user.userArn(), suffix, key, value), suffix);
-        return new EncryptionFixture(bucket, user);
+                """.formatted(fixture.user().userArn(), fixture.bucket(), key, value), fixture.owner());
+        return fixture;
+    }
+
+    private static String suffix() {
+        return UUID.randomUUID().toString().substring(0, 8);
     }
 
     private Credentials encryptionUser(String userName, String policy) {
@@ -947,19 +1097,20 @@ class S3BucketPolicyEnforcementIntegrationTest {
         return user;
     }
 
-    private String encryptionBucket(String bucket, String policy, String suffix) {
+    private EncryptionFixture encryptionBucket(String bucket, Credentials user, String suffix, boolean kmsDefault) {
         String ownerName = "encryption-owner-" + suffix;
         cleanup.register(() -> EnforcementFixtures.removeUser(endpoint.getPort(), auth(ACCOUNT_A, "iam"), ownerName));
         Credentials owner = createAccountAdmin(ownerName, ACCOUNT_A);
         cleanup.register(() -> EnforcementFixtures.removeBucket(endpoint.getPort(), owner.signer(), bucket));
         createBucketAs(bucket, owner.signer());
-        given().filter(owner.signer()).contentType("application/xml").body("""
-                <ServerSideEncryptionConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule>
-                  <ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>
-                    <KMSMasterKeyID>%s</KMSMasterKeyID></ApplyServerSideEncryptionByDefault>
-                </Rule></ServerSideEncryptionConfiguration>""".formatted(BUCKET_KEY))
-                .put("/" + bucket + "?encryption").then().statusCode(200);
-        putBucketPolicyAs(bucket, policy, owner.signer());
-        return bucket;
+        if (kmsDefault) {
+            given().filter(owner.signer()).contentType("application/xml").body("""
+                    <ServerSideEncryptionConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule>
+                      <ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>
+                        <KMSMasterKeyID>%s</KMSMasterKeyID></ApplyServerSideEncryptionByDefault>
+                    </Rule></ServerSideEncryptionConfiguration>""".formatted(BUCKET_KEY))
+                    .put("/" + bucket + "?encryption").then().statusCode(200);
+        }
+        return new EncryptionFixture(bucket, owner.signer(), user);
     }
 }
