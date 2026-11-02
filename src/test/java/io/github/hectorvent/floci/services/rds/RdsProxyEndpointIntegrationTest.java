@@ -214,4 +214,66 @@ class RdsProxyEndpointIntegrationTest {
         query("DescribeDBProxyEndpoints").when().post("/").then().statusCode(200)
                 .body(not(containsString("<member>")));
     }
+
+    @Test
+    @Order(7)
+    void anEndpointCreatedWithoutSecurityGroupsGetsItsVpcsDefaultGroup() {
+        String vpcId = ec2("CreateVpc").formParam("CidrBlock", "10.78.0.0/16")
+                .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString("CreateVpcResponse.vpc.vpcId");
+        String subnetA = subnet(vpcId, "10.78.1.0/24", "a");
+        String subnetB = subnet(vpcId, "10.78.2.0/24", "b");
+        // A second, non-default group in the VPC, so an unfiltered lookup cannot pass by luck.
+        ec2("CreateSecurityGroup").formParam("GroupName", "proxy-other")
+                .formParam("GroupDescription", "other").formParam("VpcId", vpcId)
+                .when().post("/").then().statusCode(200);
+        String defaultGroupId = ec2("DescribeSecurityGroups")
+                .formParam("Filter.1.Name", "vpc-id").formParam("Filter.1.Value.1", vpcId)
+                .formParam("Filter.2.Name", "group-name").formParam("Filter.2.Value.1", "default")
+                .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString("DescribeSecurityGroupsResponse.securityGroupInfo.item.groupId");
+        assertTrue(defaultGroupId != null && defaultGroupId.startsWith("sg-"), defaultGroupId);
+
+        String proxy = "pep-default-sg";
+        query("CreateDBProxy")
+                .formParam("DBProxyName", proxy)
+                .formParam("EngineFamily", "POSTGRESQL")
+                .formParam("RoleArn", "arn:aws:iam::000000000000:role/proxy")
+                .formParam("VpcSubnetIds.member.1", subnetA)
+                .formParam("VpcSubnetIds.member.2", subnetB)
+                .formParam("VpcSecurityGroupIds.member.1", "sg-proxy")
+                .formParam("Auth.member.1.AuthScheme", "SECRETS")
+                .formParam("Auth.member.1.SecretArn",
+                        "arn:aws:secretsmanager:" + REGION + ":000000000000:secret:db-AbCdEf")
+        .when().post("/").then().statusCode(200);
+        query("CreateDBProxyEndpoint")
+                .formParam("DBProxyName", proxy)
+                .formParam("DBProxyEndpointName", "no-groups")
+                .formParam("VpcSubnetIds.member.1", subnetA)
+                .formParam("VpcSubnetIds.member.2", subnetB)
+        .when().post("/").then().statusCode(200);
+
+        query("DescribeDBProxyEndpoints").formParam("DBProxyEndpointName", "no-groups")
+                .when().post("/").then().statusCode(200)
+                .body(MEMBERS + ".VpcId", equalTo(vpcId))
+                .body(MEMBERS + ".VpcSecurityGroupIds.member.size()", equalTo(1))
+                .body(MEMBERS + ".VpcSecurityGroupIds.member", equalTo(defaultGroupId));
+
+        query("DeleteDBProxy").formParam("DBProxyName", proxy).when().post("/").then().statusCode(200);
+    }
+
+    private static RequestSpecification ec2(String action) {
+        return given().header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=test/20261019/" + REGION + "/ec2/aws4_request")
+                .contentType(URLENC)
+                .formParam("Action", action)
+                .formParam("Version", "2016-11-15");
+    }
+
+    private static String subnet(String vpcId, String cidr, String azSuffix) {
+        return ec2("CreateSubnet").formParam("VpcId", vpcId).formParam("CidrBlock", cidr)
+                .formParam("AvailabilityZone", REGION + azSuffix)
+                .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString("CreateSubnetResponse.subnet.subnetId");
+    }
 }

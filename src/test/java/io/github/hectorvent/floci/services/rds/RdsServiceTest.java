@@ -11514,11 +11514,9 @@ class RdsServiceTest {
         SecurityGroup defaultGroup = new SecurityGroup();
         defaultGroup.setGroupId("sg-vpc-default");
         defaultGroup.setGroupName("default");
-        SecurityGroup otherGroup = new SecurityGroup();
-        otherGroup.setGroupId("sg-vpc-other");
-        otherGroup.setGroupName("other");
-        when(ec2Service.getSecurityGroupsForVpc("us-east-1", proxy.getVpcId(), Map.of()))
-                .thenReturn(List.of(otherGroup, defaultGroup));
+        // Picking the group out of the VPC is Ec2Service's job, covered in Ec2ServiceTest.
+        when(ec2Service.defaultSecurityGroupOf("us-east-1", proxy.getVpcId()))
+                .thenReturn(Optional.of(defaultGroup));
 
         DbProxyEndpoint endpoint = rdsService.createDbProxyEndpoint("us-east-1", "app-proxy", "ep",
                 PROXY_SUBNET_IDS, List.of(), null, null, Map.of("env", "dev"));

@@ -234,6 +234,58 @@ class Ec2ServiceTest {
     }
 
 
+    @Test
+    void defaultSecurityGroupOfReturnsTheGroupNamedDefaultInThatVpc() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        service.createSecurityGroup(region, "web", "not the default", vpcId);
+        SecurityGroup expected = service.describeSecurityGroups(region, List.of(), List.of(),
+                Map.of("vpc-id", List.of(vpcId), "group-name", List.of("default"))).getFirst();
+
+        SecurityGroup found = service.defaultSecurityGroupOf(region, vpcId).orElseThrow();
+
+        assertEquals(expected.getGroupId(), found.getGroupId());
+        assertEquals(vpcId, found.getVpcId());
+        assertEquals("default", found.getGroupName());
+        assertNotEquals(service.defaultSecurityGroupOf(region, service.resolveDefaultVpcId(region))
+                .orElseThrow().getGroupId(), found.getGroupId());
+    }
+
+    @Test
+    void createNetworkInterfaceWithoutGroupsGetsItsVpcsDefaultGroup() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        Subnet subnet = service.createSubnet(region, vpcId, "10.94.1.0/24", region + "a");
+
+        NetworkInterface eni = service.createNetworkInterface(region, subnet.getSubnetId(), null, null,
+                List.of(), List.of(), List.of());
+
+        assertEquals(List.of(service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId()),
+                eni.getGroups().stream().map(GroupIdentifier::getGroupId).toList());
+    }
+
+    @Test
+    void defaultSecurityGroupOfIsEmptyOnceTheDefaultGroupIsGone() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        service.deleteSecurityGroup(region, service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
+
+        assertTrue(service.defaultSecurityGroupOf(region, vpcId).isEmpty());
+    }
+
+    @Test
+    void defaultSecurityGroupOfRejectsAnUnknownVpc() {
+        Ec2Service service = mockModeService();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.defaultSecurityGroupOf("us-east-1", "vpc-0123456789abcdef0"));
+
+        assertEquals("InvalidVpcID.NotFound", error.getErrorCode());
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void createNetworkInterfaceRejectsMissingGroupsBeforeAllocatingAddresses(boolean includeExistingGroup) {

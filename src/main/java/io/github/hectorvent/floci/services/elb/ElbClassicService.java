@@ -229,7 +229,6 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         lb.setCreatedTime(Instant.now());
         lb.setListeners(new ArrayList<>(listeners));
         lb.setSecurityGroups(securityGroups != null ? new ArrayList<>(securityGroups) : new ArrayList<>());
-        populateSourceSecurityGroup(region, lb);
         lb.setHealthCheck(ClassicHealthCheck.defaults());
         if (tags != null && !tags.isEmpty()) {
             lb.setTags(new LinkedHashMap<>(tags));
@@ -246,6 +245,14 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         } else if (availabilityZones != null) {
             lb.setAvailabilityZones(new ArrayList<>(availabilityZones));
         }
+        if (lb.getVpcId() != null && lb.getSecurityGroups().isEmpty()) {
+            // AWS associates a security group with a VPC load balancer created without one; for a
+            // non-default VPC that is the VPC's default group. (In a default VPC AWS creates a
+            // default_elb_<id> group instead; not modelled, see docs/services/elb-classic.md.)
+            ec2Service.defaultSecurityGroupOf(region, lb.getVpcId())
+                    .ifPresent(sg -> lb.getSecurityGroups().add(sg.getGroupId()));
+        }
+        populateSourceSecurityGroup(region, lb);
 
         whileCertificatesHeld(listeners, () -> {
             // The certificate check again, and this is the one that counts. The one above it

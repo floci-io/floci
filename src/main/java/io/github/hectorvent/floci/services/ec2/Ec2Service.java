@@ -7791,6 +7791,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .collect(Collectors.toList());
     }
 
+    /**
+     * The VPC's {@code default} security group, the one EC2 creates with the VPC. A VPC holds at most
+     * one, since a second group of the same name is rejected as a duplicate. Empty if it was deleted;
+     * an unknown VPC fails the way {@link #getSecurityGroupsForVpc} does.
+     */
+    public Optional<SecurityGroup> defaultSecurityGroupOf(String region, String vpcId) {
+        return getSecurityGroupsForVpc(region, vpcId, List.of()).stream()
+                .filter(sg -> "default".equals(sg.getGroupName()))
+                .findFirst();
+    }
+
     public void deleteSecurityGroup(String region, String groupId) {
         ensureDefaultResources(region);
         if (securityGroups.get(key(region, groupId)).isEmpty()) {
@@ -14538,13 +14549,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
             }
         } else {
-            SecurityGroup defaultSg = securityGroups.scan(k -> k.startsWith(region + "::")).stream()
-                    .filter(group -> subnet.getVpcId().equals(group.getVpcId())
-                            && "default".equals(group.getGroupName()))
-                    .findFirst().orElse(null);
-            if (defaultSg != null) {
-                sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
-            }
+            defaultSecurityGroupOf(region, subnet.getVpcId()).ifPresent(defaultSg ->
+                    sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName())));
         }
 
         // An explicit address is checked the way RunInstances checks its PrivateIpAddress: it must be
