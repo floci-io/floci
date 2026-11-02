@@ -2117,6 +2117,19 @@ class StepFunctionsJsonataIntegrationTest {
         assertEquals("States.ExceedToleratedFailureThreshold", failure.jsonPath().getString("error"));
     }
 
+    /** Only a literal may be a decimal: a JSONata expression must evaluate to an integer, as the guide says. */
+    @Test
+    void distributedMapToleratedFailurePercentage_refusesADecimalJsonataExpression() throws Exception {
+        String definition = toleratedPercentageMap("[{\"n\": 1}, {\"n\": -1}]", "\"{% 50.5 %}\"");
+
+        String smArn = createStateMachine("map-tolerated-percentage-jsonata-decimal", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+    }
+
     /** A Distributed Map over {@code items} in which every negative {@code n} fails its item. */
     private static String toleratedPercentageMap(String items, String percentage) {
         return """

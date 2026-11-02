@@ -106,11 +106,11 @@ class StepFunctionsContextObjectPathIntegrationTest {
     }
 
     /**
-     * ToleratedFailurePercentagePath may resolve to a decimal. One of two items fails, a 50 percent
-     * share, which a tolerance of 50.5 read from the Context Object absorbs.
+     * Only a literal ToleratedFailurePercentage may be a decimal: the guide says its Path "must resolve to a
+     * positive integer between 0 and 100 at runtime", so 50.5 read from the Context Object is refused.
      */
     @Test
-    void toleratedFailurePercentagePathResolvesADecimal() throws Exception {
+    void toleratedFailurePercentagePathRefusesADecimal() throws Exception {
         String definition = """
                 {"StartAt":"M","States":{"M":{"Type":"Map",
                   "InputPath":"$.payload","ItemsPath":"$.items",
@@ -125,13 +125,23 @@ class StepFunctionsContextObjectPathIntegrationTest {
                   "End":true}}}
                 """;
 
-        JsonNode results = mapper.readTree(run(definition,
-                "{\"percentage\":50.5,\"payload\":{\"items\":[{\"n\":1},{\"n\":-1}]}}"));
+        Response failure = execute(definition,
+                "{\"percentage\":50.5,\"payload\":{\"items\":[{\"n\":1},{\"n\":-1}]}}");
 
-        assertEquals(1, results.size(), "results: " + results);
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.Runtime", failure.jsonPath().getString("error"));
     }
 
     private String run(String definition, String input) throws InterruptedException {
+        Response describe = execute(definition, input);
+        if (!"SUCCEEDED".equals(describe.jsonPath().getString("status"))) {
+            fail("Execution failed: " + describe.body().asString());
+        }
+        return describe.jsonPath().getString("output");
+    }
+
+    /** Runs the definition and returns the DescribeExecution response once the execution has ended. */
+    private Response execute(String definition, String input) throws InterruptedException {
         String name = "context-path-" + System.nanoTime();
         Response create = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
@@ -157,11 +167,8 @@ class StepFunctionsContextObjectPathIntegrationTest {
                     .body("{\"executionArn\":\"" + execArn + "\"}")
                     .when().post("/");
             String status = describe.jsonPath().getString("status");
-            if ("SUCCEEDED".equals(status)) {
-                return describe.jsonPath().getString("output");
-            }
-            if ("FAILED".equals(status)) {
-                fail("Execution failed: " + describe.body().asString());
+            if ("SUCCEEDED".equals(status) || "FAILED".equals(status)) {
+                return describe;
             }
             Thread.sleep(100);
         }
