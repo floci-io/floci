@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.SignedIamEnforcementProfile;
 import io.github.hectorvent.floci.testing.SignedIamUsers;
+import io.github.hectorvent.floci.testing.SqsTestQueue;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -26,11 +28,10 @@ import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.sfn.SfnClient;
 import software.amazon.awssdk.services.sfn.model.CreateStateMachineResponse;
 import software.amazon.awssdk.services.sfn.model.SfnException;
-import software.amazon.awssdk.services.sqs.SqsClient;
-import software.amazon.awssdk.services.sqs.model.Message;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -53,6 +54,9 @@ class StepFunctionsCallbackIamIntegrationTest {
     @Inject
     IamService iam;
 
+    @Inject
+    SqsService sqsService;
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
@@ -71,22 +75,17 @@ class StepFunctionsCallbackIamIntegrationTest {
     })
     void signedCallbacksAuthorizeTheTokensResource(String mode, String policy, boolean allowed) throws Exception {
         SfnClient admin = client("test", "test");
-        SqsClient sqs = SqsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
-        cleanup.register(sqs::close);
         String name = "callback-iam-" + UUID.randomUUID();
         String role = executionRole(name);
-        String queue = sqs.createQueue(request -> request.queueName(name)).queueUrl();
-        cleanup.register(() -> sqs.deleteQueue(request -> request.queueUrl(queue)));
+        SqsTestQueue queue = SqsTestQueue.create(sqsService, "000000000000", "us-east-1", "callback-iam-");
+        cleanup.register(queue::delete);
         String activity = admin.createActivity(request -> request.name(name)).activityArn();
         cleanup.register(() -> admin.deleteActivity(request -> request.activityArn(activity)));
         boolean isActivity = "activity".equals(mode);
         Map<String, Object> task = isActivity
                 ? Map.of("Type", "Task", "Resource", activity, "TimeoutSeconds", 60, "End", true)
                 : Map.of("Type", "Task", "Resource", "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
-                        "Parameters", Map.of("QueueUrl", queue, "MessageBody", Map.of("token.$", "$$.Task.Token")),
+                        "Parameters", Map.of("QueueUrl", queue.url(), "MessageBody", Map.of("token.$", "$$.Task.Token")),
                         "TimeoutSeconds", 60, "End", true);
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Callback", "States", Map.of("Callback", task)));
         boolean versioned = "integration-version".equals(mode);
@@ -131,7 +130,7 @@ class StepFunctionsCallbackIamIntegrationTest {
             });
             String token = isActivity
                     ? admin.getActivityTask(request -> request.activityArn(activity)).taskToken()
-                    : queueToken(sqs, queue);
+                    : queue.awaitJson(Duration.ofSeconds(10)).path("token").asText();
             if (allowed) {
                 callback(actor, action, token);
                 if (!"heartbeat".equals(action)) {
@@ -287,19 +286,6 @@ class StepFunctionsCallbackIamIntegrationTest {
             case "failure" -> actor.sendTaskFailure(request -> request.taskToken(token).error("ExpectedFailure"));
             default -> throw new IllegalArgumentException(action);
         }
-    }
-
-    private static String queueToken(SqsClient sqs, String queue) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (System.nanoTime() < deadline) {
-            List<Message> messages = sqs.receiveMessage(request -> request.queueUrl(queue).waitTimeSeconds(1)).messages();
-            if (!messages.isEmpty()) {
-                Message message = messages.getFirst();
-                sqs.deleteMessage(request -> request.queueUrl(queue).receiptHandle(message.receiptHandle()));
-                return MAPPER.readTree(message.body()).path("token").asText();
-            }
-        }
-        return fail("integration did not send its task token");
     }
 
     private static String terminal(SfnClient admin, String execution) throws InterruptedException {
