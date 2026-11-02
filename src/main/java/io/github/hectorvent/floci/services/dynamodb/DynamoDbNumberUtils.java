@@ -9,7 +9,6 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import java.math.BigDecimal;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.function.Consumer;
 
 /**
  * DynamoDB number validation and normalization.
@@ -122,32 +121,9 @@ final class DynamoDbNumberUtils {
         return toNormalizedString(stripped);
     }
 
-    static void forEachNumber(JsonNode values, Consumer<String> check) {
-        for (JsonNode value : values) {
-            JsonNode number = value.get("N");
-            if (number != null && number.isTextual()) {
-                check.accept(number.asText());
-            }
-            for (JsonNode member : value.path("NS")) {
-                if (member.isTextual()) {
-                    check.accept(member.asText());
-                }
-            }
-            forEachNumber(value.path("L"), check);
-            forEachNumber(value.path("M"), check);
-        }
-    }
-
-    static void requireItemNumber(String text, String prefix) {
-        String problem = itemNumberProblem(text);
-        if (problem != null) {
-            throw new AwsException("ValidationException", prefix + problem, 400);
-        }
-    }
-
     // An item call reads the exponent as a long and checks the range without wrapping around,
     // unlike a PartiQL parameter. It counts the digits before it checks the range.
-    private static String itemNumberProblem(String text) {
+    static String itemNumberProblem(String text) {
         int marker = exponentMarker(text);
         BigDecimal mantissa;
         long exponent;
@@ -221,6 +197,11 @@ final class DynamoDbNumberUtils {
         // it into a valid value before validation can reject it — pass it through.
         if (attr.isObject() && attr.size() != 1) {
             return attr;
+        }
+
+        // DynamoDB stores a NULL flag written as a string as true.
+        if (attr.path("NULL").isTextual()) {
+            return JsonNodeFactory.instance.objectNode().put("NULL", true);
         }
 
         if (attr.has("N")) {

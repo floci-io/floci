@@ -293,7 +293,9 @@ public class TimestreamInfluxDbService implements Resettable {
         if (hasDataPlane(containerId)) {
             instance.setStatus("REBOOTING");
             instances.put(key(region, instance.getId()), instance);
-            restartAsync(DB_INSTANCE, instance.getAccountId(), region, instance.getId(),
+            String clusterId = instance.getDbClusterId();
+            restartAsync(clusterId == null ? DB_INSTANCE : DB_CLUSTER, instance.getAccountId(), region,
+                    clusterId == null ? instance.getId() : clusterId,
                     new InfluxDbEndpoint(containerId, instance.getEndpoint(), instance.getPort()));
         }
         return new Reported<>(instance, "REBOOTING");
@@ -852,13 +854,14 @@ public class TimestreamInfluxDbService implements Resettable {
     private void restartAsync(String resourceType, String accountId, String region, String resourceId,
                               InfluxDbEndpoint endpoint) {
         executor.execute(() -> {
+            InfluxDbEndpoint restarted = endpoint;
             try {
-                containerManager.restart(endpoint.containerId());
-                containerManager.waitUntilReady(endpoint);
-                applyDataPlane(resourceType, accountId, region, resourceId, null, endpoint, AVAILABLE);
+                restarted = containerManager.restart(endpoint.containerId());
+                containerManager.waitUntilReady(restarted);
+                applyDataPlane(resourceType, accountId, region, resourceId, null, restarted, AVAILABLE);
             } catch (RuntimeException e) {
                 LOG.errorv(e, "Failed to reboot the InfluxDB container for {0} {1}", resourceType, resourceId);
-                applyDataPlane(resourceType, accountId, region, resourceId, null, endpoint, "REBOOT_FAILED");
+                applyDataPlane(resourceType, accountId, region, resourceId, null, restarted, "REBOOT_FAILED");
             }
         });
     }

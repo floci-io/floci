@@ -14,12 +14,14 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import io.restassured.path.xml.XmlPath;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
@@ -34,6 +36,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
@@ -638,6 +642,98 @@ class AutoScalingStandbyTest {
         assertTrue(descriptions.get(0).contains("i-a"));
         assertTrue(descriptions.get(1).contains("i-b"));
         assertEquals("EnterStandby".equals(action) ? 0 : 2, group().getDesiredCapacity());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void returningInstanceRetriesFailedRegistrationBeforeCompletingActivity(boolean classicFailure,
+                                                                          boolean awsFailure) {
+        ok(enterStandby(true, "i-a"));
+        reconciler.reconcile(group());
+        String activityId = ok(exitStandby("i-a")).getString(EXITED + ".ActivityId");
+        RuntimeException failure = awsFailure
+                ? new AwsException("InternalFailure", "retry registration", 500)
+                : new IllegalStateException("retry registration");
+        if (classicFailure) {
+            when(elbClassic.registerInstances(REGION, CLASSIC, List.of("i-a")))
+                    .thenThrow(failure).thenReturn(List.of());
+        } else {
+            doThrow(failure).doNothing().when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        }
+
+        List<LogRecord> records = LogCapture.capture(AutoScalingReconciler.class,
+                () -> reconciler.reconcile(group()));
+
+        List<LogRecord> warnings = records.stream()
+                .filter(record -> record.getLevel().intValue() == Level.WARNING.intValue()).toList();
+        assertEquals(1, warnings.size());
+        LogRecord warning = warnings.getFirst();
+        assertArrayEquals(new Object[]{GROUP, "i-a", classicFailure ? CLASSIC : TARGET_GROUP,
+                failure.getMessage()}, warning.getParameters());
+        assertSame(failure, warning.getThrown());
+        assertEquals("Pending", lifecycle("i-a"));
+        AsgInstance returning = group().getInstances().stream()
+                .filter(instance -> "i-a".equals(instance.getInstanceId())).findFirst().orElseThrow();
+        assertEquals(activityId, returning.getStandbyActivityId());
+        XmlPath pending = describeScalingActivities();
+        assertEquals("PreInService", activity(pending, activityId, "StatusCode"));
+        assertTrue(activity(pending, activityId, "EndTime").isEmpty());
+        assertEquals(2, group().getDesiredCapacity());
+
+        reconciler.reconcile(group());
+
+        assertEquals("InService", lifecycle("i-a"));
+        assertNull(returning.getStandbyActivityId());
+        assertEquals("Successful", activity(describeScalingActivities(), activityId, "StatusCode"));
+        verify(elbV2, atLeastOnce()).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        verify(elbClassic, times(classicFailure ? 2 : 1)).registerInstances(REGION, CLASSIC, List.of("i-a"));
+        assertNoLaunch();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void returningInstanceToleratesADeletedLoadBalancer(boolean classicDeleted) {
+        ok(enterStandby(true, "i-a"));
+        reconciler.reconcile(group());
+        String activityId = ok(exitStandby("i-a")).getString(EXITED + ".ActivityId");
+        if (classicDeleted) {
+            when(elbClassic.registerInstances(REGION, CLASSIC, List.of("i-a")))
+                    .thenThrow(new AwsException("LoadBalancerNotFound", "deleted", 400));
+        } else {
+            doThrow(new AwsException("TargetGroupNotFound", "deleted", 400))
+                    .when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        }
+
+        reconciler.reconcile(group());
+
+        assertEquals("InService", lifecycle("i-a"));
+        assertEquals("Successful", activity(describeScalingActivities(), activityId, "StatusCode"));
+        verify(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        verify(elbClassic).registerInstances(REGION, CLASSIC, List.of("i-a"));
+        assertNoLaunch();
+    }
+
+    @Test
+    void launchRegistrationPrecedesInServiceWithoutAStandbyActivity() {
+        AsgInstance launching = group().getInstances().stream()
+                .filter(instance -> "i-a".equals(instance.getInstanceId())).findFirst().orElseThrow();
+        launching.setLifecycleState("Pending");
+        assertNull(launching.getStandbyActivityId());
+        doAnswer(invocation -> {
+            assertEquals("Pending", launching.getLifecycleState());
+            return null;
+        }).when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        when(elbClassic.registerInstances(REGION, CLASSIC, List.of("i-a"))).thenAnswer(invocation -> {
+            assertEquals("Pending", launching.getLifecycleState());
+            return List.of();
+        });
+
+        reconciler.reconcile(group());
+
+        assertEquals("InService", launching.getLifecycleState());
+        verify(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        verify(elbClassic).registerInstances(REGION, CLASSIC, List.of("i-a"));
+        assertNoLaunch();
     }
 
     private Response enterStandby(boolean decrement, String... instanceIds) {

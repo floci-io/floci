@@ -264,13 +264,17 @@ def test_a_type_whose_service_mints_an_id_after_its_name_is_recorded_and_must_be
 
 
 def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_the_members_naming_it(corrections, tmp_path):
-    documents = [reference("svc", {"PutTarget": ["target"], "TagTarget": ["target"], "GetByResource": ["target"]},
-                           {"target": "arn:${Partition}:svc:${Region}:${Account}:target/${ResourceId}"})]
+    documents = [reference("svc", {"PutTarget": ["target"], "TagTarget": ["target"], "GetByResource": ["target"],
+                                   "RunOn": ["target", "group"]},
+                           {"target": "arn:${Partition}:svc:${Region}:${Account}:target/${ResourceId}",
+                            "group": "arn:${Partition}:svc:${Region}:${Account}:group/${GroupId}"})]
     write_models(tmp_path, {"svc": model({"PutTarget": {"Namespace": "String", "ResourceId": "String",
                                                         "Dimension": "String"},
                                           "TagTarget": {"ResourceArn": "String"},
-                                          "GetByResource": {"ResourceId": "String"}})})
-    corrections.setattr(r, "FOUND_BY", {"svc:target": (["Namespace", "ResourceId", "Dimension"], "its service mints the id")})
+                                          "GetByResource": {"ResourceId": "String"},
+                                          "RunOn": {"GroupName": "String"}})})
+    corrections.setattr(r, "FOUND_BY", {"svc:target": (["Namespace", "ResourceId", "Dimension"], "its service mints the id"),
+                                        "svc:group": (["GroupName"], "its service mints the id")})
     document = r.build(documents, "test", tmp_path, "botocore test")
     assert r.validate(document) == [] and r.derive(document, tmp_path) == []
     operations = document["operations"]
@@ -280,6 +284,8 @@ def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_the_members
     # Its ARN names it as given, and a request lacking a member names none.
     assert operations["svc:TagTarget"]["resources"] == [{"types": ["target"], "arn": "ResourceArn"}]
     assert operations["svc:GetByResource"]["resources"] == []
+    # Found by its name though no member fills its id, so the rule derives nothing for it.
+    assert operations["svc:RunOn"]["resources"] == [{"type": "group", "fill": {}, "find": ["GroupName"]}]
     # A hand edit no longer matches, and a type the file has no format for fails the build.
     operations["svc:PutTarget"]["resources"] = [{"type": "target", "fill": {"ResourceId": "ResourceId"}}]
     assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
@@ -572,6 +578,11 @@ def test_the_vendored_file_is_well_formed():
         {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
     assert operations["application-autoscaling:TagResource"]["resources"] == [
         {"types": ["ScalableTarget"], "arn": "ResourceARN"}]
+    # A Data API request runs on the cluster it names, or on the serverless workgroup its name or ARN finds.
+    assert operations["redshift-data:ExecuteStatement"]["resources"][1:] == [
+        {"type": "cluster", "fill": {"ClusterName": "ClusterIdentifier"}},
+        {"type": "workgroup", "fill": {}, "find": ["WorkgroupName"]}]
+    assert operations["redshift-data:ListStatements"]["resources"] == []
     # The v2 API's Type picks the load balancer it creates, application when it gives none.
     assert operations["elasticloadbalancing:CreateLoadBalancer"]["resources"][1] == {
         "type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}}

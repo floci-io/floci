@@ -590,7 +590,9 @@ public class LambdaWebDataPlane {
         headers.set("Connection", "close");
     }
 
+    /** The platform writes its own {@code Date} in place of the app's, but lets a {@code date} in lowercase pass. */
     static void copyResponseHeaders(MultiMap headers, HttpServerResponse out) {
+        out.headers().add("Date", LambdaWebErrorPages.platformDate(Instant.now()));
         Set<String> dropped = new HashSet<>(DROPPED_RESPONSE_HEADERS);
         for (String connection : headers.getAll("Connection")) {
             for (String token : connection.split(",")) {
@@ -598,7 +600,7 @@ public class LambdaWebDataPlane {
             }
         }
         for (Map.Entry<String, String> header : headers) {
-            if (!dropped.contains(header.getKey().toLowerCase(Locale.ROOT))) {
+            if (!"Date".equals(header.getKey()) && !dropped.contains(header.getKey().toLowerCase(Locale.ROOT))) {
                 out.headers().add(header.getKey(), header.getValue());
             }
         }

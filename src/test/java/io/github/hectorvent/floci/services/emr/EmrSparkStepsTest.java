@@ -126,8 +126,21 @@ class EmrSparkStepsTest {
     }
 
     @Test
+    void streamingAndTheLzoIndexerRunAsTheCommandsTheyAre() {
+        // The Management Guide's streaming step, as the AWS CLI turns Type=STREAMING into one.
+        String[] streaming = {"hadoop-streaming", "-files", "s3://bucket/my_mapper.py,s3://bucket/my_reducer.py",
+                "-mapper", "my_mapper.py", "-reducer", "my_reducer.py", "-input", "s3://bucket/my_input",
+                "-output", "s3://bucket/my_output",
+                "-cacheFile", "s3://bucket/sample_dataset.dat#sample_dataset_cached.dat"};
+        String[] indexer = {"hadoop-lzo", "com.hadoop.compression.lzo.DistributedLzoIndexer", "s3://bucket/logs/"};
+
+        assertEquals(List.of(streaming), EmrSparkSteps.command(step("command-runner.jar", null, streaming)));
+        assertEquals(List.of(indexer), EmrSparkSteps.command(step("command-runner.jar", null, indexer)));
+    }
+
+    @Test
     void toolsTheImageDoesNotHaveAreNotRun() {
-        for (String tool : List.of("hive-script", "pig-script", "hadoop-streaming", "hadoop-lzo")) {
+        for (String tool : List.of("hive-script", "pig-script")) {
             assertNull(EmrSparkSteps.command(step("command-runner.jar", null, tool, "--src", "s3://bucket/in/")));
         }
         assertNull(EmrSparkSteps.command(step("command-runner.jar", null)));

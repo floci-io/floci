@@ -10,6 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class RedshiftDestinationModelTest {
 
@@ -79,6 +80,36 @@ class RedshiftDestinationModelTest {
                 mapper.readValue(mapper.writeValueAsString(stream), DeliveryStreamDescription.class);
         assertEquals("Secret123", reloaded.getDestinations().get(0).getRedshiftDestinationDescription().getPassword());
         assertEquals("stage", reloaded.s3Destination().bucketName());
+    }
+
+    @Test
+    void aRedshiftStreamsProcessingConfigurationIsTheDestinationsOwn() throws Exception {
+        RedshiftDestination dest = mapper.readValue("""
+                {"S3Configuration": {"RoleARN": "arn:aws:iam::000000000000:role/r", "BucketARN": "arn:aws:s3:::stage"},
+                 "ProcessingConfiguration": {"Enabled": true, "Processors": [{"Type": "Lambda"}]}}""",
+                RedshiftDestination.class);
+
+        DeliveryStreamDescription stream = new DeliveryStreamDescription("s", "arn", null, dest, null);
+
+        assertSame(dest.getProcessingConfiguration(), stream.processingConfiguration());
+        assertNull(stream.s3Destination().getProcessingConfiguration());
+    }
+
+    @Test
+    void aRedshiftStreamWithoutProcessingHasNoProcessingConfiguration() throws Exception {
+        RedshiftDestination dest = mapper.readValue(CONFIG, RedshiftDestination.class);
+
+        assertNull(new DeliveryStreamDescription("s", "arn", null, dest, null).processingConfiguration());
+    }
+
+    @Test
+    void anS3StreamsProcessingConfigurationIsTheS3Destinations() {
+        DeliveryStreamDescription.S3Destination s3 = new DeliveryStreamDescription.S3Destination();
+        DeliveryStreamDescription.ProcessingConfiguration processing =
+                new DeliveryStreamDescription.ProcessingConfiguration();
+        s3.setProcessingConfiguration(processing);
+
+        assertSame(processing, new DeliveryStreamDescription("s", "arn", s3).processingConfiguration());
     }
 
     @Test

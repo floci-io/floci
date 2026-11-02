@@ -1632,6 +1632,51 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void alignKinds_followsExplicitColumnListAndTreatsUnknownNamesAsOrdinary() {
+        List<S3CopySimulator.ColumnInfo> catalog = List.of(
+                new S3CopySimulator.ColumnInfo("id", null, CopyRecordTransformer.ColumnKind.OTHER),
+                new S3CopySimulator.ColumnInfo("born", null, CopyRecordTransformer.ColumnKind.DATE),
+                new S3CopySimulator.ColumnInfo("Seen", null, CopyRecordTransformer.ColumnKind.TIMESTAMP));
+        CopyStatementParser.S3CopyFrom explicit = new CopyStatementParser.S3CopyFrom(
+                "t", List.of("SEEN", "missing", "\"Seen\"", "born"), "wh", "k", "|", 0, false, false, null, null);
+
+        assertEquals(List.of(CopyRecordTransformer.ColumnKind.OTHER, CopyRecordTransformer.ColumnKind.OTHER,
+                        CopyRecordTransformer.ColumnKind.TIMESTAMP, CopyRecordTransformer.ColumnKind.DATE),
+                S3CopySimulator.alignKinds(explicit, catalog));
+    }
+
+    @Test
+    void streamCopyInput_rewritesDatesWithTheColumnKindsOfTheCatalog() throws Exception {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, CopyTemporalFormat.parse("MM/DD/YYYY", false), null, false);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "people", List.of(), "wh", "p.txt", "|", 0, false, false, null, null,
+                false, false, false, transforms);
+        when(s3.getObject("wh", "p.txt")).thenReturn(new S3Object("wh", "p.txt",
+                "1|03/31/2003\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        S3CopySimulator.streamCopyInput(input, null, null,
+                List.of(CopyRecordTransformer.ColumnKind.OTHER, CopyRecordTransformer.ColumnKind.DATE), out);
+
+        assertEquals("1|2003-03-31\n", copyDataPayload(out.toByteArray()));
+    }
+
+    @Test
+    void streamCopyInput_withDateFormatsAndNoCatalogFailsAndNamesSimpleQueryMode() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, CopyTemporalFormat.parse("MM/DD/YYYY", false), null, false);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+
+        S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream()));
+        assertTrue(failure.getMessage().contains("preferQueryMode=simple"), failure.getMessage());
+    }
+
+    @Test
     void streamCopyInput_withTruncateColumnsAndNoCatalogFailsAndNamesSimpleQueryMode() {
         CopyStatementParser.CopyTransforms transforms =
                 new CopyStatementParser.CopyTransforms(false, false, false, true, null);

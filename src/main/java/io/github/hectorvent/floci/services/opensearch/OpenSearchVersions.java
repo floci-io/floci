@@ -75,6 +75,9 @@ public final class OpenSearchVersions {
         VERSION_TO_IMAGE.put("Elasticsearch_7.10", "docker.elastic.co/elasticsearch/elasticsearch-oss:7.10.2");
         VERSION_TO_IMAGE.put("Elasticsearch_7.9", "docker.elastic.co/elasticsearch/elasticsearch-oss:7.9.3");
         VERSION_TO_IMAGE.put("Elasticsearch_7.8", "docker.elastic.co/elasticsearch/elasticsearch-oss:7.8.1");
+        VERSION_TO_IMAGE.put("Elasticsearch_7.7", "docker.elastic.co/elasticsearch/elasticsearch-oss:7.7.1");
+        VERSION_TO_IMAGE.put("Elasticsearch_7.4", "docker.elastic.co/elasticsearch/elasticsearch-oss:7.4.2");
+        VERSION_TO_IMAGE.put("Elasticsearch_7.1", "docker.elastic.co/elasticsearch/elasticsearch-oss:7.1.1");
 
         // Compatibility matrix — mirrors AWS OpenSearch's allowed in-place
         // upgrade hops. Source versions that are still on the supported list
@@ -87,6 +90,14 @@ public final class OpenSearchVersions {
         // https://docs.aws.amazon.com/opensearch-service/latest/developerguide/version-migration.html
         COMPAT_MATRIX.put("Elasticsearch_7.10", List.of("OpenSearch_1.0", "OpenSearch_1.1",
                 "OpenSearch_1.2", "OpenSearch_1.3"));
+        COMPAT_MATRIX.put("Elasticsearch_7.1", List.of("Elasticsearch_7.4", "Elasticsearch_7.7",
+                "Elasticsearch_7.8", "Elasticsearch_7.9", "Elasticsearch_7.10",
+                "OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"));
+        COMPAT_MATRIX.put("Elasticsearch_7.4", List.of("Elasticsearch_7.7", "Elasticsearch_7.8",
+                "Elasticsearch_7.9", "Elasticsearch_7.10",
+                "OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"));
+        COMPAT_MATRIX.put("Elasticsearch_7.7", List.of("Elasticsearch_7.8", "Elasticsearch_7.9", "Elasticsearch_7.10",
+                "OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"));
         COMPAT_MATRIX.put("Elasticsearch_7.8", List.of("Elasticsearch_7.9", "Elasticsearch_7.10",
                 "OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"));
         COMPAT_MATRIX.put("Elasticsearch_7.9", List.of("Elasticsearch_7.10",
