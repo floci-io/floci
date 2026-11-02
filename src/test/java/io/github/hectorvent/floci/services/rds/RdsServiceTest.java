@@ -61,6 +61,7 @@ import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -1345,8 +1346,9 @@ class RdsServiceTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void persistedInstanceTombstoneRetriesNamedBackendCleanup(boolean mockOnRestart) throws Exception {
-        Path file = Files.createTempFile(Path.of("target"), "rds-instance-retry-", ".json");
+    void persistedInstanceTombstoneRetriesNamedBackendCleanup(boolean mockOnRestart, @TempDir Path tempDir)
+            throws Exception {
+        Path file = tempDir.resolve("rds-instance-retry.json");
         TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
         PersistentStorage<String, DbInstance> storage = new PersistentStorage<>(file, type);
         RdsService service = newService(containerManager, proxyManager, storage,
@@ -1378,8 +1380,9 @@ class RdsServiceTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void persistedClusterTombstoneRetriesNamedBackendCleanup(boolean mockOnRestart) throws Exception {
-        Path file = Files.createTempFile(Path.of("target"), "rds-cluster-retry-", ".json");
+    void persistedClusterTombstoneRetriesNamedBackendCleanup(boolean mockOnRestart, @TempDir Path tempDir)
+            throws Exception {
+        Path file = tempDir.resolve("rds-cluster-retry.json");
         TypeReference<Map<String, DbCluster>> type = new TypeReference<>() {};
         PersistentStorage<String, DbCluster> storage = new PersistentStorage<>(file, type);
         RdsService service = newService(containerManager, proxyManager,

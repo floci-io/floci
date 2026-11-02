@@ -565,16 +565,12 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         if (!claimedRuntimes.add(runtimeId)) {
             throw new IllegalStateException("RDS runtime " + runtimeId + " already has an active container");
         }
-        boolean currentClaimed = false;
-        boolean legacyClaimed = false;
         boolean cleanupPendingForRetry = false;
         String cleanupName = currentName;
         try {
             claimStorage(currentKey, runtimeId);
-            currentClaimed = true;
             if (legacyKey != null) {
                 claimStorage(legacyKey, runtimeId);
-                legacyClaimed = true;
             }
             try {
                 lifecycleManager.removeIfExistsStrict(currentName);
@@ -591,13 +587,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             }
         } finally {
             if (!cleanupPendingForRetry) {
-                if (currentClaimed) {
-                    activeStorageOwners.remove(currentKey, runtimeId);
-                }
-                if (legacyClaimed) {
-                    activeStorageOwners.remove(legacyKey, runtimeId);
-                }
-                claimedRuntimes.remove(runtimeId);
+                releaseOwnership(currentKey, legacyKey, runtimeId);
             }
         }
     }
