@@ -22,7 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The card validation operations.
  *
  * <p>The values in the first test are the emulator's, and the emulator checks them against
- * jPOS: the card verification value of an account number, an expiry and a service code.
+ * an independent implementation: the card verification value of an account number,
+ * an expiry and a service code.
  */
 class PaymentCryptographyCardValidationOperationsTest {
 

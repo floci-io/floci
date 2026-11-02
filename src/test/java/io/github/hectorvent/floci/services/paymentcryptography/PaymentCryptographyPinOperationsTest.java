@@ -24,7 +24,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The PIN operations, over the Visa PVV path.
  *
  * <p>The values in the first two tests are the ones the emulator computes, and the emulator
- * checks them against jPOS: the account field of a PAN, the ISO 0 block of a PIN, the ISO 4
+ * checks them against an independent implementation: the account field of a PAN,
+ * the ISO 0 block of a PIN, the ISO 4
  * PIN field and the PVV of a PIN under a PVK.
  */
 class PaymentCryptographyPinOperationsTest {

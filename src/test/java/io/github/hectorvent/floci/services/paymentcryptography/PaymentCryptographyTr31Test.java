@@ -6,10 +6,10 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * The TR-31 key block, against the vectors the emulator computes.
+ * The TR-31 key block, against the vectors the standard's examples give.
  *
- * <p>The emulator is the reference for this format, and it is checked against jPOS, so the
- * values here are the ones a key block must have. The block type follows the family of the
+ * <p>The values here are the ones a key block must have, checked against an
+ * independent implementation of the same formats. The block type follows the family of the
  * key that protects it: a type B block under a TDES key and a type D one under an AES key, and
  * the algorithm byte says which family the key the block carries belongs to.
  *

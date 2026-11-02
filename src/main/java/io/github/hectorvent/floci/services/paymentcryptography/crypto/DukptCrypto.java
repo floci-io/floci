@@ -12,9 +12,8 @@ package io.github.hectorvent.floci.services.paymentcryptography.crypto;
  *
  * <p>Validated against two independent published vector sets: the classic
  * X9.24 walkthrough, and the ID TECH worked example. TDES only - AES DUKPT
- * (X9.24-3) is out of scope, and the jPOS version in use does not implement this
- * derivation either, so parity is checked against published vectors rather than
- * against jPOS.
+ * (X9.24-3) is out of scope, so the parity is checked against published
+ * vectors.
  */
 public final class DukptCrypto {
 

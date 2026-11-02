@@ -23,7 +23,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * The authorization request cryptograms.
  *
  * <p>The derivations in the first test are the emulator's, and the emulator checks them
- * against jPOS: the ICC master key, the session key that comes from it, and the ARQC of a
+ * against an independent implementation: the ICC master key, the session key that
+ * comes from it, and the ARQC of a
  * transaction.
  */
 class PaymentCryptographyAuthCryptogramOperationsTest {

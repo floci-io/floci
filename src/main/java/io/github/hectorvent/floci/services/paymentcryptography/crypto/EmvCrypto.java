@@ -196,7 +196,7 @@ public final class EmvCrypto {
      *   F2 = ATC(2) || 0F || 00*5     SK_R = 3DES(MK, F2)
      * </pre>
      *
-     * <p>Each half carries odd DES parity, as jPOS applies.
+     * <p>Each half carries odd DES parity.
      */
     public static byte[] deriveSessionKey(byte[] mk16, byte[] atc) {
         byte[] r = new byte[8];
@@ -221,7 +221,7 @@ public final class EmvCrypto {
     public static byte[] deriveSessionKeyMastercard(byte[] mk16, byte[] atc,
                                                    byte[] unpredictableNumber) {
         byte[] r = new byte[8];
-        // The LOW bytes, as jPOS takes them, so an over-long counter or
+        // The LOW bytes, so an over-long counter or
         // unpredictable number gives the same result on both sides.
         int atcFrom = Math.max(0, atc.length - 2);
         System.arraycopy(atc, atcFrom, r, 0, Math.min(2, atc.length));
@@ -293,8 +293,8 @@ public final class EmvCrypto {
      * over {@code ARQC || ARC || CSU || proprietary} under the session key.
      *
      * <p>The response code belongs in the MAC input. Omitting it produces an
-     * ARPC that disagrees with jPOS even when both sides hold the same session
-     * key - which happened.
+     * ARPC that disagrees with the one an independent implementation computes
+     * even when both sides hold the same session key - which happened.
      */
     public static byte[] computeArpcMethod2(byte[] sk, byte[] arqc, String arcHex,
                                             String csuHex, String padHex) {
