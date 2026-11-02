@@ -6,7 +6,7 @@ import java.nio.charset.StandardCharsets;
 
 // AWS counts the raw expression text, before placeholders are resolved. Single-item write
 // APIs wrap the error in the validation envelope, the others do not, and only the Scan
-// FilterExpression and TransactWriteItems conditions report the size.
+// FilterExpression and the conditions of a deeply nested TransactWriteItems request report the size.
 final class DynamoDbExpressionSize {
 
     static final int MAX_BYTES = 4096;
