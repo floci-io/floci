@@ -1423,9 +1423,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * {@code _}, and that attribute forces replacement, so a name without one never converges.
      */
     public IamRole createServiceLinkedRole(String awsServiceName, String customSuffix, String description) {
-        if (awsServiceName == null || !SERVICE_PRINCIPAL_PATTERN.matcher(awsServiceName).matches()) {
-            throw new AwsException("InvalidInput",
-                    "AWSServiceName must be 1-128 characters matching [\\w+=,.@-], for example es.amazonaws.com.", 400); // partition-literal: AWS's own message text
+        if (awsServiceName == null) {
+            throw SmithyValidationErrors.validationError(SmithyValidationErrors.notNull("aWSServiceName"));
+        }
+        String constraint;
+        if (awsServiceName.isEmpty()) {
+            constraint = "Member must have length greater than or equal to 1";
+        } else if (awsServiceName.length() > 128) {
+            constraint = "Member must have length less than or equal to 128";
+        } else if (!SERVICE_PRINCIPAL_PATTERN.matcher(awsServiceName).matches()) {
+            constraint = "Member must satisfy regular expression pattern: [\\w+=.@-]*";
+        } else {
+            constraint = null;
+        }
+        if (constraint != null) {
+            throw IamValidationErrors.validationError("aWSServiceName", awsServiceName, constraint);
         }
         if (customSuffix != null && !customSuffix.isEmpty()
                 && !CUSTOM_SUFFIX_PATTERN.matcher(customSuffix).matches()) {

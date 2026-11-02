@@ -1045,6 +1045,7 @@ public class ElbV2DataPlane {
     }
 
     private void executeForward(HttpServerRequest req, Action action, String region, String listenerArn) {
+        ElbV2TraceHeader.update(req.headers());
         String tgArn = resolveTgArn(action);
         if (tgArn == null) {
             req.response().setStatusCode(502).end("No target group");
@@ -1055,6 +1056,11 @@ public class ElbV2DataPlane {
             req.response().setStatusCode(502).end("Target group not found");
             return;
         }
+
+        ElbV2ForwardedHeaders forwarded = ElbV2ForwardedHeaders.of(req,
+                loadBalancerAttribute(listenerArn, region, ElbV2ForwardedHeaders.XFF_MODE_ATTRIBUTE),
+                Boolean.parseBoolean(
+                        loadBalancerAttribute(listenerArn, region, ElbV2ForwardedHeaders.XFF_CLIENT_PORT_ATTRIBUTE)));
 
         if ("lambda".equals(tg.getTargetType())) {
             if (isWebSocketUpgrade(req)) {
@@ -1067,7 +1073,7 @@ public class ElbV2DataPlane {
                 return;
             }
             String functionArn = targets.get(0).getId();
-            invokeLambdaTarget(req, functionArn, region);
+            invokeLambdaTarget(req, functionArn, region, forwarded);
             return;
         }
 
@@ -1089,10 +1095,11 @@ public class ElbV2DataPlane {
         boolean preserveHostHeader = Boolean.parseBoolean(
                 loadBalancerAttribute(listenerArn, region, PRESERVE_HOST_HEADER_ATTRIBUTE));
         if (isWebSocketUpgrade(req)) {
-            proxyUpgrade(req, host, targetPort, preserveHostHeader, idleTimeoutMillis(listenerArn, region), cookies);
+            proxyUpgrade(req, host, targetPort, preserveHostHeader, forwarded,
+                    idleTimeoutMillis(listenerArn, region), cookies);
             return;
         }
-        proxyRequest(req, host, targetPort, preserveHostHeader, cookies);
+        proxyRequest(req, host, targetPort, preserveHostHeader, forwarded, cookies);
     }
 
     private String loadBalancerAttribute(String listenerArn, String region, String key) {
@@ -1154,9 +1161,10 @@ public class ElbV2DataPlane {
         return candidates.get(index);
     }
 
-    private void invokeLambdaTarget(HttpServerRequest req, String functionArn, String region) {
+    private void invokeLambdaTarget(HttpServerRequest req, String functionArn, String region,
+                                    ElbV2ForwardedHeaders forwarded) {
         if (req.isEnded()) {
-            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer());
+            invokeLambdaWithBody(req, functionArn, region, forwarded, Buffer.buffer());
             return;
         }
         ByteArrayOutputStream body = new ByteArrayOutputStream();
@@ -1181,13 +1189,13 @@ public class ElbV2DataPlane {
             if (rejected.get()) {
                 return;
             }
-            invokeLambdaWithBody(req, functionArn, region, Buffer.buffer(body.toByteArray()));
+            invokeLambdaWithBody(req, functionArn, region, forwarded, Buffer.buffer(body.toByteArray()));
         });
     }
 
-    private void invokeLambdaWithBody(HttpServerRequest req, String functionArn,
-                                      String region, Buffer body) {
-        Map<String, Object> event = buildAlbEvent(req, body);
+    private void invokeLambdaWithBody(HttpServerRequest req, String functionArn, String region,
+                                      ElbV2ForwardedHeaders forwarded, Buffer body) {
+        Map<String, Object> event = buildAlbEvent(req, forwarded, body);
         // Lambda invocation is synchronous and may take seconds while a cold container
         // boots and polls the Runtime API. The Runtime API itself runs on Vert.x event
         // loops, so blocking the listener's event loop here would deadlock the runtime
@@ -1276,7 +1284,7 @@ public class ElbV2DataPlane {
         }
     }
 
-    private Map<String, Object> buildAlbEvent(HttpServerRequest req, Buffer body) {
+    Map<String, Object> buildAlbEvent(HttpServerRequest req, ElbV2ForwardedHeaders forwarded, Buffer body) {
         Map<String, Object> event = new HashMap<>();
         event.put("requestContext", Map.of("elb", Map.of("targetGroupArn", "")));
         event.put("httpMethod", req.method().name());
@@ -1299,9 +1307,11 @@ public class ElbV2DataPlane {
 
         Map<String, String> headers = new HashMap<>();
         Map<String, List<String>> multiValueHeaders = new HashMap<>();
-        req.headers().forEach(entry -> {
+        MultiMap eventHeaders = MultiMap.caseInsensitiveMultiMap().addAll(req.headers());
+        forwarded.applyTo(req.headers(), eventHeaders);
+        eventHeaders.forEach(entry -> {
             String key = entry.getKey().toLowerCase();
-            headers.putIfAbsent(key, entry.getValue());
+            headers.put(key, entry.getValue());
             multiValueHeaders.computeIfAbsent(key, k -> new ArrayList<>()).add(entry.getValue());
         });
         event.put("headers", headers);
@@ -1345,19 +1355,20 @@ public class ElbV2DataPlane {
         return tuples.get(tuples.size() - 1).getTargetGroupArn();
     }
 
-    private void proxyRequest(HttpServerRequest req, String host, int port,
-                              boolean preserveHostHeader, List<String> cookies) {
+    private void proxyRequest(HttpServerRequest req, String host, int port, boolean preserveHostHeader,
+                              ElbV2ForwardedHeaders forwarded, List<String> cookies) {
         req.pause();
         if (ElbV2TargetResolver.isIpLiteral(host)) {
             try {
-                proxyRequestTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port, preserveHostHeader, cookies);
+                proxyRequestTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port,
+                        preserveHostHeader, forwarded, cookies);
             } catch (IOException e) {
                 rejectTarget(req, host, e);
             }
             return;
         }
         vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
-                .onSuccess(address -> proxyRequestTo(req, address, host, port, preserveHostHeader, cookies))
+                .onSuccess(address -> proxyRequestTo(req, address, host, port, preserveHostHeader, forwarded, cookies))
                 .onFailure(err -> rejectTarget(req, host, err));
     }
 
@@ -1368,7 +1379,7 @@ public class ElbV2DataPlane {
     }
 
     private void proxyRequestTo(HttpServerRequest req, String address, String host, int port,
-                                boolean preserveHostHeader, List<String> cookies) {
+                                boolean preserveHostHeader, ElbV2ForwardedHeaders forwarded, List<String> cookies) {
         RequestOptions opts = new RequestOptions()
                 .setHost(address)
                 .setPort(port)
@@ -1378,9 +1389,10 @@ public class ElbV2DataPlane {
                 .onSuccess(clientReq -> {
                     req.headers().forEach(entry -> {
                         if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                            clientReq.putHeader(entry.getKey(), entry.getValue());
+                            clientReq.headers().add(entry.getKey(), entry.getValue());
                         }
                     });
+                    forwarded.applyTo(req.headers(), clientReq.headers());
                     if (!preserveHostHeader) {
                         clientReq.putHeader("Host", ElbV2TargetResolver.hostHeader(host, port));
                     }
@@ -1440,12 +1452,12 @@ public class ElbV2DataPlane {
     }
 
     private void proxyUpgrade(HttpServerRequest req, String host, int port, boolean preserveHostHeader,
-                              long idleTimeoutMillis, List<String> cookies) {
+                              ElbV2ForwardedHeaders forwarded, long idleTimeoutMillis, List<String> cookies) {
         req.pause();
         if (ElbV2TargetResolver.isIpLiteral(host)) {
             try {
                 proxyUpgradeTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port,
-                        preserveHostHeader, idleTimeoutMillis, cookies);
+                        preserveHostHeader, forwarded, idleTimeoutMillis, cookies);
             } catch (IOException e) {
                 rejectTarget(req, host, e);
             }
@@ -1453,7 +1465,7 @@ public class ElbV2DataPlane {
         }
         vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
                 .onSuccess(address -> proxyUpgradeTo(req, address, host, port, preserveHostHeader,
-                        idleTimeoutMillis, cookies))
+                        forwarded, idleTimeoutMillis, cookies))
                 .onFailure(err -> rejectTarget(req, host, err));
     }
 
@@ -1463,7 +1475,8 @@ public class ElbV2DataPlane {
      * the target refused the upgrade and is relayed as an ordinary response.
      */
     private void proxyUpgradeTo(HttpServerRequest req, String address, String host, int port,
-                                boolean preserveHostHeader, long idleTimeoutMillis, List<String> cookies) {
+                                boolean preserveHostHeader, ElbV2ForwardedHeaders forwarded,
+                                long idleTimeoutMillis, List<String> cookies) {
         RequestOptions opts = new RequestOptions()
                 .setHost(address)
                 .setPort(port)
@@ -1473,9 +1486,10 @@ public class ElbV2DataPlane {
                 .onSuccess(clientReq -> {
                     req.headers().forEach(entry -> {
                         if (!HOP_BY_HOP_HEADERS.contains(entry.getKey().toLowerCase())) {
-                            clientReq.putHeader(entry.getKey(), entry.getValue());
+                            clientReq.headers().add(entry.getKey(), entry.getValue());
                         }
                     });
+                    forwarded.applyTo(req.headers(), clientReq.headers());
                     clientReq.putHeader("Connection", "Upgrade");
                     clientReq.putHeader("Upgrade", req.getHeader("Upgrade"));
                     if (!preserveHostHeader) {

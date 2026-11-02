@@ -3,10 +3,13 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessRuntime;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -30,9 +33,13 @@ import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.when;
 
 /**
  * A request of a service whose ARNs the vendored table of request resources gives is checked on the resource it
@@ -49,6 +56,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static final String ELB = "arn:aws:elasticloadbalancing:" + REGION + ":" + ACCOUNT + ":";
     private static final String EVENTS = "arn:aws:events:" + REGION + ":" + ACCOUNT + ":";
     private static final String TARGETS = "arn:aws:application-autoscaling:" + REGION + ":" + ACCOUNT + ":scalable-target/";
+    private static final String REDSHIFT = "arn:aws:redshift:" + REGION + ":" + ACCOUNT + ":";
+    private static final String WORKGROUPS = "arn:aws:redshift-serverless:" + REGION + ":" + ACCOUNT + ":workgroup/";
     /** The AWS Load Balancer Controller's create, tag-on-create and listener statements (its policy v2.14.0). */
     private static final String CONTROLLER_CREATE = "{\"Effect\":\"Allow\",\"Action\":[\"elasticloadbalancing:CreateLoadBalancer\","
             + "\"elasticloadbalancing:CreateTargetGroup\"],\"Resource\":\"*\","
@@ -73,6 +82,10 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
+
+    /** A serverless workgroup's PostgreSQL container is not needed to check a request on it, so none starts. */
+    @InjectMock
+    RedshiftServerlessRuntime runtime;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -502,6 +515,49 @@ class IamRequestResourceEnforcementIntegrationTest {
         user.policy(allowOn("cognito-idp:DescribeUserPool", arn));
         describeUserPool(user, id).statusCode(200);
         refusedJson(describeUserPool(user, id + "x"), "cognito-idp:DescribeUserPool");
+    }
+
+    /**
+     * A key is named by its id or by an alias, and an alias names the key it points at, so a request naming a key by
+     * an alias is checked on the key the alias names, as the handler resolves it: a grant on that key allows it, a
+     * grant on the alias alone does not, and a deny on the key holds.
+     */
+    @Test
+    void aKeyNamedByAnAliasIsCheckedOnTheKeyTheAliasNames() {
+        String key = createPaymentKey();
+        String alias = "alias/res-card-" + suffix();
+        createPaymentAlias(alias, key).statusCode(200);
+
+        User user = user("res-key");
+        user.policy(allowOn("payment-cryptography:GetKey", key));
+        getPaymentKey(user, alias).statusCode(200);
+        getPaymentKey(user, key).statusCode(200);
+        refusedJson(getPaymentKey(user, "alias/res-other-" + suffix()), "payment-cryptography:GetKey");
+
+        user.policy(allowOn("payment-cryptography:GetKey", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"payment-cryptography:GetKey\",\"Resource\":\"" + key + "\"}");
+        refusedJson(getPaymentKey(user, alias), "payment-cryptography:GetKey");
+    }
+
+    /**
+     * A tagging request names its key by the ARN of one, as the reference takes it there, so a request naming it by
+     * its id names no key for the check and is refused: a deny on the key is not skipped by naming it another way.
+     */
+    @Test
+    void aTaggingRequestNamesItsKeyByItsArn() {
+        String key = createPaymentKey();
+        String id = key.substring(key.lastIndexOf('/') + 1);
+
+        User user = user("res-key-tag");
+        user.policy(allowOn("payment-cryptography:TagResource", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"payment-cryptography:TagResource\",\"Resource\":\"" + key + "\"}");
+        // The key's own ARN is checked on the key, and the deny holds.
+        refusedJson(tagPaymentKey(user, key), "payment-cryptography:TagResource");
+        // Its id names no ARN for the check, so the request is refused rather than tagging the denied key.
+        tagPaymentKey(user, id).statusCode(400).body(containsString("ValidationException"));
+        admin("payment-cryptography").header("X-Amz-Target", "PaymentCryptographyControlPlane.ListTagsForResource")
+                .contentType("application/x-amz-json-1.0").body("{\"ResourceArn\":\"" + key + "\"}")
+                .post("/").then().statusCode(200).body("Tags", hasSize(0));
     }
 
     /** A repository is checked on the ARN its name gives, whether or not it exists. */
@@ -1270,6 +1326,63 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .then();
     }
 
+    /**
+     * A Data API request is checked on the cluster it names, or on the serverless workgroup its name or ARN finds,
+     * whose ARN ends in the id Redshift Serverless gave it; one naming a workgroup there is none of is checked with
+     * that id open. Before, these were checked on {@code *}.
+     */
+    @Test
+    void aDataApiRequestIsCheckedOnTheClusterOrWorkgroupItNames() {
+        when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
+                .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
+        String name = "res-wg-" + suffix();
+        String arn = createWorkgroup(name);
+        assertTrue(arn.startsWith(WORKGROUPS), arn);
+
+        User user = user("res-data");
+        user.policy(allowOn("redshift-data:ListDatabases", arn) + ","
+                + allowOn("redshift-data:ListDatabases", REDSHIFT + "cluster:res-cluster"));
+        // Authorized, a database the workgroup does not have, or a cluster Floci does not have, is refused by the
+        // Data API, not by IAM.
+        for (String named : List.of(name, arn)) {
+            listDatabases(user, "\"WorkgroupName\":\"" + named + "\"").statusCode(400)
+                    .body(containsString("does not exist in workgroup"));
+        }
+        listDatabases(user, "\"ClusterIdentifier\":\"res-cluster\",\"DbUser\":\"admin\"").statusCode(400)
+                .body(containsString("was not found"));
+        refusedJson(listDatabases(user, "\"ClusterIdentifier\":\"res-other\",\"DbUser\":\"admin\""),
+                "redshift-data:ListDatabases");
+        refusedJson(listDatabases(user, "\"WorkgroupName\":\"res-wg-missing\""), "redshift-data:ListDatabases");
+        // A deny on the workgroup holds, whether a request names it by its name or by its ARN.
+        user.policy(allowOn("redshift-data:*", "*") + ",{\"Effect\":\"Deny\","
+                + "\"Action\":\"redshift-data:ListDatabases\",\"Resource\":\"" + arn + "\"}");
+        for (String named : List.of(name, arn)) {
+            refusedJson(listDatabases(user, "\"WorkgroupName\":\"" + named + "\""), "redshift-data:ListDatabases");
+        }
+    }
+
+    /** Creates a serverless workgroup and its namespace as the admin and gives the workgroup's ARN. */
+    private String createWorkgroup(String name) {
+        adminJson("redshift-serverless", "RedshiftServerless.CreateNamespace")
+                .body("{\"namespaceName\":\"" + name + "-ns\",\"adminUsername\":\"admin\","
+                        + "\"adminUserPassword\":\"Secret123!\"}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("redshift-serverless", "RedshiftServerless.DeleteNamespace")
+                .body("{\"namespaceName\":\"" + name + "-ns\"}").post("/"));
+        String arn = adminJson("redshift-serverless", "RedshiftServerless.CreateWorkgroup")
+                .body("{\"workgroupName\":\"" + name + "\",\"namespaceName\":\"" + name + "-ns\"}").post("/").then()
+                .statusCode(200).extract().path("workgroup.workgroupArn");
+        cleanup.register(() -> adminJson("redshift-serverless", "RedshiftServerless.DeleteWorkgroup")
+                .body("{\"workgroupName\":\"" + name + "\"}").post("/"));
+        return arn;
+    }
+
+    /** A ListDatabases of a database no workgroup or cluster has, on the target the members name. */
+    private static ValidatableResponse listDatabases(User user, String members) {
+        return user.json("redshift-data", "RedshiftData.ListDatabases", "1.1")
+                .body("{\"Database\":\"res-none\"," + members + "}").post("/").then();
+    }
+
     /** A monthly cost budget of the name, with a billing view ARN when one is given. */
     private static String budget(String name, String billingViewArn) {
         return "{\"BudgetName\":\"" + name + "\",\"BudgetType\":\"COST\",\"TimeUnit\":\"MONTHLY\",\"BudgetLimit\":"
@@ -1520,6 +1633,35 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static ValidatableResponse startExecution(User user, String arn) {
         return user.json("states", "AWSStepFunctions.StartExecution", "1.0")
                 .body("{\"stateMachineArn\":\"" + arn + "\"}").post("/").then();
+    }
+
+    /** A key of the account, made as the administrator. */
+    private String createPaymentKey() {
+        return admin("payment-cryptography").header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
+                .contentType("application/x-amz-json-1.0").body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                        + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                        + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}")
+                .post("/").then().statusCode(200).extract().path("Key.KeyArn");
+    }
+
+    /** An alias naming a key, made as the administrator. */
+    private static ValidatableResponse createPaymentAlias(String alias, String key) {
+        return admin("payment-cryptography").header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateAlias")
+                .contentType("application/x-amz-json-1.0")
+                .body("{\"AliasName\":\"" + alias + "\",\"KeyArn\":\"" + key + "\"}").post("/").then();
+    }
+
+    /** A tagging request naming its key the way the request gives it. */
+    private static ValidatableResponse tagPaymentKey(User user, String resource) {
+        return user.json("payment-cryptography", "PaymentCryptographyControlPlane.TagResource", "1.0")
+                .body("{\"ResourceArn\":\"" + resource + "\",\"Tags\":[{\"Key\":\"owner\",\"Value\":\"team\"}]}")
+                .post("/").then();
+    }
+
+    /** A read of the key a request names by its id, its alias or its ARN. */
+    private static ValidatableResponse getPaymentKey(User user, String identifier) {
+        return user.json("payment-cryptography", "PaymentCryptographyControlPlane.GetKey", "1.0")
+                .body("{\"KeyIdentifier\":\"" + identifier + "\"}").post("/").then();
     }
 
     private static ValidatableResponse describeUserPool(User user, String id) {

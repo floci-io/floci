@@ -659,6 +659,96 @@ class AppSyncResolverExecutorTest {
         assertEquals(request.get("payload"), objectMapper.readValue(payload.getValue(), Map.class));
     }
 
+    private AppSyncResolverExecutor executorOverAThrowingFunction(byte[] errorPayload) {
+        String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";
+        DataSource lambdaDataSource = dataSource("accountFunction", DataSourceType.AWS_LAMBDA);
+        lambdaDataSource.setLambdaConfig(Map.of("lambdaFunctionArn", functionArn));
+        when(appSync.getDataSource(API_ID, "accountFunction")).thenReturn(lambdaDataSource);
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.invokeArn(eq(functionArn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, "Unhandled", errorPayload, null, "request-id"));
+        return new AppSyncResolverExecutor(appSync, jsRuntime,
+                new AppSyncDataSourceInvokers(List.of(new LambdaDataSourceInvoker(lambdaService, objectMapper)),
+                        mock(AppSyncDataSourceAuthorizer.class)),
+                vtlEngine(), objectMapper);
+    }
+
+    private static byte[] thrownErrorPayload() {
+        return "{\"errorType\":\"Error\",\"errorMessage\":\"I always fail.\",\"trace\":[]}"
+                .getBytes(StandardCharsets.UTF_8);
+    }
+
+    private Resolver vtlResolverForwardingCtxError() {
+        Resolver resolver = resolver(ResolverKind.UNIT, null);
+        resolver.setDataSourceName("accountFunction");
+        resolver.setRequestMappingTemplate(
+                "{\"version\":\"2018-05-29\",\"operation\":\"Invoke\",\"payload\":{}}");
+        resolver.setResponseMappingTemplate("""
+                #if($ctx.error)
+                  $util.error($ctx.error.message, $ctx.error.type)
+                #end
+                $util.toJson($ctx.result)
+                """);
+        return resolver;
+    }
+
+    private void assertFieldFailedWithFunctionError(ResolverOutcome result, String message) {
+        assertNull(result.data());
+        assertEquals(1, result.errors().size());
+        assertEquals(message, result.errors().get(0).message());
+        assertEquals("Lambda:Unhandled", result.errors().get(0).errorType());
+    }
+
+    @Test
+    void jsResponseHandlerThatForwardsCtxErrorReportsTheFunctionError() {
+        AppSyncResolverExecutor lambdaExecutor = executorOverAThrowingFunction(thrownErrorPayload());
+        Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
+        resolver.setDataSourceName("accountFunction");
+        jsRuntime.script("unit-code", "request",
+                (handler, context) -> ok(Map.of("operation", "Invoke", "payload", Map.of())));
+        // What `if (ctx.error) util.error(ctx.error.message, ctx.error.type)` does.
+        jsRuntime.script("unit-code", "response", (handler, context) -> {
+            Map<?, ?> ctxError = (Map<?, ?>) context.get("error");
+            return new JsEvaluation(null, Map.of(), false, List.of(), new JsEvaluation.JsError(
+                    (String) ctxError.get("message"), (String) ctxError.get("type"), null, null), false);
+        });
+
+        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of()));
+
+        assertFieldFailedWithFunctionError(result, "I always fail.");
+    }
+
+    @Test
+    void jsResolverWithNoResponseHandlerReportsTheFunctionError() {
+        AppSyncResolverExecutor lambdaExecutor = executorOverAThrowingFunction(thrownErrorPayload());
+        Resolver resolver = resolver(ResolverKind.UNIT, "unit-code");
+        resolver.setDataSourceName("accountFunction");
+        jsRuntime.script("unit-code", "request",
+                (handler, context) -> ok(Map.of("operation", "Invoke", "payload", Map.of())));
+
+        ResolverOutcome result = lambdaExecutor.execute(resolver, invocation(Map.of()));
+
+        assertFieldFailedWithFunctionError(result, "I always fail.");
+    }
+
+    @Test
+    void vtlResponseTemplateThatForwardsCtxErrorReportsTheFunctionError() {
+        AppSyncResolverExecutor lambdaExecutor = executorOverAThrowingFunction(thrownErrorPayload());
+
+        ResolverOutcome result = lambdaExecutor.execute(vtlResolverForwardingCtxError(), invocation(Map.of()));
+
+        assertFieldFailedWithFunctionError(result, "I always fail.");
+    }
+
+    @Test
+    void vtlResponseTemplateSurvivesAFunctionErrorWithNoPayload() {
+        AppSyncResolverExecutor lambdaExecutor = executorOverAThrowingFunction(null);
+
+        ResolverOutcome result = lambdaExecutor.execute(vtlResolverForwardingCtxError(), invocation(Map.of()));
+
+        assertFieldFailedWithFunctionError(result, "");
+    }
+
     @Test
     void vtlLambdaResolverSendsOnlyPayloadToTheFunction() throws Exception {
         String functionArn = "arn:aws:lambda:eu-west-1:000000000000:function:resolver-fn";

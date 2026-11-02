@@ -59,7 +59,8 @@ import java.util.zip.GZIPOutputStream;
  * are unpacked into its working directory before the driver starts. The driver's output goes to
  * Floci's log and, while it runs, to the run's CloudWatch log streams, when it has some; once it ends, its
  * standard output and error go, gzipped, to the run's log folder in Floci's S3, when it has one. An EMR step's
- * container mounts its cluster's storage, where {@code hdfs://} paths, and paths without a scheme, lead.
+ * container mounts its cluster's storage, where {@code hdfs://} paths, and paths without a scheme, lead, and a
+ * step's {@code hadoop} command reaches Floci's S3 and runs MapReduce in local mode.
  */
 @ApplicationScoped
 public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardown {
@@ -72,15 +73,41 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // A cluster's HDFS, as Hadoop settings: hdfs:// paths, and those without a scheme ("hdfs:// (or no prefix)"),
     // lead to the HDFS folder of the cluster's /mnt volume, through a view of it under the hdfs scheme, as the
     // image has no HDFS of its own.
+    private static final String HDFS_FOLDER = "/mnt/hdfs";
     private static final List<SparkSetting> HDFS_SETTINGS = List.of(
             new SparkSetting("fs.defaultFS", "hdfs:///"),
             new SparkSetting("fs.hdfs.impl", "org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme"),
-            new SparkSetting("fs.viewfs.mounttable.default.linkFallback", "file:///mnt/hdfs"));
+            new SparkSetting("fs.viewfs.mounttable.default.linkFallback", "file://" + HDFS_FOLDER));
     // Spark's default checkpoint manager goes through Hadoop's FileContext, which refuses an hdfs:// path
     // without a host, so a streaming query keeps its checkpoints through the file system instead.
     private static final SparkSetting FILE_SYSTEM_CHECKPOINTS = new SparkSetting(
             "spark.sql.streaming.checkpointFileManagerClass",
             "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager");
+    // Where Hadoop's local job runner puts a job's files, -files and -archives among them: a folder of the local
+    // file system, whose files it then names by their path alone, which leads to the cluster's HDFS.
+    private static final String MAPRED_STAGING = "/tmp/hadoop/mapred/staging";
+    // A command's MapReduce runs in the hadoop command's own JVM, as there is no YARN to run it on.
+    private static final String MAPRED_SITE = "<property><name>mapreduce.framework.name</name><value>local</value>"
+            + "</property><property><name>mapreduce.jobtracker.staging.root.dir</name><value>" + MAPRED_STAGING
+            + "</value></property>";
+    // The image's Hadoop log4j.properties is empty, so a hadoop command logs nothing, a streaming job's reason for
+    // failing included; one that is empty logs to standard error instead, in the layout of the step log lines the
+    // Management Guide shows ("ERROR org.apache.hadoop.streaming.StreamJob (main): Error Launching job : ...").
+    private static final List<String> HADOOP_CONSOLE_LOG = List.of(
+            "hadoop.root.logger=INFO,console",
+            "log4j.rootLogger=${hadoop.root.logger}",
+            "log4j.appender.console=org.apache.log4j.ConsoleAppender",
+            "log4j.appender.console.target=System.err",
+            "log4j.appender.console.layout=org.apache.log4j.PatternLayout",
+            "log4j.appender.console.layout.ConversionPattern=%d{ISO8601} %p %c (%t): %m%n");
+    // MapReduce, which a streaming job, the LZO indexer and any other hadoop jar run in, is only in Spark's shaded
+    // Hadoop client, and S3A's AWS SDK only in the jar Spark's own S3A finds it in; links to them make up the hadoop
+    // command's MapReduce home, whose jars it puts after its own, whatever HADOOP_CLASSPATH a command sets.
+    private static final String MAPRED_HOME = "/tmp/floci-mapreduce";
+    private static final List<String> MAPRED_JARS = List.of(
+            "/usr/lib/spark/jars/hadoop-client-api-*.jar",
+            "/usr/lib/spark/jars/hadoop-client-runtime-*.jar",
+            "/usr/lib/spark/jars/emr-serverless-spark-goodies.jar");
     // A Spark configuration of the container's own: a copy of the folder a spark-env export of SPARK_CONF_DIR names,
     // else of the image's, links followed, whose log4j2.properties ends with the job's lines, passed in
     // SPARK_LOG4J2_VARIABLE, a later line winning. What is added to a file starts on a line of its own, as the
@@ -104,29 +131,47 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "sed -i -e '/^spark\\.master[[:space:]]/d' -e '/^spark\\.submit\\.deployMode[[:space:]]/d'"
                     + " -e '/^spark\\.submit\\.customResourceManager/d' \"$conf/spark-defaults.conf\"",
             "printf '\\n%s\\n' \"$" + SPARK_DEFAULTS_VARIABLE + "\" >> \"$conf/spark-defaults.conf\"",
-            // On a cluster, the hadoop command gets its HDFS too, through a copy of its Hadoop configuration (the
-            // image's, or the folder a spark-env export names), links followed, whose core-site.xml takes in the
-            // original's through Hadoop's XInclude, whatever its XML, then HADOOP_SITE_VARIABLE's properties, which
-            // win (see hadoopSite). Its script runs only once its HDFS, MapReduce and YARN homes name folders that
-            // are there, and the image has /usr/lib/hadoop alone. The image's hdfs command cannot run, so hdfs dfs
-            // runs as hadoop fs.
+            // On a cluster, the hadoop command gets its HDFS and Floci's S3 too, through a copy of its Hadoop
+            // configuration (the image's, or the folder a spark-env export names), links followed, whose
+            // core-site.xml takes in the original's through Hadoop's XInclude, whatever its XML, then
+            // HADOOP_SITE_VARIABLE's properties, which win (see hadoopSite), and whose mapred-site.xml runs
+            // MapReduce in local mode the same way. Its script runs only once its HDFS, MapReduce and YARN homes
+            // name folders that are there, and the image has /usr/lib/hadoop alone, without MapReduce, so the
+            // MapReduce home is Floci's (see MAPRED_HOME). The image's hdfs command cannot run, so hdfs dfs runs
+            // as hadoop fs, and its hadoop-streaming names a jar it does not have, so the one it has runs.
             "if [ -n \"${" + HADOOP_SITE_VARIABLE + ":-}\" ]; then",
             "  hadoop_conf=/tmp/floci-hadoop-conf source_conf=\"${HADOOP_CONF_DIR:-/etc/hadoop/conf}\"",
-            "  mkdir -p \"$hadoop_conf\" /tmp/floci-bin",
+            "  mkdir -p \"$hadoop_conf\" /tmp/floci-bin " + MAPRED_HOME,
             "  cp -rL \"$source_conf/.\" \"$hadoop_conf\" 2>/dev/null",
-            "  include=",
-            "  if [ -f \"$hadoop_conf/core-site.xml\" ]; then",
-            "    mv \"$hadoop_conf/core-site.xml\" \"$hadoop_conf/floci-original-core-site.xml\"",
-            "    include='<xi:include href=\"/tmp/floci-hadoop-conf/floci-original-core-site.xml\"/>'",
+            "  site() {",
+            "    include=",
+            "    if [ -f \"$hadoop_conf/$1\" ]; then",
+            "      mv \"$hadoop_conf/$1\" \"$hadoop_conf/floci-original-$1\"",
+            "      include=\"<xi:include href=\\\"$hadoop_conf/floci-original-$1\\\"/>\"",
+            "    fi",
+            "    printf '%s\\n' '<configuration xmlns:xi=\"http://www.w3.org/2001/XInclude\">' \"$include\" \"$2\""
+                    + " '</configuration>' > \"$hadoop_conf/$1\"",
+            "  }",
+            "  site core-site.xml \"$" + HADOOP_SITE_VARIABLE + "\"",
+            "  site mapred-site.xml '" + MAPRED_SITE + "'",
+            // The local staging folder is a link to the same path in the HDFS folder, so a job's files are where
+            // their path leads.
+            "  mkdir -p \"" + HDFS_FOLDER + MAPRED_STAGING + "\" \"$(dirname " + MAPRED_STAGING + ")\"",
+            "  ln -sfn \"" + HDFS_FOLDER + MAPRED_STAGING + "\" " + MAPRED_STAGING,
+            "  if [ ! -s \"$hadoop_conf/log4j.properties\" ]; then",
+            "    printf '%s\\n' '" + String.join("' '", HADOOP_CONSOLE_LOG) + "' > \"$hadoop_conf/log4j.properties\"",
             "  fi",
-            "  printf '%s\\n' '<configuration xmlns:xi=\"http://www.w3.org/2001/XInclude\">' \"$include\" \"$"
-                    + HADOOP_SITE_VARIABLE + "\" '</configuration>' > \"$hadoop_conf/core-site.xml\"",
             "  printf '%s\\n' '#!/bin/bash' 'if [ \"$1\" = dfs ]; then shift; exec hadoop fs \"$@\"; fi'"
                     + " 'echo \"hdfs $1: only hdfs dfs runs here, as hadoop fs\" >&2' 'exit 1' > /tmp/floci-bin/hdfs",
-            "  chmod +x /tmp/floci-bin/hdfs",
+            "  printf '%s\\n' '#!/bin/bash' 'exec hadoop jar /usr/lib/hadoop/hadoop-streaming.jar \"$@\"'"
+                    + " > /tmp/floci-bin/hadoop-streaming",
+            "  chmod +x /tmp/floci-bin/hdfs /tmp/floci-bin/hadoop-streaming",
+            "  for jar in " + String.join(" ", MAPRED_JARS) + "; do",
+            "    if [ -f \"$jar\" ]; then ln -sf \"$jar\" " + MAPRED_HOME + "/; fi",
+            "  done",
             "  export HADOOP_CONF_DIR=\"$hadoop_conf\" PATH=\"/tmp/floci-bin:$PATH\"",
             "  export HADOOP_HDFS_HOME=\"${HADOOP_HDFS_HOME:-/usr/lib/hadoop}\"",
-            "  export HADOOP_MAPRED_HOME=\"${HADOOP_MAPRED_HOME:-/usr/lib/hadoop}\"",
+            "  export HADOOP_MAPRED_HOME=\"${HADOOP_MAPRED_HOME:-" + MAPRED_HOME + "}\"",
             "  export HADOOP_YARN_HOME=\"${HADOOP_YARN_HOME:-/usr/lib/hadoop}\"",
             "fi",
             "exec \"$@\""));
@@ -240,7 +285,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                         .withCmd(job.command())
                         .withEnv(SPARK_DEFAULTS_VARIABLE, sparkDefaultsFile(job, endpoint));
                 if (job.storage() != null) {
-                    container.withEnv(HADOOP_SITE_VARIABLE, hadoopSite(job));
+                    container.withEnv(HADOOP_SITE_VARIABLE, hadoopSite(job, endpoint));
                 }
             }
             if (!job.sparkLog4j2().isEmpty()) {
@@ -568,12 +613,15 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     /**
-     * The {@code core-site.xml} properties a step's {@code hadoop} command gets: its cluster's HDFS, then the
-     * job's {@code core-site}, which wins, as a later property does in one file.
+     * The {@code core-site.xml} properties a step's {@code hadoop} command gets: Floci's S3 and Glue, as its
+     * {@code spark-submit} gets them, its cluster's HDFS, then the job's {@code core-site}, which wins, as a
+     * later property does in one file.
      */
-    static String hadoopSite(Job job) {
+    static String hadoopSite(Job job, String flociEndpoint) {
+        List<SparkSetting> settings = new ArrayList<>(hadoopSettings(job, flociEndpoint));
+        settings.addAll(HDFS_SETTINGS);
         List<String> properties = new ArrayList<>();
-        for (SparkSetting setting : HDFS_SETTINGS) {
+        for (SparkSetting setting : settings) {
             properties.add(siteProperty(setting.key(), setting.value()));
         }
         job.coreSite().forEach((name, value) -> properties.add(siteProperty(name, value)));
@@ -623,20 +671,28 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         return escaped.toString();
     }
 
+    // Floci's Hadoop settings: S3A on Floci's S3, and the Glue Data Catalog client on Floci's Glue.
+    private static List<SparkSetting> hadoopSettings(Job job, String flociEndpoint) {
+        return List.of(
+                new SparkSetting("fs.s3a.endpoint", flociEndpoint),
+                new SparkSetting("fs.s3a.endpoint.region", job.region()),
+                new SparkSetting("fs.s3a.path.style.access", "true"),
+                new SparkSetting("fs.s3a.committer.magic.track.commits.in.memory.enabled", "true"),
+                new SparkSetting("fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"),
+                new SparkSetting("fs.AbstractFileSystem.s3.impl", "org.apache.hadoop.fs.s3a.S3A"),
+                new SparkSetting("aws.glue.endpoint", flociEndpoint),
+                new SparkSetting("aws.region", job.region()));
+    }
+
     // Floci's settings, then the job's spark-defaults, in the order a later one wins.
     private static List<SparkSetting> sparkSettings(Job job, String flociEndpoint) {
-        List<SparkSetting> settings = new ArrayList<>(List.of(
-                new SparkSetting("spark.hadoop.fs.s3a.endpoint", flociEndpoint),
-                new SparkSetting("spark.hadoop.fs.s3a.endpoint.region", job.region()),
-                new SparkSetting("spark.hadoop.fs.s3a.path.style.access", "true"),
-                new SparkSetting("spark.hadoop.fs.s3a.committer.magic.track.commits.in.memory.enabled", "true"),
-                new SparkSetting("spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"),
-                new SparkSetting("spark.hadoop.fs.AbstractFileSystem.s3.impl", "org.apache.hadoop.fs.s3a.S3A"),
-                new SparkSetting("spark.hadoop.aws.glue.endpoint", flociEndpoint),
-                new SparkSetting("spark.hadoop.aws.region", job.region())));
+        List<SparkSetting> hadoop = new ArrayList<>(hadoopSettings(job, flociEndpoint));
         if (job.storage() != null) {
-            HDFS_SETTINGS.forEach(setting -> settings.add(new SparkSetting("spark.hadoop." + setting.key(),
-                    setting.value())));
+            hadoop.addAll(HDFS_SETTINGS);
+        }
+        List<SparkSetting> settings = new ArrayList<>();
+        hadoop.forEach(setting -> settings.add(new SparkSetting("spark.hadoop." + setting.key(), setting.value())));
+        if (job.storage() != null) {
             settings.add(FILE_SYSTEM_CHECKPOINTS);
         }
         job.sparkDefaults().forEach((key, value) -> settings.add(new SparkSetting(key, value)));

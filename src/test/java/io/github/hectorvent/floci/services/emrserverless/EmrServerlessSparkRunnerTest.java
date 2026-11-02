@@ -437,12 +437,12 @@ class EmrServerlessSparkRunnerTest {
 
         verify(spec).withNamedVolume(STORAGE.home(), "/home/hadoop");
         verify(spec).withNamedVolume(STORAGE.mnt(), "/mnt");
-        verify(spec).withEnv("FLOCI_HADOOP_SITE", String.join("\n",
+        verify(spec).withEnv(eq("FLOCI_HADOOP_SITE"), argThat(site -> site.endsWith(String.join("\n",
                 "<property><name>fs.defaultFS</name><value>hdfs:///</value></property>",
                 "<property><name>fs.hdfs.impl</name><value>org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme"
                         + "</value></property>",
                 "<property><name>fs.viewfs.mounttable.default.linkFallback</name><value>file:///mnt/hdfs</value>"
-                        + "</property>"));
+                        + "</property>"))));
         verify(spec).withEnv(eq("FLOCI_SPARK_DEFAULTS"), argThat(file -> file.contains(
                 "\nspark.hadoop.fs.defaultFS hdfs:///\n")));
         // A copy of the Hadoop configuration a spark-env export of HADOOP_CONF_DIR names, else of the image's, links
@@ -450,22 +450,97 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
                 "source_conf=\"${HADOOP_CONF_DIR:-/etc/hadoop/conf}\"\n")
                 && entrypoint.get(2).contains("cp -rL \"$source_conf/.\" \"$hadoop_conf\"")
-                && entrypoint.get(2).contains(
-                        "include='<xi:include href=\"/tmp/floci-hadoop-conf/floci-original-core-site.xml\"/>'")
-                && entrypoint.get(2).contains("'<configuration xmlns:xi=\"http://www.w3.org/2001/XInclude\">'"
-                        + " \"$include\" \"$FLOCI_HADOOP_SITE\" '</configuration>' > \"$hadoop_conf/core-site.xml\"")
+                && entrypoint.get(2).contains(String.join("\n",
+                        "    if [ -f \"$hadoop_conf/$1\" ]; then",
+                        "      mv \"$hadoop_conf/$1\" \"$hadoop_conf/floci-original-$1\"",
+                        "      include=\"<xi:include href=\\\"$hadoop_conf/floci-original-$1\\\"/>\"",
+                        "    fi",
+                        "    printf '%s\\n' '<configuration xmlns:xi=\"http://www.w3.org/2001/XInclude\">' \"$include\""
+                                + " \"$2\" '</configuration>' > \"$hadoop_conf/$1\""))
+                && entrypoint.get(2).contains("\n  site core-site.xml \"$FLOCI_HADOOP_SITE\"\n")
                 && entrypoint.get(2).contains(
                         "export HADOOP_CONF_DIR=\"$hadoop_conf\" PATH=\"/tmp/floci-bin:$PATH\"")));
     }
 
     @Test
-    void aStepsHadoopCommandGetsItsClustersCoreSiteAfterItsHdfsEscapedForXml() {
+    void aStepsHadoopCommandReachesFlocisS3AndRunsMapReduceLocally() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        List<String> command = List.of("hadoop-streaming", "-mapper", "cat", "-input", "s3://bucket/input/",
+                "-output", "s3://bucket/output/");
+        SparkJobRunner.Job job = commandJob(command, Map.of(), STORAGE);
+
+        runner(builder).run(job, progress);
+
+        // S3A on Floci's S3, as the step's spark-submit gets it.
+        verify(spec).withEnv("FLOCI_HADOOP_SITE", EmrServerlessSparkRunner.hadoopSite(job, ENDPOINT));
+        verify(spec).withEnv(eq("FLOCI_HADOOP_SITE"), argThat(site -> site.startsWith(
+                "<property><name>fs.s3a.endpoint</name><value>http://floci:4566</value></property>\n")));
+        verify(spec).withCmd(command);
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join("\n",
+                "  site mapred-site.xml '<property><name>mapreduce.framework.name</name><value>local</value>"
+                        + "</property><property><name>mapreduce.jobtracker.staging.root.dir</name>"
+                        + "<value>/tmp/hadoop/mapred/staging</value></property>'",
+                // The local job runner names a job's files by their path alone, which leads to the cluster's HDFS.
+                "  mkdir -p \"/mnt/hdfs/tmp/hadoop/mapred/staging\" \"$(dirname /tmp/hadoop/mapred/staging)\"",
+                "  ln -sfn \"/mnt/hdfs/tmp/hadoop/mapred/staging\" /tmp/hadoop/mapred/staging\n"))
+                // MapReduce from Spark's shaded Hadoop client, and S3A's AWS SDK, in a MapReduce home of Floci's,
+                // which a command's own HADOOP_CLASSPATH does not take off the hadoop command's class path.
+                && entrypoint.get(2).contains("\n  mkdir -p \"$hadoop_conf\" /tmp/floci-bin /tmp/floci-mapreduce\n")
+                && entrypoint.get(2).contains(String.join("\n",
+                        "  for jar in /usr/lib/spark/jars/hadoop-client-api-*.jar"
+                                + " /usr/lib/spark/jars/hadoop-client-runtime-*.jar"
+                                + " /usr/lib/spark/jars/emr-serverless-spark-goodies.jar; do",
+                        "    if [ -f \"$jar\" ]; then ln -sf \"$jar\" /tmp/floci-mapreduce/; fi",
+                        "  done"))
+                && entrypoint.get(2).contains(
+                        "\n  export HADOOP_MAPRED_HOME=\"${HADOOP_MAPRED_HOME:-/tmp/floci-mapreduce}\"\n")
+                // The image's hadoop-streaming names /usr/lib/hadoop-mapreduce/hadoop-streaming.jar, which it lacks.
+                && entrypoint.get(2).contains("printf '%s\\n' '#!/bin/bash'"
+                        + " 'exec hadoop jar /usr/lib/hadoop/hadoop-streaming.jar \"$@\"'"
+                        + " > /tmp/floci-bin/hadoop-streaming")
+                && entrypoint.get(2).contains("chmod +x /tmp/floci-bin/hdfs /tmp/floci-bin/hadoop-streaming")));
+    }
+
+    @Test
+    void aStepsHadoopCommandLogsToStandardErrorWhenItsLog4jPropertiesIsEmpty() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("hadoop", "fs", "-ls", "s3://bucket/"), Map.of(), STORAGE), progress);
+
+        // The image's is empty; one a spark-env export's folder has is kept.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join("\n",
+                "  if [ ! -s \"$hadoop_conf/log4j.properties\" ]; then",
+                "    printf '%s\\n' 'hadoop.root.logger=INFO,console' 'log4j.rootLogger=${hadoop.root.logger}'"
+                        + " 'log4j.appender.console=org.apache.log4j.ConsoleAppender'"
+                        + " 'log4j.appender.console.target=System.err'"
+                        + " 'log4j.appender.console.layout=org.apache.log4j.PatternLayout'"
+                        + " 'log4j.appender.console.layout.ConversionPattern=%d{ISO8601} %p %c (%t): %m%n'"
+                        + " > \"$hadoop_conf/log4j.properties\"",
+                "  fi"))));
+    }
+
+    @Test
+    void aStepsHadoopCommandGetsItsClustersCoreSiteAfterFlocisS3AndItsHdfsEscapedForXml() {
         Map<String, String> coreSite = new LinkedHashMap<>();
         coreSite.put("fs.permissions.umask-mode", "077");
         coreSite.put("floci.note", "a<b & \"c\" 'd'");
 
         // A later property wins over an earlier one in the same file.
         assertEquals(String.join("\n",
+                "<property><name>fs.s3a.endpoint</name><value>http://floci:4566</value></property>",
+                "<property><name>fs.s3a.endpoint.region</name><value>eu-west-1</value></property>",
+                "<property><name>fs.s3a.path.style.access</name><value>true</value></property>",
+                "<property><name>fs.s3a.committer.magic.track.commits.in.memory.enabled</name><value>true</value>"
+                        + "</property>",
+                "<property><name>fs.s3.impl</name><value>org.apache.hadoop.fs.s3a.S3AFileSystem</value></property>",
+                "<property><name>fs.AbstractFileSystem.s3.impl</name><value>org.apache.hadoop.fs.s3a.S3A</value>"
+                        + "</property>",
+                "<property><name>aws.glue.endpoint</name><value>http://floci:4566</value></property>",
+                "<property><name>aws.region</name><value>eu-west-1</value></property>",
                 "<property><name>fs.defaultFS</name><value>hdfs:///</value></property>",
                 "<property><name>fs.hdfs.impl</name><value>org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme"
                         + "</value></property>",
@@ -474,7 +549,7 @@ class EmrServerlessSparkRunnerTest {
                 "<property><name>fs.permissions.umask-mode</name><value>077</value></property>",
                 "<property><name>floci.note</name><value>a&lt;b &amp; &quot;c&quot; &apos;d&apos;</value></property>"),
                 EmrServerlessSparkRunner.hadoopSite(
-                        clusterJob(List.of("hadoop", "fs", "-ls", "/"), coreSite, Map.of())));
+                        clusterJob(List.of("hadoop", "fs", "-ls", "/"), coreSite, Map.of()), ENDPOINT));
     }
 
     @Test
@@ -910,9 +985,10 @@ class EmrServerlessSparkRunnerTest {
         when(lifecycle.create(any())).thenReturn("driver");
         when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenReturn(false);
         when(docker.inspectContainerCmd("driver").exec().getState().getExitCodeLong()).thenReturn(0L);
-        return new EmrServerlessSparkRunner(builder, lifecycle, logStreamer,
-                mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class), s3, ecr, config,
-                new MutableClock(), Duration.ZERO);
+        LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
+        when(awsEnv.flociEndpoint()).thenReturn(ENDPOINT);
+        return new EmrServerlessSparkRunner(builder, lifecycle, logStreamer, awsEnv,
+                mock(LambdaExecutionRoleCredentials.class), s3, ecr, config, new MutableClock(), Duration.ZERO);
     }
 
     // What the driver wrote, as Docker gives it once asked for an ended container's output.

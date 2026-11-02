@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.dynamodb;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.ArrayList;
 import java.util.Base64;
@@ -46,6 +48,20 @@ class DynamoDbSetOrderTest {
     void aMemberListThatIsNotAnArrayIsLeftAlone() throws Exception {
         JsonNode members = MAPPER.readTree("\"x\"");
         assertSame(members, DynamoDbSetOrder.sorted("SS", members));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SS | b,a,b            | a,b,b
+            SS | c,b,c,a,z        | b,c,c,a,z
+            SS | 😀,\uFFFD,\uFFFD | \uFFFD,😀,\uFFFD
+            NS | 2,1,1.0,3        | 1,2,1.0,3
+            BS | /w==,AA==,AA==   | AA==,/w==,AA==
+            SS | b,a,c            |
+            """)
+    void aRepeatStopsTheSortAndLeavesTheRestAsSent(String setType, String sent, String held) {
+        List<JsonNode> order = DynamoDbSetOrder.orderAtFirstRepeat(setType, MAPPER.valueToTree(sent.split(",")));
+        assertEquals(held, order == null ? null : String.join(",", order.stream().map(JsonNode::asText).toList()));
     }
 
     private static List<String> sorted(String setType, List<String> members) {

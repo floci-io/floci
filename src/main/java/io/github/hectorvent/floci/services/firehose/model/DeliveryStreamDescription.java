@@ -166,6 +166,36 @@ public class DeliveryStreamDescription {
     }
 
     /**
+     * The ProcessingConfiguration that transforms this stream's records, or null when it has none. A Redshift
+     * destination carries its own, next to its intermediate S3 configuration; any other destination keeps it
+     * on the S3 destination.
+     */
+    public ProcessingConfiguration processingConfiguration() {
+        if (destinations == null || destinations.isEmpty()) {
+            return null;
+        }
+        Destination first = destinations.get(0);
+        if (first.getRedshiftDestinationDescription() != null) {
+            return first.getRedshiftDestinationDescription().getProcessingConfiguration();
+        }
+        S3Destination s3 = first.getExtendedS3DestinationDescription();
+        return s3 == null ? null : s3.getProcessingConfiguration();
+    }
+
+    /**
+     * True when a transformation applies to deliveries: the configuration is present
+     * and Enabled is explicitly true. An omitted Enabled leaves it disabled, the
+     * opposite of the conversion block below. Probed rather than carried over from
+     * there (2026-09-11): DescribeDeliveryStream echoes an omitted Enabled as false
+     * here and as true on the conversion block.
+     */
+    @JsonIgnore
+    public boolean isProcessingEnabled() {
+        ProcessingConfiguration processing = processingConfiguration();
+        return processing != null && Boolean.TRUE.equals(processing.getEnabled());
+    }
+
+    /**
      * Fills the AWS defaults on every S3 configuration the stream describes: its S3 destination, or
      * a Redshift destination's intermediate and backup configurations.
      */
@@ -301,21 +331,6 @@ public class DeliveryStreamDescription {
         public void setCloudWatchLoggingOptions(CloudWatchLoggingOptions options) { this.cloudWatchLoggingOptions = options; }
 
         /**
-         * True when a transformation applies to deliveries: the configuration is present
-         * and Enabled is explicitly true. An omitted Enabled leaves it disabled, the
-         * opposite of the conversion block below. Probed rather than carried over from
-         * there (2026-09-11): DescribeDeliveryStream echoes an omitted Enabled as false
-         * here and as true on the conversion block.
-         *
-         * Ignored for serialization for the same reason as the accessor below.
-         */
-        @JsonIgnore
-        public boolean isProcessingEnabled() {
-            return processingConfiguration != null
-                    && Boolean.TRUE.equals(processingConfiguration.getEnabled());
-        }
-
-        /**
          * True when data format conversion applies to deliveries: the configuration is
          * present and not explicitly disabled. AWS treats an omitted Enabled as enabled
          * (probe: a config without Enabled is validated exactly like an enabled one).
@@ -399,6 +414,14 @@ public class DeliveryStreamDescription {
          * role was current at the time of the read.
          */
         public void canonicalizeProcessors() {
+            canonicalizeProcessors(processingConfiguration, roleArn);
+        }
+
+        /**
+         * The same defaults for a ProcessingConfiguration that is not an S3 destination's own, as a Redshift
+         * destination's is; {@code roleArn} is the role of the destination that carries it.
+         */
+        public static void canonicalizeProcessors(ProcessingConfiguration processingConfiguration, String roleArn) {
             if (processingConfiguration == null) {
                 return;
             }

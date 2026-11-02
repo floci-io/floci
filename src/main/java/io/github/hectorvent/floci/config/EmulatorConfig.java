@@ -366,6 +366,7 @@ public interface EmulatorConfig {
         CloudWatchLogsStorageConfig cloudwatchlogs();
         CloudWatchMetricsStorageConfig cloudwatchmetrics();
         SecretsManagerStorageConfig secretsmanager();
+        PaymentCryptographyStorageConfig paymentcryptography();
         AcmStorageConfig acm();
         OpenSearchStorageConfig opensearch();
         AppConfigStorageConfig appconfig();
@@ -482,6 +483,13 @@ public interface EmulatorConfig {
     }
 
     interface SecretsManagerStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface PaymentCryptographyStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -771,6 +779,7 @@ public interface EmulatorConfig {
         CloudWatchLogsServiceConfig cloudwatchlogs();
         CloudWatchMetricsServiceConfig cloudwatchmetrics();
         SecretsManagerServiceConfig secretsmanager();
+        PaymentCryptographyServiceConfig paymentcryptography();
         ApiGatewayV2ServiceConfig apigatewayv2();
         KinesisServiceConfig kinesis();
         FirehoseServiceConfig firehose();
@@ -1811,6 +1820,13 @@ public interface EmulatorConfig {
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();
 
+        /**
+         * S3 bucket a snapshot export stages each table's rows and Parquet in, before the finished
+         * Parquet is written to the export's own bucket. Created on first use if it doesn't exist.
+         */
+        @WithDefault("floci-rds-export-staging")
+        String exportStagingBucket();
+
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultMysqlImage();
 
@@ -2108,6 +2124,11 @@ public interface EmulatorConfig {
     }
 
     interface CloudWatchMetricsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface PaymentCryptographyServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

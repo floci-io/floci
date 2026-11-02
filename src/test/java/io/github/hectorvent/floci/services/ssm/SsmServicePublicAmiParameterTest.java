@@ -125,6 +125,29 @@ class SsmServicePublicAmiParameterTest {
     }
 
     @Test
+    void resolvesCanonicalUbuntuServerParametersByVersionAndCodename() {
+        String base = "/aws/service/canonical/ubuntu/server/";
+        for (String release : List.of("24.04", "noble")) {
+            assertEquals("ami-ubuntu2404-amd64", ssmService.getParameter(
+                    base + release + "/stable/current/amd64/hvm/ebs-gp3/ami-id", REGION).getValue(), release);
+            assertEquals("ami-ubuntu2404-arm64", ssmService.getParameter(
+                    base + release + "/stable/current/arm64/hvm/ebs-gp3/ami-id", REGION).getValue(), release);
+        }
+        for (String release : List.of("22.04", "jammy")) {
+            assertEquals("ami-ubuntu2204", ssmService.getParameter(
+                    base + release + "/stable/current/amd64/hvm/ebs-gp2/ami-id", REGION).getValue(), release);
+        }
+        for (String release : List.of("20.04", "focal")) {
+            assertEquals("ami-0abcdef1234567892", ssmService.getParameter(
+                    base + release + "/stable/current/amd64/hvm/ebs-gp2/ami-id", REGION).getValue(), release);
+        }
+        assertEquals(2, ssmService.getParametersByPath(base + "24.04/stable/current", true, REGION).size());
+        // Canonical publishes 24.04 on gp3 only; the gp2 name stays absent rather than aliased.
+        assertThrows(AwsException.class, () -> ssmService.getParameter(
+                base + "24.04/stable/current/amd64/hvm/ebs-gp2/ami-id", REGION));
+    }
+
+    @Test
     void resolvesAPublicParameterByItsArnForAnEcsSecret() {
         String arn = ssmService.getParameter(AL2023_DEFAULT, REGION).getArn();
 
@@ -152,12 +175,12 @@ class SsmServicePublicAmiParameterTest {
         assertTrue(names.contains(AMZN2_DEFAULT), names.toString());
         assertEquals(9, names.size());
         assertTrue(ssmService.getParametersByPath("/aws/service", false, REGION).isEmpty());
-        assertEquals(46, ssmService.getParametersByPath("/aws/service", true, REGION).size());
+        assertEquals(54, ssmService.getParametersByPath("/aws/service", true, REGION).size());
     }
 
     @Test
     void appliesPathTypeFiltersToPublicParameters() {
-        assertEquals(46, ssmService.getParametersByPath("/aws/service", true,
+        assertEquals(54, ssmService.getParametersByPath("/aws/service", true,
                 List.of(new ParameterStringFilter("Type", null, List.of("String"))), REGION).size());
         assertTrue(ssmService.getParametersByPath("/aws/service", true,
                 List.of(new ParameterStringFilter("Type", null, List.of("StringList"))), REGION).isEmpty());

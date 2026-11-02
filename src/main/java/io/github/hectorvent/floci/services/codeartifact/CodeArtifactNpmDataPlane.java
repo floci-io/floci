@@ -41,6 +41,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntConsumer;
 
@@ -127,23 +128,36 @@ public class CodeArtifactNpmDataPlane {
 
         String npmRepositoryId;
         try {
-            npmRepositoryId = service.ensureFormatContainerId("npm", scope.get().region(), npmRequest.domain(),
-                    scope.get().owner(), npmRequest.repository());
-        } catch (AwsException e) {
+            npmRepositoryId = service.resolveContainerIdAndBeginUse("npm", scope.get().region(),
+                    npmRequest.domain(), scope.get().owner(), npmRequest.repository(), verdaccioClient);
+        } catch (AwsException | IllegalStateException e) {
             context.response().setStatusCode(404).end();
             return;
         }
+        NpmUse use = new NpmUse(npmRepositoryId);
+        AtomicReference<Runnable> cleanupOnClose = new AtomicReference<>(() -> { });
+        context.response().endHandler(ignored -> use.responseDone());
+        context.response().closeHandler(ignored -> {
+            use.responseDone();
+            cleanupOnClose.get().run();
+        });
 
         if (isPublish(context.request().method(), npmRequest.rest())) {
             context.request().pause();
             Context eventLoop = vertx.getOrCreateContext();
             AtomicReference<PreflightGate.Waiter> queued = new AtomicReference<>();
-            context.response().closeHandler(ignored -> preflights.abandon(queued.get()));
+            use.retain();
+            cleanupOnClose.set(() -> {
+                if (preflights.abandon(queued.get())) {
+                    use.done();
+                }
+            });
             PreflightGate.Waiter waiter = preflights.acquire(() -> eventLoop.runOnContext(ignored ->
-                    handlePublish(context, npmRequest, npmRepositoryId, scope.get())));
+                    handlePublish(context, npmRequest, npmRepositoryId, scope.get(), use, cleanupOnClose)));
             if (waiter == null) {
                 context.request().resume();
                 context.response().putHeader("Retry-After", "1").setStatusCode(429).end();
+                use.done();
                 return;
             }
             queued.set(waiter);
@@ -159,6 +173,7 @@ public class CodeArtifactNpmDataPlane {
         if (packumentTarget.isPresent()) {
             PackageIdentity identity = packumentTarget.get();
             boolean fullMetadata = !acceptsCorgi(context.request().getHeader("Accept"));
+            use.retain();
             vertx.<ObjectNode>executeBlocking(promise -> promise.complete(externalConnectionImporter.mergedPackument(
                     tokenScope.region(), npmRequest.domain(), tokenScope.owner(), npmRequest.repository(), repoId,
                     identity.namespace(), identity.packageName(), fullMetadata).orElse(null)), false).onComplete(
@@ -166,13 +181,14 @@ public class CodeArtifactNpmDataPlane {
                         if (mergeResult.succeeded() && mergeResult.result() != null) {
                             context.request().resume();
                             respondWithMergedPackument(context, mergeResult.result());
-                            return;
+                        } else {
+                            proceedToProxy(context, npmRequest, repoId, tokenScope, use);
                         }
-                        proceedToProxy(context, npmRequest, repoId, tokenScope);
+                        use.done();
                     });
             return;
         }
-        proceedToProxy(context, npmRequest, repoId, tokenScope);
+        proceedToProxy(context, npmRequest, repoId, tokenScope, use);
     }
 
     /**
@@ -182,11 +198,12 @@ public class CodeArtifactNpmDataPlane {
      * #tryImportMissingTarball}) when the requested download is one.
      */
     private void proceedToProxy(RoutingContext context, NpmRequest npmRequest, String repoId,
-            AuthorizationTokenScope tokenScope) {
+            AuthorizationTokenScope tokenScope, NpmUse use) {
         Optional<TarballDownloadRequest> tarballTarget = nativeTarballDownloadTarget(context.request().method(),
                 npmRequest.rest());
         Optional<PackageIdentity> unpublishTarget = nativeUnpublishTarget(context.request().method(),
                 npmRequest.rest());
+        use.retain();
         vertx.<String>executeBlocking(promise -> {
             tarballTarget.ifPresent(target -> {
                 tryImportMissingTarball(tokenScope, npmRequest, repoId, target);
@@ -197,17 +214,47 @@ public class CodeArtifactNpmDataPlane {
             if (result.failed()) {
                 context.request().resume();
                 context.response().setStatusCode(result.cause() instanceof AwsException ? 404 : 503).end();
+                use.done();
                 return;
             }
             proxy(context, result.result(), npmRequest.rest() + querySuffix(context), status ->
                     unpublishTarget.ifPresent(identity -> {
                         if (status == 200 || status == 201) {
                             service.forgetContainerBackedPackage(tokenScope.region(), npmRequest.domain(),
-                                    tokenScope.owner(), npmRequest.repository(), "npm", identity.namespace(),
+                                    tokenScope.owner(), npmRequest.repository(), repoId, "npm", identity.namespace(),
                                     identity.packageName());
                         }
-                    }));
+                    }), use::done);
         });
+    }
+
+    private final class NpmUse {
+        private final String repoId;
+        private final AtomicInteger references = new AtomicInteger(1);
+        private final AtomicBoolean responseFinished = new AtomicBoolean();
+
+        NpmUse(String repoId) {
+            this.repoId = repoId;
+        }
+
+        void retain() {
+            references.incrementAndGet();
+        }
+
+        void responseDone() {
+            if (responseFinished.compareAndSet(false, true)) {
+                done();
+            }
+        }
+
+        void done() {
+            if (references.decrementAndGet() == 0) {
+                vertx.<Void>executeBlocking(promise -> {
+                    verdaccioClient.endUse(repoId);
+                    promise.complete();
+                }, false).onFailure(error -> LOG.warnv(error, "Could not end npm sidecar use for {0}", repoId));
+            }
+        }
     }
 
     /**
@@ -425,8 +472,15 @@ public class CodeArtifactNpmDataPlane {
      * answer 200 without reaching Verdaccio; anything else forwards the spooled body unchanged.
      */
     private void handlePublish(RoutingContext context, NpmRequest npmRequest, String npmRepositoryId,
-            AuthorizationTokenScope scope) {
+            AuthorizationTokenScope scope, NpmUse use, AtomicReference<Runnable> cleanupOnClose) {
         AtomicBoolean finished = new AtomicBoolean();
+        AtomicBoolean pipelineFinished = new AtomicBoolean();
+        use.retain();
+        Runnable pipelineDone = () -> {
+            if (pipelineFinished.compareAndSet(false, true)) {
+                use.done();
+            }
+        };
         AtomicReference<String> spool = new AtomicReference<>();
         AtomicReference<AsyncFile> reading = new AtomicReference<>();
         Runnable finish = () -> {
@@ -438,34 +492,41 @@ public class CodeArtifactNpmDataPlane {
                     vertx.fileSystem().delete(spool.get());
                 }
                 preflights.release();
+                use.done();
             }
         };
+        cleanupOnClose.set(finish);
         if (context.response().ended() || context.response().closed()) {
             finish.run();
+            pipelineDone.run();
             return;
         }
         vertx.fileSystem().createTempFile("npm-publish-", ".json").onComplete(created -> {
             if (created.failed()) {
                 finish.run();
                 respondUnlessGone(context, 500);
+                pipelineDone.run();
                 return;
             }
             String path = created.result();
             spool.set(path);
             if (finished.get()) {
                 vertx.fileSystem().delete(path);
+                pipelineDone.run();
                 return;
             }
             vertx.fileSystem().open(path, new OpenOptions().setWrite(true)).onComplete(opened -> {
                 if (opened.failed()) {
                     finish.run();
                     respondUnlessGone(context, 500);
+                    pipelineDone.run();
                     return;
                 }
                 context.request().pipeTo(opened.result()).onComplete(piped -> {
                     if (piped.failed()) {
                         finish.run();
                         respondUnlessGone(context, 400);
+                        pipelineDone.run();
                         return;
                     }
                     vertx.<String>executeBlocking(promise ->
@@ -474,6 +535,7 @@ public class CodeArtifactNpmDataPlane {
                                 if (readyResult.failed()) {
                                     finish.run();
                                     respondUnlessGone(context, 503);
+                                    pipelineDone.run();
                                     return;
                                 }
                                 String backendBaseUrl = readyResult.result();
@@ -484,6 +546,7 @@ public class CodeArtifactNpmDataPlane {
                                         .onComplete(checkResult -> {
                                             if (context.response().closed()) {
                                                 finish.run();
+                                                pipelineDone.run();
                                                 return;
                                             }
                                             RepublishCheck check = checkResult.succeeded() ? checkResult.result()
@@ -508,6 +571,7 @@ public class CodeArtifactNpmDataPlane {
                                                         .end("{\"error\":\"forbidden\",\"reason\":\""
                                                                 + check.blockedMessage() + "\"}");
                                                 finish.run();
+                                                pipelineDone.run();
                                                 return;
                                             }
                                             if (check.confirmed()) {
@@ -520,6 +584,7 @@ public class CodeArtifactNpmDataPlane {
                                                         .end("{\"ok\":\"accepted, content already published\","
                                                                 + "\"success\":true}");
                                                 finish.run();
+                                                pipelineDone.run();
                                                 return;
                                             }
                                             // Snapshotted before the real write (the forwarded
@@ -553,18 +618,21 @@ public class CodeArtifactNpmDataPlane {
                                                         if (reopened.failed()) {
                                                             finish.run();
                                                             respondUnlessGone(context, 500);
+                                                            pipelineDone.run();
                                                             return;
                                                         }
                                                         reading.set(reopened.result());
                                                         context.addEndHandler(ended -> finish.run());
-                                                        context.response().closeHandler(ignored -> finish.run());
                                                         forwardSpooled(context, backendBaseUrl,
                                                                 npmRequest.rest() + querySuffix(context),
                                                                 reopened.result(), scope, npmRequest.domain(),
                                                                 npmRequest.repository(), check.identity(),
                                                                 check.totalAttachmentBytes(), fenceSnapshot,
                                                                 check.readmeByVersion(), readmeFenceSnapshots,
-                                                                check.beforeRevisionByVersion());
+                                                         check.beforeRevisionByVersion(), () -> {
+                                                             finish.run();
+                                                             pipelineDone.run();
+                                                         });
                                                     });
                                         });
                             });
@@ -617,12 +685,12 @@ public class CodeArtifactNpmDataPlane {
             return waiter;
         }
 
-        void abandon(Waiter waiter) {
+        boolean abandon(Waiter waiter) {
             if (waiter == null) {
-                return;
+                return false;
             }
             synchronized (this) {
-                waiting.remove(waiter);
+                return waiting.remove(waiter);
             }
         }
 
@@ -895,7 +963,13 @@ public class CodeArtifactNpmDataPlane {
             ReadStream<Buffer> body, AuthorizationTokenScope scope, String domain, String repository,
             PackageIdentity identity, long totalAttachmentBytes, long fenceSnapshot,
             Map<String, String> readmeByVersion, Map<String, Long> readmeFenceSnapshots,
-            Map<String, String> beforeRevisionByVersion) {
+            Map<String, String> beforeRevisionByVersion, Runnable onComplete) {
+        AtomicBoolean completed = new AtomicBoolean();
+        Runnable complete = () -> {
+            if (completed.compareAndSet(false, true)) {
+                onComplete.run();
+            }
+        };
         URI backend = URI.create(backendBaseUrl);
         RequestOptions options = new RequestOptions()
                 .setHost(backend.getHost())
@@ -905,6 +979,7 @@ public class CodeArtifactNpmDataPlane {
         proxyClient.request(options).onComplete(upstreamRequest -> {
             if (upstreamRequest.failed()) {
                 respondUnlessGone(context, 503);
+                complete.run();
                 return;
             }
             HttpClientRequest clientReq = upstreamRequest.result();
@@ -912,6 +987,7 @@ public class CodeArtifactNpmDataPlane {
             clientReq.response().onComplete(upstreamResponse -> {
                 if (upstreamResponse.failed()) {
                     respondUnlessGone(context, 502);
+                    complete.run();
                     return;
                 }
                 HttpClientResponse response = upstreamResponse.result();
@@ -926,6 +1002,7 @@ public class CodeArtifactNpmDataPlane {
                 response.body().onComplete(bodyResult -> {
                     if (bodyResult.failed()) {
                         respondUnlessGone(context, 502);
+                        complete.run();
                         return;
                     }
                     Buffer responseBody = bodyResult.result();
@@ -934,6 +1011,7 @@ public class CodeArtifactNpmDataPlane {
                     boolean needsReadmeCapture = !readmeByVersion.isEmpty() && forwardSucceeded;
                     if (!needsBytes && !needsReadmeCapture) {
                         respondUnlessGone(context, responseBody);
+                        complete.run();
                         return;
                     }
                     // Each still runs off the event loop, in executeBlocking, on principle:
@@ -976,15 +1054,15 @@ public class CodeArtifactNpmDataPlane {
                                     result.cause().getMessage());
                         }
                         respondUnlessGone(context, responseBody);
+                        complete.run();
                     });
                 });
             });
-            clientReq.send(body).onFailure(ignored -> respondUnlessGone(context, 502));
+            clientReq.send(body).onFailure(ignored -> {
+                respondUnlessGone(context, 502);
+                complete.run();
+            });
         });
-    }
-
-    private void proxy(RoutingContext context, String backendBaseUrl, String backendPath) {
-        proxy(context, backendBaseUrl, backendPath, status -> { });
     }
 
     /**
@@ -994,7 +1072,13 @@ public class CodeArtifactNpmDataPlane {
      * package, not before); every other caller passes a no-op.
      */
     private void proxy(RoutingContext context, String backendBaseUrl, String backendPath,
-            IntConsumer onSuccessStatus) {
+            IntConsumer onSuccessStatus, Runnable onComplete) {
+        AtomicBoolean completed = new AtomicBoolean();
+        Runnable complete = () -> {
+            if (completed.compareAndSet(false, true)) {
+                onComplete.run();
+            }
+        };
         URI backend = URI.create(backendBaseUrl);
         RequestOptions options = new RequestOptions()
                 .setHost(backend.getHost())
@@ -1005,6 +1089,7 @@ public class CodeArtifactNpmDataPlane {
             if (upstreamRequest.failed()) {
                 context.request().resume();
                 context.response().setStatusCode(503).end();
+                complete.run();
                 return;
             }
             HttpClientRequest clientReq = upstreamRequest.result();
@@ -1014,17 +1099,19 @@ public class CodeArtifactNpmDataPlane {
                     if (!context.response().ended()) {
                         context.response().setStatusCode(502).end();
                     }
+                    complete.run();
                     return;
                 }
                 HttpClientResponse response = upstreamResponse.result();
                 copyResponseHeaders(context, response);
-                response.pipeTo(context.response());
+                response.pipeTo(context.response()).onComplete(ignored -> complete.run());
                 onSuccessStatus.accept(response.statusCode());
             });
             clientReq.send(context.request()).onFailure(ignored -> {
                 if (!context.response().ended()) {
                     context.response().setStatusCode(502).end();
                 }
+                complete.run();
             });
             context.request().resume();
         });

@@ -15,12 +15,12 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <quarkus.platform.version>3.40.1</quarkus.platform.version>
+        <quarkus.platform.version>3.40.1.1</quarkus.platform.version>
         <jackson.version>2.22.4</jackson.version>
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
-        <wire.version>7.1.0</wire.version>
-        <aws.sdk.version>2.57.3</aws.sdk.version>
+        <wire.version>7.1.2</wire.version>
+        <aws.sdk.version>2.57.7</aws.sdk.version>
     </properties>
 
     <dependencyManagement>
@@ -330,6 +330,12 @@
         </dependency>
 
         <!-- Testing -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>acm</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>sts</artifactId>

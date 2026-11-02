@@ -1277,6 +1277,32 @@ use `ParallelizationFactor` instead, which is a separate field.
     at a time regardless). Real parallel dispatch capped by
     `MaximumConcurrency` is tracked as a follow-up.
 
+### ParallelizationFactor (Kinesis and DynamoDB Streams only)
+
+`CreateEventSourceMapping` and `UpdateEventSourceMapping` accept a
+`ParallelizationFactor` integer between 1 and 10 on Kinesis and DynamoDB
+Streams event sources. `GetEventSourceMapping`, `ListEventSourceMappings`
+and the create, update and delete responses return it on every stream
+mapping, `1` when none was set, as AWS does. SQS mappings omit it.
+
+```bash
+aws lambda create-event-source-mapping \
+  --function-name my-function \
+  --event-source-arn $STREAM_ARN \
+  --starting-position LATEST \
+  --parallelization-factor 4 \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+Values outside 1 to 10 are rejected with `InvalidParameterValueException`,
+and so is `ParallelizationFactor` on any other event source.
+
+!!! note "Enforcement status"
+    The configured `ParallelizationFactor` is persisted and returned on the
+    wire, but the Kinesis and DynamoDB Streams pollers still process one
+    batch per shard at a time. Concurrent batches per shard are tracked as
+    a follow-up.
+
 ### FilterCriteria
 
 `CreateEventSourceMapping` and `UpdateEventSourceMapping` accept a

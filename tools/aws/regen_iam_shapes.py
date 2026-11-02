@@ -93,9 +93,10 @@ REQUIRED_BY_HAND = (
 
 # Members an operation answers in a wording the walk would move, each with the reason it keeps.
 #
-# A service-linked role's principal and suffix answer `InvalidInput` rather than a validation error
-# at all. `ServiceNamespaces` on `ListPoliciesGrantingServiceAccess` answers `InvalidInput` too
-# when the list arrives empty. `statusType` is answered without the offending value or the
+# `CreateServiceLinkedRole` keeps its principal and suffix in this hand-written list because the
+# service method applies the IAM validation helper to `AWSServiceName`, while `CustomSuffix` still
+# answers `InvalidInput`. `ServiceNamespaces` on `ListPoliciesGrantingServiceAccess` answers
+# `InvalidInput` too when the list arrives empty. `statusType` is answered without the value or the
 # permitted set, on all four operations that take it, which is what the recorded refusal carries,
 # and `Encoding` on `GetSSHPublicKey` is answered with the modelled `UnrecognizedPublicKeyEncoding`
 # rather than as a constraint at all. The simulators answer an empty `ActionNames`,

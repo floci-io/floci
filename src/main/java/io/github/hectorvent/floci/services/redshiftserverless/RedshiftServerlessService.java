@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.SnapshotDumpCopier;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
+import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessSnapshotCopyService.CopyRule;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
@@ -1201,24 +1202,31 @@ public class RedshiftServerlessService implements Resettable {
         return new WorkgroupTarget(workgroup.getWorkgroupArn(), workgroup.getWorkgroupName(),
                 workgroup.getRuntimeHost(), workgroup.getRuntimePort(), namespace.getDbName(),
                 workgroup.getMasterUsername(), namespace.getAdminUserPassword(), adminUserOf(namespace),
-                namespace.getIamRoles(), namespace.getAdminPasswordSecretArn());
+                namespace.getIamRoles(), namespace.getAdminPasswordSecretArn(), workgroup.getEndpoint());
     }
 
     /** Connection details of a workgroup's backend; {@code adminUsername} is the name clients log in with. */
     public record WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
                                   String masterUsername, String masterPassword, String adminUsername,
-                                  List<String> iamRoleArns, String adminPasswordSecretArn) {
+                                  List<String> iamRoleArns, String adminPasswordSecretArn, Endpoint endpoint) {
+        public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
+                               String masterUsername, String masterPassword, String adminUsername,
+                               List<String> iamRoleArns, String adminPasswordSecretArn) {
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
+                    iamRoleArns, adminPasswordSecretArn, null);
+        }
+
         public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
                                String masterUsername, String masterPassword, String adminUsername,
                                List<String> iamRoleArns) {
             this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
-                    iamRoleArns, null);
+                    iamRoleArns, null, null);
         }
 
         public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
                                String masterUsername, String masterPassword, String adminUsername) {
             this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
-                    List.of(), null);
+                    List.of(), null, null);
         }
 
         public WorkgroupTarget {
@@ -1226,14 +1234,20 @@ public class RedshiftServerlessService implements Resettable {
         }
     }
 
+    /** The workgroup a workgroup name or ARN names in the Region, as the Data API reads either; empty when none. */
+    public Optional<Workgroup> findWorkgroupByNameOrArn(String nameOrArn, String region) {
+        return AwsArnUtils.looksLikeArn(nameOrArn) ? workgroupByArn(nameOrArn, region)
+                : findWorkgroup(nameOrArn, region);
+    }
+
     private Workgroup resolveWorkgroup(String nameOrArn, String region) {
         if (nameOrArn == null || nameOrArn.isBlank()) {
             throw ServerlessSupport.validation("workgroupName is required.");
         }
         if (!AwsArnUtils.looksLikeArn(nameOrArn)) {
-            return getWorkgroup(nameOrArn, region);
+            validateWorkgroupName(nameOrArn);
         }
-        return workgroupByArn(nameOrArn, region).orElseThrow(() -> workgroupNotFound(nameOrArn));
+        return findWorkgroupByNameOrArn(nameOrArn, region).orElseThrow(() -> workgroupNotFound(nameOrArn));
     }
 
     /**

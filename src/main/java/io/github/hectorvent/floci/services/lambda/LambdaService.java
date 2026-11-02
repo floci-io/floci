@@ -51,6 +51,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -1693,6 +1694,7 @@ public class LambdaService implements ResourceProvider {
 
         Integer maximumRetryAttempts = parseMaximumRetryAttempts(request);
         Integer maximumRecordAgeInSeconds = parseMaximumRecordAgeInSeconds(request);
+        Integer parallelizationFactor = parseParallelizationFactor(request, eventSourceArn);
 
         EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
 
@@ -1721,6 +1723,7 @@ public class LambdaService implements ResourceProvider {
         esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
         esm.setMaximumRetryAttempts(maximumRetryAttempts);
         esm.setMaximumRecordAgeInSeconds(maximumRecordAgeInSeconds);
+        esm.setParallelizationFactor(parallelizationFactor);
         esm.setDestinationConfig(destinationConfig);
         esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
@@ -2098,25 +2101,12 @@ public class LambdaService implements ResourceProvider {
             }
             return null;
         }
-        if (!(mc instanceof Number)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "ScalingConfig.MaximumConcurrency must be a numeric value", 400);
-        }
-        double d = ((Number) mc).doubleValue();
-        if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "ScalingConfig.MaximumConcurrency must be an integer", 400);
-        }
-        long longValue = ((Number) mc).longValue();
-        if (longValue < 2 || longValue > 1000) {
-            throw new AwsException("InvalidParameterValueException",
-                    "ScalingConfig.MaximumConcurrency must be between 2 and 1000 (got " + longValue + ")", 400);
-        }
+        int maximumConcurrency = boundedInteger(mc, "ScalingConfig.MaximumConcurrency", 2, 1000);
         if (!isSqs) {
             throw new AwsException("InvalidParameterValueException",
                     "ScalingConfig is only supported for Amazon SQS event source mappings", 400);
         }
-        return new ScalingConfig((int) longValue);
+        return new ScalingConfig(maximumConcurrency);
     }
 
     /**
@@ -2125,69 +2115,75 @@ public class LambdaService implements ResourceProvider {
      * is absent so a create leaves it unset and an update leaves the stored value untouched.
      */
     private Integer parseMaximumBatchingWindow(Map<String, Object> request) {
-        Object raw = request.get("MaximumBatchingWindowInSeconds");
-        if (raw == null) {
-            return null;
-        }
-        if (!(raw instanceof Number)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaximumBatchingWindowInSeconds must be a numeric value", 400);
-        }
-        double d = ((Number) raw).doubleValue();
-        if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaximumBatchingWindowInSeconds must be an integer", 400);
-        }
-        long value = ((Number) raw).longValue();
-        if (value < 0 || value > 300) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaximumBatchingWindowInSeconds must be between 0 and 300 (got " + value + ")", 400);
-        }
-        return (int) value;
+        return boundedInteger(request.get("MaximumBatchingWindowInSeconds"), "MaximumBatchingWindowInSeconds", 0, 300);
     }
 
     private Integer parseMaximumRetryAttempts(Map<String, Object> request) {
-        Object raw = request.get("MaximumRetryAttempts");
-        if (raw == null) {
-            return null;
-        }
-        if (!(raw instanceof Number)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaximumRetryAttempts must be a numeric value", 400);
-        }
-        double d = ((Number) raw).doubleValue();
-        if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaximumRetryAttempts must be an integer", 400);
-        }
-        long value = ((Number) raw).longValue();
-        if (value < -1 || value > 10000) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaximumRetryAttempts must be between -1 and 10000 (got " + value + ")", 400);
-        }
-        return (int) value;
+        return boundedInteger(request.get("MaximumRetryAttempts"), "MaximumRetryAttempts", -1, 10000);
     }
 
+    /** -1 (infinite) or 60 to 604800: the one member whose range has a gap. */
     private Integer parseMaximumRecordAgeInSeconds(Map<String, Object> request) {
         Object raw = request.get("MaximumRecordAgeInSeconds");
+        String range = "-1 or between 60 and 604800";
+        Integer value = boundedInteger(raw, "MaximumRecordAgeInSeconds", -1, 604800, range);
+        if (value != null && value != -1 && value < 60) {
+            throw outOfRange("MaximumRecordAgeInSeconds", range, value);
+        }
+        return value;
+    }
+
+    /**
+     * Reads an integer member of an event source mapping request: {@code null} when absent, otherwise a
+     * whole number from {@code minimum} to {@code maximum}, or {@code InvalidParameterValueException}. The
+     * range is checked on the value as sent, before it is narrowed, so a value beyond {@code long} cannot
+     * wrap into range.
+     */
+    private static Integer boundedInteger(Object raw, String member, int minimum, int maximum) {
+        return boundedInteger(raw, member, minimum, maximum, "between " + minimum + " and " + maximum);
+    }
+
+    private static Integer boundedInteger(Object raw, String member, int minimum, int maximum, String range) {
         if (raw == null) {
             return null;
         }
-        if (!(raw instanceof Number)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaximumRecordAgeInSeconds must be a numeric value", 400);
+        if (!(raw instanceof Number number)) {
+            throw new AwsException("InvalidParameterValueException", member + " must be a numeric value", 400);
         }
-        double d = ((Number) raw).doubleValue();
+        double d = number.doubleValue();
         if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaximumRecordAgeInSeconds must be an integer", 400);
+            throw new AwsException("InvalidParameterValueException", member + " must be an integer", 400);
         }
-        long value = ((Number) raw).longValue();
-        if (value != -1 && (value < 60 || value > 604800)) {
-            throw new AwsException("InvalidParameterValueException",
-                    "MaximumRecordAgeInSeconds must be -1 or between 60 and 604800 (got " + value + ")", 400);
+        if (d < minimum || d > maximum) {
+            throw outOfRange(member, range, number);
         }
-        return (int) value;
+        return number.intValue();
+    }
+
+    private static AwsException outOfRange(String member, String range, Number value) {
+        // Printed as a whole number whatever its JSON spelling: 301.0 reads as 301.
+        String got = new BigDecimal(value.toString()).toBigInteger().toString();
+        return new AwsException("InvalidParameterValueException",
+                member + " must be " + range + " (got " + got + ")", 400);
+    }
+
+    /**
+     * Parses {@code ParallelizationFactor}: an integer in [1, 10], accepted only on Kinesis and
+     * DynamoDB Streams sources. Returns {@code null} when the field is absent.
+     */
+    private Integer parseParallelizationFactor(Map<String, Object> request, String eventSourceArn) {
+        Integer value = boundedInteger(request.get("ParallelizationFactor"), "ParallelizationFactor", 1, 10);
+        if (value != null && !isStreamSource(eventSourceArn)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ParallelizationFactor is only supported for Amazon Kinesis and Amazon DynamoDB Streams event sources",
+                    400);
+        }
+        return value;
+    }
+
+    static boolean isStreamSource(String eventSourceArn) {
+        return eventSourceArn != null
+                && (eventSourceArn.contains(":kinesis:") || eventSourceArn.contains(":dynamodb:"));
     }
 
     private void startPollingHelper(EventSourceMapping esm) {
@@ -2305,6 +2301,11 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("MaximumRecordAgeInSeconds")) {
             Integer maximumRecordAge = parseMaximumRecordAgeInSeconds(request);
             changes.add(m -> m.setMaximumRecordAgeInSeconds(maximumRecordAge));
+        }
+        if (request.get("ParallelizationFactor") != null) {
+            // A JSON null is an absent member and leaves the stored factor unchanged.
+            Integer parallelizationFactor = parseParallelizationFactor(request, esm.getEventSourceArn());
+            changes.add(m -> m.setParallelizationFactor(parallelizationFactor));
         }
 
         if (request.containsKey("DestinationConfig")) {

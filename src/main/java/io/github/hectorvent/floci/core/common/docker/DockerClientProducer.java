@@ -12,6 +12,7 @@ import com.github.dockerjava.transport.DockerHttpClient;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Digests;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Disposes;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -448,6 +449,14 @@ public class DockerClientProducer {
     public DockerClient streamingDockerClient() {
         return buildDockerClient(buildClientConfig(),
                 validateStreamingMaxConnections(config.docker().streamingMaxConnections()), "streaming");
+    }
+
+    void disposeDockerClient(@Disposes DockerClient client) throws IOException {
+        client.close();
+    }
+
+    void disposeStreamingDockerClient(@Disposes @StreamingDocker DockerClient client) throws IOException {
+        client.close();
     }
 
     /**

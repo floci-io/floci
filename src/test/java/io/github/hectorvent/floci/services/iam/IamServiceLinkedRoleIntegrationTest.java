@@ -155,7 +155,10 @@ class IamServiceLinkedRoleIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value null at 'aWSServiceName' failed to satisfy constraint: "
+                            + "Member must not be null"));
     }
 
     @Test
@@ -319,12 +322,28 @@ class IamServiceLinkedRoleIntegrationTest {
                     equalTo("AWSServiceRoleForAutoScaling_CustomResource"));
     }
 
-    /** AWS constrains AWSServiceName to [\w+=,.@-]{1,128}; anything else must not reach storage. */
+    @Test
+    @Order(15)
+    void aServiceNameWithSpacesMatchesAwsValidationError() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "not a service principal")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value at 'aWSServiceName' failed to satisfy constraint: "
+                            + "Member must satisfy regular expression pattern: [\\w+=.@-]*"));
+    }
+
+    /** The documented name pattern rejects these characters before any role lookup. */
     @Test
     @Order(15)
     void aServiceNameOutsideTheAwsPatternIsRejected() {
-        for (String bad : new String[]{"x\",\"AWS\":\"*", "a\"b.amazonaws.com", " ", "a/b.amazonaws.com",
-                "x".repeat(129)}) {
+        for (String bad : new String[]{"x\",\"AWS\":\"*", "a\"b.amazonaws.com", " ", "a/b.amazonaws.com"}) {
             given()
                 .formParam("Action", "CreateServiceLinkedRole")
                 .formParam("AWSServiceName", bad)
@@ -333,8 +352,42 @@ class IamServiceLinkedRoleIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
         }
+    }
+
+    @Test
+    @Order(15)
+    void anEmptyServiceNameUsesIamValidationError() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value at 'aWSServiceName' failed to satisfy constraint: "
+                            + "Member must have length greater than or equal to 1"));
+    }
+
+    @Test
+    @Order(15)
+    void aServiceNameLongerThanTheDocumentedMaximumIsRejected() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "x".repeat(129))
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value at 'aWSServiceName' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to 128"));
     }
 
     /** The deletion task is account-scoped storage, so another account must not resolve it. */
