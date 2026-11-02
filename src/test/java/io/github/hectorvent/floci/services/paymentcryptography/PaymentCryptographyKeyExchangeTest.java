@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -30,12 +31,21 @@ class PaymentCryptographyKeyExchangeTest {
 
     private PaymentCryptographyService service;
 
+    /** The key a key block is wrapped under. */
+    private PaymentCryptographyKey protection;
+
     @BeforeEach
     void setUp() {
         service = new PaymentCryptographyService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"));
+        protection = service.createKey("us-east-1",
+                Map.of("KeyAlgorithm", "AES_256",
+                        "KeyClass", "SYMMETRIC_KEY",
+                        "KeyUsage", "TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+                        "KeyModesOfUse", Map.of("Wrap", true, "Unwrap", true)),
+                Map.of("Wrap", true, "Unwrap", true), true, true, Map.of());
     }
 
     @Test
@@ -102,7 +112,7 @@ class PaymentCryptographyKeyExchangeTest {
         material.put("RandomNonce", "A1B2C3D4");
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
-                material);
+                material, "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
         assertEquals("TR34_KEY_BLOCK", wrapped.get("WrappedKeyMaterialFormat"));
 
@@ -143,7 +153,7 @@ class PaymentCryptographyKeyExchangeTest {
         material.put("RandomNonce", "A1B2C3D4");
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
-                material);
+                material, "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
 
         // Another authority signs it, so the signature does not verify against this one.
@@ -175,7 +185,7 @@ class PaymentCryptographyKeyExchangeTest {
         material.put("WrappingSpec", "RSA_OAEP_SHA_256");
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "KeyCryptogram",
-                material);
+                material, "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
         assertEquals("KEY_CRYPTOGRAM", wrapped.get("WrappedKeyMaterialFormat"));
 
@@ -205,7 +215,7 @@ class PaymentCryptographyKeyExchangeTest {
                 "WrappingKeyIdentifier", kek.getKeyId());
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(),
-                "As2805KeyCryptogram", material);
+                "As2805KeyCryptogram", material, "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
         assertEquals("KEY_CRYPTOGRAM", wrapped.get("WrappedKeyMaterialFormat"));
 
@@ -236,7 +246,7 @@ class PaymentCryptographyKeyExchangeTest {
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(),
                 "As2805KeyCryptogram", Map.of(
                         "As2805KeyVariant", "PIN_ENCRYPTION_KEY_VARIANT_28",
-                        "WrappingKeyIdentifier", kek.getKeyId()));
+                        "WrappingKeyIdentifier", kek.getKeyId()), "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
 
         Map<String, Object> incoming = Map.of(
@@ -257,11 +267,53 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     @Test
+    void anInitialKeyLeavesInsteadOfTheBaseKey() {
+        // The initial key of the DUKPT derivation is derived from the base
+        // derivation key, and it is the derived key that leaves.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "TDES_2KEY");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_B0_BASE_DERIVATION_KEY");
+        PaymentCryptographyKey base = service.createKey("us-east-1", attributes,
+                Map.of("DeriveKey", Boolean.TRUE), true, true, Map.of());
+
+        Map<String, Object> answer = service.exportKey("us-east-1", base.getKeyId(), "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId()), "12345678900000000001");
+
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        String block = (String) wrapped.get("KeyMaterial");
+        // The header names the derived key: a PIN encryption key of Triple DES
+        // that does not leave again.
+        assertEquals("P0", block.substring(5, 7), "the usage of the derived key");
+        assertEquals("T", block.substring(7, 8), "the algorithm of the derived key");
+        assertEquals("N", block.substring(11, 12), "the derived key does not leave again");
+        // And the check value is the derived key's, not the base key's.
+        assertNotEquals(base.getKeyCheckValue(), wrapped.get("KeyCheckValue"));
+    }
+
+    @Test
+    void anInitialKeyCannotBeDerivedFromAnotherKey() {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "TDES_2KEY");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_P0_PIN_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = service.createKey("us-east-1", attributes,
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
+                        Map.of("WrappingKeyIdentifier", protection.getKeyId()),
+                        "12345678900000000001"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
     void aFormTheServiceDoesNotKnowIsRefused() {
         PaymentCryptographyKey key = createKey("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", key.getKeyId(), "Nonsense", Map.of()));
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Nonsense", Map.of(), ""));
         assertEquals("ValidationException", refused.getErrorCode());
     }
 

@@ -106,6 +106,7 @@ final class PaymentCryptographyPinOperations {
         PaymentCryptographyKey pvk = requiredKey(verificationKeyIdentifier, region);
         requireMode(pvk, "Verify", "verifying a PIN");
         requireSymmetricMaterial(pvk, "verify a PIN with");
+        requireTdesKey(pvk, "verify a PIN with");
 
         String pin;
         try {
@@ -176,6 +177,7 @@ final class PaymentCryptographyPinOperations {
         PaymentCryptographyKey pvk = requiredKey(generationKeyIdentifier, region);
         requireMode(pvk, "Generate", "generating a PIN verification value");
         requireSymmetricMaterial(pvk, "generate a PIN verification value with");
+        requireTdesKey(pvk, "generate a PIN verification value with");
         requireKeyMatchesFormat(pek, format, "EncryptionKeyIdentifier");
 
         String pin;
@@ -440,6 +442,26 @@ final class PaymentCryptographyPinOperations {
         if (material.length() != algorithm.bytes * 2) {
             throw validation("the key " + key.getArn() + " does not hold "
                     + algorithm.name() + " material");
+        }
+    }
+
+    /**
+     * The key has to be a TDES one, for the Visa PVV.
+     *
+     * <p>The PVV is defined over Triple DES: it encrypts the transaction data selector with the
+     * verification key and takes the decimalized result. An AES verification key has no such
+     * computation, and asking for one would fail inside the cipher rather than say why, so the
+     * key is refused here with the reason.
+     *
+     * @param key the verification key
+     * @param what what the key was asked to do, in words
+     */
+    private static void requireTdesKey(PaymentCryptographyKey key, String what) {
+        PaymentCryptographyKeyAlgorithm algorithm = algorithmOf(key);
+        if (algorithm.aes) {
+            throw validation("the key " + key.getArn()
+                    + " is an AES key, and the Visa PVV is defined over Triple DES, so it cannot "
+                    + what);
         }
     }
 

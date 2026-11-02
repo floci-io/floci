@@ -278,7 +278,31 @@ public class PaymentCryptographyJsonHandler {
         }
         JsonNode material = request.path("KeyMaterial");
         String form = soleForm(material, PaymentCryptographyKeyExchange.EXPORT_FORMS);
-        return service.exportKey(region, keyIdentifier, form, members(material.path(form)));
+        return service.exportKey(region, keyIdentifier, form, members(material.path(form)),
+                initialKeySerialNumber(request.path("ExportAttributes")));
+    }
+
+    /**
+     * The serial number of the initial key the request asks to be derived.
+     *
+     * <p>The export attributes name the kind of key that leaves: an initial key for the
+     * DUKPT derivation is derived from the base derivation key and the serial number the
+     * request gives, and it is that derived key which leaves.
+     *
+     * @param attributes the export attributes of the request
+     * @return the serial number, or an empty string when the request names no initial key
+     */
+    private static String initialKeySerialNumber(JsonNode attributes) {
+        JsonNode initial = attributes.path("ExportDukptInitialKey");
+        if (initial.isMissingNode() || initial.isNull()) {
+            return "";
+        }
+        String serialNumber = initial.path("KeySerialNumber").asText();
+        if (serialNumber.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "ExportAttributes.ExportDukptInitialKey.KeySerialNumber is required", 400);
+        }
+        return serialNumber;
     }
 
     /**

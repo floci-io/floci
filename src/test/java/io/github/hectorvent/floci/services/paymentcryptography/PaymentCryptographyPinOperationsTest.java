@@ -120,8 +120,30 @@ class PaymentCryptographyPinOperationsTest {
     }
 
     @Test
-    void theVerificationValueIsTheOneJposGives() {
+    void theVerificationValueIsTheOneTheStandardGives() {
         assertEquals("0463", PinCrypto.computePvv(PAN, 1, PIN, PVK));
+    }
+
+    @Test
+    void aVerificationKeyThatIsNotTdesIsRefused() {
+        // The PVV is defined over Triple DES, so an AES verification key has
+        // no such computation. It is refused with the reason rather than
+        // failing inside the cipher.
+        PaymentCryptographyKey pek = createKey("TDES_2KEY", "TR31_P0_PIN_ENCRYPTION_KEY",
+                "Encrypt", "Decrypt");
+        PaymentCryptographyKey pvk = createKey("AES_256", "TR31_P1_PIN_GENERATION_KEY",
+                "Generate", "Verify");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> pin.generatePinData(request(Map.of(
+                        "EncryptionKeyIdentifier", pek.getArn(),
+                        "GenerationKeyIdentifier", pvk.getArn(),
+                        "PinBlockFormat", "ISO_FORMAT_0",
+                        "PrimaryAccountNumber", PAN,
+                        "GenerationAttributes", visaPin(1))),
+                        "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
     }
 
     @Test

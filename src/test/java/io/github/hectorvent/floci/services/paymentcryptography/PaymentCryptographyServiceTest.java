@@ -47,7 +47,7 @@ class PaymentCryptographyServiceTest {
      */
     private Map<String, Object> exportTr31Answer(String region, String keyId, String wrappingKeyId) {
         return service.exportKey(region, keyId, "Tr31KeyBlock",
-                Map.of("WrappingKeyIdentifier", wrappingKeyId));
+                Map.of("WrappingKeyIdentifier", wrappingKeyId), "");
     }
 
     /**

@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.paymentcryptography.crypto.DukptCrypto;
 import io.github.hectorvent.floci.services.paymentcryptography.crypto.X509;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyKey;
@@ -711,25 +712,70 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * @return the material, the format it is in, and the key that protects it
      */
     public Map<String, Object> exportKey(String region, String keyIdentifier, String form,
-                                          Map<String, Object> material) {
+                                          Map<String, Object> material, String keySerialNumber) {
         PaymentCryptographyKey key = findKey(region, keyIdentifier);
         if (key == null) {
             throw new AwsException("ResourceNotFoundException", "Key not found: " + keyIdentifier, 400);
         }
-        if (!key.isExportable()) {
+        // An initial key leaves instead of the key itself: the service derives it and does
+        // not keep it.
+        PaymentCryptographyKey leaving = keySerialNumber.isEmpty() ? key : initialKey(key, keySerialNumber);
+        if (!leaving.isExportable() && keySerialNumber.isEmpty()) {
             throw new AwsException("ValidationException",
                     "the key " + key.getArn() + " is not exportable", 400);
         }
-        PaymentCryptographyKeyExchange.Exported exported = exchange.export(region, key, form, material);
+        PaymentCryptographyKeyExchange.Exported exported = exchange.export(region, leaving, form, material);
         Map<String, Object> wrapped = new LinkedHashMap<>();
         wrapped.put("KeyMaterial", exported.material());
         wrapped.put("WrappedKeyMaterialFormat", exported.format());
-        wrapped.put("KeyCheckValue", key.getKeyCheckValue());
-        wrapped.put("KeyCheckValueAlgorithm", key.getKeyCheckValueAlgorithm());
+        wrapped.put("KeyCheckValue", leaving.getKeyCheckValue());
+        wrapped.put("KeyCheckValueAlgorithm", leaving.getKeyCheckValueAlgorithm());
         if (exported.wrappingKeyArn() != null) {
             wrapped.put("WrappingKeyArn", exported.wrappingKeyArn());
         }
         return Map.of("WrappedKey", wrapped);
+    }
+
+    /**
+     * The initial key of the DUKPT derivation, derived from a base derivation key.
+     *
+     * <p>The derived key is a PIN encryption key of sixteen bytes, and it does not leave the
+     * service again: what leaves is the derived key, not the base one.
+     *
+     * @param base the base derivation key
+     * @param keySerialNumber the serial number of the key the derivation starts from
+     * @return the derived key, as the key that leaves
+     */
+    private static PaymentCryptographyKey initialKey(PaymentCryptographyKey base,
+                                                      String keySerialNumber) {
+        if (!"TR31_B0_BASE_DERIVATION_KEY".equals(base.getKeyUsage())) {
+            throw new AwsException("ValidationException",
+                    "an initial key under export is derived from a base derivation key, but "
+                            + base.getArn() + " is " + base.getKeyUsage(), 400);
+        }
+        byte[] initial;
+        try {
+            initial = DukptCrypto.deriveIpek(base.getKeyMaterialHex(), keySerialNumber);
+        } catch (RuntimeException e) {
+            throw new AwsException("ValidationException",
+                    "the initial key could not be derived: " + e.getMessage(), 400);
+        }
+        PaymentCryptographyKey derived = new PaymentCryptographyKey();
+        derived.setKeyId(base.getKeyId());
+        derived.setArn(base.getArn());
+        derived.setRegion(base.getRegion());
+        derived.setKeyAlgorithm("TDES_2KEY");
+        derived.setKeyClass("SYMMETRIC_KEY");
+        derived.setKeyUsage("TR31_P0_PIN_ENCRYPTION_KEY");
+        derived.setKeyModesOfUse(new LinkedHashMap<>(Map.of("Encrypt", Boolean.TRUE,
+                "Decrypt", Boolean.TRUE)));
+        derived.setKeyMaterialHex(PaymentCryptographyCrypto.toHex(initial));
+        derived.setKeyCheckValue(PaymentCryptographyCrypto.checkValue(derived.getKeyMaterialHex(),
+                PaymentCryptographyKeyAlgorithm.TDES_2KEY));
+        derived.setKeyCheckValueAlgorithm("ANSI_X9_24");
+        // The derived key is for the counterparty's use and does not leave again.
+        derived.setExportable(false);
+        return derived;
     }
 
     /**
