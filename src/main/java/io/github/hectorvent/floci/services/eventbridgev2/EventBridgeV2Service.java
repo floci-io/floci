@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
@@ -82,27 +83,34 @@ public class EventBridgeV2Service implements Resettable {
     private final RegionResolver regionResolver;
     private final EventBridgeV2Delivery delivery;
     private final Clock clock;
+    private final boolean enabled;
     private final SecureRandom random = new SecureRandom();
     private final ConcurrentMap<String, OrderedDeliveries> deliveriesByBus = new ConcurrentHashMap<>();
 
     @Inject
     public EventBridgeV2Service(StorageFactory storageFactory, RegionResolver regionResolver,
-                                EventBridgeV2Delivery delivery) {
+                                EventBridgeV2Delivery delivery, EmulatorConfig config) {
         this(storageFactory.create("eventbridgev2", "eventbridgev2-buses.json",
                         new TypeReference<Map<String, EventBusV2>>() {}),
                 storageFactory.create("eventbridgev2", "eventbridgev2-subscribers.json",
                         new TypeReference<Map<String, SubscriberV2>>() {}),
-                regionResolver, delivery, Clock.systemUTC());
+                regionResolver, delivery, Clock.systemUTC(), config.services().eventbridgev2().enabled());
     }
 
     EventBridgeV2Service(AccountAwareStorageBackend<EventBusV2> buses,
                          AccountAwareStorageBackend<SubscriberV2> subscribers, RegionResolver regionResolver,
-                         EventBridgeV2Delivery delivery, Clock clock) {
+                         EventBridgeV2Delivery delivery, Clock clock, boolean enabled) {
         this.buses = buses;
         this.subscribers = subscribers;
         this.regionResolver = regionResolver;
         this.delivery = delivery;
         this.clock = clock;
+        this.enabled = enabled;
+    }
+
+    /** Whether {@code floci.services.eventbridgev2.enabled} turns the service off. */
+    public boolean isDisabled() {
+        return !enabled;
     }
 
     // ──────────────────────────── Event buses ────────────────────────────
@@ -168,6 +176,22 @@ public class EventBridgeV2Service implements Resettable {
         bus.setRetentionPeriodInDays(retentionPeriodInDays);
         bus.setTags(tags);
         bus.setLastModifiedTime(clock.instant());
+        buses.put(storageKey(region, bus.getName()), bus);
+        return bus;
+    }
+
+    /**
+     * Puts back the settings {@code snapshot} records for a bus, as a CloudFormation rollback does for an update that
+     * changed them in place. The bus keeps its sequence number, so events published since the snapshot keep theirs
+     * and later ones never repeat them. The restore fails when the bus is no longer the one {@code snapshot} records.
+     */
+    public synchronized EventBusV2 restoreEventBus(EventBusV2 snapshot, String region) {
+        EventBusV2 bus = requireEventBus(snapshot.getArn(), region);
+        bus.setDescription(snapshot.getDescription());
+        bus.setKmsKeyIdentifier(snapshot.getKmsKeyIdentifier());
+        bus.setRetentionPeriodInDays(snapshot.getRetentionPeriodInDays());
+        bus.setTags(snapshot.getTags());
+        bus.setLastModifiedTime(snapshot.getLastModifiedTime());
         buses.put(storageKey(region, bus.getName()), bus);
         return bus;
     }
@@ -345,6 +369,23 @@ public class EventBridgeV2Service implements Resettable {
                 .toList();
         return page(listed, subscriber -> busName(subscriber.getEventBusArn()) + "::" + subscriber.getName(),
                 request, "subscriber");
+    }
+
+    /**
+     * Puts a subscriber back exactly as {@code snapshot} records it, under its own ARN, as a CloudFormation rollback
+     * does for one its update deleted or changed in place. A subscriber under that ARN is overwritten; the restore
+     * fails when its bus is gone or another subscriber holds its name on the bus.
+     */
+    public synchronized SubscriberV2 restoreSubscriber(SubscriberV2 snapshot, String region) {
+        EventBusV2 bus = requireEventBus(snapshot.getEventBusArn(), region);
+        String key = subscriberKey(region, bus.getName(), snapshot.getName());
+        Optional<SubscriberV2> existing = subscribers.get(key);
+        if (existing.isPresent() && !existing.get().getArn().equals(snapshot.getArn())) {
+            throw new AwsException("ResourceAlreadyExistsException",
+                    "Subscriber " + snapshot.getName() + " already exists on event bus " + bus.getName() + ".", 409);
+        }
+        subscribers.put(key, snapshot);
+        return snapshot;
     }
 
     /** Deletes the subscriber {@code SubscriberArn} names. */
@@ -651,7 +692,7 @@ public class EventBridgeV2Service implements Resettable {
      * A copy of the point-in-time configuration with its {@code StartingPoint} and {@code EndPoint} as epoch
      * seconds at millisecond precision, the form a response encodes as timestamps; null when there is none.
      */
-    private static JsonNode normalizedPointInTime(JsonNode configuration) {
+    public static JsonNode normalizedPointInTime(JsonNode configuration) {
         if (configuration == null || configuration.isNull()) {
             return null;
         }
