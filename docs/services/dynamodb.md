@@ -554,7 +554,7 @@ aws dynamodb update-contributor-insights --table-name Users \
 aws dynamodb describe-contributor-insights --table-name Users --endpoint-url $AWS_ENDPOINT_URL
 ```
 
-`DescribeContributorInsights` lists the rule names AWS would create, in the form `DynamoDBContributorInsights-<kind>-<table>-<creation time in ms>`. The kinds are `PKC` and `PKT`, plus `SKC` and `SKT` when the table or index has a sort key. `THROTTLED_KEYS` mode has only the throttled-key rules (`PKT`, `SKT`). A table or index that never had Contributor Insights enabled reads `DISABLED`. `ListContributorInsights` returns the enabled tables and indexes, at most 100 per page.
+`DescribeContributorInsights` lists the rule names AWS would create, in the form `DynamoDBContributorInsights-<kind>-<resource>-<creation time in ms>`, where the resource is the table name, or `<table>-<index>` for an index. The kinds are `PKC` and `PKT`, plus `SKC` and `SKT` when the table or index has a sort key. `THROTTLED_KEYS` mode has only the throttled-key rules (`PKT`, `SKT`). A table or index that never had Contributor Insights enabled reads `DISABLED`. `ListContributorInsights` returns the enabled tables and indexes, at most 100 per page.
 
 Deviations from AWS: `UpdateContributorInsights` answers `ENABLING` or `DISABLING` as on AWS, but the change applies at once, so the next `DescribeContributorInsights` reads `ENABLED` or `DISABLED`. Floci creates no CloudWatch rules and collects no key statistics, and the status is never `FAILED`.
 

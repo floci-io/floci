@@ -3004,6 +3004,10 @@ public class DynamoDbService {
             throw SmithyValidationErrors.validationException(SmithyValidationErrors.valueTooLarge(
                     "maxResults", String.valueOf(maxResults), MAX_CONTRIBUTOR_INSIGHTS_PAGE_SIZE));
         }
+        // A token is the ARN of the last table or index of the previous page.
+        if (nextToken != null && !AwsArnUtils.isArnFor(nextToken, "dynamodb")) {
+            throw new AwsException("ValidationException", "The provided next token is invalid", 400);
+        }
         List<TableDefinition> tables;
         if (tableName != null) {
             String canonicalTableName = canonicalTableName(region, tableName);
@@ -3042,7 +3046,8 @@ public class DynamoDbService {
         }
         GlobalSecondaryIndex gsi = table.findGsi(indexName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Requested resource not found: Index: " + indexName + " not found", 400));
+                        "Requested resource not found: Index: " + indexName + " not found for table: "
+                        + table.getTableName(), 400));
         return new ContributorInsightsTarget(table.getTableName(), indexName, gsi.getIndexArn(),
                 gsi.getSortKeyName() != null, gsi.getContributorInsights());
     }

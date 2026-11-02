@@ -71,7 +71,8 @@ public class NativeDynamoDbJsonHandler {
     private static final Instant MAX_TIME_RANGE_BOUND = Instant.ofEpochMilli(99_999_999_999_999L);
     private static final int MAX_RECOVERY_PERIOD_DAYS = 35;
     private static final List<String> CONTRIBUTOR_INSIGHTS_ACTIONS = List.of("ENABLE", "DISABLE");
-    private static final List<String> CONTRIBUTOR_INSIGHTS_MODES = List.of("ACCESSED_AND_THROTTLED_KEYS", "THROTTLED_KEYS");
+    // The order AWS prints the enum constraint in.
+    private static final List<String> CONTRIBUTOR_INSIGHTS_MODES = List.of("THROTTLED_KEYS", "ACCESSED_AND_THROTTLED_KEYS");
     // The warm throughput a new on-demand table or index starts with.
     private static final long ON_DEMAND_WARM_READ_UNITS = 12000;
     private static final long ON_DEMAND_WARM_WRITE_UNITS = 4000;
@@ -2110,10 +2111,10 @@ public class NativeDynamoDbJsonHandler {
     }
 
     /**
-     * The rules AWS creates, named {@code DynamoDBContributorInsights-<kind>-<table>-<creation millis>}:
-     * the accessed-key rules (PKC, SKC) only in ACCESSED_AND_THROTTLED_KEYS mode, the sort-key rules
-     * (SKC, SKT) only when the table or index has a sort key. An index's rules carry the table name,
-     * as in the AWS CLI reference example.
+     * The rules AWS creates, named {@code DynamoDBContributorInsights-<kind>-<resource>-<creation millis>}
+     * where the resource is the table name, or {@code <table>-<index>} for an index: the accessed-key
+     * rules (PKC, SKC) only in ACCESSED_AND_THROTTLED_KEYS mode, the sort-key rules (SKC, SKT) only
+     * when the table or index has a sort key.
      */
     private static List<String> contributorInsightsRuleNames(DynamoDbService.ContributorInsightsTarget target) {
         List<String> kinds = new ArrayList<>();
@@ -2127,7 +2128,9 @@ public class NativeDynamoDbJsonHandler {
         if (target.hasSortKey()) {
             kinds.add("SKT");
         }
-        String suffix = "-" + target.tableName() + "-" + target.insights().getRulesCreatedAt().toEpochMilli();
+        String resource = target.indexName() != null
+                ? target.tableName() + "-" + target.indexName() : target.tableName();
+        String suffix = "-" + resource + "-" + target.insights().getRulesCreatedAt().toEpochMilli();
         List<String> names = new ArrayList<>();
         for (String kind : kinds) {
             names.add("DynamoDBContributorInsights-" + kind + suffix);

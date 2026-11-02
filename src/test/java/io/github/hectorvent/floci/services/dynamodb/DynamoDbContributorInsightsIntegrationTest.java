@@ -128,8 +128,8 @@ class DynamoDbContributorInsightsIntegrationTest {
         List<String> rules = rulesOf(table, "byOwner");
         long created = ruleTimestamp(rules.getFirst());
         assertEquals(List.of(
-                "DynamoDBContributorInsights-PKC-" + table + "-" + created,
-                "DynamoDBContributorInsights-PKT-" + table + "-" + created), rules);
+                "DynamoDBContributorInsights-PKC-" + table + "-byOwner-" + created,
+                "DynamoDBContributorInsights-PKT-" + table + "-byOwner-" + created), rules);
         describe(table, "byOwner").statusCode(200).body("IndexName", equalTo("byOwner"));
         describe(table, null).statusCode(200).body("ContributorInsightsStatus", equalTo("DISABLED"));
 
@@ -146,7 +146,7 @@ class DynamoDbContributorInsightsIntegrationTest {
                 {"TableName": "%s", "GlobalSecondaryIndexUpdates": [{"Delete": {"IndexName": "byOwner"}}]}
                 """.formatted(table)).statusCode(200);
         expectError(describe(table, "byOwner"), "ResourceNotFoundException",
-                "Requested resource not found: Index: byOwner not found");
+                "Requested resource not found: Index: byOwner not found for table: " + table);
     }
 
     @Test
@@ -223,16 +223,16 @@ class DynamoDbContributorInsightsIntegrationTest {
                 "2 validation errors detected: Value 'PAUSE' at 'contributorInsightsAction' failed to satisfy "
                 + "constraint: Member must satisfy enum value set: [ENABLE, DISABLE]; Value 'ALL_KEYS' at "
                 + "'contributorInsightsMode' failed to satisfy constraint: Member must satisfy enum value set: "
-                + "[ACCESSED_AND_THROTTLED_KEYS, THROTTLED_KEYS]");
+                + "[THROTTLED_KEYS, ACCESSED_AND_THROTTLED_KEYS]");
         expectError(update(table, "ab", "ENABLE", null), "ValidationException",
                 "1 validation error detected: Value 'ab' at 'indexName' failed to satisfy constraint: "
                 + "Member must have length greater than or equal to 3");
         expectError(update("CiIT-missing", null, "ENABLE", null), "ResourceNotFoundException",
                 "Requested resource not found: Table: CiIT-missing not found");
         expectError(update(table, "nope", "ENABLE", null), "ResourceNotFoundException",
-                "Requested resource not found: Index: nope not found");
+                "Requested resource not found: Index: nope not found for table: " + table);
         expectError(describe(table, "byOwnerLocal"), "ResourceNotFoundException",
-                "Requested resource not found: Index: byOwnerLocal not found");
+                "Requested resource not found: Index: byOwnerLocal not found for table: " + table);
         expectError(ddb("DescribeContributorInsights", "{}"), "ValidationException",
                 "The parameter 'TableName' is required but was not present in the request");
         expectError(describe("CiIT-missing", null), "ResourceNotFoundException",
@@ -242,6 +242,8 @@ class DynamoDbContributorInsightsIntegrationTest {
         expectError(ddb("ListContributorInsights", "{\"MaxResults\": 101}"), "ValidationException",
                 "1 validation error detected: Value '101' at 'maxResults' failed to satisfy constraint: "
                 + "Member must have value less than or equal to 100");
+        expectError(ddb("ListContributorInsights", "{\"NextToken\": \"garbage\"}"), "ValidationException",
+                "The provided next token is invalid");
     }
 
     @Test
