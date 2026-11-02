@@ -905,8 +905,10 @@ public class RdsService implements Resettable, ResourceProvider {
                             + "the database do not until a daemon appears.", id);
                 }
             } catch (RuntimeException | Error failure) {
-                rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
-                        effectiveRegion, false, false, mock);
+                synchronized (instance) {
+                    rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
+                            effectiveRegion, false, false, mock);
+                }
                 throw failure;
             }
         }

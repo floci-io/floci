@@ -92,6 +92,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
@@ -1215,6 +1216,68 @@ class RdsServiceTest {
         assertEquals(DbInstanceStatus.DELETING, retained.getStatus());
         assertNotNull(retained.getDockerVolumeName());
         assertThrows(AwsException.class, () -> service.getDbInstance("failed-instance"));
+    }
+
+    @Test
+    void failedInstanceRollbackKeepsPortOwnedUntilCleanupFinishes() throws Exception {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        IllegalStateException startupFailure = new IllegalStateException("backend startup failed");
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any())).thenThrow(startupFailure).thenReturn(null);
+        CountDownLatch cleanupEntered = new CountDownLatch(1);
+        CountDownLatch allowCleanup = new CountDownLatch(1);
+        AtomicBoolean firstCleanup = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            if (firstCleanup.compareAndSet(true, false)) {
+                cleanupEntered.countDown();
+                assertTrue(allowCleanup.await(10, TimeUnit.SECONDS));
+            }
+            return null;
+        }).when(containerManager).stopForDelete(any(), any());
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Future<?> create = executor.submit(() -> assertSame(startupFailure,
+                assertThrows(IllegalStateException.class, () -> service.createDbInstance(
+                        "failed-instance", "postgres", "13", "admin", "secret", "app",
+                        "db.t3.micro", 20, false, null, null, null))));
+        try {
+            assertTrue(cleanupEntered.await(10, TimeUnit.SECONDS));
+            CountDownLatch deleteStarted = new CountDownLatch(1);
+            Future<?> delete = executor.submit(() -> {
+                deleteStarted.countDown();
+                try {
+                    service.deleteDbInstance("failed-instance");
+                } catch (AwsException e) {
+                    assertEquals("DBInstanceNotFound", e.getErrorCode());
+                }
+            });
+            assertTrue(deleteStarted.await(10, TimeUnit.SECONDS));
+            assertThrows(TimeoutException.class, () -> delete.get(1, TimeUnit.SECONDS),
+                    "delete must wait while failed-create rollback owns the instance");
+
+            allowCleanup.countDown();
+            create.get(10, TimeUnit.SECONDS);
+            delete.get(10, TimeUnit.SECONDS);
+            DbInstance next = service.createDbInstance("next-instance", "postgres", "13",
+                    "admin", "secret", "app", "db.t3.micro", 20, false, null, null,
+                    null, null, false, false, null, Map.of(), List.of(), null,
+                    "us-east-1", true, DbInstanceSettings.defaults(), null, 7000);
+            assertEquals(7000, next.getProxyPort());
+            AwsException conflict = assertThrows(AwsException.class, () ->
+                    service.createDbInstance("another-instance", "postgres", "13",
+                            "admin", "secret", "app", "db.t3.micro", 20, false,
+                            null, null, null, null, false, false, null, Map.of(),
+                            List.of(), null, "us-east-1", true,
+                            DbInstanceSettings.defaults(), null, 7000));
+            assertEquals("InvalidParameterValue", conflict.getErrorCode());
+        } finally {
+            allowCleanup.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+        }
     }
 
     @Test
