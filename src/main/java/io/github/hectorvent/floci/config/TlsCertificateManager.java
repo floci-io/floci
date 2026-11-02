@@ -98,7 +98,7 @@ public class TlsCertificateManager implements Resettable {
             return;
         }
         synchronized (lock) {
-            if (!loadOnce() || covers(name)) {
+            if (!loadOnce() || covers(knownHostnames, name)) {
                 return;
             }
             if (!isAllowed(name)) {
@@ -115,6 +115,32 @@ public class TlsCertificateManager implements Resettable {
             } catch (Exception e) {
                 LOG.warnv(e, "TLS: could not extend the server certificate with {0}: {1}", name, e.getMessage());
             }
+        }
+    }
+
+    /**
+     * Whether the certificate Floci serves names {@code host}, exactly or under a one-label
+     * wildcard, so a client that verifies the name accepts it: the managed leaf with every name it
+     * learned, or a user-provided certificate as it is on disk. False with TLS off, for a host it
+     * does not name, such as an IP from {@code docker-host-override} or the container-IP fallback,
+     * and when the certificate cannot be read.
+     */
+    public boolean serves(String host) {
+        String name = normalize(host);
+        if (name == null || !config.tls().enabled()) {
+            return false;
+        }
+        if (managesServerCertificate()) {
+            synchronized (lock) {
+                return loadOnce() && covers(knownHostnames, name);
+            }
+        }
+        String certPath = config.tls().certPath().orElse("");
+        try {
+            return covers(sansOf(Pem.parseCertificate(Files.readString(Path.of(certPath)))), name);
+        } catch (Exception e) {
+            LOG.warnv("TLS: could not read the certificate {0} to check it names {1}: {2}", certPath, name, e.getMessage());
+            return false;
         }
     }
 
@@ -231,12 +257,12 @@ public class TlsCertificateManager implements Resettable {
         certificateUpdated.fire(new CertificateUpdatedEvent(TlsConfig.DEFAULT_NAME, cfg));
     }
 
-    private boolean covers(String name) {
-        if (knownHostnames.contains(name)) {
+    private static boolean covers(Set<String> sans, String name) {
+        if (sans.contains(name)) {
             return true;
         }
         int dot = name.indexOf('.');
-        return dot > 0 && knownHostnames.contains("*" + name.substring(dot));
+        return dot > 0 && sans.contains("*" + name.substring(dot));
     }
 
     private boolean isAllowed(String name) {

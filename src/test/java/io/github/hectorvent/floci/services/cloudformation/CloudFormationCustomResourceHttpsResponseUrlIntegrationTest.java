@@ -116,28 +116,40 @@ class CloudFormationCustomResourceHttpsResponseUrlIntegrationTest {
         }
     }
 
+    /**
+     * Runs the handler with its output in a file, so the wait is bounded by its deadline and
+     * never by a read; a handler still running at the deadline is destroyed.
+     */
     private void runHandler(byte[] payload) throws IOException, InterruptedException {
         Path event = Files.createTempFile("cr-event-", ".json");
         Path script = Files.createTempFile("cr-handler-", ".js");
+        Path output = Files.createTempFile("cr-handler-", ".log");
+        Process process = null;
         try {
             Files.write(event, payload);
             Files.writeString(script, HANDLER);
             String ca = FlociCertificateAuthority.loadOrCreate(Path.of(SelfSignedTlsProfile.TLS_DIR))
                     .certificatePath().toAbsolutePath().toString();
             ProcessBuilder node = new ProcessBuilder("node", script.toString(), event.toString())
-                    .redirectErrorStream(true);
+                    .redirectErrorStream(true)
+                    .redirectOutput(output.toFile());
             node.environment().put("NODE_EXTRA_CA_CERTS", ca);
-            Process process = node.start();
-            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            if (!process.waitFor(30, TimeUnit.SECONDS) || process.exitValue() != 0) {
-                handlerErrors.add(output.trim());
+            process = node.start();
+            if (!process.waitFor(30, TimeUnit.SECONDS)) {
+                handlerErrors.add("the handler did not exit within 30 seconds: " + Files.readString(output).trim());
+            } else if (process.exitValue() != 0) {
+                handlerErrors.add(Files.readString(output).trim());
             }
         } catch (Exception e) {
             handlerErrors.add(e.getMessage());
             throw e;
         } finally {
+            if (process != null) {
+                process.destroyForcibly();
+            }
             Files.deleteIfExists(event);
             Files.deleteIfExists(script);
+            Files.deleteIfExists(output);
         }
     }
 
@@ -166,12 +178,17 @@ class CloudFormationCustomResourceHttpsResponseUrlIntegrationTest {
     }
 
     private static boolean nodeAvailable() {
+        Process process = null;
         try {
-            Process process = new ProcessBuilder("node", "--version").redirectErrorStream(true).start();
-            process.getInputStream().readAllBytes();
+            process = new ProcessBuilder("node", "--version").redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD).start();
             return process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0;
         } catch (IOException | InterruptedException e) {
             return false;
+        } finally {
+            if (process != null) {
+                process.destroyForcibly();
+            }
         }
     }
 
