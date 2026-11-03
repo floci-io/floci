@@ -8,50 +8,34 @@ import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.testing.StartGate;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentMatchers;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.xml.HasXPath.hasXPath;
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.doReturn;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -561,7 +545,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         for (int round = 0; round < RACE_ROUNDS; round++) {
             String name = uniqueName("floci-race-dst");
             AtomicInteger duplicates = new AtomicInteger();
-            List<Image> created = runConcurrently(RACE_THREADS, () -> {
+            StartGate.Results<Image> created = StartGate.runConcurrently(RACE_THREADS, index -> {
                 try {
                     return service.copyImage(WEST, EAST, source.getImageId(), name, null, false, List.of());
                 } catch (AwsException e) {
@@ -571,7 +555,8 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 }
             });
 
-            List<Image> winners = created.stream().filter(Objects::nonNull).toList();
+            assertTrue(created.errors().isEmpty(), () -> "copy workers failed: " + created.errors());
+            List<Image> winners = created.values().stream().filter(Objects::nonNull).toList();
             assertEquals(1, winners.size(),
                     "exactly one copy may claim the name; round " + round + " produced " + winners.size());
             assertEquals(RACE_THREADS - 1, duplicates.get());
@@ -594,7 +579,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
 
             AtomicInteger successes = new AtomicInteger();
             AtomicInteger unavailable = new AtomicInteger();
-            runConcurrently(RACE_THREADS, () -> {
+            StartGate.Results<Void> results = StartGate.runConcurrently(RACE_THREADS, index -> {
                 try {
                     service.deregisterImage(EAST, image.getImageId(), true);
                     successes.incrementAndGet();
@@ -605,6 +590,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 return null;
             });
 
+            assertTrue(results.errors().isEmpty(), () -> "deregistration workers failed: " + results.errors());
             assertEquals(1, successes.get(), "round " + round + " deregistered the same AMI twice");
             assertEquals(RACE_THREADS - 1, unavailable.get());
             assertTrue(service.describeImages(EAST, List.of(image.getImageId()), List.of()).isEmpty());
@@ -619,12 +605,12 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 "x86_64", "/dev/xvda", null);
         String prefix = uniqueName("floci-fanout-dst");
 
-        AtomicInteger seq = new AtomicInteger();
-        List<Image> copies = runConcurrently(24,
-                () -> service.copyImage(WEST, EAST, source.getImageId(),
-                        prefix + "-" + seq.getAndIncrement(), null, false, List.of()));
+        StartGate.Results<Image> copies = StartGate.runConcurrently(24,
+                index -> service.copyImage(WEST, EAST, source.getImageId(),
+                        prefix + "-" + index, null, false, List.of()));
 
-        Set<String> ids = copies.stream().map(Image::getImageId).collect(Collectors.toSet());
+        assertTrue(copies.errors().isEmpty(), () -> "copy workers failed: " + copies.errors());
+        Set<String> ids = copies.values().stream().map(Image::getImageId).collect(Collectors.toSet());
         assertEquals(24, ids.size(), "every concurrent copy must get a distinct id");
         assertEquals(24, service.describeImages(WEST, List.of(), List.of("self")).stream()
                 .filter(img -> img.getName().startsWith(prefix))
@@ -647,243 +633,6 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         }
         return service.registerImage(EAST, uniqueName("floci-race-src"), null,
                 "x86_64", "/dev/xvda", null);
-    }
-
-    @Test
-    void concurrentProducerFailureCancelsRunningSibling() throws Exception {
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        CountDownLatch entered = new CountDownLatch(1);
-        CountDownLatch interrupted = new CountDownLatch(1);
-        CountDownLatch release = new CountDownLatch(1);
-        IllegalStateException producerFailure = new IllegalStateException("producer failed");
-        try {
-            ExecutionException failure = assertThrows(ExecutionException.class,
-                    () -> runConcurrently(pool, List.of(() -> {
-                        assertTrue(entered.await(5, TimeUnit.SECONDS));
-                        throw producerFailure;
-                    }, () -> {
-                        entered.countDown();
-                        try {
-                            release.await();
-                            return "unexpected completion";
-                        } catch (InterruptedException cancellation) {
-                            interrupted.countDown();
-                            throw cancellation;
-                        }
-                    }), TimeUnit.SECONDS.toNanos(30), System::nanoTime));
-            assertSame(producerFailure, failure.getCause());
-            assertEquals(0, interrupted.getCount(), "the running sibling must observe cancellation");
-            assertTrue(pool.isTerminated());
-        } finally {
-            release.countDown();
-            pool.shutdownNow();
-            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void concurrentProducerTimeoutCancelsRunningWorkers() throws Exception {
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        CountDownLatch entered = new CountDownLatch(2);
-        CountDownLatch interrupted = new CountDownLatch(2);
-        CountDownLatch release = new CountDownLatch(1);
-        AtomicInteger clockReads = new AtomicInteger();
-        LongSupplier clock = () -> {
-            if (clockReads.getAndIncrement() == 0) {
-                return 0;
-            }
-            assertTrue(assertDoesNotThrow(() -> entered.await(5, TimeUnit.SECONDS)));
-            return 30;
-        };
-        Callable<String> blocked = () -> {
-            entered.countDown();
-            try {
-                release.await();
-                return "unexpected completion";
-            } catch (InterruptedException cancellation) {
-                interrupted.countDown();
-                throw cancellation;
-            }
-        };
-        try {
-            assertThrows(TimeoutException.class,
-                    () -> runConcurrently(pool, List.of(blocked, blocked), 30, clock));
-            assertEquals(0, entered.getCount());
-            assertEquals(0, interrupted.getCount(), "both running workers must observe cancellation");
-            assertTrue(pool.isTerminated());
-        } finally {
-            release.countDown();
-            pool.shutdownNow();
-            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void concurrentProducersShareOneDeadline() throws Exception {
-        ExecutorService pool = mock(ExecutorService.class);
-        AtomicLong clock = new AtomicLong();
-        CompletableFuture<String> first = new CompletableFuture<>() {
-            @Override
-            public String get(long timeout, TimeUnit unit) {
-                assertEquals(30, unit.toNanos(timeout));
-                clock.set(20);
-                return "first";
-            }
-        };
-        CompletableFuture<String> second = new CompletableFuture<>() {
-            @Override
-            public String get(long timeout, TimeUnit unit) {
-                assertEquals(10, unit.toNanos(timeout), "later producers receive only the remaining budget");
-                return "second";
-            }
-        };
-        doReturn(first, second).when(pool).submit(ArgumentMatchers.<Callable<String>>any());
-        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenReturn(true);
-        assertEquals(List.of("first", "second"), runConcurrently(pool,
-                List.of(() -> "unused", () -> "unused"), 30, clock::get));
-    }
-
-    @Test
-    void successfulConcurrentProducersTerminateWorkers() throws Exception {
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            assertEquals(List.of("completed", "completed"), runConcurrently(pool,
-                    List.of(() -> "completed", () -> "completed"), TimeUnit.SECONDS.toNanos(30), System::nanoTime));
-            assertTrue(pool.isTerminated());
-        } finally {
-            pool.shutdownNow();
-            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
-        }
-    }
-
-    @Test
-    void concurrentProducerFailureRetainsSuppressedCleanupFailure() throws Exception {
-        ExecutorService pool = mock(ExecutorService.class);
-        IllegalStateException producerFailure = new IllegalStateException("producer failed");
-        IllegalStateException cleanupFailure = new IllegalStateException("cleanup failed");
-        CompletableFuture<String> future = CompletableFuture.failedFuture(producerFailure);
-        doReturn(future).when(pool).submit(ArgumentMatchers.<Callable<String>>any());
-        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenThrow(cleanupFailure);
-
-        ExecutionException failure = assertThrows(ExecutionException.class,
-                () -> runConcurrently(pool, List.of(() -> "unused"), 30, () -> 0));
-
-        assertSame(producerFailure, failure.getCause());
-        assertEquals(1, failure.getSuppressed().length);
-        assertSame(cleanupFailure, failure.getSuppressed()[0]);
-        verify(pool).shutdownNow();
-    }
-
-    @Test
-    void concurrentProducerInterruptionRestoresCallerInterrupt() throws Exception {
-        ExecutorService pool = mock(ExecutorService.class);
-        InterruptedException interruption = new InterruptedException("producer wait interrupted");
-        CompletableFuture<String> future = new CompletableFuture<>() {
-            @Override
-            public String get(long timeout, TimeUnit unit) throws InterruptedException {
-                throw interruption;
-            }
-        };
-        doReturn(future).when(pool).submit(ArgumentMatchers.<Callable<String>>any());
-        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenReturn(true);
-        try {
-            assertSame(interruption, assertThrows(InterruptedException.class,
-                    () -> runConcurrently(pool, List.of(() -> "unused"), 30, () -> 0)));
-            assertTrue(Thread.currentThread().isInterrupted());
-            assertTrue(future.isCancelled());
-            verify(pool).shutdownNow();
-        } finally {
-            Thread.interrupted();
-        }
-    }
-
-    @Test
-    void concurrentCleanupInterruptionRestoresCallerInterrupt() throws Exception {
-        ExecutorService pool = mock(ExecutorService.class);
-        InterruptedException interruption = new InterruptedException("cleanup interrupted");
-        doReturn(CompletableFuture.completedFuture("completed"))
-                .when(pool).submit(ArgumentMatchers.<Callable<String>>any());
-        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenThrow(interruption);
-        try {
-            assertSame(interruption, assertThrows(InterruptedException.class,
-                    () -> runConcurrently(pool, List.of(() -> "unused"), 30, () -> 0)));
-            assertTrue(Thread.currentThread().isInterrupted());
-            verify(pool).shutdownNow();
-        } finally {
-            Thread.interrupted();
-        }
-    }
-
-    @Test
-    void concurrentProducerFailureSuppressesCleanupInterruption() throws Exception {
-        ExecutorService pool = mock(ExecutorService.class);
-        IllegalStateException producerFailure = new IllegalStateException("producer failed");
-        InterruptedException interruption = new InterruptedException("cleanup interrupted");
-        doReturn(CompletableFuture.failedFuture(producerFailure))
-                .when(pool).submit(ArgumentMatchers.<Callable<String>>any());
-        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenThrow(interruption);
-        try {
-            ExecutionException failure = assertThrows(ExecutionException.class,
-                    () -> runConcurrently(pool, List.of(() -> "unused"), 30, () -> 0));
-            assertSame(producerFailure, failure.getCause());
-            assertEquals(1, failure.getSuppressed().length);
-            assertSame(interruption, failure.getSuppressed()[0]);
-            assertTrue(Thread.currentThread().isInterrupted());
-        } finally {
-            Thread.interrupted();
-        }
-    }
-
-    private <T> List<T> runConcurrently(int threads, Callable<T> body) throws Exception {
-        return runConcurrently(Executors.newFixedThreadPool(threads), Collections.nCopies(threads, body),
-                TimeUnit.SECONDS.toNanos(30), System::nanoTime);
-    }
-
-    private static <T> List<T> runConcurrently(ExecutorService pool, List<Callable<T>> bodies,
-                                              long timeoutNanos, LongSupplier clock) throws Exception {
-        long deadline = clock.getAsLong() + timeoutNanos;
-        CountDownLatch start = new CountDownLatch(1);
-        List<Future<T>> futures = new ArrayList<>();
-        Throwable primaryFailure = null;
-        try {
-            for (Callable<T> body : bodies) {
-                futures.add(pool.submit(() -> {
-                    start.await();
-                    return body.call();
-                }));
-            }
-            start.countDown();
-            List<T> results = new ArrayList<>();
-            for (Future<T> future : futures) {
-                results.add(future.get(Math.max(0, deadline - clock.getAsLong()), TimeUnit.NANOSECONDS));
-            }
-            return results;
-        } catch (Exception | Error failure) {
-            primaryFailure = failure;
-            throw failure;
-        } finally {
-            for (Future<T> future : futures) {
-                future.cancel(true);
-            }
-            pool.shutdownNow();
-            try {
-                assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS),
-                        "concurrent image workers did not terminate");
-            } catch (Exception | Error cleanupFailure) {
-                if (cleanupFailure instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
-                if (primaryFailure != null) {
-                    primaryFailure.addSuppressed(cleanupFailure);
-                } else {
-                    throw cleanupFailure;
-                }
-            } finally {
-                if (primaryFailure instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-        }
     }
 
     /**
