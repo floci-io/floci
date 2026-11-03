@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.cognito.CognitoService.UserPoolDomainNames;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
@@ -1640,7 +1641,7 @@ public class CognitoJsonHandler {
     private Response handleListWebAuthnCredentials(JsonNode request) {
         return Response.ok(objectMapper.valueToTree(service.listWebAuthnCredentials(
                 request.path("AccessToken").asText(),
-                request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null,
+                Pagination.parseMaxResults(request, "MaxResults", "SerializationException"),
                 request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null))).build();
     }
 
@@ -1648,7 +1649,7 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.valueToTree(service.adminListUserAuthEvents(
                 request.path("UserPoolId").asText(),
                 request.path("Username").asText(),
-                request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null,
+                Pagination.parseMaxResults(request, "MaxResults", "SerializationException"),
                 request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null))).build();
     }
 

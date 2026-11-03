@@ -243,4 +243,75 @@ class CognitoWebAuthnIntegrationTest {
                 """.formatted(poolId))
                 .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
     }
+
+    @Test
+    void listWebAuthnCredentialsRejectsAMaxResultsThatIsNotAnInteger() throws Exception {
+        String accessToken = passkeyUserWithCredentials(1);
+        for (String bad : new String[] {"1.5", "\"2\"", "4294967297", "true"}) {
+            cognitoAction("ListWebAuthnCredentials", """
+                    {"AccessToken":"%s","MaxResults":%s}
+                    """.formatted(accessToken, bad))
+                    .then().statusCode(400)
+                    .body("__type", equalTo("SerializationException"))
+                    .body("message", equalTo("MaxResults must be an integer."));
+        }
+    }
+
+    @Test
+    void listWebAuthnCredentialsPagesWithAnIntegerMaxResultsAndTreatsNullAsOmitted() throws Exception {
+        String accessToken = passkeyUserWithCredentials(3);
+        JsonNode first = cognitoJson("ListWebAuthnCredentials", """
+                {"AccessToken":"%s","MaxResults":2}
+                """.formatted(accessToken));
+        assertEquals(2, first.path("Credentials").size());
+        assertFalse(first.path("NextToken").asText().isEmpty());
+        JsonNode second = cognitoJson("ListWebAuthnCredentials", """
+                {"AccessToken":"%s","MaxResults":2,"NextToken":"%s"}
+                """.formatted(accessToken, first.path("NextToken").asText()));
+        assertEquals(1, second.path("Credentials").size());
+        assertTrue(second.path("NextToken").isMissingNode());
+
+        cognitoAction("ListWebAuthnCredentials", """
+                {"AccessToken":"%s","MaxResults":null}
+                """.formatted(accessToken))
+                .then().statusCode(200)
+                .body("Credentials", hasSize(3))
+                .body("$", not(hasKey("NextToken")));
+    }
+
+    private static String passkeyUserWithCredentials(int count) throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+                {"PoolName":"PasskeyPagingPool","UserPoolTier":"ESSENTIALS",
+                 "Policies":{"SignInPolicy":{"AllowedFirstAuthFactors":["PASSWORD","WEB_AUTHN"]}}}
+                """).path("UserPool").path("Id").asText();
+        cognitoJson("SetUserPoolMfaConfig", """
+                {"UserPoolId":"%s","MfaConfiguration":"OFF",
+                 "WebAuthnConfiguration":{"RelyingPartyId":"localhost"}}
+                """.formatted(poolId));
+        String clientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId":"%s","ClientName":"passkey-paging-client",
+                 "ExplicitAuthFlows":["ALLOW_USER_PASSWORD_AUTH"]}
+                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+        String username = "passkey-paging-" + UUID.randomUUID();
+        cognitoJson("AdminCreateUser", """
+                {"UserPoolId":"%s","Username":"%s","MessageAction":"SUPPRESS"}
+                """.formatted(poolId, username));
+        cognitoJson("AdminSetUserPassword", """
+                {"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}
+                """.formatted(poolId, username, PASSWORD));
+        String accessToken = cognitoJson("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"%s","PASSWORD":"%s"}}
+                """.formatted(clientId, username, PASSWORD)).path("AuthenticationResult").path("AccessToken").asText();
+        for (int i = 0; i < count; i++) {
+            WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256("http://localhost:5173");
+            ObjectNode complete = JSON.createObjectNode();
+            complete.put("AccessToken", accessToken);
+            complete.set("Credential", authenticator.register(cognitoJson("StartWebAuthnRegistration", """
+                    {"AccessToken":"%s"}
+                    """.formatted(accessToken)).path("CredentialCreationOptions"), "none"));
+            cognitoAction("CompleteWebAuthnRegistration", complete.toString()).then().statusCode(200);
+        }
+        return accessToken;
+    }
 }
