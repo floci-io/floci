@@ -193,29 +193,6 @@ class CognitoAuthEventsServiceTest {
         assertEquals(0, authEvents.keys().size());
     }
 
-    private List<String> listedEventIds(String poolId, String username) {
-        List<String> ids = new ArrayList<>();
-        for (Object event : (List<?>) service.adminListUserAuthEvents(poolId, username, null, null)
-                .get("AuthEvents")) {
-            ids.add((String) ((Map<?, ?>) event).get("EventId"));
-        }
-        return ids;
-    }
-
-    private UserPool createPoolWithId(String id) {
-        Map<String, Object> request = new HashMap<>();
-        request.put("PoolName", "events");
-        request.put("UserPoolTier", "PLUS");
-        request.put("UserPoolAddOns", Map.of("AdvancedSecurityMode", "AUDIT"));
-        request.put("UserPoolTags", new HashMap<>(Map.of("floci:override-id", id)));
-        return service.createUserPool(request, "us-east-1");
-    }
-
-    private CognitoUser createUserWithSub(UserPool pool, String username, String sub) {
-        service.adminCreateUser(pool.getId(), username, Map.of("sub", sub), "TempPass1!");
-        return service.adminGetUser(pool.getId(), username);
-    }
-
     @Test
     void ineligibleListingFailsBeforeTheUserIsLookedUp() {
         UserPool pool = createPool("ESSENTIALS", null);
@@ -237,6 +214,29 @@ class CognitoAuthEventsServiceTest {
 
     private CognitoUser createUser(UserPool pool, String username) {
         service.adminCreateUser(pool.getId(), username, Map.of(), "TempPass1!");
+        return service.adminGetUser(pool.getId(), username);
+    }
+
+    private List<String> listedEventIds(String poolId, String username) {
+        List<String> ids = new ArrayList<>();
+        for (Object event : (List<?>) service.adminListUserAuthEvents(poolId, username, null, null)
+                .get("AuthEvents")) {
+            ids.add((String) ((Map<?, ?>) event).get("EventId"));
+        }
+        return ids;
+    }
+
+    private UserPool createPoolWithId(String id) {
+        Map<String, Object> request = new HashMap<>();
+        request.put("PoolName", "events");
+        request.put("UserPoolTier", "PLUS");
+        request.put("UserPoolAddOns", Map.of("AdvancedSecurityMode", "AUDIT"));
+        request.put("UserPoolTags", new HashMap<>(Map.of("floci:override-id", id)));
+        return service.createUserPool(request, "us-east-1");
+    }
+
+    private CognitoUser createUserWithSub(UserPool pool, String username, String sub) {
+        service.adminCreateUser(pool.getId(), username, Map.of("sub", sub), "TempPass1!");
         return service.adminGetUser(pool.getId(), username);
     }
 
