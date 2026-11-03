@@ -134,7 +134,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
 
             assertStreamsRequestAndResponse(loadBalancerArn);
             assertForwardsLargeHeaders(loadBalancerArn);
-            assertForwardedHost("127.0.0.1:" + backend.actualPort());
+            assertForwardedHost(CLIENT_HOST);
 
             enableHostHeaderPreservation(loadBalancerArn);
 
