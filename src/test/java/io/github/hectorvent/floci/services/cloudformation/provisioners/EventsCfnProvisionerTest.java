@@ -782,6 +782,27 @@ class EventsCfnProvisionerTest {
     }
 
     @Test
+    void aRuleTargetKeepsItsAppSyncParameters() {
+        stubPutRule();
+        when(events.listTargetsByRule(anyString(), any(), anyString())).thenReturn(List.of());
+        ObjectNode appSyncTarget = target("appsync",
+                "arn:aws:appsync:us-east-1:000000000000:endpoints/graphql-api/example");
+        String operation = "mutation Publish($id: ID!) { publish(id: $id) { id } }";
+        appSyncTarget.putObject("AppSyncParameters").put("GraphQLOperation", operation);
+        appSyncTarget.put("RoleArn", "arn:aws:iam::000000000000:role/events-appsync");
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders");
+        props.putArray("Targets").add(appSyncTarget);
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, ctx("orders"));
+
+        ArgumentCaptor<List<Target>> put = ArgumentCaptor.forClass(List.class);
+        verify(events).putTargets(eq("orders"), any(), put.capture(), anyString());
+        JsonNode stored = mapper.valueToTree(put.getValue().getFirst());
+        assertEquals(operation, stored.path("appSyncParameters").path("GraphQLOperation").asText());
+        assertEquals("arn:aws:iam::000000000000:role/events-appsync", stored.path("roleArn").asText());
+    }
+
+    @Test
     void aRuleTargetKeepsItsHttpParameters() {
         stubPutRule();
         when(events.listTargetsByRule(anyString(), any(), anyString())).thenReturn(List.of());

@@ -295,6 +295,10 @@ public class EventBridgeHandler {
                 if (!httpParamsNode.isMissingNode() && httpParamsNode.isObject()) {
                     target.setHttpParameters(objectMapper.convertValue(httpParamsNode, HttpParameters.class));
                 }
+                JsonNode appSyncParamsNode = t.path("AppSyncParameters");
+                if (appSyncParamsNode.isObject()) {
+                    target.setAppSyncParameters(objectMapper.convertValue(appSyncParamsNode, Target.AppSyncParameters.class));
+                }
                 targets.add(target);
             }
         }
@@ -372,6 +376,9 @@ public class EventBridgeHandler {
             }
             if (t.getHttpParameters() != null) {
                 node.set("HttpParameters", objectMapper.valueToTree(t.getHttpParameters()));
+            }
+            if (t.getAppSyncParameters() != null) {
+                node.set("AppSyncParameters", objectMapper.valueToTree(t.getAppSyncParameters()));
             }
             targetsArray.add(node);
         }

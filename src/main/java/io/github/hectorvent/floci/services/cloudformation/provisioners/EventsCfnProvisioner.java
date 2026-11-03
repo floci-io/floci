@@ -231,6 +231,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 target.setBatchParameters(batchParameters);
             }
             target.setRoleArn(resolved.path("RoleArn").asText(null));
+            JsonNode appSyncParamsNode = resolved.path("AppSyncParameters");
+            if (appSyncParamsNode.isObject()) {
+                target.setAppSyncParameters(MAPPER.convertValue(appSyncParamsNode, Target.AppSyncParameters.class));
+            }
             JsonNode ecsParamsNode = resolved.path("EcsParameters");
             if (ecsParamsNode.isObject()) {
                 target.setEcsParameters(MAPPER.convertValue(
