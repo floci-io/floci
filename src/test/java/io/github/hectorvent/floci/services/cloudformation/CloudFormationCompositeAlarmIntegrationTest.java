@@ -65,7 +65,7 @@ class CloudFormationCompositeAlarmIntegrationTest {
         if (rename) {
             assertMissing(next);
         }
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack);
         assertMissing(name);
     }
 
@@ -85,7 +85,7 @@ class CloudFormationCompositeAlarmIntegrationTest {
         } else {
             assertMissing(original);
         }
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack);
         assertMissing(next);
         if (retain) {
             assertEquals("TRUE", alarm(original).get("AlarmRule"));
@@ -109,7 +109,7 @@ class CloudFormationCompositeAlarmIntegrationTest {
         assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
         assertMissing(name);
         assertEquals("FALSE", alarm(replacement).get("AlarmRule"));
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack);
         assertMissing(replacement);
     }
 
@@ -121,7 +121,7 @@ class CloudFormationCompositeAlarmIntegrationTest {
         deploy("CreateStack", stack, template(name, "FALSE", Map.of(), false, false));
         assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
         assertEquals("TRUE", alarm(name).get("AlarmRule"));
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack);
         assertEquals("TRUE", alarm(name).get("AlarmRule"));
         cw("DeleteAlarms", Map.of("AlarmNames", List.of(name))).then().statusCode(200);
     }
@@ -145,7 +145,7 @@ class CloudFormationCompositeAlarmIntegrationTest {
         Map<String, Object> created = alarm(parent);
         assertEquals(created.get("AlarmArn") + " was created and its alarm rule evaluates to OK",
                 created.get("StateReason"));
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack);
         assertMissing(parent);
         assertEquals(List.of(), cw("DescribeAlarms", Map.of("AlarmNames", List.of(child))).then().statusCode(200)
                 .extract().jsonPath().getList("MetricAlarms"));
@@ -164,7 +164,7 @@ class CloudFormationCompositeAlarmIntegrationTest {
         assertTrue(reason.contains("Could not save the composite alarm as alarms [arn:aws:cloudwatch:us-east-1:"
                 + "000000000000:alarm:" + stack + "-missing] in the alarm rule do not exist"), reason);
         assertMissing(parent);
-        deleteStack(stack);
+        CfnStackWaits.deleteStack(stack);
     }
 
     private String template(String name, String rule, Map<String, String> tags, boolean fail, boolean retain)
@@ -219,11 +219,6 @@ class CloudFormationCompositeAlarmIntegrationTest {
                 .extract().jsonPath().getList("CompositeAlarms"));
     }
 
-    private void deleteStack(String stack) {
-        given().contentType("application/x-www-form-urlencoded").formParam("Action", "DeleteStack")
-                .formParam("StackName", stack).post("/").then().statusCode(200);
-        CfnStackWaits.awaitStackDeleted(stack);
-    }
 
     private static String unique(String prefix) {
         return prefix + "-" + Long.toString(System.nanoTime(), 36);

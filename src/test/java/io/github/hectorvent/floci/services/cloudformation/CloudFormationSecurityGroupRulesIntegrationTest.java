@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
@@ -288,7 +289,7 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
                 .formParam("Filter.1.Name", "vpc-id")
                 .formParam("Filter.1.Value.1", vpcId)
             .when().post("/").then().statusCode(200).body(containsString("<vpcId>" + vpcId + "</vpcId>"));
-            String callerId = createStack(callerStack, standaloneIngressTemplate(groupId, "10.2.0.0/16"));
+            createStack(callerStack, standaloneIngressTemplate(groupId, "10.2.0.0/16"));
             updateStack(stackName, template.replace("10.1.0.0/16", "10.3.0.0/16"));
             assertTrue(awaitStackStatus(stackId, "UPDATE_COMPLETE"));
             assertEquals(groupId, output(stackName, "RefId"));
@@ -299,7 +300,7 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
             assertTrue(group.contains("<cidrIp>10.2.0.0/16</cidrIp>"),
                     "frontend update removed another stack's permission");
 
-            deleteStack(callerStack, callerId);
+            CfnStackWaits.deleteStack(callerStack, CFN_AUTH);
             group = describeGroup(groupId);
             assertFalse(group.contains("<cidrIp>10.2.0.0/16</cidrIp>"));
             assertTrue(group.contains("<cidrIp>10.3.0.0/16</cidrIp>"));
@@ -334,17 +335,7 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
         response.then().statusCode(200);
         String id = between(body, "<StackId>", "</StackId>");
         assertFalse(id.isBlank(), "owned stack has no id");
-        deleteStack(name, id);
-    }
-
-    private static void deleteStack(String name, String id) throws InterruptedException {
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DeleteStack")
-            .formParam("StackName", name)
-        .when().post("/").then().statusCode(200);
-        assertTrue(awaitStackStatus(id, "DELETE_COMPLETE"), "stack did not reach DELETE_COMPLETE");
+        CfnStackWaits.deleteStack(name, CFN_AUTH);
     }
 
     /** A deleted stack is only describable by id, as in AWS; it is retained for a grace period. */
