@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
@@ -18,19 +20,24 @@ import org.junit.jupiter.api.Test;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -43,6 +50,7 @@ class FirehoseRedshiftDeliveryTest {
     private RedshiftServerlessService serverless;
     private SecretsManagerService secrets;
     private ServiceRoleAuthorizer roleAuthorizer;
+    private IamService iamService;
     private final List<String[]> executed = new ArrayList<>();
     private FirehoseRedshiftDelivery delivery;
 
@@ -56,7 +64,8 @@ class FirehoseRedshiftDeliveryTest {
         when(redshift.describeClustersForAccount("000000000000", "c1")).thenReturn(List.of(cluster));
         serverless = mock(RedshiftServerlessService.class);
         roleAuthorizer = mock(ServiceRoleAuthorizer.class);
-        delivery = new FirehoseRedshiftDelivery(redshift, serverless, secrets, roleAuthorizer, mapper,
+        iamService = mock(IamService.class);
+        delivery = new FirehoseRedshiftDelivery(redshift, serverless, secrets, roleAuthorizer, iamService, mapper,
                 (url, user, password, sql) -> executed.add(new String[] {url, user, password, sql}));
     }
 
@@ -234,6 +243,71 @@ class FirehoseRedshiftDeliveryTest {
         assertEquals("COPY events FROM 's3://stage/k1' json 'auto'", executed.get(0)[3]);
     }
 
+    private void knownLoadRole() {
+        when(iamService.findRole("000000000000", "firehose"))
+                .thenReturn(Optional.of(new IamRole("id-firehose", "firehose", "/", LOAD_ROLE, "{}")));
+    }
+
+    private static String sessionKey(String sql) {
+        return sql.substring(sql.indexOf("aws_access_key_id=") + "aws_access_key_id=".length(), sql.indexOf(';'));
+    }
+
+    @Test
+    void loadsWithTemporaryCredentialsOfTheDestinationRole() throws Exception {
+        knownLoadRole();
+
+        delivery.copy("000000000000", "us-east-1", destination(), "stage", "k1");
+
+        String sql = executed.get(0)[3];
+        assertTrue(sql.startsWith("COPY events FROM 's3://stage/k1' CREDENTIALS 'aws_access_key_id=ASIA"), sql);
+        assertTrue(sql.contains(";aws_secret_access_key="), sql);
+        assertTrue(sql.contains(";token="), sql);
+        assertTrue(sql.endsWith("' json 'auto'"), sql);
+        verify(iamService).registerSessionForAccount(eq("000000000000"), anyString(), anyString(), anyString(),
+                eq(LOAD_ROLE), any(Instant.class), isNull());
+    }
+
+    @Test
+    void everyAttemptMintsFreshCredentialsAndReleasesThem() throws Exception {
+        knownLoadRole();
+
+        delivery.copy("000000000000", "us-east-1", destination(), "stage", "k1");
+        delivery.copy("000000000000", "us-east-1", destination(), "stage", "k1");
+
+        assertNotEquals(sessionKey(executed.get(0)[3]), sessionKey(executed.get(1)[3]));
+        verify(iamService, times(2)).unregisterSession(eq("000000000000"), anyString());
+    }
+
+    @Test
+    void aFailedCopyNeitherLeaksCredentialsIntoTheErrorNorKeepsTheSession() throws Exception {
+        knownLoadRole();
+        List<String> sent = new ArrayList<>();
+        FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(redshift, serverless, secrets,
+                roleAuthorizer, iamService, mapper, (url, user, password, sql) -> {
+                    sent.add(sql);
+                    throw new SQLException("rejected: " + sql, "XX000");
+                });
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> failing.copy("000000000000", "us-east-1", destination(), "stage", "k1"));
+
+        String secret = sent.get(0).substring(sent.get(0).indexOf("aws_secret_access_key=") + 22,
+                sent.get(0).indexOf(";token="));
+        String token = sent.get(0).substring(sent.get(0).indexOf(";token=") + 7, sent.get(0).indexOf("' json"));
+        assertFalse(e.getMessage().contains(secret), e.getMessage());
+        assertFalse(e.getMessage().contains(token), e.getMessage());
+        verify(iamService).unregisterSession(eq("000000000000"), anyString());
+    }
+
+    @Test
+    void aRoleIamDoesNotKnowLoadsWithoutCredentials() throws Exception {
+        delivery.copy("000000000000", "us-east-1", destination(), "stage", "k1");
+
+        assertFalse(executed.get(0)[3].contains("CREDENTIALS"), executed.get(0)[3]);
+        verify(iamService, never()).registerSessionForAccount(anyString(), anyString(), anyString(), anyString(),
+                anyString(), any(Instant.class), any());
+    }
+
     @Test
     void secretOverridesInlineCredentialsWhenEnabled() throws Exception {
         RedshiftDestination dest = destination();
@@ -275,7 +349,7 @@ class FirehoseRedshiftDeliveryTest {
     @Test
     void jdbcFailureIsWrappedWithTableClusterAndSqlState() {
         FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(redshift, serverless, secrets,
-                roleAuthorizer, mapper,
+                roleAuthorizer, iamService, mapper,
                 (url, user, password, sql) -> {
                     throw new SQLException("relation \"events\" does not exist", "42P01");
                 });

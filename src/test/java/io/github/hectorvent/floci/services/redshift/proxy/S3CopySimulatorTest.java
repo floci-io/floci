@@ -43,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -177,6 +178,22 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void anOrganizationPolicyDenyStillAppliesToTheKeysCopy() {
+        IamService iamService = knownKey();
+        when(iamService.findAccountForAccessKeyId("ASIAEXAMPLE")).thenReturn(Optional.of("222222222222"));
+        when(iamService.effectiveScpLevels("222222222222")).thenReturn(List.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"},"
+                        + "{\"Effect\":\"Deny\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}"))));
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}"))));
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("42501", error.sqlState());
+    }
+
+    @Test
     void aConditionalDenyOnThePrincipalArnStillAppliesToTheKeysCopy() {
         IamService iamService = knownKey();
         String arn = "arn:aws:iam::111111111111:user/alice";
@@ -233,7 +250,7 @@ class S3CopySimulatorTest {
 
         S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
 
-        verify(iamService).findAccountForAccessKeyId("ASIAEXAMPLE");
+        verify(iamService, atLeastOnce()).findAccountForAccessKeyId("ASIAEXAMPLE");
     }
 
     @Test
