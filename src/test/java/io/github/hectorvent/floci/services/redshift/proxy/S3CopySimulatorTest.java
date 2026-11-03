@@ -114,7 +114,7 @@ class S3CopySimulatorTest {
         S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
 
         assertEquals(List.of("data.csv"), input.keys());
-        verify(s3).authorizeSignedListBucket("ASIAEXAMPLE", "tok", "bucket");
+        verify(s3).authorizeSignedListBucket("ASIAEXAMPLE", "tok", "bucket", "data.csv");
         verify(s3).authorizeSignedGetObject("ASIAEXAMPLE", "tok", "bucket", "data.csv");
         verify(s3, never()).authorizeAnonymousGetObject(any(), any());
     }
@@ -492,7 +492,7 @@ class S3CopySimulatorTest {
 
         verify(s3, never()).authorizeAnonymousGetObject(any(), any());
         verify(s3, never()).authorizeAnonymousListBucket(any());
-        verify(s3).authorizeSignedListBucket(any(), any(), eq("b"));
+        verify(s3).authorizeSignedListBucket(any(), any(), eq("b"), any());
         verify(s3).authorizeSignedGetObject(any(), any(), eq("b"), eq("k"));
         verify(iamService).registerSessionForAccount(
                 eq("000000000000"), any(), any(), any(), eq(ROLE_ARN), any(), isNull());

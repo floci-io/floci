@@ -247,4 +247,47 @@ class RedshiftInterceptorIamRoleEnforcedIntegrationTest {
             assertEquals("42501", noPolicy.getSQLState());
         }
     }
+
+    @Test
+    void copyHonorsABucketPolicyDenyConditionedOnTheRequestedPrefix() throws Exception {
+        clusterId = "it-copy-bucket-prefix";
+        String bucket = "redshift-copy-bucket-prefix";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "private/p1.txt", "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        s3.putObject(bucket, "public/p1.txt", "2|bob\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        // the user's own policy allows everything, so only the bucket policy can refuse the private prefix
+        iamService.createUser("CopyPrefixReader", "/");
+        iamService.putUserPolicy("CopyPrefixReader", "ReadAll", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"}
+                ]}
+                """);
+        s3.putBucketPolicy(bucket, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Deny","Principal":"*","Action":"s3:ListBucket",
+                   "Resource":"arn:aws:s3:::redshift-copy-bucket-prefix",
+                   "Condition":{"StringLike":{"s3:prefix":"private/*"}}}
+                ]}
+                """);
+        AccessKey reader = iamService.createAccessKey("CopyPrefixReader");
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123", null, List.of(),
+                List.of());
+
+        try (Connection connection = waitForConnection(cluster, "simple");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE people (id int, name text)");
+            String credentials = " ACCESS_KEY_ID '" + reader.getAccessKeyId() + "' SECRET_ACCESS_KEY '"
+                    + reader.getSecretAccessKey() + "'";
+
+            SQLException denied = assertThrows(SQLException.class, () -> statement.execute(
+                    "COPY people FROM 's3://" + bucket + "/private/p1.txt'" + credentials));
+            assertEquals("42501", denied.getSQLState());
+
+            statement.execute("COPY people FROM 's3://" + bucket + "/public/p1.txt'" + credentials);
+            try (ResultSet rows = statement.executeQuery("SELECT name FROM people")) {
+                assertTrue(rows.next());
+                assertEquals("bob", rows.getString(1));
+            }
+        }
+    }
 }

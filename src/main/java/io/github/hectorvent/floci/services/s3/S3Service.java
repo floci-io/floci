@@ -1236,6 +1236,16 @@ public class S3Service implements Resettable, ResourceProvider {
         authorizeListBucket(bucketName, new RequestAuthorization(true, accessKeyId, sessionToken));
     }
 
+    /**
+     * Authorize a signed {@code s3:ListBucket} that lists under {@code prefix}. The bucket policy sees
+     * {@code s3:prefix} as a real listing offers it, so a statement conditioned on the prefix matches
+     * instead of failing on the absent key.
+     */
+    public void authorizeSignedListBucket(String accessKeyId, String sessionToken, String bucketName, String prefix) {
+        authorizeBucketRead(bucketName, "s3:ListBucket", new RequestAuthorization(true, accessKeyId, sessionToken),
+                Map.of("s3:prefix", List.of(prefix == null ? "" : prefix)));
+    }
+
     /** Authorize a signed {@code s3:DeleteObject}; see {@link #authorizeSignedGetObject}. */
     public void authorizeSignedDeleteObject(String accessKeyId, String sessionToken, String bucketName, String key) {
         authorizeDeleteObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, sessionToken));
@@ -1307,8 +1317,13 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization) {
+        authorizeBucketRead(bucketName, action, authorization, null);
+    }
+
+    void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization,
+                             Map<String, List<String>> requestConditions) {
         String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
-        authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
+        authorizeS3Read(bucketName, null, null, action, bucketArn, authorization, requestConditions);
     }
 
     /**
@@ -1369,7 +1384,7 @@ public class S3Service implements Resettable, ResourceProvider {
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
         String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
         authorizeS3Read(bucketName, key, versionId, S3ObjectActions.forVersion(action, versionId), objectArn,
-                authorization);
+                authorization, null);
     }
 
     void authorizePutObject(String bucketName, String key, RequestAuthorization authorization) {
@@ -1488,7 +1503,8 @@ public class S3Service implements Resettable, ResourceProvider {
         return enforceAuth;
     }
 
-    private void authorizeS3Read(String bucketName, String key, String versionId, String action, String resourceArn, RequestAuthorization authorization) {
+    private void authorizeS3Read(String bucketName, String key, String versionId, String action, String resourceArn,
+                                 RequestAuthorization authorization, Map<String, List<String>> requestConditions) {
         if (!enforceAuth) {
             return;
         }
@@ -1498,7 +1514,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 : RequestAuthorization.unsigned();
 
         if (requestAuthorization.signed()) {
-            authorizeSignedBucketPolicy(bucketName, key, action, resourceArn, requestAuthorization, null);
+            authorizeSignedBucketPolicy(bucketName, key, action, resourceArn, requestAuthorization, requestConditions);
             return;
         }
 

@@ -17,6 +17,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -259,7 +260,7 @@ class SpectrumS3ReaderTest {
             assertEquals(1, rows.count());
         }
 
-        verify(s3).authorizeSignedListBucket(anyString(), anyString(), eq("warehouse"));
+        verify(s3).authorizeSignedListBucket(anyString(), anyString(), eq("warehouse"), any());
         verify(s3).authorizeSignedGetObject(anyString(), anyString(), eq("warehouse"), eq("events/data.csv"));
         verify(iam).unregisterSession(eq("000000000000"), anyString());
     }
@@ -270,7 +271,7 @@ class SpectrumS3ReaderTest {
         IamService iam = iamWithRole();
         String role = "arn:aws:iam::000000000000:role/Reader";
         doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)
-                .authorizeSignedListBucket(anyString(), anyString(), eq("warehouse"));
+                .authorizeSignedListBucket(anyString(), anyString(), eq("warehouse"), any());
 
         assertThrows(SpectrumReadException.class, () -> new SpectrumS3Reader(s3, iam)
                 .read(session(role), schema(role), table(SpectrumColumn.Type.VARCHAR)).toList());

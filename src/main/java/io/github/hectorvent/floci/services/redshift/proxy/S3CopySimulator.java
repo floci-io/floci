@@ -142,7 +142,8 @@ public final class S3CopySimulator {
                     if (roleSession != null) {
                         RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
                                 "s3:ListBucket", copyBucketArn(spec, s3), Map.of("s3:prefix", List.of(spec.keyOrPrefix())));
-                        s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
+                        s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(),
+                                spec.keyOrPrefix());
                     } else {
                         s3.authorizeAnonymousListBucket(spec.bucket());
                     }

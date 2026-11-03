@@ -236,7 +236,7 @@ public final class RedshiftRoleAccess {
         authorizeRoleAction(s3, iamService, roleArn, "s3:ListBucket", bucketArn(roleArn, bucket),
                 Map.of("s3:prefix", List.of(prefix == null ? "" : prefix)));
         try {
-            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), bucket);
+            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), bucket, prefix);
         } catch (AwsException e) {
             throw signedAccessFailure(e, "s3://" + bucket);
         }
