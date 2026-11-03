@@ -56,8 +56,9 @@ home_is() { [ "$(pid1_home)" = "$1" ]; }
 reports_unreachable() { docker logs "${NAME}" 2>&1 | grep -q 'Docker is not reachable'; }
 reaches_docker() { ! reports_unreachable; }
 
-# The availability report runs on its own thread after startup. This case has to log it, so waiting
-# for it here also proves the report has run by the time the other cases look for its absence.
+# The availability report runs on its own thread after startup and logs nothing when Docker answers.
+# This case has to log it, so it can wait for it. The other cases can only look for its absence, which
+# does not prove their own report has run: the group and uid checks on PID 1 are what prove the fix.
 wait_for_unreachable_report() {
     for _ in $(seq 1 30); do
         reports_unreachable && return 0
