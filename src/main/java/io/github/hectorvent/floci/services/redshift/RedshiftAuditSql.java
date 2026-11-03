@@ -115,7 +115,12 @@ public final class RedshiftAuditSql {
             if (!secretClause(tokens.get(i))) {
                 continue;
             }
-            Token value = tokens.get(++i);
+            int valueIndex = i + 1;
+            if (tokens.get(valueIndex).keyword("AS") && valueIndex + 1 < tokens.size()) {
+                valueIndex++;
+            }
+            Token value = tokens.get(valueIndex);
+            i = valueIndex;
             if (value.kind() == Kind.SYMBOL) {
                 continue;
             }
