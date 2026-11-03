@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -247,6 +248,85 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
                 "update left the replaced permission behind");
     }
 
+    @Test
+    void unnamedGroupUpdateKeepsItsIdentityAndAnotherStacksRules() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-unnamed-sg-" + suffix;
+        String callerStack = "cfn-unnamed-caller-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.51.0.0/16"}},
+                    "Group": {
+                      "Type": "AWS::EC2::SecurityGroup",
+                      "Properties": {
+                        "GroupDescription": "unnamed frontend",
+                        "VpcId": {"Ref": "Vpc"},
+                        "SecurityGroupIngress": [
+                          {"IpProtocol": "tcp", "FromPort": 9100, "ToPort": 9100, "CidrIp": "10.1.0.0/16"}
+                        ]
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "RefId": {"Value": {"Ref": "Group"}},
+                    "GroupId": {"Value": {"Fn::GetAtt": ["Group", "GroupId"]}},
+                    "VpcId": {"Value": {"Ref": "Vpc"}}
+                  }
+                }
+                """;
+        String stackId = createStack(stackName, template);
+        String groupId = output(stackName, "RefId");
+        String vpcId = output(stackName, "VpcId");
+        String callerId = null;
+        try {
+            given()
+                .header("Authorization", EC2_AUTH)
+                .formParam("Action", "DescribeVpcs")
+                .formParam("Filter.1.Name", "vpc-id")
+                .formParam("Filter.1.Value.1", vpcId)
+            .when().post("/").then().statusCode(200).body(containsString("<vpcId>" + vpcId + "</vpcId>"));
+            callerId = createStack(callerStack, standaloneIngressTemplate(groupId, "10.2.0.0/16"));
+            updateStack(stackName, template.replace("10.1.0.0/16", "10.3.0.0/16"));
+            assertTrue(awaitStackStatus(stackId, "UPDATE_COMPLETE"));
+            assertEquals(groupId, output(stackName, "RefId"));
+            assertEquals(groupId, output(stackName, "GroupId"));
+            String group = describeGroup(groupId);
+            assertFalse(group.contains("<cidrIp>10.1.0.0/16</cidrIp>"));
+            assertTrue(group.contains("<cidrIp>10.3.0.0/16</cidrIp>"));
+            assertTrue(group.contains("<cidrIp>10.2.0.0/16</cidrIp>"),
+                    "frontend update removed another stack's permission");
+
+            deleteStack(callerStack, callerId);
+            callerId = null;
+            group = describeGroup(groupId);
+            assertFalse(group.contains("<cidrIp>10.2.0.0/16</cidrIp>"));
+            assertTrue(group.contains("<cidrIp>10.3.0.0/16</cidrIp>"));
+        } finally {
+            if (callerId != null) {
+                deleteStack(callerStack, callerId);
+            }
+            deleteStack(stackName, stackId);
+        }
+        assertFalse(describeGroup(groupId).contains("<groupId>"));
+        given()
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "DescribeVpcs")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpcId)
+        .when().post("/").then().statusCode(200).body(not(containsString("<vpcId>")));
+    }
+
+    private static void deleteStack(String name, String id) throws InterruptedException {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", name)
+        .when().post("/").then().statusCode(200);
+        assertTrue(awaitStackStatus(id, "DELETE_COMPLETE"), "stack did not reach DELETE_COMPLETE");
+    }
+
     /** A deleted stack is only describable by id, as in AWS; it is retained for a grace period. */
     private static boolean awaitStackStatus(String stackId, String status) throws InterruptedException {
         for (int i = 0; i < 100; i++) {
@@ -349,7 +429,8 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
     private static String describeGroup(String groupId) {
         return given()
             .formParam("Action", "DescribeSecurityGroups")
-            .formParam("GroupId.1", groupId)
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", groupId)
             .header("Authorization", EC2_AUTH)
         .when().post("/").then().statusCode(200).extract().asString();
     }

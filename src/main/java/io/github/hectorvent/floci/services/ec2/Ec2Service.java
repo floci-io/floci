@@ -8162,11 +8162,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * <p>Returns the permissions that remain.
      */
     private List<IpPermission> revokeSources(List<IpPermission> existing, List<IpPermission> toRemove) {
+        // A caller can pass permissions stored on the group. Freeze all removal criteria before
+        // mutating any of them; an emptied source list otherwise becomes a wildcard for later rules.
+        List<IpPermission> removals = toRemove.stream().map(Ec2Service::copyPermissionSources).toList();
         List<IpPermission> remaining = new ArrayList<>();
         for (IpPermission perm : existing) {
             boolean dropWholePermission = false;
             boolean hadSources = hasSources(perm);
-            for (IpPermission removal : toRemove) {
+            for (IpPermission removal : removals) {
                 if (!sameProtocolAndPorts(perm, removal)) {
                     continue;
                 }
@@ -8174,8 +8177,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     dropWholePermission = true;
                     break;
                 }
-                // authorize stores the caller's IpPermission object, so a revoke can name the very
-                // instance held on the group. Snapshot the values before mutating either list.
                 List<String> cidrs = removal.getIpRanges().stream().map(IpRange::getCidrIp).toList();
                 List<String> cidrsV6 = removal.getIpv6Ranges().stream().map(Ipv6Range::getCidrIpv6).toList();
                 List<String> lists = removal.getPrefixListIds().stream()
@@ -8194,6 +8195,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         return remaining;
+    }
+
+    private static IpPermission copyPermissionSources(IpPermission permission) {
+        IpPermission copy = new IpPermission();
+        copy.setIpProtocol(permission.getIpProtocol());
+        copy.setFromPort(permission.getFromPort());
+        copy.setToPort(permission.getToPort());
+        copy.setIpRanges(new ArrayList<>(permission.getIpRanges()));
+        copy.setIpv6Ranges(new ArrayList<>(permission.getIpv6Ranges()));
+        copy.setPrefixListIds(new ArrayList<>(permission.getPrefixListIds()));
+        copy.setUserIdGroupPairs(new ArrayList<>(permission.getUserIdGroupPairs()));
+        return copy;
     }
 
     private boolean sameProtocolAndPorts(IpPermission a, IpPermission b) {
