@@ -346,7 +346,11 @@ public class SnsService implements Resettable, ResourceProvider {
         this.firehoseService = firehoseService;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
-        this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+        // Pin to HTTP/1.1 like AWS SNS: the default HTTP_2 sends an h2c upgrade to http:// endpoints.
+        this.httpClient = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(5))
+                .build();
         this.messageSigner = messageSigner;
     }
 
