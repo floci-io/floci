@@ -17,6 +17,12 @@ public class EbsOptions {
     @JsonProperty("VolumeSize")
     private Integer volumeSize = 10;
 
+    @JsonProperty("Iops")
+    private Integer iops;
+
+    @JsonProperty("Throughput")
+    private Integer throughput;
+
     public EbsOptions() {}
 
     public Boolean isEbsEnabled() {
@@ -33,6 +39,22 @@ public class EbsOptions {
 
     public void setVolumeType(String volumeType) {
         this.volumeType = volumeType;
+    }
+
+    public Integer getIops() {
+        return iops;
+    }
+
+    public void setIops(Integer iops) {
+        this.iops = iops;
+    }
+
+    public Integer getThroughput() {
+        return throughput;
+    }
+
+    public void setThroughput(Integer throughput) {
+        this.throughput = throughput;
     }
 
     public Integer getVolumeSize() {
