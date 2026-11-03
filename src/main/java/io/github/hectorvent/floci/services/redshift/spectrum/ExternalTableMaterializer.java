@@ -26,8 +26,11 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -295,6 +298,28 @@ public class ExternalTableMaterializer {
                         deletions.add(values);
                     }
                     loaded.put(values, fingerprint);
+                }
+            }
+            if (!deletions.isEmpty()) {
+                Set<List<String>> deletedConverted = deletions.stream()
+                        .map(values -> convertedPartitionValues(table, values))
+                        .collect(Collectors.toSet());
+                Set<List<String>> alreadyLoading = toLoad.stream()
+                        .map(source -> source.partition().getValues())
+                        .collect(Collectors.toSet());
+                List<Partition> overlappingToReload = partitions.stream()
+                        .filter(partition -> held.containsKey(partition.getValues())
+                                && !alreadyLoading.contains(partition.getValues())
+                                && deletedConverted.contains(convertedPartitionValues(table, partition.getValues())))
+                        .toList();
+                if (!overlappingToReload.isEmpty()) {
+                    List<ReadSource> overlappingSources = readSources(accountId, binding, roleSession,
+                            table, location, overlappingToReload);
+                    authorizeObjects(accountId, binding, roleSession, overlappingSources);
+                    for (ReadSource source : overlappingSources) {
+                        toLoad.add(source);
+                        loaded.put(source.partition().getValues(), partitionFingerprint(table, source));
+                    }
                 }
             }
             if (!reset && deletions.isEmpty() && toLoad.isEmpty()) {
@@ -785,7 +810,7 @@ public class ExternalTableMaterializer {
                 // the table already holds other partitions, so only the ones named here are replaced
                 String delete = deletions.isEmpty() ? "" : "DELETE FROM " + target + " WHERE "
                         + deletions.stream().map(values -> "(" + partitionCondition(table, values) + ")")
-                        .collect(Collectors.joining(" OR ")) + "; ";
+                        .distinct().collect(Collectors.joining(" OR ")) + "; ";
                 backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); " + delete
                         + "INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
             } else if (definitions.equals(loadedDefinitions)) {
@@ -858,6 +883,42 @@ public class ExternalTableMaterializer {
             return null;
         }
         return value;
+    }
+
+    /**
+     * Converts partition key values to their canonical form so that partitions whose keys overlap
+     * in PostgreSQL (such as integer '1' and '01', or ISO date formats) map to the same key.
+     */
+    private static List<String> convertedPartitionValues(Table table, List<String> values) {
+        List<Column> keys = table.getPartitionKeys();
+        List<String> converted = new ArrayList<>();
+        for (int index = 0; index < keys.size(); index++) {
+            Column key = keys.get(index);
+            String value = partitionValue(key, values, index);
+            if (value == null) {
+                converted.add(null);
+            } else {
+                String type = GlueTypeMapper.canonicalGlueType(key.getType());
+                switch (type) {
+                    case "tinyint", "smallint", "int", "integer", "bigint" -> {
+                        try {
+                            converted.add(new BigInteger(value.trim()).toString());
+                        } catch (NumberFormatException expected) {
+                            converted.add(value);
+                        }
+                    }
+                    case "date" -> {
+                        try {
+                            converted.add(LocalDate.parse(value.trim()).toString());
+                        } catch (DateTimeParseException expected) {
+                            converted.add(value);
+                        }
+                    }
+                    default -> converted.add(value);
+                }
+            }
+        }
+        return converted;
     }
 
     private void prepareScratchBucket(String accountId) {

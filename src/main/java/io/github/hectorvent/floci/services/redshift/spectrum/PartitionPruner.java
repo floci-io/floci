@@ -133,10 +133,18 @@ final class PartitionPruner {
             return List.of();
         }
         int clauseEnd = blockEnd;
+        int caseLevel = 0;
         for (int j = where + 1; j < blockEnd; j++) {
-            if (tokens.depth[j] == depth && CLAUSE_AFTER_WHERE.stream().anyMatch(tokens.list.get(j)::isWord)) {
-                clauseEnd = j;
-                break;
+            if (tokens.depth[j] == depth) {
+                Token token = tokens.list.get(j);
+                if (token.isWord("case")) {
+                    caseLevel++;
+                } else if (token.isWord("end")) {
+                    caseLevel = Math.max(0, caseLevel - 1);
+                } else if (caseLevel == 0 && CLAUSE_AFTER_WHERE.stream().anyMatch(token::isWord)) {
+                    clauseEnd = j;
+                    break;
+                }
             }
         }
         Set<List<String>> qualifiers = qualifiers(tokens, occurrence, schema, table);
@@ -207,29 +215,42 @@ final class PartitionPruner {
     /** Splits the terms of a {@code WHERE}; a clause holding a top-level OR is a single term. */
     private static List<List<Token>> split(List<Token> clause) {
         int depth = 0;
+        int caseDepth = 0;
         for (Token token : clause) {
             if (token.kind == Kind.LPAREN) {
                 depth++;
             } else if (token.kind == Kind.RPAREN) {
                 depth--;
-            } else if (depth == 0 && token.isWord("or")) {
+            } else if (token.isWord("case")) {
+                caseDepth++;
+            } else if (token.isWord("end")) {
+                caseDepth = Math.max(0, caseDepth - 1);
+            } else if (depth == 0 && caseDepth == 0 && token.isWord("or")) {
                 return List.of(clause);
             }
+        }
+        if (caseDepth != 0) {
+            return List.of();
         }
         List<List<Token>> terms = new ArrayList<>();
         List<Token> current = new ArrayList<>();
         depth = 0;
+        caseDepth = 0;
         boolean inBetween = false;
         for (Token token : clause) {
             if (token.kind == Kind.LPAREN) {
                 depth++;
             } else if (token.kind == Kind.RPAREN) {
                 depth--;
+            } else if (token.isWord("case")) {
+                caseDepth++;
+            } else if (token.isWord("end")) {
+                caseDepth = Math.max(0, caseDepth - 1);
             }
-            if (depth == 0 && token.isWord("between")) {
+            if (depth == 0 && caseDepth == 0 && token.isWord("between")) {
                 inBetween = true;
             }
-            if (depth == 0 && token.isWord("and")) {
+            if (depth == 0 && caseDepth == 0 && token.isWord("and")) {
                 if (inBetween) {
                     inBetween = false;
                 } else {
@@ -632,8 +653,10 @@ final class PartitionPruner {
         boolean balanced() {
             depth = new int[list.size()];
             int level = 0;
+            int caseCount = 0;
             for (int i = 0; i < list.size(); i++) {
-                Kind kind = list.get(i).kind;
+                Token token = list.get(i);
+                Kind kind = token.kind;
                 if (kind == Kind.RPAREN) {
                     level--;
                     if (level < 0) {
@@ -644,13 +667,21 @@ final class PartitionPruner {
                 if (kind == Kind.LPAREN) {
                     level++;
                 }
+                if (token.isWord("case")) {
+                    caseCount++;
+                } else if (token.isWord("end")) {
+                    caseCount--;
+                    if (caseCount < 0) {
+                        return false;
+                    }
+                }
                 if (kind == Kind.SEMICOLON) {
-                    if (level != 0) {
+                    if (level != 0 || caseCount != 0) {
                         return false;
                     }
                 }
             }
-            return level == 0;
+            return level == 0 && caseCount == 0;
         }
     }
 

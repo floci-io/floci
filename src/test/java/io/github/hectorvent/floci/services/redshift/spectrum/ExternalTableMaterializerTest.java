@@ -56,6 +56,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -1295,6 +1296,29 @@ class ExternalTableMaterializerTest {
 
         verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
         assertThat(backend.statements.stream().anyMatch(sql -> sql.contains("CREATE TABLE")), equalTo(true));
+    }
+
+    @Test
+    void refreshingOnePartitionReloadsOtherPartitionsWhoseConvertedKeysOverlap() {
+        Table table = csvTable();
+        table.setPartitionKeys(List.of(new Column("day", "int")));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        Partition p1 = dayPartition(table, "1", "one/", "e1");
+        Partition p01 = dayPartition(table, "01", "zero-one/", "e01");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(p1, p01));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE day IN (1, 01)");
+
+        Partition p1Changed = dayPartition(table, "1", "one/", "e1-new");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(p1Changed, p01));
+
+        reset(duck);
+        materializer.ensureCurrent(backend, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE day = 1");
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && sql.contains("s3://bucket/zero-one/part-1.csv")), any(), anyString(), eq(ACCOUNT));
     }
 
     private static Map<String, Object> schemaRow(String file, String name) {

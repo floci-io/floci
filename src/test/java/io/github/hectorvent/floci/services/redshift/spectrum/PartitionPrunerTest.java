@@ -294,4 +294,19 @@ class PartitionPrunerTest {
                 is(false));
         assertThat(filter("SELECT * FROM lake.events WHERE day = 'a'", DAY).isPresent(), is(true));
     }
+
+    @Test
+    void doesNotTreatAndInsideCaseAsATopLevelSeparator() {
+        String sql = "SELECT * FROM lake.events WHERE CASE WHEN id = 7 AND day = 'a' AND id = 8 THEN TRUE ELSE TRUE END";
+        assertThat(filter(sql, DAY).isPresent(), is(false));
+    }
+
+    @Test
+    void keepsValidConjunctAlongsideACaseExpression() {
+        String sql = "SELECT * FROM lake.events WHERE (CASE WHEN id = 1 THEN 'a' ELSE 'b' END) = 'a' AND day = '2026-01-01'";
+        Optional<PartitionPruner.Filter> filter = filter(sql, DAY);
+
+        assertThat(keeps(filter, "2026-01-01"), is(true));
+        assertThat(keeps(filter, "2026-01-02"), is(false));
+    }
 }
