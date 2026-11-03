@@ -55,14 +55,8 @@ class DynamoDbStreamsUpdateItemEventNameIntegrationTest {
 
     @AfterEach
     void deleteTableAndCloseClients() {
-        try {
-            ddb.deleteTable(b -> b.tableName(tableName));
-        } finally {
-            try {
-                ddb.close();
-            } finally {
-                streams.close();
-            }
+        try (DynamoDbStreamsClient streamsClient = streams; DynamoDbClient ddbClient = ddb) {
+            ddbClient.deleteTable(b -> b.tableName(tableName));
         }
     }
 
