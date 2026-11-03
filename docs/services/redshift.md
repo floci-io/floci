@@ -426,11 +426,15 @@ Serverless namespace or of a provisioned cluster, so `aws_redshift_resource_poli
 does on AWS:
 
 - The policy must be a JSON object, or the call is refused with `InvalidPolicyFault`.
-- A namespace or cluster that does not exist, or one without a policy on `GetResourcePolicy` and
-  `DeleteResourcePolicy`, is `ResourceNotFoundFault`. An ARN of any other resource type is
-  `UnsupportedOperation`.
-- The policy is stored with its namespace or cluster and returned as given. Deleting the resource
-  deletes its policy.
+- The policy is stored the way AWS returns it: `Version` and `Statement` first, each statement's
+  `Effect`, `Principal`, `Action`, `Resource` and `Condition` first, other keys after them in the
+  order sent, pretty-printed. The provider compares policies by content, so this causes no drift.
+- A namespace that does not exist is `ResourceNotFoundFault` ("The requested namespace doesn't
+  exist."), as is a cluster that does not exist, or a resource without a policy on
+  `GetResourcePolicy` and `DeleteResourcePolicy`.
+- An ARN in another Region, a namespace id that is not a UUID, and an ARN of any other resource type
+  (a workgroup, a snapshot) are `InvalidParameterValue`, with AWS's messages.
+- Deleting the namespace or cluster deletes its policy.
 - Floci does not evaluate the policy: `CreateIntegration` does not require one.
 
 ```bash
