@@ -21,7 +21,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
 /**
@@ -42,7 +41,6 @@ public class BedrockAgentCoreHarnessRegistry {
     private static final String ARN_SERVICE = "bedrock-agentcore";
     private static final String STATUS_READY = "READY";
     private static final String STATUS_DELETING = "DELETING";
-    private static final String ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static final int MAX_PAGE = 100;
     private static final int MAX_TAGS = 50;
     private static final int MAX_VERSION = 99999;
@@ -123,7 +121,7 @@ public class BedrockAgentCoreHarnessRegistry {
 
         Instant now = Instant.now();
         Harness harness = new Harness();
-        harness.setHarnessId(name + "-" + random(10));
+        harness.setHarnessId(name + "-" + BedrockAgentCoreControllerSupport.randomAlphanumeric(10));
         harness.setHarnessName(name);
         harness.setStatus(STATUS_READY);
         harness.setCreatedAt(now);
@@ -266,7 +264,8 @@ public class BedrockAgentCoreHarnessRegistry {
         ObjectNode runtime = objectMapper.createObjectNode();
         String runtimeName = "harness_" + harnessName;
         String runtimeId = existing != null && existing.hasNonNull("agentRuntimeId")
-                ? existing.get("agentRuntimeId").asText() : runtimeName + "-" + random(10);
+                ? existing.get("agentRuntimeId").asText()
+                : runtimeName + "-" + BedrockAgentCoreControllerSupport.randomAlphanumeric(10);
         runtime.put("agentRuntimeArn", regionResolver.buildArn(ARN_SERVICE, region, "runtime/" + runtimeId));
         runtime.put("agentRuntimeName", runtimeName);
         runtime.put("agentRuntimeId", runtimeId);
@@ -364,13 +363,6 @@ public class BedrockAgentCoreHarnessRegistry {
         return new AwsException("ValidationException", message, 400);
     }
 
-    private static String random(int length) {
-        StringBuilder sb = new StringBuilder(length);
-        for (int i = 0; i < length; i++) {
-            sb.append(ALNUM.charAt(ThreadLocalRandom.current().nextInt(ALNUM.length())));
-        }
-        return sb.toString();
-    }
 
     private static String key(String region, String id) {
         return keyPrefix(region) + id;

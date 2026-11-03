@@ -9,11 +9,13 @@ import org.jboss.logging.Logger;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Helpers shared by the sibling REST controllers under this package (control, gateway, gateway
- * rule, identity, memory, resource policy, tools). Each used to carry its own copy of the same
- * error-response builder and JSON-to-map conversion, found duplicated by CPD across all seven.
+ * rule, identity, memory, resource policy, tools) and by its services. Each used to carry its own
+ * copy of the same error-response builder and JSON-to-map conversion, found duplicated by CPD across
+ * all seven, and four services their own random id suffix.
  *
  * <p>{@code putInstant} deliberately stays out of here: different AgentCore resource types encode
  * timestamps differently (ISO-8601 strings for runtimes, epoch seconds for workload identities and
@@ -55,6 +57,23 @@ final class BedrockAgentCoreControllerSupport {
         Map<String, String> map = new HashMap<>();
         node.fields().forEachRemaining(e -> map.put(e.getKey(), e.getValue().asText()));
         return map;
+    }
+
+    /** The letters and digits AgentCore's generated id suffixes are drawn from. */
+    static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+    /** {@code length} characters drawn at random from {@code alphabet}, for a generated id suffix. */
+    static String random(String alphabet, int length) {
+        StringBuilder value = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            value.append(alphabet.charAt(ThreadLocalRandom.current().nextInt(alphabet.length())));
+        }
+        return value.toString();
+    }
+
+    /** {@code length} random letters and digits, the suffix AgentCore puts after a resource's name. */
+    static String randomAlphanumeric(int length) {
+        return random(ALPHANUMERIC, length);
     }
 
     /** Reads a text field from a JSON node, or null when the field is absent or JSON null. */
