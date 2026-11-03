@@ -2234,6 +2234,57 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void nugetImportFinishingAfterRepositoryRecreationDoesNotBlockPublishingToTheNewRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("nuget");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "widget");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
+                "widget", "1.0.0");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "widget", "1.0.0", "public:nuget-org", packageFence);
+        AtomicBoolean wroteOldAsset = new AtomicBoolean();
+
+        CodeArtifactService.AssetRetentionAttemptResult retained = service.retainAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "nuget", null, "widget", "1.0.0", versionFence, packageFence,
+                claim.episodeId(), oldId, "widget.1.0.0.nupkg", new byte[] {1},
+                () -> wroteOldAsset.set(true));
+        assertTrue(retained.fenceMatched());
+        assertTrue(retained.wroteNewContent());
+        assertTrue(wroteOldAsset.get());
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
+
+        service.ensureRetainedPackageOriginDefaultIfCurrentRepository(REGION, "dom", null, "repo", "nuget", null,
+                "widget", packageFence, oldId);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
+                "nuget", null, "widget"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void nugetImportSetsTheDefaultWhileItsRepositoryIsCurrent() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "widget");
+
+        service.ensureRetainedPackageOriginDefaultIfCurrentRepository(REGION, "dom", null, "repo", "nuget", null,
+                "widget", fence, repoId);
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "nuget", null, "widget");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
+    }
+
+    @Test
     void claimMavenRetainedVersionOriginIsAtomicPerVersion() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());

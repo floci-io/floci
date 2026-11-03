@@ -2960,8 +2960,9 @@ public class CodeArtifactService implements Resettable {
      * #recordContainerBackedAssetBytes} already does: {@code DeleteRepository} removes a
      * repository's {@code packageOriginConfigs} entries directly rather than through this fence,
      * so the package-level fence check below cannot by itself catch an import finishing after
-     * the repository was deleted. Without this, a repository recreated under the same name would
-     * see a stale default written back for a package it never had any version of.
+     * the repository was deleted and remains absent. A sidecar importer also checks the original
+     * container id through {@link #ensureRetainedPackageOriginDefaultIfCurrentRepository}, since
+     * an existence check alone cannot distinguish a same-name replacement.
      */
     public synchronized void ensureRetainedPackageOriginDefault(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, long packageFenceSnapshot) {
@@ -2992,6 +2993,21 @@ public class CodeArtifactService implements Resettable {
         }
         packageOriginConfigs.putForAccount(owner, key,
                 new PackageOriginConfig("BLOCK", "ALLOW", format, namespace, packageName));
+    }
+
+    /** Checks the repository generation and writes the default under the same deletion monitor. */
+    public synchronized void ensureRetainedPackageOriginDefaultIfCurrentRepository(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            long packageFenceSnapshot, String repositoryContainerId) {
+        String owner = effectiveOwner(domainOwner);
+        CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain, repository))
+                .orElse(null);
+        if (current == null || repositoryContainerId == null || !repositoryContainerId.equals(
+                current.getSidecarContainerIds().get(format))) {
+            return;
+        }
+        ensureRetainedPackageOriginDefault(region, domain, owner, repository, format, namespace, packageName,
+                packageFenceSnapshot);
     }
 
     /**
