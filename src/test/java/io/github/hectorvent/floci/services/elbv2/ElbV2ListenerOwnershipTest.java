@@ -38,6 +38,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.github.hectorvent.floci.services.elbv2.ElbV2PublicationTestSupport.publishRuntime;
@@ -52,6 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -444,7 +446,7 @@ class ElbV2ListenerOwnershipTest {
     }
 
     @Test
-    void failedClosePermitsABoundedBindAttemptAndIdenticalPublicationCanRetry() {
+    void failedCloseRetainsListenersUntilBackgroundBindRetry() {
         Fixture fixture = new Fixture(new Registry());
         Promise<Void> close = Promise.promise();
         Listener first = listener("first", 8443, false);
@@ -462,12 +464,69 @@ class ElbV2ListenerOwnershipTest {
             close.fail(new IllegalStateException("controlled close failure"));
             assertEquals(2, fixture.creations(8443));
             assertEquals(1, fixture.closes(8443), "failed replacement must be closed");
-            publishRuntime(fixture.plane, second, REGION, second.getPort(), List.of(rule("second")));
+            fixture.runNextTimer();
             assertEquals(3, fixture.creations(8443));
             fixture.serves(8443, "second");
             fixture.serves(9443, "unrelated");
         } finally {
             close.tryComplete();
+            fixture.plane.shutdown();
+        }
+    }
+
+    @Test
+    void repeatedBindFailuresBackOffWithoutDuplicatingPublication() {
+        Fixture fixture = new Fixture(new Registry());
+        Listener listener = listener("retry", 8443, false);
+        try {
+            fixture.failNextListenPort = 8443;
+            publishRuntime(fixture.plane, listener, REGION, null, List.of(rule("retry")));
+            for (long delay : List.of(100L, 200L, 400L, 800L, 1600L, 3200L, 5000L, 5000L)) {
+                int creations = fixture.creations(8443);
+                publishRuntime(fixture.plane, listener, REGION, listener.getPort(), List.of(rule("retry")));
+                assertEquals(creations, fixture.creations(8443), "publication must not bypass an outstanding retry");
+                assertEquals(1, fixture.timers.size());
+                assertEquals(delay, fixture.nextTimerDelay);
+                fixture.failNextListenPort = 8443;
+                fixture.runNextTimer();
+            }
+            fixture.runNextTimer();
+            fixture.serves(8443, "retry");
+            assertTrue(fixture.timers.isEmpty());
+            fixture.failNextListenPort = 8443;
+            publishRuntime(fixture.plane, listener("retry", 8443, true), REGION, 8443, List.of(rule("retry")));
+            assertEquals(100, fixture.nextTimerDelay, "a successful bind resets the next recovery delay");
+            fixture.runNextTimer();
+            fixture.serves(8443, "retry");
+        } finally {
+            fixture.plane.shutdown();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void retirementCancelsBindRetryAndItsQueuedCallbackCannotReviveTheListener(boolean shutdown) {
+        Fixture fixture = new Fixture(new Registry());
+        Listener listener = listener("retiring", 8443, false);
+        try {
+            fixture.failNextListenPort = 8443;
+            publishRuntime(fixture.plane, listener, REGION, null, List.of(rule("retiring")));
+            Map.Entry<Long, Handler<Long>> pending = fixture.timers.entrySet().iterator().next();
+            if (shutdown) {
+                fixture.plane.shutdown();
+            } else {
+                removeRuntime(fixture.plane, listener.getListenerArn(), listener.getPort());
+            }
+            assertTrue(fixture.timers.isEmpty());
+            pending.getValue().handle(pending.getKey());
+            assertEquals(1, fixture.creations(8443));
+            if (!shutdown) {
+                publishRuntime(fixture.plane, listener("replacement", 8443, false), REGION, null, List.of(rule("replacement")));
+                pending.getValue().handle(pending.getKey());
+                assertEquals(2, fixture.creations(8443));
+                fixture.serves(8443, "replacement");
+            }
+        } finally {
             fixture.plane.shutdown();
         }
     }
@@ -531,6 +590,9 @@ class ElbV2ListenerOwnershipTest {
         private final Map<Integer, AtomicInteger> created = new ConcurrentHashMap<>();
         private final Map<Integer, AtomicInteger> closed = new ConcurrentHashMap<>();
         private final Map<Integer, HttpServer> servers = new ConcurrentHashMap<>();
+        private final Map<Long, Handler<Long>> timers = new ConcurrentHashMap<>();
+        private final AtomicLong timerSequence = new AtomicLong();
+        private long nextTimerDelay;
         private volatile int failNextListenPort = -1;
 
         private Fixture(Registry registry) {
@@ -554,6 +616,14 @@ class ElbV2ListenerOwnershipTest {
             CertificateMaterial material = new CertificateMaterial(CERTIFICATE, pair.certificatePem(), pair.privateKeyPem(), null);
             when(plane.certificateResolver.publishedMaterial(anyString(), eq(REGION), eq(CERTIFICATE))).thenReturn(material);
             plane.vertx = mock(Vertx.class);
+            when(plane.vertx.setTimer(anyLong(), any())).thenAnswer(call -> {
+                long timer = timerSequence.incrementAndGet();
+                nextTimerDelay = call.getArgument(0);
+                timers.put(timer, call.getArgument(1));
+                return timer;
+            });
+            when(plane.vertx.cancelTimer(anyLong())).thenAnswer(call ->
+                    timers.remove(call.<Long>getArgument(0)) != null);
             when(plane.vertx.createHttpServer(any(HttpServerOptions.class))).thenAnswer(call -> {
                 int port = ((HttpServerOptions) call.getArgument(0)).getPort();
                 created.computeIfAbsent(port, ignored -> new AtomicInteger()).incrementAndGet();
@@ -582,6 +652,12 @@ class ElbV2ListenerOwnershipTest {
         private int creations(int port) {
             AtomicInteger count = created.get(port);
             return count == null ? 0 : count.get();
+        }
+
+        private void runNextTimer() {
+            assertEquals(1, timers.size());
+            long timer = timers.keySet().iterator().next();
+            timers.remove(timer).handle(timer);
         }
 
         private int closes(int port) {

@@ -55,10 +55,14 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -357,6 +361,71 @@ class ElbV2TcpDataPlaneIntegrationTest {
                     assertTrue(response.endsWith("parked"), response);
                 }
             });
+        } finally {
+            client.deleteLoadBalancer(request -> request.loadBalancerArn(other.loadBalancerArn()));
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = ProtocolEnum.class, names = {"TCP", "HTTP"})
+    void listenerStartsAfterExternalPortOwnerReleasesIt(ProtocolEnum protocol) throws Exception {
+        LoadBalancer other = client.createLoadBalancer(request -> request.name("tcp-regression-occupied")
+                .type(protocol == ProtocolEnum.TCP ? LoadBalancerTypeEnum.NETWORK : LoadBalancerTypeEnum.APPLICATION)
+                .subnets(Ec2Service.defaultSubnetId("us-east-1", "a"),
+                        Ec2Service.defaultSubnetId("us-east-1", "b")))
+                .loadBalancers().getFirst();
+        Logger logger = Logger.getLogger(ElbV2DataPlane.class.getName());
+        try (ServerSocket occupied = new ServerSocket(0)) {
+            int port = occupied.getLocalPort();
+            CountDownLatch bindFailed = new CountDownLatch(1);
+            // JUL observes the failed bind; Vert.x Handler controls the test sockets.
+            java.util.logging.Handler failureLog = new java.util.logging.Handler() {
+                @Override
+                public void publish(LogRecord record) {
+                    if (record.getMessage().contains("listener port failed to start")
+                            && record.getParameters() != null
+                            && Arrays.asList(record.getParameters()).contains(Integer.toString(port))) {
+                        bindFailed.countDown();
+                    }
+                }
+
+                @Override
+                public void flush() {}
+
+                @Override
+                public void close() {}
+            };
+            logger.addHandler(failureLog);
+            try {
+                Action action = protocol == ProtocolEnum.TCP
+                        ? Action.builder().type(ActionTypeEnum.FORWARD).targetGroupArn(targetGroupArn).build()
+                        : Action.builder().type(ActionTypeEnum.FIXED_RESPONSE).fixedResponseConfig(
+                                FixedResponseActionConfig.builder().statusCode("200").contentType("text/plain")
+                                        .messageBody("recovered").build()).build();
+                Listener created = client.createListener(request -> request.loadBalancerArn(other.loadBalancerArn())
+                        .protocol(protocol).port(port).defaultActions(action)).listeners().getFirst();
+                assertTrue(bindFailed.await(5, TimeUnit.SECONDS), "the held socket must cause a real failed bind");
+                assertEquals(created.listenerArn(), client.describeListeners(request -> request
+                        .loadBalancerArn(other.loadBalancerArn())).listeners().getFirst().listenerArn());
+                occupied.close();
+
+                await().atMost(Duration.ofSeconds(5)).ignoreExceptions().untilAsserted(() -> {
+                    try (Socket socket = connect(port)) {
+                        if (protocol == ProtocolEnum.TCP) {
+                            assertEcho(socket, new byte[]{0, 9, 13, 10});
+                        } else {
+                            socket.setSoTimeout(2000);
+                            socket.getOutputStream().write(("GET / HTTP/1.1\r\nHost: " + other.dnsName()
+                                    + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+                            String response = new String(socket.getInputStream().readAllBytes(), StandardCharsets.US_ASCII);
+                            assertTrue(response.startsWith("HTTP/1.1 200"), response);
+                            assertTrue(response.endsWith("recovered"), response);
+                        }
+                    }
+                });
+            } finally {
+                logger.removeHandler(failureLog);
+            }
         } finally {
             client.deleteLoadBalancer(request -> request.loadBalancerArn(other.loadBalancerArn()));
         }
