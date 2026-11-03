@@ -78,10 +78,11 @@
   its own ARN of it. A replica is read-only: it cannot be deleted on its own and it cannot
   be replicated further.
 - **The data plane is a service of its own,** with its own page.
-- **Not yet emulated:** the operations that answer with a certificate, which are
-  `GetParametersForExport`, `GetParametersForImport` and `GetPublicKeyCertificate`, because
-  this service does not mint certificates yet. They are refused, so nobody builds against
-  them expecting them.
+- **The certificates are the service's own.** `GetParametersForExport`, `GetParametersForImport`
+  and `GetPublicKeyCertificate` answer with a certificate this service minted for the
+  occasion, over a key pair it made for it. The certificate parses as X.509 and the exchange
+  works with it, but it is self-signed: a counterparty that needs the certificate to chain to a
+  certificate authority of its own has to bring that certificate instead.
 
 ## Configuration
 
