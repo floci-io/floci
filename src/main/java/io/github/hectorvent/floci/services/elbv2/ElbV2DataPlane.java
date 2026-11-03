@@ -21,6 +21,8 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.netty.channel.ConnectTimeoutException;
+import io.netty.handler.ssl.SslHandshakeTimeoutException;
 import io.vertx.core.Future;
 import io.vertx.core.MultiMap;
 import io.vertx.core.Vertx;
@@ -53,6 +55,7 @@ import javax.naming.ldap.Rdn;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
@@ -70,6 +73,8 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -226,8 +231,12 @@ public class ElbV2DataPlane {
     @PostConstruct
     void init() {
         proxyClient = vertx.createHttpClient(new HttpClientOptions()
+                .setTrustAll(true)
+                .setVerifyHost(false)
                 .setMaxPoolSize(100)
-                .setConnectTimeout(5000)
+                .setConnectTimeout(10_000)
+                .setSslHandshakeTimeout(10)
+                .setSslHandshakeTimeoutUnit(TimeUnit.SECONDS)
                 .setKeepAlive(true)
                 .setMaxHeaderSize(MAX_RESPONSE_HEADER_SIZE));
         tcpClient = vertx.createNetClient(new NetClientOptions().setConnectTimeout(5000)
@@ -1100,12 +1109,13 @@ public class ElbV2DataPlane {
         List<String> cookies = duration > 0 ? stickyCookie.headers(scope, tg, target) : List.of();
         int targetPort = ElbV2HealthChecker.effectivePort(target, tg);
         String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, target);
+        boolean secure = "HTTPS".equals(tg.getProtocol());
         if (isWebSocketUpgrade(req)) {
-            proxyUpgrade(req, host, targetPort, hostHeader, forwarded,
+            proxyUpgrade(req, host, targetPort, secure, hostHeader, forwarded,
                     idleTimeoutMillis(listenerArn, region), cookies);
             return;
         }
-        proxyRequest(req, host, targetPort, hostHeader, forwarded, cookies);
+        proxyRequest(req, host, targetPort, secure, hostHeader, forwarded, cookies);
     }
 
     private String loadBalancerAttribute(String listenerArn, String region, String key) {
@@ -1365,20 +1375,20 @@ public class ElbV2DataPlane {
         return tuples.get(tuples.size() - 1).getTargetGroupArn();
     }
 
-    private void proxyRequest(HttpServerRequest req, String host, int port, String hostHeader,
+    private void proxyRequest(HttpServerRequest req, String host, int port, boolean secure, String hostHeader,
                               ElbV2ForwardedHeaders forwarded, List<String> cookies) {
         req.pause();
         if (ElbV2TargetResolver.isIpLiteral(host)) {
             try {
                 proxyRequestTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port,
-                        hostHeader, forwarded, cookies);
+                        secure, hostHeader, forwarded, cookies);
             } catch (IOException e) {
                 rejectTarget(req, host, e);
             }
             return;
         }
         vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
-                .onSuccess(address -> proxyRequestTo(req, address, host, port, hostHeader, forwarded, cookies))
+                .onSuccess(address -> proxyRequestTo(req, address, host, port, secure, hostHeader, forwarded, cookies))
                 .onFailure(err -> rejectTarget(req, host, err));
     }
 
@@ -1388,9 +1398,10 @@ public class ElbV2DataPlane {
         req.response().setStatusCode(503).end("Service unavailable");
     }
 
-    private void proxyRequestTo(HttpServerRequest req, String address, String host, int port,
+    private void proxyRequestTo(HttpServerRequest req, String address, String host, int port, boolean secure,
                                 String hostHeader, ElbV2ForwardedHeaders forwarded, List<String> cookies) {
         RequestOptions opts = new RequestOptions()
+                .setSsl(secure)
                 .setHost(address)
                 .setPort(port)
                 .setURI(req.uri())
@@ -1442,10 +1453,19 @@ public class ElbV2DataPlane {
                     clientReq.send(req);
                     req.resume();
                 })
-                .onFailure(err -> {
-                    req.resume();
-                    req.response().setStatusCode(503).end("Service unavailable");
-                });
+                .onFailure(err -> backendConnectionFailed(req, err));
+    }
+
+    private void backendConnectionFailed(HttpServerRequest req, Throwable error) {
+        req.resume();
+        for (Throwable cause = error; cause != null; cause = cause.getCause()) {
+            if (cause instanceof ConnectTimeoutException || cause instanceof SslHandshakeTimeoutException
+                    || cause instanceof SocketTimeoutException || cause instanceof TimeoutException) {
+                req.response().setStatusCode(504).end("Gateway timeout");
+                return;
+            }
+        }
+        req.response().setStatusCode(502).end("Bad gateway");
     }
 
     private static void copyTargetResponseHeaders(MultiMap headers, HttpServerResponse response) {
@@ -1461,20 +1481,20 @@ public class ElbV2DataPlane {
         return WebSocketUpgrades.isHandshake(req);
     }
 
-    private void proxyUpgrade(HttpServerRequest req, String host, int port, String hostHeader,
+    private void proxyUpgrade(HttpServerRequest req, String host, int port, boolean secure, String hostHeader,
                               ElbV2ForwardedHeaders forwarded, long idleTimeoutMillis, List<String> cookies) {
         req.pause();
         if (ElbV2TargetResolver.isIpLiteral(host)) {
             try {
                 proxyUpgradeTo(req, ElbV2TargetResolver.resolveCheckedAddress(host), host, port,
-                        hostHeader, forwarded, idleTimeoutMillis, cookies);
+                        secure, hostHeader, forwarded, idleTimeoutMillis, cookies);
             } catch (IOException e) {
                 rejectTarget(req, host, e);
             }
             return;
         }
         vertx.<String>executeBlocking(() -> ElbV2TargetResolver.resolveCheckedAddress(host))
-                .onSuccess(address -> proxyUpgradeTo(req, address, host, port, hostHeader,
+                .onSuccess(address -> proxyUpgradeTo(req, address, host, port, secure, hostHeader,
                         forwarded, idleTimeoutMillis, cookies))
                 .onFailure(err -> rejectTarget(req, host, err));
     }
@@ -1484,10 +1504,11 @@ public class ElbV2DataPlane {
      * relays that answer and joins the two connections into a byte tunnel. Any other answer means
      * the target refused the upgrade and is relayed as an ordinary response.
      */
-    private void proxyUpgradeTo(HttpServerRequest req, String address, String host, int port,
+    private void proxyUpgradeTo(HttpServerRequest req, String address, String host, int port, boolean secure,
                                 String hostHeader, ElbV2ForwardedHeaders forwarded,
                                 long idleTimeoutMillis, List<String> cookies) {
         RequestOptions opts = new RequestOptions()
+                .setSsl(secure)
                 .setHost(address)
                 .setPort(port)
                 .setURI(req.uri())
@@ -1541,10 +1562,7 @@ public class ElbV2DataPlane {
                                 }
                             });
                 })
-                .onFailure(err -> {
-                    req.resume();
-                    req.response().setStatusCode(503).end("Service unavailable");
-                });
+                .onFailure(err -> backendConnectionFailed(req, err));
     }
 
     /**

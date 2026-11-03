@@ -2,36 +2,47 @@ package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.concurrent.SocketDeadline;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.vertx.core.Vertx;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocketFactory;
 import java.io.IOException;
 import java.net.HttpURLConnection;
+import java.net.Proxy;
 import java.net.SocketTimeoutException;
 import java.net.URL;
+import java.security.GeneralSecurityException;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Semaphore;
 
 @ApplicationScoped
 public class ElbV2HealthChecker implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(ElbV2HealthChecker.class);
+    private static final int MAX_CONCURRENT_PROBES = 32;
 
     private final Vertx vertx;
     private final EmulatorConfig config;
     private final Ec2Service ec2Service;
+    private final SSLSocketFactory backendTls = backendTls();
 
     // tgArn → (targetKey → TargetState)
     private final Map<String, Map<String, TargetState>> states = new ConcurrentHashMap<>();
     // tgArn → timerId
     private final Map<String, Long> timers = new ConcurrentHashMap<>();
+    private final Semaphore probeSlots = new Semaphore(MAX_CONCURRENT_PROBES);
 
     @Inject
     public ElbV2HealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service) {
@@ -118,7 +129,9 @@ public class ElbV2HealthChecker implements Resettable {
         if (s == null) {
             return TargetHealthStatus.registrationInProgress();
         }
-        return new TargetHealthStatus(s.status, s.reason, s.description);
+        synchronized (s) {
+            return new TargetHealthStatus(s.status, s.reason, s.description);
+        }
     }
 
     public boolean isHealthy(String tgArn, TargetDescription target, int port) {
@@ -145,7 +158,7 @@ public class ElbV2HealthChecker implements Resettable {
             } catch (NumberFormatException e) {
                 continue;
             }
-            String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, targetId);
+            String protocol = tg.getHealthCheckProtocol();
             String path = tg.getHealthCheckPath() != null ? tg.getHealthCheckPath() : "/";
             String matcher = tg.getMatcher() != null ? tg.getMatcher() : "200";
             int timeout = tg.getHealthCheckTimeoutSeconds() != null ? tg.getHealthCheckTimeoutSeconds() : 5;
@@ -153,54 +166,99 @@ public class ElbV2HealthChecker implements Resettable {
             int unhealthyThreshold = tg.getUnhealthyThresholdCount() != null ? tg.getUnhealthyThresholdCount() : 2;
             int probePort = healthCheckPort(tg, port);
 
-            vertx.executeBlocking(() -> {
-                return probe(host, probePort, path, timeout);
-            }).onSuccess(statusCode -> {
-                boolean success = matchesStatusCode(statusCode, matcher);
-                if (success) {
-                    state.consecutiveFailures = 0;
-                    state.consecutiveSuccesses++;
-                    boolean initialApplicationTarget = "initial".equals(state.status)
-                            && ("HTTP".equals(tg.getProtocol()) || "HTTPS".equals(tg.getProtocol())
-                            || "lambda".equals(tg.getTargetType()));
-                    if (initialApplicationTarget || state.consecutiveSuccesses >= healthyThreshold) {
-                        state.status = "healthy";
-                        state.reason = null;
-                        state.description = null;
-                    } else if ("initial".equals(state.status)) {
-                        state.reason = "Elb.InitialHealthChecking";
-                        state.description = "Initial health checks in progress";
-                    }
-                } else {
-                    state.consecutiveSuccesses = 0;
-                    state.consecutiveFailures++;
-                    if (state.consecutiveFailures >= unhealthyThreshold) {
-                        state.status = "unhealthy";
-                        state.reason = "Target.ResponseCodeMismatch";
-                        state.description = "Health checks failed with these codes: [" + statusCode + "]";
-                    }
+            synchronized (state) {
+                if (state.inFlight || state.workerRunning) {
+                    continue;
                 }
-            }).onFailure(err -> {
-                state.consecutiveSuccesses = 0;
-                state.consecutiveFailures++;
-                if (state.consecutiveFailures >= unhealthyThreshold) {
-                    state.status = "unhealthy";
-                    if (isTimeout(err)) {
-                        state.reason = "Target.Timeout";
-                        state.description = "Request timed out";
-                    } else {
-                        state.reason = "Target.FailedHealthChecks";
-                        state.description = "Health checks failed";
+                state.inFlight = true;
+            }
+            try {
+                vertx.<Integer>executeBlocking(() -> {
+                    synchronized (state) {
+                        if (states.get(tgArn) != tgStates || tgStates.get(key) != state
+                                || !probeSlots.tryAcquire()) {
+                            return null;
+                        }
+                        state.workerRunning = true;
                     }
+                    return SocketDeadline.call(timeout, () -> {
+                        String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, targetId);
+                        return probeOnce(host, probePort, path, timeout, protocol);
+                    }, () -> {
+                        synchronized (state) {
+                            state.workerRunning = false;
+                            probeSlots.release();
+                        }
+                    });
+                }, false).onComplete(outcome -> {
+                    synchronized (state) {
+                        try {
+                            if (states.get(tgArn) != tgStates || tgStates.get(key) != state) {
+                                return;
+                            }
+                            if (outcome.failed()) {
+                                state.consecutiveSuccesses = 0;
+                                state.consecutiveFailures++;
+                                if (state.consecutiveFailures >= unhealthyThreshold) {
+                                    state.status = "unhealthy";
+                                    if (isTimeout(outcome.cause())) {
+                                        state.reason = "Target.Timeout";
+                                        state.description = "Request timed out";
+                                    } else {
+                                        state.reason = "Target.FailedHealthChecks";
+                                        state.description = "Health checks failed";
+                                    }
+                                }
+                                LOG.debugv("Health check failed for {0}:{1} - {2}",
+                                        targetId, port, outcome.cause().getMessage());
+                            } else if (outcome.result() != null) {
+                                int statusCode = outcome.result();
+                                if (matchesStatusCode(statusCode, matcher)) {
+                                    state.consecutiveFailures = 0;
+                                    state.consecutiveSuccesses++;
+                                    boolean initialApplicationTarget = "initial".equals(state.status)
+                                            && ("HTTP".equals(tg.getProtocol()) || "HTTPS".equals(tg.getProtocol())
+                                            || "lambda".equals(tg.getTargetType()));
+                                    if (initialApplicationTarget || state.consecutiveSuccesses >= healthyThreshold) {
+                                        state.status = "healthy";
+                                        state.reason = null;
+                                        state.description = null;
+                                    } else if ("initial".equals(state.status)) {
+                                        state.reason = "Elb.InitialHealthChecking";
+                                        state.description = "Initial health checks in progress";
+                                    }
+                                } else {
+                                    state.consecutiveSuccesses = 0;
+                                    state.consecutiveFailures++;
+                                    if (state.consecutiveFailures >= unhealthyThreshold) {
+                                        state.status = "unhealthy";
+                                        state.reason = "Target.ResponseCodeMismatch";
+                                        state.description = "Health checks failed with these codes: [" + statusCode + "]";
+                                    }
+                                }
+                            }
+                        } finally {
+                            state.inFlight = false;
+                        }
+                    }
+                });
+            } catch (RuntimeException | Error error) {
+                synchronized (state) {
+                    state.inFlight = false;
                 }
-                LOG.debugv("Health check failed for {0}:{1} - {2}", host, port, err.getMessage());
-            });
+                throw error;
+            }
         }
     }
 
-    private int probe(String host, int port, String path, int timeoutSeconds) throws IOException {
-        URL url = new URL("http", ElbV2TargetResolver.resolveCheckedAddress(host), port, path);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+    private int probeOnce(String host, int port, String path, int timeoutSeconds, String protocol) throws IOException {
+        String scheme = "HTTPS".equals(protocol) ? "https" : "http";
+        URL url = new URL(scheme, ElbV2TargetResolver.resolveCheckedAddress(host), port, path);
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection(Proxy.NO_PROXY);
+        if (conn instanceof HttpsURLConnection https) {
+            https.setSSLSocketFactory(backendTls);
+            https.setHostnameVerifier((hostname, session) -> true);
+        }
         conn.setConnectTimeout(timeoutSeconds * 1000);
         conn.setReadTimeout(timeoutSeconds * 1000);
         conn.setRequestMethod("GET");
@@ -210,6 +268,17 @@ public class ElbV2HealthChecker implements Resettable {
             return conn.getResponseCode();
         } finally {
             conn.disconnect();
+        }
+    }
+
+    private static SSLSocketFactory backendTls() {
+        try {
+            // ALB encrypts target connections without validating target certificates.
+            SSLContext context = SSLContext.getInstance("TLS");
+            context.init(null, InsecureTrustManagerFactory.INSTANCE.getTrustManagers(), null);
+            return context.getSocketFactory();
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("Cannot initialize ELBv2 backend TLS", e);
         }
     }
 
@@ -286,6 +355,8 @@ public class ElbV2HealthChecker implements Resettable {
     }
 
     private static class TargetState {
+        boolean inFlight;
+        boolean workerRunning;
         volatile String status = "initial";
         volatile String reason = "Elb.RegistrationInProgress";
         volatile String description = "Target registration is in progress";
