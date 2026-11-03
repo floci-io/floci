@@ -6828,6 +6828,35 @@ class Ec2ServiceTest {
                 .getFirst().getIpPermissions().isEmpty(), "protocol 6 is tcp");
     }
 
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void revokingAStoredPermissionKeepsLaterSources(boolean egress, boolean repeatedRemoval) {
+        Ec2Service service = sgService();
+        String groupId = service.createSecurityGroup("us-east-1", "web", "web", null).getGroupId();
+        IpPermission retired = basePermission();
+        retired.getIpRanges().add(new IpRange("192.0.2.1/32", null));
+        IpPermission current = basePermission();
+        current.getIpRanges().add(new IpRange("192.0.2.2/32", null));
+        IpPermission otherOwner = basePermission();
+        otherOwner.getIpRanges().add(new IpRange("192.0.2.3/32", null));
+        List<IpPermission> permissions = List.of(retired, current, otherOwner);
+        List<IpPermission> removals = repeatedRemoval ? List.of(retired, retired) : List.of(retired);
+        if (egress) {
+            service.revokeSecurityGroupEgress("us-east-1", groupId, List.of(cidrPermission("-1", 0, 0)));
+            service.authorizeSecurityGroupEgress("us-east-1", groupId, permissions);
+            service.revokeSecurityGroupEgress("us-east-1", groupId, removals);
+        } else {
+            service.authorizeSecurityGroupIngress("us-east-1", groupId, permissions);
+            service.revokeSecurityGroupIngress("us-east-1", groupId, removals);
+        }
+        SecurityGroup group = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst();
+        List<IpPermission> remaining = egress ? group.getIpPermissionsEgress() : group.getIpPermissions();
+        assertEquals(List.of("192.0.2.2/32", "192.0.2.3/32"),
+                remaining.stream().flatMap(permission -> permission.getIpRanges().stream())
+                        .map(IpRange::getCidrIp).toList());
+    }
+
     /** Ingress only: createSecurityGroup seeds a default allow-all egress rule. */
     private static List<String> ingressRuleIds(Ec2Service service, String groupId) {
         return service.describeSecurityGroupRules("us-east-1", List.of(groupId), List.of())

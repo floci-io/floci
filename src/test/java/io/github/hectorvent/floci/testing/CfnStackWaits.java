@@ -162,6 +162,22 @@ public final class CfnStackWaits {
         return child == null ? "" : child.value();
     }
 
+    public static void deleteStack(String stackName) {
+        deleteStack(stackName, null);
+    }
+
+    public static void deleteStack(String stackName, String authorization) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName);
+        if (authorization != null) {
+            request.header("Authorization", authorization);
+        }
+        request.when().post("/").then().statusCode(200);
+        awaitStackDeleted(stackName, authorization);
+    }
+
     /**
      * Waits until DescribeStacks answers 400, which is how a missing stack is reported. Fails on
      * DELETE_FAILED or after ten seconds.

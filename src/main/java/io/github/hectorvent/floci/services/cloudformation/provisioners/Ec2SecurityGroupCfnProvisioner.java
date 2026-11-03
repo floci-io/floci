@@ -68,7 +68,7 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
         String region = ctx.region();
         String groupName = ctx.resolveOptional(props, "GroupName");
         if (groupName == null || groupName.isBlank()) {
-            groupName = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
+            groupName = null;
         }
         String description = ctx.resolveOptional(props, "GroupDescription");
         if (description == null || description.isBlank()) {
@@ -78,8 +78,12 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
         // provision() re-runs for every resource on every update. Re-creating an unchanged group
         // would mint a new group id (and collide on the name whenever the VPC id is stable), so
         // reuse the group this resource already points at.
-        SecurityGroup reconciled = existingSecurityGroupToReconcile(ctx.priorPhysicalId(), groupName, description,
-                vpcId, region);
+        // An omitted name keeps the generated name, unless this update removed an explicit one.
+        SecurityGroup reconciled = groupName == null && ctx.previouslyDeclared("GroupName") ? null
+                : existingSecurityGroupToReconcile(ctx.priorPhysicalId(), groupName, description, vpcId, region);
+        if (reconciled == null && groupName == null) {
+            groupName = ctx.generatePhysicalName(r.getLogicalId(), 255, false);
+        }
         final SecurityGroup sg = reconciled != null
                 ? reconciled
                 : ec2Service.createSecurityGroup(region, groupName, description, vpcId);
