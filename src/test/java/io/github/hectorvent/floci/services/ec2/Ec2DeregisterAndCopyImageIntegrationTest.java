@@ -51,6 +51,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -752,6 +753,84 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         } finally {
             pool.shutdownNow();
             assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void concurrentProducerFailureRetainsSuppressedCleanupFailure() throws Exception {
+        ExecutorService pool = mock(ExecutorService.class);
+        IllegalStateException producerFailure = new IllegalStateException("producer failed");
+        IllegalStateException cleanupFailure = new IllegalStateException("cleanup failed");
+        CompletableFuture<String> future = CompletableFuture.failedFuture(producerFailure);
+        doReturn(future).when(pool).submit(ArgumentMatchers.<Callable<String>>any());
+        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenThrow(cleanupFailure);
+
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> runConcurrently(pool, List.of(() -> "unused"), 30, () -> 0));
+
+        assertSame(producerFailure, failure.getCause());
+        assertEquals(1, failure.getSuppressed().length);
+        assertSame(cleanupFailure, failure.getSuppressed()[0]);
+        verify(pool).shutdownNow();
+    }
+
+    @Test
+    void concurrentProducerInterruptionRestoresCallerInterrupt() throws Exception {
+        ExecutorService pool = mock(ExecutorService.class);
+        InterruptedException interruption = new InterruptedException("producer wait interrupted");
+        CompletableFuture<String> future = new CompletableFuture<>() {
+            @Override
+            public String get(long timeout, TimeUnit unit) throws InterruptedException {
+                throw interruption;
+            }
+        };
+        doReturn(future).when(pool).submit(ArgumentMatchers.<Callable<String>>any());
+        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenReturn(true);
+        try {
+            assertSame(interruption, assertThrows(InterruptedException.class,
+                    () -> runConcurrently(pool, List.of(() -> "unused"), 30, () -> 0)));
+            assertTrue(Thread.currentThread().isInterrupted());
+            assertTrue(future.isCancelled());
+            verify(pool).shutdownNow();
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void concurrentCleanupInterruptionRestoresCallerInterrupt() throws Exception {
+        ExecutorService pool = mock(ExecutorService.class);
+        InterruptedException interruption = new InterruptedException("cleanup interrupted");
+        doReturn(CompletableFuture.completedFuture("completed"))
+                .when(pool).submit(ArgumentMatchers.<Callable<String>>any());
+        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenThrow(interruption);
+        try {
+            assertSame(interruption, assertThrows(InterruptedException.class,
+                    () -> runConcurrently(pool, List.of(() -> "unused"), 30, () -> 0)));
+            assertTrue(Thread.currentThread().isInterrupted());
+            verify(pool).shutdownNow();
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    void concurrentProducerFailureSuppressesCleanupInterruption() throws Exception {
+        ExecutorService pool = mock(ExecutorService.class);
+        IllegalStateException producerFailure = new IllegalStateException("producer failed");
+        InterruptedException interruption = new InterruptedException("cleanup interrupted");
+        doReturn(CompletableFuture.failedFuture(producerFailure))
+                .when(pool).submit(ArgumentMatchers.<Callable<String>>any());
+        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenThrow(interruption);
+        try {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> runConcurrently(pool, List.of(() -> "unused"), 30, () -> 0));
+            assertSame(producerFailure, failure.getCause());
+            assertEquals(1, failure.getSuppressed().length);
+            assertSame(interruption, failure.getSuppressed()[0]);
+            assertTrue(Thread.currentThread().isInterrupted());
+        } finally {
+            Thread.interrupted();
         }
     }
 
