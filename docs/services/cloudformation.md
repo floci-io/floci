@@ -951,6 +951,25 @@ module for inline `ZipFile` code follows that URL's scheme and port and does not
 this callback. The HTTPS/443 requirement applies to handlers with the hard-coded behavior above,
 not to every custom-resource handler.
 
+## Nested stack tags
+
+Stack-level tags passed to `CreateStack` or `UpdateStack` are applied to nested stacks as well as
+the root stack. `DescribeStacks` on a nested stack returns its inherited tags, including through
+multiple levels of nesting, and the tags its own `Tags` property declares take precedence over the
+inherited ones. Updating the root stack's tags updates its nested stacks even when their templates
+have not changed, and a template holding a nested stack is never refused as having nothing to
+change: AWS reads the child template again and counts the nested stack as a change on every update.
+
+Every update requires a readable child template URL, including an output-only parent update.
+If the child template is missing, the child update fails and the parent rolls back while the
+existing child's deployment remains intact.
+
+When a later resource fails the parent update, a nested stack the update re-provisioned with the
+template and the parameter values it already ran gets its prior tags back, its descendants'
+inherited tags included. A nested stack the update re-deployed with a different template or
+different parameter values, including in a descendant, is not restored: the stack ends `UPDATE_ROLLBACK_FAILED` rather than
+claiming a nested deployment rollback Floci does not implement yet.
+
 ## Failed update rollbacks
 
 When an update fails, Floci rolls back the resources it changed. A resource whose rollback fails
