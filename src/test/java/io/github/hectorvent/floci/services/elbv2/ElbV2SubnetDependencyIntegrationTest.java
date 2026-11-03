@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.testing.TestAccounts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
@@ -17,7 +18,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -107,7 +107,7 @@ class ElbV2SubnetDependencyIntegrationTest {
      */
     @Test
     void referencesInAnotherAccountDoNotPinTheSameDefaultSubnetId() {
-        String otherAccount = Long.toString(ThreadLocalRandom.current().nextLong(100_000_000_000L, 1_000_000_000_000L));
+        String otherAccount = TestAccounts.randomId();
         String first = Ec2Service.defaultSubnetId(REGION, "a");
         String second = Ec2Service.defaultSubnetId(REGION, "b");
         String arn = loadBalancer("application", first, second);
