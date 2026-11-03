@@ -1101,6 +1101,84 @@ class Ec2ContainerManagerTest {
         assertNull(manager.reachablePublicAddress(null));
     }
 
+    @Test
+    void reachablePublicAddressReportsTheServiceNetworkAddressWhenEnabledInAContainer() {
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, "172.20.0.9");
+
+        assertEquals("172.20.0.9", manager.reachablePublicAddress(serviceNetworkInstance()));
+    }
+
+    @Test
+    void reachablePublicAddressIgnoresTheServiceNetworkWhenDisabled() {
+        Ec2ContainerManager manager = managerOnServiceNetwork(false, true, "172.20.0.9");
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(serviceNetworkInstance()));
+    }
+
+    @Test
+    void reachablePublicAddressIgnoresTheServiceNetworkWhenFlociRunsOnTheHost() {
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, false, "172.20.0.9");
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(serviceNetworkInstance()));
+    }
+
+    @Test
+    void reachablePublicAddressFallsBackWhenTheInstanceIsNotOnTheServiceNetwork() {
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, null);
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(serviceNetworkInstance()));
+    }
+
+    private static Instance serviceNetworkInstance() {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-service-network");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+        instance.setContainerBridgeIp("172.17.0.4");
+        return instance;
+    }
+
+    /**
+     * A manager whose instance container sits on the bridge, unroutable from the host, and on
+     * Floci's own network {@code floci-net} at {@code serviceNetworkIp} when that is not null.
+     */
+    private static Ec2ContainerManager managerOnServiceNetwork(boolean enabled, boolean inContainer,
+                                                               String serviceNetworkIp) {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ec2().publicIpFromServiceNetwork()).thenReturn(enabled);
+        ContainerDetector detector = mock(ContainerDetector.class);
+        when(detector.isRunningInContainer()).thenReturn(inContainer);
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        when(builder.resolveDockerNetwork(Optional.empty())).thenReturn(Optional.of("floci-net"));
+
+        Map<String, ContainerNetwork> networks = new LinkedHashMap<>();
+        networks.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.4"));
+        if (serviceNetworkIp != null) {
+            networks.put("floci-net", new ContainerNetwork().withIpv4Address(serviceNetworkIp));
+        }
+        InspectContainerResponse inspect = mock(InspectContainerResponse.class);
+        NetworkSettings settings = mock(NetworkSettings.class);
+        when(inspect.getNetworkSettings()).thenReturn(settings);
+        when(settings.getNetworks()).thenReturn(networks);
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec()).thenReturn(inspect);
+
+        return new Ec2ContainerManager(
+                builder,
+                mock(ContainerLifecycleManager.class),
+                mock(ContainerLogStreamer.class),
+                detector,
+                mock(DockerHostResolver.class),
+                docker,
+                mock(PortAllocator.class),
+                config,
+                mock(Ec2MetadataServer.class),
+                mock(Ec2PortForwardManager.class),
+                mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class),
+                mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class));
+    }
+
     private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {
         return new Ec2ContainerManager(
                 mock(ContainerBuilder.class),

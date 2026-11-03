@@ -1316,11 +1316,42 @@ public class Ec2ContainerManager {
         if (instance == null) {
             return null;
         }
+        String serviceNetworkIp = serviceNetworkIp(instance);
+        if (serviceNetworkIp != null) {
+            return serviceNetworkIp;
+        }
         String containerIp = instance.getContainerBridgeIp();
         if (containerIp == null || containerIp.isBlank()) {
             return null;
         }
         return containerNetworkReachability.isContainerIpRoutable(containerIp) ? containerIp : "127.0.0.1";
+    }
+
+    /**
+     * The instance's address on Floci's own Docker network, when
+     * {@code publicIpFromServiceNetwork} is on and Floci runs as a container; null otherwise.
+     */
+    private String serviceNetworkIp(Instance instance) {
+        if (!config.services().ec2().publicIpFromServiceNetwork() || !containerDetector.isRunningInContainer()
+                || instance.getDockerContainerId() == null) {
+            return null;
+        }
+        Optional<String> network = containerBuilder.resolveDockerNetwork(Optional.empty());
+        if (network.isEmpty()) {
+            return null;
+        }
+        try {
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(instance.getDockerContainerId()).exec();
+            if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
+                return null;
+            }
+            ContainerNetwork attached = inspect.getNetworkSettings().getNetworks().get(network.get());
+            return attached == null || attached.getIpAddress() == null || attached.getIpAddress().isBlank()
+                    ? null : attached.getIpAddress();
+        } catch (RuntimeException e) {
+            LOG.debugv("No service-network address for {0}: {1}", instance.getInstanceId(), e.getMessage());
+            return null;
+        }
     }
 
     /**

@@ -3443,6 +3443,16 @@ public interface EmulatorConfig {
         Optional<Boolean> containerIpsRoutable();
 
         /**
+         * When Floci itself runs as a container, report an instance's address on Floci's own
+         * Docker network as its public IP, so clients on that network (an orchestrator, a worker
+         * running Ansible) reach the guest's real ports there, as they would an AWS public IP.
+         *
+         * Env var: FLOCI_SERVICES_EC2_PUBLIC_IP_FROM_SERVICE_NETWORK
+         */
+        @WithDefault("false")
+        boolean publicIpFromServiceNetwork();
+
+        /**
          * When true, Floci removes on startup any EC2 instance container left on the Docker
          * daemon by a previous run of <em>this same</em> Floci (matched by the
          * {@code io.floci.owner} label) whose instance record did not survive the restart, or

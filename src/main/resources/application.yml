@@ -754,6 +754,9 @@ floci:
       # FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS
       instance-resource-limits: true
       aws-faithful-private-ip: false
+      # Floci in a container: report an instance's address on Floci's own Docker network as its
+      # public IP. FLOCI_SERVICES_EC2_PUBLIC_IP_FROM_SERVICE_NETWORK
+      public-ip-from-service-network: false
       # container-ips-routable: true  # Auto-detected by default (a throwaway TCP probe toward
                                        # the container network). Set explicitly when the probe
                                        # can't speak for your clients, e.g. Floci itself running
