@@ -92,6 +92,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -1103,30 +1104,73 @@ class Ec2ContainerManagerTest {
 
     @Test
     void reachablePublicAddressReportsTheServiceNetworkAddressWhenEnabledInAContainer() {
-        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, "172.20.0.9");
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
 
-        assertEquals("172.20.0.9", manager.reachablePublicAddress(serviceNetworkInstance()));
+        manager.refreshServiceNetworkIp(instance);
+
+        assertEquals("172.20.0.9", instance.getServiceNetworkIp());
+        assertEquals("172.20.0.9", manager.reachablePublicAddress(instance));
+    }
+
+    @Test
+    void reachablePublicAddressReportsTheRecordedAddressWithoutAskingDocker() {
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+        manager.refreshServiceNetworkIp(instance);
+
+        manager.reachablePublicAddress(instance);
+        manager.reachablePublicAddress(instance);
+
+        verify(docker, times(1)).inspectContainerCmd(TEST_CONTAINER_ID);
+    }
+
+    @Test
+    void aProtectedGuestReportsItsFirewallHelpersServiceNetworkAddress() {
+        DockerClient docker = guestDocker(null, "172.20.0.11");
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+
+        manager.refreshServiceNetworkIp(instance);
+
+        assertEquals("172.20.0.11", manager.reachablePublicAddress(instance));
     }
 
     @Test
     void reachablePublicAddressIgnoresTheServiceNetworkWhenDisabled() {
-        Ec2ContainerManager manager = managerOnServiceNetwork(false, true, "172.20.0.9");
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(false, true, docker);
+        Instance instance = serviceNetworkInstance();
 
-        assertEquals("127.0.0.1", manager.reachablePublicAddress(serviceNetworkInstance()));
+        manager.refreshServiceNetworkIp(instance);
+
+        assertNull(instance.getServiceNetworkIp());
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+        verify(docker, never()).inspectContainerCmd(anyString());
     }
 
     @Test
     void reachablePublicAddressIgnoresTheServiceNetworkWhenFlociRunsOnTheHost() {
-        Ec2ContainerManager manager = managerOnServiceNetwork(true, false, "172.20.0.9");
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, false, docker);
+        Instance instance = serviceNetworkInstance();
 
-        assertEquals("127.0.0.1", manager.reachablePublicAddress(serviceNetworkInstance()));
+        manager.refreshServiceNetworkIp(instance);
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
     }
 
     @Test
     void reachablePublicAddressFallsBackWhenTheInstanceIsNotOnTheServiceNetwork() {
-        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, null);
+        DockerClient docker = guestDocker(null, null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
 
-        assertEquals("127.0.0.1", manager.reachablePublicAddress(serviceNetworkInstance()));
+        manager.refreshServiceNetworkIp(instance);
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
     }
 
     private static Instance serviceNetworkInstance() {
@@ -1138,29 +1182,52 @@ class Ec2ContainerManagerTest {
     }
 
     /**
-     * A manager whose instance container sits on the bridge, unroutable from the host, and on
-     * Floci's own network {@code floci-net} at {@code serviceNetworkIp} when that is not null.
+     * A daemon whose guest container sits on the bridge, unroutable from the host, and on Floci's
+     * own network {@code floci-net} at {@code guestIp} when that is not null. With a
+     * {@code helperIp}, the guest instead joins a firewall helper's namespace, as a security-group
+     * protected guest does, and the helper is on {@code floci-net} at that address.
      */
+    private static DockerClient guestDocker(String guestIp, String helperIp) {
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        Map<String, ContainerNetwork> guestNetworks = new LinkedHashMap<>();
+        if (helperIp == null) {
+            guestNetworks.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.4"));
+        }
+        if (guestIp != null) {
+            guestNetworks.put("floci-net", new ContainerNetwork().withIpv4Address(guestIp));
+        }
+        InspectContainerResponse guest = inspectWithNetworks(guestNetworks);
+        if (helperIp != null) {
+            HostConfig hostConfig = mock(HostConfig.class);
+            when(hostConfig.getNetworkMode()).thenReturn("container:helper-1");
+            when(guest.getHostConfig()).thenReturn(hostConfig);
+            InspectContainerResponse helper = inspectWithNetworks(Map.of(
+                    "bridge", new ContainerNetwork().withIpv4Address("172.17.0.5"),
+                    "floci-net", new ContainerNetwork().withIpv4Address(helperIp)));
+            when(docker.inspectContainerCmd("helper-1").exec()).thenReturn(helper);
+        }
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec()).thenReturn(guest);
+        clearInvocations(docker);
+        return docker;
+    }
+
+    private static InspectContainerResponse inspectWithNetworks(Map<String, ContainerNetwork> networks) {
+        InspectContainerResponse inspect = mock(InspectContainerResponse.class);
+        NetworkSettings settings = mock(NetworkSettings.class);
+        when(inspect.getNetworkSettings()).thenReturn(settings);
+        when(settings.getNetworks()).thenReturn(networks);
+        return inspect;
+    }
+
+    /** A manager on {@code docker} whose bridge addresses are unroutable from the host. */
     private static Ec2ContainerManager managerOnServiceNetwork(boolean enabled, boolean inContainer,
-                                                               String serviceNetworkIp) {
+                                                               DockerClient docker) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ec2().publicIpFromServiceNetwork()).thenReturn(enabled);
         ContainerDetector detector = mock(ContainerDetector.class);
         when(detector.isRunningInContainer()).thenReturn(inContainer);
         ContainerBuilder builder = mock(ContainerBuilder.class);
         when(builder.resolveDockerNetwork(Optional.empty())).thenReturn(Optional.of("floci-net"));
-
-        Map<String, ContainerNetwork> networks = new LinkedHashMap<>();
-        networks.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.4"));
-        if (serviceNetworkIp != null) {
-            networks.put("floci-net", new ContainerNetwork().withIpv4Address(serviceNetworkIp));
-        }
-        InspectContainerResponse inspect = mock(InspectContainerResponse.class);
-        NetworkSettings settings = mock(NetworkSettings.class);
-        when(inspect.getNetworkSettings()).thenReturn(settings);
-        when(settings.getNetworks()).thenReturn(networks);
-        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
-        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec()).thenReturn(inspect);
 
         return new Ec2ContainerManager(
                 builder,

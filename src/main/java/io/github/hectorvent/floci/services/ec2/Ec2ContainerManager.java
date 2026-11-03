@@ -514,6 +514,7 @@ public class Ec2ContainerManager {
                 }
                 if (containerIp != null && !containerIp.isBlank()) {
                     instance.setContainerBridgeIp(containerIp);
+                    refreshServiceNetworkIp(instance);
                     if (started.namespace() == null) {
                         exposeReachablePrivateAddress(instance, containerIp,
                                 config.services().ec2().awsFaithfulPrivateIp());
@@ -765,6 +766,7 @@ public class Ec2ContainerManager {
             instance.setDockerContainerId(null);
             instance.setSshHostPort(0);
             instance.setContainerBridgeIp(null);
+            instance.setServiceNetworkIp(null);
         }
         if (alreadyCleaned) {
             return;
@@ -1027,6 +1029,7 @@ public class Ec2ContainerManager {
                         : namespace.transportAddress();
                 if (containerIp != null && !containerIp.isBlank()) {
                     instance.setContainerBridgeIp(containerIp);
+                    refreshServiceNetworkIp(instance);
                     if (namespace == null) {
                         exposeReachablePrivateAddress(instance, containerIp,
                                 config.services().ec2().awsFaithfulPrivateIp());
@@ -1216,6 +1219,7 @@ public class Ec2ContainerManager {
             metadataServer.unregisterContainer(previousContainerIp, instance);
         }
         instance.setContainerBridgeIp(containerIp);
+        refreshServiceNetworkIp(instance);
         exposeReachablePrivateAddress(instance, containerIp, config.services().ec2().awsFaithfulPrivateIp());
         if (instance.getPublicIpAddress() != null || AutomaticPublicAddress.isDue(instance, true)) {
             exposeReachablePublicAddress(instance);
@@ -1316,8 +1320,9 @@ public class Ec2ContainerManager {
         if (instance == null) {
             return null;
         }
-        String serviceNetworkIp = serviceNetworkIp(instance);
-        if (serviceNetworkIp != null) {
+        String serviceNetworkIp = instance.getServiceNetworkIp();
+        if (serviceNetworkIp != null && !serviceNetworkIp.isBlank()
+                && config.services().ec2().publicIpFromServiceNetwork()) {
             return serviceNetworkIp;
         }
         String containerIp = instance.getContainerBridgeIp();
@@ -1328,10 +1333,16 @@ public class Ec2ContainerManager {
     }
 
     /**
-     * The instance's address on Floci's own Docker network, when
-     * {@code publicIpFromServiceNetwork} is on and Floci runs as a container; null otherwise.
+     * Records the instance's address on Floci's own Docker network, when
+     * {@code publicIpFromServiceNetwork} is on and Floci runs as a container, so
+     * {@link #reachablePublicAddress} reports it without asking Docker. Called where the container's
+     * addresses are (re)learned: launch, start and restore.
      */
-    private String serviceNetworkIp(Instance instance) {
+    void refreshServiceNetworkIp(Instance instance) {
+        instance.setServiceNetworkIp(resolveServiceNetworkIp(instance));
+    }
+
+    private String resolveServiceNetworkIp(Instance instance) {
         if (!config.services().ec2().publicIpFromServiceNetwork() || !containerDetector.isRunningInContainer()
                 || instance.getDockerContainerId() == null) {
             return null;
@@ -1342,6 +1353,12 @@ public class Ec2ContainerManager {
         }
         try {
             InspectContainerResponse inspect = dockerClient.inspectContainerCmd(instance.getDockerContainerId()).exec();
+            // A security-group protected guest joins its firewall helper's network namespace and has
+            // no attachment of its own: the helper's address on the network is the guest's.
+            String mode = inspect.getHostConfig() == null ? null : inspect.getHostConfig().getNetworkMode();
+            if (mode != null && mode.startsWith("container:")) {
+                inspect = dockerClient.inspectContainerCmd(mode.substring("container:".length())).exec();
+            }
             if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
                 return null;
             }
