@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
@@ -63,6 +64,36 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(200)
                     .body("Key.KeyArn", equalTo(arn))
                     .body("Key.KeyAttributes.KeyAlgorithm", equalTo("AES_256"));
+    }
+
+    @Test
+    void aDerivationKeySaysWhatItDerivesFor() {
+        // The usage a derivation key derives for sits beside the attributes, and it comes
+        // back with the key.
+        String arn = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_B0_BASE_DERIVATION_KEY\","
+                + "\"KeyModesOfUse\":{\"DeriveKey\":true}},"
+                + "\"DeriveKeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"Exportable\":true}")
+                .then().statusCode(200)
+                    .body("Key.DeriveKeyUsage", equalTo("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"))
+                    .extract().path("Key.KeyArn");
+
+        call("GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.DeriveKeyUsage", equalTo("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
+    }
+
+    @Test
+    void aKeyThatAsksForACheckValueOfAnotherKindIsRefused() {
+        // The kind follows the algorithm, so a request that names another is refused
+        // rather than answered with a value of another kind.
+        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},"
+                + "\"KeyCheckValueAlgorithm\":\"CMAC\"}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"));
     }
 
     @Test
@@ -410,5 +441,36 @@ class PaymentCryptographyIntegrationTest {
         call("ListKeys", "{\"MaxResults\":1,\"NextToken\":\"" + first + "\"}")
                 .then().statusCode(200)
                     .body("Keys", hasSize(1));
+    }
+
+    @Test
+    void theDataPlaneMakesAPinBlock() {
+        String pek = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_P0_PIN_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        String pvk = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_P1_PIN_GENERATION_KEY\","
+                + "\"KeyModesOfUse\":{\"Generate\":true,\"Verify\":true}},\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        String body = "{\"EncryptionKeyIdentifier\":\"" + pek + "\","
+                + "\"GenerationKeyIdentifier\":\"" + pvk + "\","
+                + "\"PinBlockFormat\":\"ISO_FORMAT_0\","
+                + "\"PrimaryAccountNumber\":\"5081470082639564\","
+                + "\"GenerationAttributes\":{\"VisaPin\":{\"PinVerificationKeyIndex\":1}}}";
+
+        // The data plane is rest-json, so its body is plain JSON.
+        given().contentType("application/json")
+                .filter(AwsRequestSigner.signedAs("test", "test", "payment-cryptography-data"))
+                .body(body)
+            // The data plane's routes live under the internal prefix, and only a request
+            // signed for the data plane is moved onto them.
+            .when().post("/pindata/generate")
+            .then().statusCode(200)
+                .body("EncryptedPinBlock", matchesPattern("[0-9A-F]{16}"))
+                .body("PinData.VerificationValue", matchesPattern("[0-9]{4,12}"));
     }
 }
