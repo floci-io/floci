@@ -44,6 +44,14 @@ and zero capacity. Both groups had identical configuration except for name, ARN
 and creation time. The SDK regression is
 `compatibility-tests/sdk-test-python/tests/test_autoscaling_subnet_whitespace.py`.
 
+Capacity reservation targets remain limited to one reservation ID or one resource
+group ARN. Multiple entries, including duplicates, return `ValidationError`;
+mixing IDs and group ARNs returns a distinct validation message. These messages
+match live AWS comparisons on November 2, 2026 in `us-east-1` and `eu-west-1`
+for create, and `eu-west-1` for update, using zero desired capacity.
+Rejected updates preserve the group's existing configuration. This does not
+enable preview support for multiple reservation targets.
+
 Scale-out follows the [AWS placement rules](https://docs.aws.amazon.com/autoscaling/ec2/userguide/auto-scaling-benefits.html):
 choose the zone with the fewest active instances, then its subnet with the most
 free IPv4 addresses. Declared subnets and actual EC2 placement take precedence

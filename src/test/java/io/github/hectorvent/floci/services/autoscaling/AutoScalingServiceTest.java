@@ -1709,12 +1709,16 @@ class AutoScalingServiceTest {
         AsgOptionalFields options = new AsgOptionalFields(null, null, null, null, null, null, null, specification);
         AwsException create = assertThrows(AwsException.class, () -> createWithStructures("multi-target", options));
         assertEquals("ValidationError", create.getErrorCode());
+        String expected = "mixed".equals(kind) ? AutoScalingService.MIXED_CAPACITY_RESERVATION_TARGETS_MESSAGE
+                : AutoScalingService.MULTIPLE_CAPACITY_RESERVATION_TARGETS_MESSAGE;
+        assertEquals(expected, create.getMessage());
         assertTrue(service.describeAutoScalingGroups(REGION, List.of("multi-target")).isEmpty());
         AutoScalingGroup before = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         int desired = before.getDesiredCapacity();
         AwsException update = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(REGION,
                 "test-asg", null, null, null, null, null, null, null, 2, null, null, null, null, null, null, options));
         assertEquals("ValidationError", update.getErrorCode());
+        assertEquals(expected, update.getMessage());
         AutoScalingGroup after = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
         assertEquals(desired, after.getDesiredCapacity());
         assertNull(after.getCapacityReservationSpecification());
