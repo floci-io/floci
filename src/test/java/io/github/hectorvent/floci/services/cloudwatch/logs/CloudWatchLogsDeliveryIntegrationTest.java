@@ -2,14 +2,14 @@ package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.LogsRequests.logs;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.matchesPattern;
@@ -25,8 +25,6 @@ import static org.hamcrest.Matchers.nullValue;
 @QuarkusTest
 class CloudWatchLogsDeliveryIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20261103/us-east-1/logs/aws4_request";
     private static final String PREFIX = "arn:aws:logs:us-east-1:000000000000:";
 
     @BeforeAll
@@ -118,6 +116,43 @@ class CloudWatchLogsDeliveryIntegrationTest {
     }
 
     @Test
+    void describeCallsNarrowToTheNamedSourcesDestinationsAndDeliveries() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String[] ids = new String[2];
+        for (int i = 0; i < 2; i++) {
+            String bus = "arn:aws:events:us-east-1:000000000000:event-bus/filter-" + i + "-" + suffix;
+            logs("PutDeliverySource", """
+                    {"name": "filter-%d-%s", "resourceArn": "%s", "logType": "ERROR_LOGS"}
+                    """.formatted(i, suffix, bus)).then().statusCode(200);
+            String destination = logs("PutDeliveryDestination", """
+                    {"name": "filter-%d-%s", "deliveryDestinationConfiguration":
+                     {"destinationResourceArn": "%slog-group:/aws/events/filter-%d-%s"}}
+                    """.formatted(i, suffix, PREFIX, i, suffix)).then().statusCode(200)
+                    .extract().path("deliveryDestination.arn");
+            ids[i] = logs("CreateDelivery", """
+                    {"deliverySourceName": "filter-%d-%s", "deliveryDestinationArn": "%s"}
+                    """.formatted(i, suffix, destination)).then().statusCode(200).extract().path("delivery.id");
+        }
+
+        logs("DescribeDeliverySources", "{\"resourceArns\": [\"arn:aws:events:us-east-1:000000000000:event-bus/filter-1-"
+                + suffix + "\"]}").then().statusCode(200)
+                .body("deliverySources.name", contains("filter-1-" + suffix));
+        logs("DescribeDeliveryDestinations", "{\"names\": [\"filter-0-" + suffix + "\", \"missing-" + suffix + "\"]}")
+                .then().statusCode(200)
+                .body("deliveryDestinations.name", contains("filter-0-" + suffix));
+        logs("DescribeDeliveries", "{\"deliverySourceNames\": [\"filter-1-" + suffix + "\"]}").then().statusCode(200)
+                .body("deliveries.id", contains(ids[1]));
+        logs("DescribeDeliveries", "{\"deliverySourceNames\": [\"missing-" + suffix + "\"]}").then().statusCode(200)
+                .body("deliveries", empty());
+
+        for (int i = 0; i < 2; i++) {
+            logs("DeleteDelivery", "{\"id\": \"" + ids[i] + "\"}").then().statusCode(200);
+            logs("DeleteDeliverySource", "{\"name\": \"filter-" + i + "-" + suffix + "\"}").then().statusCode(200);
+            logs("DeleteDeliveryDestination", "{\"name\": \"filter-" + i + "-" + suffix + "\"}").then().statusCode(200);
+        }
+    }
+
+    @Test
     void unknownResourcesAndInvalidRequestsAreRefusedWithAwsMessages() {
         refused("GetDeliverySource", "{\"name\": \"no-such-source\"}", "ResourceNotFoundException",
                 "Requested Delivery Source does not exist in this account.");
@@ -144,8 +179,20 @@ class CloudWatchLogsDeliveryIntegrationTest {
                 .body("deliveryDestination.deliveryDestinationType", equalTo("XRAY"))
                 .body("deliveryDestination.deliveryDestinationConfiguration", nullValue());
         logs("DeleteDeliveryDestination", "{\"name\": \"traces\"}").then().statusCode(200);
-        logs("PutDeliverySource", "{\"name\": \"bad name\", \"resourceArn\": \"x\", \"logType\": \"ERROR_LOGS\"}")
-                .then().statusCode(400).body("__type", equalTo("ValidationException"));
+        refused("PutDeliverySource", "{\"name\": \"bad name\", \"resourceArn\": \"x\", \"logType\": \"ERROR_LOGS\"}",
+                "ValidationException", "1 validation error detected: Value at 'name' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: [\\w-]*");
+        refused("PutDeliverySource", "{\"name\": \"source\", \"logType\": \"ERROR_LOGS\"}", "ValidationException",
+                "1 validation error detected: Value at 'resourceArn' failed to satisfy constraint: "
+                        + "Member must not be null");
+        refused("GetDelivery", "{\"id\": \"a-b\"}", "ValidationException",
+                "1 validation error detected: Value at 'id' failed to satisfy constraint: "
+                        + "Member must satisfy regular expression pattern: ^[0-9A-Za-z]+$");
+        refused("DescribeDeliveries", "{\"deliverySourceNames\": [\"bad name\"]}", "ValidationException",
+                "1 validation error detected: Value at 'deliverySourceNames' failed to satisfy constraint: "
+                        + "Member must satisfy constraint: [Member must have length less than or equal to 60, "
+                        + "Member must have length greater than or equal to 1, "
+                        + "Member must satisfy regular expression pattern: [\\w-]*]");
         logs("CreateDelivery", "{\"deliverySourceName\": \"no-such-source\", \"deliveryDestinationArn\": \""
                 + PREFIX + "delivery-destination:no-such-destination\"}").then().statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"))
@@ -154,10 +201,5 @@ class CloudWatchLogsDeliveryIntegrationTest {
 
     private static void refused(String action, String body, String type, String message) {
         logs(action, body).then().statusCode(400).body("__type", equalTo(type)).body("message", equalTo(message));
-    }
-
-    private static Response logs(String action, String body) {
-        return given().contentType(CONTENT_TYPE).header("Authorization", AUTH)
-                .header("X-Amz-Target", "Logs_20140328." + action).body(body).post("/");
     }
 }

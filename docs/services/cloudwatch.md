@@ -53,16 +53,16 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `PutDeliverySource` | Create or replace a vended-log delivery source (see [Vended log delivery](#vended-log-delivery)) |
 | `GetDeliverySource` | Return a delivery source |
 | `DeleteDeliverySource` | Delete a delivery source no delivery uses |
-| `DescribeDeliverySources` | List delivery sources |
+| `DescribeDeliverySources` | List delivery sources, optionally only those for given resource ARNs |
 | `PutDeliveryDestination` | Create or replace a delivery destination: a log group, S3 bucket, Firehose stream or X-Ray |
 | `GetDeliveryDestination` | Return a delivery destination |
 | `DeleteDeliveryDestination` | Delete a delivery destination no delivery uses |
-| `DescribeDeliveryDestinations` | List delivery destinations |
+| `DescribeDeliveryDestinations` | List delivery destinations, optionally only those with given names |
 | `CreateDelivery` | Pair a delivery source with a delivery destination |
 | `GetDelivery` | Return a delivery, with its record fields and S3 configuration |
 | `UpdateDeliveryConfiguration` | Change a delivery's record fields, delimiter or S3 configuration |
 | `DeleteDelivery` | Delete a delivery |
-| `DescribeDeliveries` | List deliveries |
+| `DescribeDeliveries` | List deliveries, optionally only those from given delivery sources |
 
 `DescribeLogGroups` returns names in ASCII order, with up to 50 groups per page by default.
 Set `limit` to an integer from 1 to 50 and pass the returned `nextToken` with the same region
@@ -111,8 +111,17 @@ configuration and does not deliver the source's logs.
 - A source or destination a delivery uses cannot be deleted (`ConflictException`).
 - Tags are set on create and through `TagResource`, `UntagResource` and `ListTagsForResource` on the
   resource's ARN; the Get and Describe responses carry none, as on AWS.
+- `DescribeDeliverySources` narrows to `resourceArns`, `DescribeDeliveryDestinations` to `names` and
+  `DescribeDeliveries` to `deliverySourceNames`; a name that matches nothing is left out, not an error.
+- Requests are checked against the Logs API model's lengths, patterns, enums and required members,
+  with AWS's `ValidationException` wording, for example "1 validation error detected: Value at
+  'limit' failed to satisfy constraint: Member must have value less than or equal to 50".
 - An unknown name or id is `ResourceNotFoundException`, "Requested Delivery Source does not exist in
-  this account." (likewise for a Delivery Destination and a Delivery). `limit` is 1 to 50.
+  this account." (likewise for a Delivery Destination and a Delivery).
+- With IAM enforcement on, each action is authorized on the resources the AWS Service Authorization
+  Reference lists for it: the source, destination or delivery it names, and for `CreateDelivery` the
+  source, the destination and the new delivery. The Describe actions and `DeleteDeliverySource` are
+  authorized on `*`, as the reference lists no resource for them.
 
 Not modelled: delivery destination policies (`PutDeliveryDestinationPolicy` and its siblings), and
 record field defaults for sources other than an EventBridge event bus.

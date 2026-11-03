@@ -61,7 +61,9 @@ names none, is checked on `*`, as AWS checks it.
 
 Every operation in `NAMESPACES` is read, whether Floci serves it or not. Explicit `CORRECTIONS`
 in `HAND_BUILT` are also read, overriding only those operations while the remaining operations
-keep their existing resource builders. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
+keep their existing resource builders, and so are the operations `READ_IN_HAND_BUILT` lists, which
+follow the rule unchanged: a family of a hand-built namespace whose requests name their resources the
+way the rule reads them. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
 `NOT_COVERED` the ones Floci serves that are not read yet, each with its reason;
 `RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
 `CORRECTIONS` gives an operation's resources where the rule gets them wrong, each with its reason; a
@@ -156,6 +158,17 @@ CLIENTS_NOT_READ: dict[str, str] = {
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
               "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
+
+# Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
+_LOGS_DELIVERY = ("CloudWatch Logs vended-log delivery: its requests name a delivery source, destination or delivery "
+                  "by the member the rule reads, while ResourceArnBuilder keeps building the log group and stream ARNs")
+READ_IN_HAND_BUILT: dict[str, str] = {
+    f"logs:{operation}": _LOGS_DELIVERY
+    for operation in ("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource", "DescribeDeliverySources",
+                      "PutDeliveryDestination", "GetDeliveryDestination", "DeleteDeliveryDestination",
+                      "DescribeDeliveryDestinations", "CreateDelivery", "GetDelivery", "UpdateDeliveryConfiguration",
+                      "DeleteDelivery", "DescribeDeliveries")
+}
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = "REST: its requests name their resources in the path, which RequestResources does not read yet"
@@ -262,6 +275,17 @@ NOT_COVERED: dict[str, str] = {
 # them apart (EventBridge's `events` and EventBridge V2's `eventsv2`): Floci applies it only to a request the service
 # of that endpoint serves, never by a member a caller could add to a request of the other.
 CORRECTIONS: dict[str, tuple[list[dict], str]] = {
+    "logs:PutDeliverySource": ([{"type": "delivery-source", "fill": {"DeliverySourceName": "name"}}],
+                               "resourceArn is the ARN of the resource that sends the logs (an event bus, a load "
+                               "balancer), never the delivery source's, which the request names by name"),
+    "logs:PutDeliveryDestination": ([{"type": "delivery-destination", "fill": {"DeliveryDestinationName": "name"}}],
+                                    "deliveryDestinationConfiguration.destinationResourceArn is the log group, bucket "
+                                    "or stream the logs go to and roleArn a role, neither the delivery destination, "
+                                    "which the request names by name"),
+    **{f"logs:{operation}": ([{"type": "delivery", "fill": {"DeliveryName": "id"}}],
+                             "the delivery format ends in ${DeliveryName}, while a delivery is named by the id "
+                             "CreateDelivery mints, which the request gives in id")
+       for operation in ("GetDelivery", "DeleteDelivery", "UpdateDeliveryConfiguration")},
     "dynamodb:ListTables": ([{"type": "table", "fill": {}}],
                             "AWS policy probes accepted by review #7336 authorize the literal regional table/*: "
                             "table/? matches while table/ does not, despite the Service Reference listing no "
@@ -970,15 +994,21 @@ def _with_resource_types(documents: list[dict]) -> set[str]:
 
 
 def reads(operation: str) -> bool:
-    """Read whole namespaces, or explicit corrections in a namespace otherwise built by hand."""
+    """Read whole namespaces, and in a namespace otherwise built by hand its explicit corrections and the
+    operations `READ_IN_HAND_BUILT` lists."""
     namespace = namespace_of(operation)
-    return namespace in NAMESPACES or namespace in HAND_BUILT and operation in CORRECTIONS
+    return namespace in NAMESPACES or namespace in HAND_BUILT and (operation in CORRECTIONS
+                                                                     or operation in READ_IN_HAND_BUILT)
 
 
 def _check_overrides(covered: dict[str, dict]) -> None:
     """Every correction names an operation the file reads, and no namespace is in two places."""
     stale = [f"CORRECTIONS names {operation}, which the file does not read" for operation in CORRECTIONS
              if operation not in covered]
+    stale += [f"READ_IN_HAND_BUILT names {operation}, which the reference does not give" for operation in READ_IN_HAND_BUILT
+              if operation not in covered]
+    stale += [f"READ_IN_HAND_BUILT names {operation}, outside HAND_BUILT" for operation in READ_IN_HAND_BUILT
+              if namespace_of(operation) not in HAND_BUILT]
     for left, right in (("NAMESPACES", "HAND_BUILT"), ("NAMESPACES", "NOT_COVERED"), ("HAND_BUILT", "NOT_COVERED")):
         stale += [f"{namespace} is in both {left} and {right}"
                   for namespace in sorted(set(globals()[left]) & set(globals()[right]))]

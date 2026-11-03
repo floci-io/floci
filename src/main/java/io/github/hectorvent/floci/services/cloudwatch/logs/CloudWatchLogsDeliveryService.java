@@ -6,7 +6,6 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.Delivery;
@@ -24,7 +23,6 @@ import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
-import java.util.regex.Pattern;
 
 /**
  * CloudWatch Logs vended-log delivery: delivery sources, delivery destinations and the
@@ -32,22 +30,16 @@ import java.util.regex.Pattern;
  * not send the source's logs anywhere.
  */
 @ApplicationScoped
-public class CloudWatchLogsDeliveryService implements StoredResourceArns {
+public class CloudWatchLogsDeliveryService {
 
     /** What a delivery, source or destination ARN's resource starts with, in AWS's form. */
     static final String SOURCE_RESOURCE = "delivery-source:";
     static final String DESTINATION_RESOURCE = "delivery-destination:";
     static final String DELIVERY_RESOURCE = "delivery:";
 
-    private static final Pattern NAME = Pattern.compile("[\\w-]{1,60}");
-    private static final Pattern LOG_TYPE = Pattern.compile("\\w{1,255}");
-    private static final Set<String> OUTPUT_FORMATS = Set.of("json", "plain", "w3c", "raw", "parquet");
-    private static final Set<String> DESTINATION_TYPES = Set.of("S3", "CWL", "FH", "XRAY");
     private static final String ID_CHARACTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static final int ID_LENGTH = 16;
     private static final int MAX_TAGS = 50;
-    private static final int MAX_RECORD_FIELDS = 128;
-    private static final int MAX_FIELD_DELIMITER = 5;
     private static final int MAX_PAGE = 50;
 
     /**
@@ -92,14 +84,9 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
     public synchronized DeliverySource putDeliverySource(String name, String resourceArn, String logType,
                                                          Map<String, String> configuration,
                                                          Map<String, String> tags, String region) {
-        requireName(name, "name");
-        if (resourceArn == null || !AwsArnUtils.isArn(resourceArn)) {
+        if (!AwsArnUtils.isArn(resourceArn)) {
             throw validation("resourceArn must be the ARN of the resource that sends the logs.");
         }
-        if (logType == null || !LOG_TYPE.matcher(logType).matches()) {
-            throw validation("logType must be 1 to 255 word characters.");
-        }
-        requireTags(tags);
         Optional<DeliverySource> existing = sources.get(key(region, name));
         DeliverySource source = new DeliverySource();
         source.setName(name);
@@ -114,7 +101,6 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
     }
 
     public DeliverySource getDeliverySource(String name, String region) {
-        requireName(name, "name");
         return sources.get(key(region, name)).orElseThrow(() -> notFound("Delivery Source"));
     }
 
@@ -127,9 +113,14 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
         sources.delete(key(region, name));
     }
 
-    public PaginatedResult<DeliverySource> describeDeliverySources(Integer limit, String nextToken, String region) {
-        return page(sources.scan(k -> k.startsWith(prefix(region))), DeliverySource::getName, limit, nextToken,
-                "delivery-sources");
+    /** Every source, or those sending from one of {@code resourceArns}. */
+    public PaginatedResult<DeliverySource> describeDeliverySources(Integer limit, String nextToken,
+                                                                   List<String> resourceArns, String region) {
+        List<DeliverySource> all = sources.scan(k -> k.startsWith(prefix(region))).stream()
+                .filter(source -> resourceArns == null
+                        || source.getResourceArns().stream().anyMatch(resourceArns::contains))
+                .toList();
+        return page(all, DeliverySource::getName, limit, nextToken, "delivery-sources");
     }
 
     // ── Delivery destinations ──
@@ -141,14 +132,6 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
     public synchronized DeliveryDestination putDeliveryDestination(String name, String outputFormat,
                                                                    String destinationResourceArn, String type,
                                                                    Map<String, String> tags, String region) {
-        requireName(name, "name");
-        if (outputFormat != null && !OUTPUT_FORMATS.contains(outputFormat)) {
-            throw validation("outputFormat must be one of json, plain, w3c, raw or parquet.");
-        }
-        if (type != null && !DESTINATION_TYPES.contains(type)) {
-            throw validation("deliveryDestinationType must be one of S3, CWL, FH or XRAY.");
-        }
-        requireTags(tags);
         String resolvedType = destinationType(destinationResourceArn, type);
         Optional<DeliveryDestination> existing = destinations.get(key(region, name));
         DeliveryDestination destination = new DeliveryDestination();
@@ -164,7 +147,6 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
     }
 
     public DeliveryDestination getDeliveryDestination(String name, String region) {
-        requireName(name, "name");
         return destinations.get(key(region, name)).orElseThrow(() -> notFound("Delivery Destination"));
     }
 
@@ -177,10 +159,13 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
         destinations.delete(key(region, name));
     }
 
+    /** Every destination, or those {@code names} names. */
     public PaginatedResult<DeliveryDestination> describeDeliveryDestinations(Integer limit, String nextToken,
-                                                                             String region) {
-        return page(destinations.scan(k -> k.startsWith(prefix(region))), DeliveryDestination::getName, limit,
-                nextToken, "delivery-destinations");
+                                                                             List<String> names, String region) {
+        List<DeliveryDestination> all = destinations.scan(k -> k.startsWith(prefix(region))).stream()
+                .filter(destination -> names == null || names.contains(destination.getName()))
+                .toList();
+        return page(all, DeliveryDestination::getName, limit, nextToken, "delivery-destinations");
     }
 
     // ── Deliveries ──
@@ -189,12 +174,6 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
     public synchronized Delivery createDelivery(String sourceName, String destinationArn, List<String> recordFields,
                                                 String fieldDelimiter, Boolean enableHiveCompatiblePath,
                                                 String suffixPath, Map<String, String> tags, String region) {
-        requireName(sourceName, "deliverySourceName");
-        if (destinationArn == null || destinationArn.isBlank()) {
-            throw validation("deliveryDestinationArn is required.");
-        }
-        requireDeliveryOptions(recordFields, fieldDelimiter);
-        requireTags(tags);
         DeliverySource source = getDeliverySource(sourceName, region);
         DeliveryDestination destination = destinationByArn(destinationArn, region);
         boolean taken = deliveries.scan(k -> k.startsWith(prefix(region))).stream()
@@ -222,9 +201,6 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
     }
 
     public Delivery getDelivery(String id, String region) {
-        if (id == null || id.isBlank()) {
-            throw validation("id is required.");
-        }
         return deliveries.get(key(region, id)).orElseThrow(() -> notFound("Delivery"));
     }
 
@@ -232,7 +208,6 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
     public synchronized void updateDeliveryConfiguration(String id, List<String> recordFields, String fieldDelimiter,
                                                          Boolean enableHiveCompatiblePath, String suffixPath,
                                                          String region) {
-        requireDeliveryOptions(recordFields, fieldDelimiter);
         Delivery delivery = getDelivery(id, region);
         if (recordFields != null) {
             delivery.setRecordFields(new ArrayList<>(recordFields));
@@ -254,9 +229,14 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
         deliveries.delete(key(region, id));
     }
 
-    public PaginatedResult<Delivery> describeDeliveries(Integer limit, String nextToken, String region) {
-        return page(deliveries.scan(k -> k.startsWith(prefix(region))), Delivery::getId, limit, nextToken,
-                "deliveries");
+    /** Every delivery, or those from one of {@code deliverySourceNames}. */
+    public PaginatedResult<Delivery> describeDeliveries(Integer limit, String nextToken,
+                                                        List<String> deliverySourceNames, String region) {
+        List<Delivery> all = deliveries.scan(k -> k.startsWith(prefix(region))).stream()
+                .filter(delivery -> deliverySourceNames == null
+                        || deliverySourceNames.contains(delivery.getDeliverySourceName()))
+                .toList();
+        return page(all, Delivery::getId, limit, nextToken, "deliveries");
     }
 
     // ── Tags ──
@@ -289,7 +269,6 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
     }
 
     public synchronized void tag(String arn, Map<String, String> tags, String region) {
-        requireTags(tags);
         retag(arn, region, current -> {
             Map<String, String> merged = new LinkedHashMap<>(current);
             merged.putAll(tags);
@@ -327,33 +306,6 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
                 deliveries.put(key(region, name), delivery);
             }
         }
-    }
-
-    // ── IAM ──
-
-    @Override
-    public String namespace() {
-        return "logs";
-    }
-
-    /** Logs resources are built by hand, not from the request-resources table, so there is nothing to find. */
-    @Override
-    public Optional<String> find(String type, List<String> names, String region) {
-        return Optional.empty();
-    }
-
-    /**
-     * The source ({@code deliverySource}) or destination ({@code deliveryDestination}) ARN of the delivery
-     * whose id is {@code value}: what UpdateDeliveryConfiguration is also authorized on.
-     */
-    @Override
-    public Optional<String> through(String member, String value, String region) {
-        Optional<Delivery> delivery = value == null ? Optional.empty() : deliveries.get(key(region, value));
-        return switch (member) {
-            case "deliverySource" -> delivery.map(d -> arn(region, SOURCE_RESOURCE + d.getDeliverySourceName()));
-            case "deliveryDestination" -> delivery.map(Delivery::getDeliveryDestinationArn);
-            default -> Optional.empty();
-        };
     }
 
     // ── Helpers ──
@@ -444,17 +396,9 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
         return type;
     }
 
-    /** A page of up to {@code limit} (1 to 50, default 50) items, with AWS's wording for a bad limit or token. */
+    /** A page of up to {@code limit} (default 50) items, with AWS's wording for a bad token. */
     private static <T> PaginatedResult<T> page(List<T> all, Function<T, String> cursorOf, Integer limit,
                                                String nextToken, String namespace) {
-        if (limit != null && limit < 1) {
-            throw validation("1 validation error detected: Value at 'limit' failed to satisfy constraint: "
-                    + "Member must have value greater than or equal to 1");
-        }
-        if (limit != null && limit > MAX_PAGE) {
-            throw validation("1 validation error detected: Value at 'limit' failed to satisfy constraint: "
-                    + "Member must have value less than or equal to " + MAX_PAGE);
-        }
         return Pagination.paginate(all, cursorOf, limit != null ? limit : MAX_PAGE, nextToken, namespace,
                 token -> validation("Invalid Next Token."));
     }
@@ -475,26 +419,8 @@ public class CloudWatchLogsDeliveryService implements StoredResourceArns {
         return regionResolver.buildArn("logs", region, resource);
     }
 
-    private static void requireName(String name, String field) {
-        if (name == null || !NAME.matcher(name).matches()) {
-            throw validation(field + " must be 1 to 60 letters, digits, underscores or hyphens.");
-        }
-    }
 
-    private static void requireTags(Map<String, String> tags) {
-        if (tags != null && tags.size() > MAX_TAGS) {
-            throw validation("A resource can have at most " + MAX_TAGS + " tags.");
-        }
-    }
 
-    private static void requireDeliveryOptions(List<String> recordFields, String fieldDelimiter) {
-        if (recordFields != null && recordFields.size() > MAX_RECORD_FIELDS) {
-            throw validation("recordFields can name at most " + MAX_RECORD_FIELDS + " fields.");
-        }
-        if (fieldDelimiter != null && fieldDelimiter.length() > MAX_FIELD_DELIMITER) {
-            throw validation("fieldDelimiter can be at most " + MAX_FIELD_DELIMITER + " characters.");
-        }
-    }
 
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);

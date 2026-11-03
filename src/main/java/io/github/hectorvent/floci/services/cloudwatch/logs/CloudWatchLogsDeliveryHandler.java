@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.Delivery;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.DeliveryDestination;
@@ -33,6 +32,7 @@ class CloudWatchLogsDeliveryHandler {
     }
 
     Response handle(String action, JsonNode request, String region) {
+        CloudWatchLogsDeliveryRequestShapes.check(action, request);
         return switch (action) {
             case "PutDeliverySource" -> putDeliverySource(request, region);
             case "GetDeliverySource" -> wrapped("deliverySource",
@@ -42,7 +42,8 @@ class CloudWatchLogsDeliveryHandler {
                 yield empty();
             }
             case "DescribeDeliverySources" -> page("deliverySources",
-                    deliveries.describeDeliverySources(limit(request), text(request, "nextToken"), region),
+                    deliveries.describeDeliverySources(limit(request), text(request, "nextToken"),
+                            stringList(request.get("resourceArns")), region),
                     this::source);
             case "PutDeliveryDestination" -> putDeliveryDestination(request, region);
             case "GetDeliveryDestination" -> wrapped("deliveryDestination",
@@ -52,7 +53,8 @@ class CloudWatchLogsDeliveryHandler {
                 yield empty();
             }
             case "DescribeDeliveryDestinations" -> page("deliveryDestinations",
-                    deliveries.describeDeliveryDestinations(limit(request), text(request, "nextToken"), region),
+                    deliveries.describeDeliveryDestinations(limit(request), text(request, "nextToken"),
+                            stringList(request.get("names")), region),
                     this::destination);
             case "CreateDelivery" -> createDelivery(request, region);
             case "GetDelivery" -> wrapped("delivery", delivery(deliveries.getDelivery(text(request, "id"), region)));
@@ -62,7 +64,8 @@ class CloudWatchLogsDeliveryHandler {
                 yield empty();
             }
             case "DescribeDeliveries" -> page("deliveries",
-                    deliveries.describeDeliveries(limit(request), text(request, "nextToken"), region),
+                    deliveries.describeDeliveries(limit(request), text(request, "nextToken"),
+                            stringList(request.get("deliverySourceNames")), region),
                     this::deliverySummary);
             default -> throw new IllegalStateException("not a delivery action: " + action);
         };
@@ -185,15 +188,10 @@ class CloudWatchLogsDeliveryHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    /** The page size; the vendored constraints have already checked it is an integer from 1 to 50. */
     private static Integer limit(JsonNode request) {
         JsonNode limit = request.get("limit");
-        if (limit == null || limit.isNull()) {
-            return null;
-        }
-        if (!limit.canConvertToInt()) {
-            throw new AwsException("ValidationException", "limit must be an integer between 1 and 50.", 400);
-        }
-        return limit.asInt();
+        return limit == null || limit.isNull() ? null : limit.asInt();
     }
 
     private static String text(JsonNode node, String field) {

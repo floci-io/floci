@@ -181,6 +181,7 @@ def corrections(monkeypatch):
     monkeypatch.setattr(r, "HAND_BUILT", ("hand",))
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "CORRECTIONS", {})
+    monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
     monkeypatch.setattr(r, "UNQUALIFIED", {})
     monkeypatch.setattr(r, "MINTED_IDS", {})
     monkeypatch.setattr(r, "FOUND_BY", {})
@@ -691,6 +692,28 @@ def test_hand_built_correction_is_generated_without_claiming_other_operations(co
     assert r.validate(document) == []
     assert r.derive(document, tmp_path) == []
     assert r.verify_against(document, r.checked_actions(documents), document["arnFormats"]) == ([], [])
+
+
+def test_hand_built_operations_listed_to_read_follow_the_rule(corrections, tmp_path):
+    corrections.setattr(r, "READ_IN_HAND_BUILT", {"hand:GetThing": "a family the rule reads"})
+    documents = DOCUMENTS + [reference("hand", {"GetThing": ["thing"], "PutThing": ["thing"]},
+                                       {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"})]
+    hand = model({"GetThing": {"ThingName": "String"}, "PutThing": {"ThingName": "String"}})
+    hand["metadata"]["endpointPrefix"] = "hand"
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "hand": hand})
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert document["operations"]["hand:GetThing"] == {
+        "action": "hand:GetThing", "types": ["thing"], "resources": [{"type": "thing", "fill": {"ThingName": "ThingName"}}]}
+    assert "hand:PutThing" not in document["operations"]
+    assert r.reads("hand:GetThing") and not r.reads("hand:PutThing")
+    assert r.validate(document) == []
+
+
+def test_operations_listed_to_read_must_exist_and_be_hand_built(corrections, tmp_path):
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
+    corrections.setattr(r, "READ_IN_HAND_BUILT", {"hand:Gone": "no longer there"})
+    with pytest.raises(ValueError, match="READ_IN_HAND_BUILT names hand:Gone, which the reference does not give"):
+        r.build(DOCUMENTS, "test", tmp_path, "botocore test")
 
 
 def test_measured_callback_correction_retains_action_metadata_and_rejects_unlisted_resources():
