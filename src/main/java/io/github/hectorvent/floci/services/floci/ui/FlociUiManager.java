@@ -851,8 +851,8 @@ public class FlociUiManager {
             return "Could not start the Floci web console: Floci could not reach the container runtime ("
                     + detail
                     + "). Check that the Docker/Podman socket is mounted into the Floci container and "
-                    + "accessible — on SELinux hosts the socket bind-mount may need relabeling "
-                    + "(e.g. ':z') or '--security-opt label=disable'.";
+                    + "accessible. On SELinux hosts, start the Floci container with "
+                    + "'--security-opt label=disable'.";
         }
         return "Could not start the Floci web console from image '" + image + "': " + detail + ".";
     }
