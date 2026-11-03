@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -16,8 +17,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
@@ -55,13 +54,9 @@ class ElbV2HostHeaderIntegrationTest {
 
     @BeforeEach
     void createSdkListenerAndRealBackend() throws Exception {
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create("test", "test"));
-        Ec2Client ec2 = Ec2Client.builder().endpointOverride(endpoint).region(Region.EU_WEST_1)
-                .credentialsProvider(credentials).build();
+        Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.EU_WEST_1, endpoint);
         cleanup.add(ec2::close);
-        elb = ElasticLoadBalancingV2Client.builder().endpointOverride(endpoint).region(Region.EU_WEST_1)
-                .credentialsProvider(credentials).build();
+        elb = AwsTestClients.create(ElasticLoadBalancingV2Client.builder(), "test", Region.EU_WEST_1, endpoint);
         cleanup.add(elb::close);
         String vpc = ec2.createVpc(r -> r.cidrBlock("10.84.0.0/16")).vpc().vpcId();
         cleanup.add(() -> ec2.deleteVpc(r -> r.vpcId(vpc)));
