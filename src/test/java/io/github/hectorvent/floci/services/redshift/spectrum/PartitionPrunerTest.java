@@ -309,4 +309,35 @@ class PartitionPrunerTest {
         assertThat(keeps(filter, "2026-01-01"), is(true));
         assertThat(keeps(filter, "2026-01-02"), is(false));
     }
+
+    @Test
+    void readsPredicatesPastNestedComments() {
+        Optional<PartitionPruner.Filter> filter = filter(
+                "SELECT * FROM lake.events WHERE /* outer /* nested */ */ day = '2026-01-01'", DAY);
+
+        assertThat(keeps(filter, "2026-01-01"), is(true));
+        assertThat(keeps(filter, "2026-01-02"), is(false));
+    }
+
+    @Test
+    void ignoresDollarQuotedPredicatesAndFallsBackSafely() {
+        String sql = "SELECT * FROM lake.events WHERE day = $tag$2026-01-01$tag$";
+        assertThat(filter(sql, DAY).isPresent(), is(false));
+    }
+
+    @Test
+    void handlesQuotedIdentifiersWithEscapesInPredicates() {
+        Optional<PartitionPruner.Filter> filter = filter(
+                "SELECT * FROM lake.events WHERE \"day\" = '2026-01-01'", DAY);
+
+        assertThat(keeps(filter, "2026-01-01"), is(true));
+        assertThat(keeps(filter, "2026-01-02"), is(false));
+    }
+
+    @Test
+    void returnsEmptyFilterForUnterminatedLiteralsInPredicates() {
+        assertThat(filter("SELECT * FROM lake.events WHERE day = 'unterminated", DAY).isPresent(), is(false));
+        assertThat(filter("SELECT * FROM lake.events WHERE \"day = '2026-01-01'", DAY).isPresent(), is(false));
+        assertThat(filter("SELECT * FROM lake.events WHERE /* unclosed day = '2026-01-01'", DAY).isPresent(), is(false));
+    }
 }

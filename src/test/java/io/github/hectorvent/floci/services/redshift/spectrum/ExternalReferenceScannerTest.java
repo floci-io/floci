@@ -183,4 +183,19 @@ class ExternalReferenceScannerTest {
         assertThat(ExternalReferenceScanner.scan("SELECT EXTRACT(year FROM ts) FROM analytics.events", SCHEMAS),
                 contains(new Reference("analytics", "events")));
     }
+
+    @Test
+    void findsReferencesPastNestedBlockComments() {
+        assertThat(ExternalReferenceScanner.scan(
+                "SELECT * FROM /* outer /* nested */ */ analytics.events", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+    }
+
+    @Test
+    void ignoresReferencesInsideDollarQuotesWithCustomTag() {
+        assertThat(ExternalReferenceScanner.scan("SELECT $sql$ FROM analytics.events $sql$", SCHEMAS), empty());
+        assertThat(ExternalReferenceScanner.scan(
+                "SELECT $sql$ FROM analytics.events $sql$ FROM analytics.events", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+    }
 }

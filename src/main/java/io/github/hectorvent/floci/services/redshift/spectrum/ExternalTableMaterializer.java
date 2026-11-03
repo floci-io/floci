@@ -26,11 +26,8 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDate;
-import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -62,6 +59,7 @@ public class ExternalTableMaterializer {
     private static final long LOCK_TIMEOUT_SECONDS = 30;
     private static final String SCRATCH_KEY_PREFIX = "spectrum-";
     private static final String HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__";
+    static final String PARTITION_COLUMN = "_floci_partition";
     private static final Duration STALE_SCRATCH_AGE = Duration.ofHours(1);
     private static final String ICEBERG_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
     private static final String ICEBERG_MANIFESTS = "SELECT DISTINCT manifest_path FROM read_avro(%s)";
@@ -272,7 +270,7 @@ public class ExternalTableMaterializer {
                 : partitions.stream().filter(partition -> filter.get().matches(partition.getValues())).toList();
         List<ReadSource> sources = readSources(accountId, binding, roleSession, table, location, qualified);
         authorizeObjects(accountId, binding, roleSession, sources);
-        String definitions = columnDefinitions(readPlanWithColumns(binding, table));
+        String definitions = columnDefinitions(table, readPlanWithColumns(binding, table));
         String identity = Digests.sha256Hex(table.getVersionId() + "|" + table.getUpdateTime() + "|" + definitions);
         String cacheKey = cacheKey(session, binding, table.getName());
         String label = binding.schemaName() + "." + table.getName();
@@ -298,28 +296,6 @@ public class ExternalTableMaterializer {
                         deletions.add(values);
                     }
                     loaded.put(values, fingerprint);
-                }
-            }
-            if (!deletions.isEmpty()) {
-                Set<List<String>> deletedConverted = deletions.stream()
-                        .map(values -> convertedPartitionValues(table, values))
-                        .collect(Collectors.toSet());
-                Set<List<String>> alreadyLoading = toLoad.stream()
-                        .map(source -> source.partition().getValues())
-                        .collect(Collectors.toSet());
-                List<Partition> overlappingToReload = partitions.stream()
-                        .filter(partition -> held.containsKey(partition.getValues())
-                                && !alreadyLoading.contains(partition.getValues())
-                                && deletedConverted.contains(convertedPartitionValues(table, partition.getValues())))
-                        .toList();
-                if (!overlappingToReload.isEmpty()) {
-                    List<ReadSource> overlappingSources = readSources(accountId, binding, roleSession,
-                            table, location, overlappingToReload);
-                    authorizeObjects(accountId, binding, roleSession, overlappingSources);
-                    for (ReadSource source : overlappingSources) {
-                        toLoad.add(source);
-                        loaded.put(source.partition().getValues(), partitionFingerprint(table, source));
-                    }
                 }
             }
             if (!reset && deletions.isEmpty() && toLoad.isEmpty()) {
@@ -774,7 +750,7 @@ public class ExternalTableMaterializer {
         String target = schema + "." + quote(table.getName());
         String stagingName = "floci_spectrum_stg_" + UUID.randomUUID().toString().replace("-", "");
         String staging = "pg_temp." + quote(stagingName);
-        String definitions = columnDefinitions(plan);
+        String definitions = columnDefinitions(table, plan);
         boolean stagingCreated = false;
         String scratchKey = null;
         try {
@@ -809,7 +785,7 @@ public class ExternalTableMaterializer {
             if (deletions != null) {
                 // the table already holds other partitions, so only the ones named here are replaced
                 String delete = deletions.isEmpty() ? "" : "DELETE FROM " + target + " WHERE "
-                        + deletions.stream().map(values -> "(" + partitionCondition(table, values) + ")")
+                        + deletions.stream().map(values -> quote(PARTITION_COLUMN) + " = '" + partitionId(values) + "'")
                         .distinct().collect(Collectors.joining(" OR ")) + "; ";
                 backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); " + delete
                         + "INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
@@ -854,26 +830,14 @@ public class ExternalTableMaterializer {
         return plan;
     }
 
-    private static String columnDefinitions(GlueTableResolver.ReadPlan plan) {
-        return plan.columns().stream().map(column -> quote(column.getName()) + " " + GlueTypeMapper.toPostgres(column.getType()))
+    private static String columnDefinitions(Table table, GlueTableResolver.ReadPlan plan) {
+        String definitions = plan.columns().stream()
+                .map(column -> quote(column.getName()) + " " + GlueTypeMapper.toPostgres(column.getType()))
                 .collect(Collectors.joining(", "));
-    }
-
-    /**
-     * Matches the rows a partition loaded: its key columns hold the partition values cast to the column types,
-     * with the Hive default partition and a value wider than its column as NULL, as {@link #readSelect} projects them.
-     */
-    private static String partitionCondition(Table table, List<String> values) {
-        List<Column> keys = table.getPartitionKeys();
-        List<String> terms = new ArrayList<>();
-        for (int index = 0; index < keys.size(); index++) {
-            Column key = keys.get(index);
-            String value = partitionValue(key, values, index);
-            terms.add(value == null ? quote(key.getName()) + " IS NULL"
-                    : quote(key.getName()) + " = CAST('" + value.replace("'", "''") + "' AS "
-                            + GlueTypeMapper.toPostgres(key.getType()) + ")");
+        if (hasPartitionKeys(table)) {
+            return definitions + ", " + quote(PARTITION_COLUMN) + " VARCHAR";
         }
-        return String.join(" AND ", terms);
+        return definitions;
     }
 
     /** A partition key value as it is loaded: null when it is missing, the Hive default partition or too wide. */
@@ -885,40 +849,14 @@ public class ExternalTableMaterializer {
         return value;
     }
 
-    /**
-     * Converts partition key values to their canonical form so that partitions whose keys overlap
-     * in PostgreSQL (such as integer '1' and '01', or ISO date formats) map to the same key.
-     */
-    private static List<String> convertedPartitionValues(Table table, List<String> values) {
-        List<Column> keys = table.getPartitionKeys();
-        List<String> converted = new ArrayList<>();
-        for (int index = 0; index < keys.size(); index++) {
-            Column key = keys.get(index);
-            String value = partitionValue(key, values, index);
-            if (value == null) {
-                converted.add(null);
-            } else {
-                String type = GlueTypeMapper.canonicalGlueType(key.getType());
-                switch (type) {
-                    case "tinyint", "smallint", "int", "integer", "bigint" -> {
-                        try {
-                            converted.add(new BigInteger(value.trim()).toString());
-                        } catch (NumberFormatException expected) {
-                            converted.add(value);
-                        }
-                    }
-                    case "date" -> {
-                        try {
-                            converted.add(LocalDate.parse(value.trim()).toString());
-                        } catch (DateTimeParseException expected) {
-                            converted.add(value);
-                        }
-                    }
-                    default -> converted.add(value);
-                }
+    static String partitionId(List<String> values) {
+        StringBuilder sb = new StringBuilder();
+        if (values != null) {
+            for (String value : values) {
+                sb.append(value == null ? "\u0000null\u0000" : value).append('\0');
             }
         }
-        return converted;
+        return Digests.sha256Hex(sb.toString());
     }
 
     private void prepareScratchBucket(String accountId) {
@@ -1147,6 +1085,7 @@ public class ExternalTableMaterializer {
                         : "CAST('" + value.replace("'", "''") + "' AS VARCHAR)";
                 parts.add("COALESCE(" + expression + ", '\\N') AS " + quote(key.getName()));
             }
+            parts.add("'" + partitionId(values) + "' AS " + quote(PARTITION_COLUMN));
             projection = String.join(", ", parts);
         }
         return "SELECT " + projection + " FROM " + fromClause(plan, source.table());

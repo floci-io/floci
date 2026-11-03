@@ -8,7 +8,6 @@ import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 
@@ -646,9 +645,14 @@ final class PartitionPruner {
     }
 
     private static final class Tokens {
-        final List<Token> list = new ArrayList<>();
+        final List<Token> list;
         int[] depth;
-        boolean unsafe;
+        final boolean unsafe;
+
+        Tokens(List<Token> list, boolean unsafe) {
+            this.list = list;
+            this.unsafe = unsafe;
+        }
 
         boolean balanced() {
             depth = new int[list.size()];
@@ -720,134 +724,23 @@ final class PartitionPruner {
     }
 
     private static Tokens tokenize(String sql) {
-        Tokens tokens = new Tokens();
-        int i = 0;
-        while (i < sql.length()) {
-            char c = sql.charAt(i);
-            if (Character.isWhitespace(c)) {
-                i++;
-            } else if (c == '-' && i + 1 < sql.length() && sql.charAt(i + 1) == '-') {
-                int newline = sql.indexOf('\n', i + 2);
-                i = newline < 0 ? sql.length() : newline;
-            } else if (c == '/' && i + 1 < sql.length() && sql.charAt(i + 1) == '*') {
-                i = skipBlockComment(sql, i);
-            } else if (c == '\'') {
-                StringBuilder value = new StringBuilder();
-                i++;
-                boolean closed = false;
-                while (i < sql.length()) {
-                    if (sql.charAt(i) == '\'') {
-                        if (i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
-                            value.append('\'');
-                            i += 2;
-                            continue;
-                        }
-                        i++;
-                        closed = true;
-                        break;
-                    }
-                    value.append(sql.charAt(i++));
-                }
-                tokens.unsafe |= !closed;
-                tokens.list.add(new Token(Kind.STRING, value.toString()));
-            } else if (c == '"') {
-                StringBuilder value = new StringBuilder();
-                i++;
-                boolean closed = false;
-                while (i < sql.length()) {
-                    if (sql.charAt(i) == '"') {
-                        if (i + 1 < sql.length() && sql.charAt(i + 1) == '"') {
-                            value.append('"');
-                            i += 2;
-                            continue;
-                        }
-                        i++;
-                        closed = true;
-                        break;
-                    }
-                    value.append(sql.charAt(i++));
-                }
-                tokens.unsafe |= !closed;
-                tokens.list.add(new Token(Kind.QUOTED_WORD, value.toString()));
-            } else if (Character.isLetter(c) || c == '_') {
-                int start = i;
-                while (i < sql.length() && (Character.isLetterOrDigit(sql.charAt(i)) || sql.charAt(i) == '_'
-                        || sql.charAt(i) == '$')) {
-                    i++;
-                }
-                // a word glued to a quote is a string prefix (E'..', U&'..', B'..') whose escapes this scan does not read
-                tokens.unsafe |= i < sql.length() && (sql.charAt(i) == '\'' || sql.charAt(i) == '&' && i + 1 < sql.length()
-                        && sql.charAt(i + 1) == '\'');
-                tokens.list.add(new Token(Kind.WORD, sql.substring(start, i).toLowerCase(Locale.ROOT)));
-            } else if (Character.isDigit(c)) {
-                int start = i;
-                while (i < sql.length() && Character.isDigit(sql.charAt(i))) {
-                    i++;
-                }
-                if (i + 1 < sql.length() && sql.charAt(i) == '.' && Character.isDigit(sql.charAt(i + 1))) {
-                    i++;
-                    while (i < sql.length() && Character.isDigit(sql.charAt(i))) {
-                        i++;
-                    }
-                }
-                tokens.list.add(new Token(Kind.NUMBER, sql.substring(start, i)));
-            } else if (c == '$') {
-                tokens.unsafe |= isDollarQuoteStart(sql, i);
-                tokens.list.add(new Token(Kind.OTHER, "$"));
-                i++;
-            } else if (c == '(') {
-                tokens.list.add(new Token(Kind.LPAREN, "("));
-                i++;
-            } else if (c == ')') {
-                tokens.list.add(new Token(Kind.RPAREN, ")"));
-                i++;
-            } else if (c == ',') {
-                tokens.list.add(new Token(Kind.COMMA, ","));
-                i++;
-            } else if (c == ';') {
-                tokens.list.add(new Token(Kind.SEMICOLON, ";"));
-                i++;
-            } else {
-                String two = i + 1 < sql.length() ? sql.substring(i, i + 2) : "";
-                if (two.equals("<=") || two.equals(">=") || two.equals("<>") || two.equals("!=") || two.equals("::")) {
-                    tokens.list.add(new Token(two.equals("::") ? Kind.OTHER : Kind.OP, two));
-                    i += 2;
-                } else if ("=<>.+-".indexOf(c) >= 0) {
-                    tokens.list.add(new Token(Kind.OP, String.valueOf(c)));
-                    i++;
-                } else {
-                    tokens.list.add(new Token(Kind.OTHER, String.valueOf(c)));
-                    i++;
-                }
-            }
+        SpectrumSqlLexer.Result result = SpectrumSqlLexer.tokenize(sql);
+        List<Token> list = new ArrayList<>(result.tokens().size());
+        for (SpectrumSqlLexer.Token t : result.tokens()) {
+            Kind kind = switch (t.kind()) {
+                case WORD -> Kind.WORD;
+                case QUOTED_WORD -> Kind.QUOTED_WORD;
+                case STRING -> Kind.STRING;
+                case NUMBER -> Kind.NUMBER;
+                case OP -> Kind.OP;
+                case LPAREN -> Kind.LPAREN;
+                case RPAREN -> Kind.RPAREN;
+                case COMMA -> Kind.COMMA;
+                case SEMICOLON -> Kind.SEMICOLON;
+                case DOLLAR_QUOTED, OTHER -> Kind.OTHER;
+            };
+            list.add(new Token(kind, t.text(), t.quoted()));
         }
-        return tokens;
-    }
-
-    private static boolean isDollarQuoteStart(String sql, int start) {
-        int i = start + 1;
-        if (i < sql.length() && (Character.isLetter(sql.charAt(i)) || sql.charAt(i) == '_')) {
-            while (i < sql.length() && (Character.isLetterOrDigit(sql.charAt(i)) || sql.charAt(i) == '_')) {
-                i++;
-            }
-        }
-        return i < sql.length() && sql.charAt(i) == '$';
-    }
-
-    private static int skipBlockComment(String sql, int start) {
-        int depth = 1;
-        int i = start + 2;
-        while (i < sql.length() && depth > 0) {
-            if (sql.startsWith("/*", i)) {
-                depth++;
-                i += 2;
-            } else if (sql.startsWith("*/", i)) {
-                depth--;
-                i += 2;
-            } else {
-                i++;
-            }
-        }
-        return Math.min(i, sql.length());
+        return new Tokens(list, result.unsafe());
     }
 }
