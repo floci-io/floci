@@ -175,6 +175,17 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public EventBus createEventBus(String name, String description,
                                    Map<String, String> tags, String region) {
+        return createEventBus(name, description, null, null, null, tags, region);
+    }
+
+    /**
+     * Creates a custom bus with the KMS key, dead-letter queue and log configuration the request
+     * gives, as {@code CreateEventBus} takes them; a null member leaves the bus without it. The
+     * dead-letter and log configurations are stored as their JSON, as {@link #updateEventBus} does.
+     */
+    public EventBus createEventBus(String name, String description, String kmsKeyIdentifier,
+                                   String deadLetterConfig, String logConfig,
+                                   Map<String, String> tags, String region) {
         validateCustomEventBusName(name);
         validateEventBusDescription(description);
         String key = busKey(region, name);
@@ -188,6 +199,15 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 description,
                 Instant.now()
         );
+        if (kmsKeyIdentifier != null && !kmsKeyIdentifier.isBlank()) {
+            bus.setKmsKeyIdentifier(kmsKeyIdentifier);
+        }
+        if (deadLetterConfig != null && !deadLetterConfig.isBlank()) {
+            bus.setDeadLetterConfig(deadLetterConfig);
+        }
+        if (logConfig != null && !logConfig.isBlank()) {
+            bus.setLogConfig(logConfig);
+        }
         if (tags != null) {
             bus.getTags().putAll(tags);
             resourceGroupsTaggingService.tagResources(List.of(bus.getArn()), tags, region);
