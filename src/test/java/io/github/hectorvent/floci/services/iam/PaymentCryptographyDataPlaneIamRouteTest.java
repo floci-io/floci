@@ -67,6 +67,12 @@ class PaymentCryptographyDataPlaneIamRouteTest {
     }
 
     @Test
+    void theCryptoAndMacOperationsResolveToTheirActions() {
+        assertEquals("payment-cryptography:GenerateMac", resolve("/_paymentcryptography/mac/generate"));
+        assertEquals("payment-cryptography:VerifyMac", resolve("/_paymentcryptography/mac/verify"));
+    }
+
+    @Test
     void thePinOperationsResolveToTheirActions() {
         assertEquals("payment-cryptography:GeneratePinData",
                 resolve("/_paymentcryptography/pindata/generate"));
@@ -94,6 +100,18 @@ class PaymentCryptographyDataPlaneIamRouteTest {
             assertEquals("payment-cryptography:EncryptData",
                     resolve(scope, "/_paymentcryptography/keys/" + KEY_ARN + "/encrypt"));
         }
+    }
+
+    @Test
+    void theCardOperationsResolveToTheirActions() {
+        assertEquals("payment-cryptography:GenerateCardValidationData",
+                resolve("/_paymentcryptography/cardvalidationdata/generate"));
+        assertEquals("payment-cryptography:VerifyCardValidationData",
+                resolve("/_paymentcryptography/cardvalidationdata/verify"));
+        assertEquals("payment-cryptography:GenerateAuthRequestCryptogram",
+                resolve("/_paymentcryptography/cryptogram/generate"));
+        assertEquals("payment-cryptography:VerifyAuthRequestCryptogram",
+                resolve("/_paymentcryptography/cryptogram/verify"));
     }
 
     /** The action the registry resolves for a POST to the path, for the service's scope. */
