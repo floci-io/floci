@@ -7,9 +7,6 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.CreateRouteRequest;
@@ -61,7 +58,8 @@ class Ec2CreateRouteDryRunIntegrationTest {
                 RouteFixture fixture = new RouteFixture(admin);
                 SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "route-dryrun-")) {
             List<Route> before = fixture.routes();
-            try (Ec2Client caller = client(user.accessKeyId(), user.secretAccessKey())) {
+            try (Ec2Client caller = AwsTestClients.create(Ec2Client.builder(), user.accessKeyId(),
+                    user.secretAccessKey(), Region.US_EAST_1, endpoint)) {
                 Ec2Exception error = assertThrows(Ec2Exception.class, () -> caller.createRoute(fixture.request()
                         .gatewayId(fixture.gatewayId).dryRun(true).build()));
                 assertEquals(403, error.statusCode());
@@ -77,7 +75,8 @@ class Ec2CreateRouteDryRunIntegrationTest {
                 RouteFixture fixture = new RouteFixture(admin);
                 SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "route-signature-")) {
             List<Route> before = fixture.routes();
-            try (Ec2Client caller = client(user.accessKeyId(), "incorrect-secret")) {
+            try (Ec2Client caller = AwsTestClients.create(Ec2Client.builder(), user.accessKeyId(),
+                    "incorrect-secret", Region.US_EAST_1, endpoint)) {
                 Ec2Exception error = assertThrows(Ec2Exception.class, () -> caller.createRoute(fixture.request()
                         .gatewayId(fixture.gatewayId).dryRun(true).build()));
                 assertEquals(403, error.statusCode());
@@ -98,7 +97,8 @@ class Ec2CreateRouteDryRunIntegrationTest {
         try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint);
                 RouteFixture fixture = new RouteFixture(admin);
                 SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "route-allowed-", "route", policy);
-                Ec2Client caller = client(user.accessKeyId(), user.secretAccessKey())) {
+                Ec2Client caller = AwsTestClients.create(Ec2Client.builder(), user.accessKeyId(),
+                    user.secretAccessKey(), Region.US_EAST_1, endpoint)) {
             List<Route> before = fixture.routes();
             CreateRouteRequest request = fixture.request().gatewayId(fixture.gatewayId).dryRun(true).build();
             assertError("DryRunOperation", 412, () -> caller.createRoute(request));
@@ -109,13 +109,6 @@ class Ec2CreateRouteDryRunIntegrationTest {
             assertTrue(denied.awsErrorDetails().rawResponse().asUtf8String().contains("<Code>AccessDenied</Code>"));
             assertEquals(before, fixture.routes());
         }
-    }
-
-    private Ec2Client client(String accessKey, String secretKey) {
-        return Ec2Client.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKey, secretKey)))
-                .build();
     }
 
     private static void assertError(String code, int status, Runnable request) {
