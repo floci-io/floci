@@ -24,6 +24,12 @@ public class CreateWorkGroupConfigurationRequest {
     @JsonProperty("EngineVersion")
     private WorkGroupEngineVersionRequest engineVersion;
 
+    @JsonProperty("ManagedQueryResultsConfiguration")
+    private ManagedQueryResultsConfiguration managedQueryResultsConfiguration;
+
+    @JsonProperty("EnableMinimumEncryptionConfiguration")
+    private Boolean enableMinimumEncryptionConfiguration;
+
     public CreateWorkGroupConfigurationRequest() {}
 
     public ResultConfiguration getResultConfiguration() { return resultConfiguration; }
@@ -44,6 +50,18 @@ public class CreateWorkGroupConfigurationRequest {
     public void setBytesScannedCutoffPerQuery(Long bytesScannedCutoffPerQuery) {
         this.bytesScannedCutoffPerQuery = bytesScannedCutoffPerQuery;
     }
+    public ManagedQueryResultsConfiguration getManagedQueryResultsConfiguration() {
+        return managedQueryResultsConfiguration;
+    }
+    public void setManagedQueryResultsConfiguration(ManagedQueryResultsConfiguration configuration) {
+        this.managedQueryResultsConfiguration = configuration;
+    }
+
+    public Boolean getEnableMinimumEncryptionConfiguration() { return enableMinimumEncryptionConfiguration; }
+    public void setEnableMinimumEncryptionConfiguration(Boolean enabled) {
+        this.enableMinimumEncryptionConfiguration = enabled;
+    }
+
     public WorkGroupEngineVersionRequest getEngineVersion() { return engineVersion; }
     public void setEngineVersion(WorkGroupEngineVersionRequest engineVersion) { this.engineVersion = engineVersion; }
 }

@@ -281,7 +281,87 @@ class AthenaUpdateWorkGroupIntegrationTest {
         .then()
             .statusCode(200)
             .body("WorkGroup.Description", equalTo("before"))
-            .body("WorkGroup.Configuration.EngineVersion.SelectedEngineVersion",
-                    equalTo("Athena engine version 3"));
+            .body("WorkGroup.Configuration.EngineVersion.SelectedEngineVersion", equalTo("AUTO"));
+    }
+
+    @Test
+    void updateWorkGroupChangesManagedQueryResultsAndMinimumEncryption() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                { "Name": "analytics-managed-updates" }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.UpdateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "WorkGroup": "analytics-managed-updates",
+                  "ConfigurationUpdates": {
+                    "ManagedQueryResultsConfigurationUpdates": {
+                      "Enabled": true,
+                      "EncryptionConfiguration": { "KmsKey": "alias/athena-results" }
+                    },
+                    "EnableMinimumEncryptionConfiguration": true
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"analytics-managed-updates\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("WorkGroup.Configuration.ManagedQueryResultsConfiguration.Enabled", equalTo(true))
+            .body("WorkGroup.Configuration.ManagedQueryResultsConfiguration.EncryptionConfiguration.KmsKey",
+                    equalTo("alias/athena-results"))
+            .body("WorkGroup.Configuration.EnableMinimumEncryptionConfiguration", equalTo(true));
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.UpdateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "WorkGroup": "analytics-managed-updates",
+                  "ConfigurationUpdates": {
+                    "ManagedQueryResultsConfigurationUpdates": { "RemoveEncryptionConfiguration": true }
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"analytics-managed-updates\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("WorkGroup.Configuration.ManagedQueryResultsConfiguration.Enabled", equalTo(true))
+            .body("WorkGroup.Configuration.ManagedQueryResultsConfiguration.EncryptionConfiguration", nullValue());
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"analytics-managed-updates\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 }
