@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.AcmService;
@@ -25,16 +26,23 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * EC2 Client VPN: endpoints, their target network associations, authorization rules and routes, and
  * the client configuration export. A configuration registry: no VPN server runs, so clients cannot
  * connect. Associations, rules and routes settle at once in the state AWS reaches after its
  * transitional one.
+ *
+ * <p>An endpoint's target networks, authorization rules and routes are replaced, never changed in
+ * place, so a describe reading them while another request writes sees one whole list or the other.
+ * An association pins its subnet and VPC, as the network interface AWS places in the subnet does:
+ * {@code DeleteSubnet} and {@code DeleteVpc} refuse them until it is disassociated.
  */
 @ApplicationScoped
-public class Ec2ClientVpnService {
+public class Ec2ClientVpnService implements VpcDependencyProvider {
 
     static final String ENDPOINT_PREFIX = "cvpn-endpoint-";
     private static final String ASSOCIATION_PREFIX = "cvpn-assoc-";
@@ -145,7 +153,7 @@ public class Ec2ClientVpnService {
     }
 
     /** The endpoints the ids name, or all of them; an unknown or malformed id is refused, as AWS does. */
-    public List<ClientVpnEndpoint> describeEndpoints(String region, List<String> ids) {
+    public synchronized List<ClientVpnEndpoint> describeEndpoints(String region, List<String> ids) {
         if (ids == null || ids.isEmpty()) {
             return all(region);
         }
@@ -261,6 +269,13 @@ public class Ec2ClientVpnService {
      * default security group), one per Availability Zone, and adds the route to the VPC through it.
      */
     public synchronized TargetNetwork associate(String region, String id, String subnetId, String clientToken) {
+        // Held while the subnet is checked and the association saved, so a DeleteSubnet cannot pass its
+        // dependency check in between.
+        return ec2.supplyWithSubnetReferencesHeld(region, () -> associateWithSubnetsHeld(region, id, subnetId,
+                clientToken));
+    }
+
+    private TargetNetwork associateWithSubnetsHeld(String region, String id, String subnetId, String clientToken) {
         ClientVpnEndpoint endpoint = require(region, id);
         if (clientToken != null) {
             Optional<TargetNetwork> replay = endpoint.getTargetNetworks().stream()
@@ -295,19 +310,19 @@ public class Ec2ClientVpnService {
         network.setVpcId(subnet.getVpcId());
         network.setAvailabilityZone(subnet.getAvailabilityZone());
         network.setClientToken(clientToken);
-        endpoint.getTargetNetworks().add(network);
+        endpoint.setTargetNetworks(with(endpoint.getTargetNetworks(), network));
 
         Route route = new Route();
         route.setDestinationCidr(ec2.requireVpc(region, subnet.getVpcId()).getCidrBlock());
         route.setTargetSubnet(subnetId);
         route.setOrigin(ORIGIN_ASSOCIATE);
         route.setDescription("Default Route");
-        endpoint.getRoutes().add(route);
+        endpoint.setRoutes(with(endpoint.getRoutes(), route));
         endpoints.put(key(region, id), endpoint);
         return network;
     }
 
-    public List<TargetNetwork> describeTargetNetworks(String region, String id, List<String> associationIds) {
+    public synchronized List<TargetNetwork> describeTargetNetworks(String region, String id, List<String> associationIds) {
         ClientVpnEndpoint endpoint = require(region, id);
         if (associationIds == null || associationIds.isEmpty()) {
             return endpoint.getTargetNetworks();
@@ -323,8 +338,9 @@ public class Ec2ClientVpnService {
                 .filter(candidate -> candidate.getAssociationId().equals(associationId)).findFirst()
                 .orElseThrow(() -> new AwsException("InvalidClientVpnAssociationId.NotFound",
                         "Association " + associationId + " does not exist", 400));
-        endpoint.getTargetNetworks().remove(network);
-        endpoint.getRoutes().removeIf(route -> network.getSubnetId().equals(route.getTargetSubnet()));
+        endpoint.setTargetNetworks(without(endpoint.getTargetNetworks(), candidate -> candidate == network));
+        endpoint.setRoutes(without(endpoint.getRoutes(),
+                route -> network.getSubnetId().equals(route.getTargetSubnet())));
         endpoints.put(key(region, id), endpoint);
         return network;
     }
@@ -360,7 +376,7 @@ public class Ec2ClientVpnService {
             throw invalid("Specify either AccessGroupId or AuthorizeAllGroups.");
         }
         boolean exists = endpoint.getAuthorizationRules().stream()
-                .anyMatch(rule -> rule.getDestinationCidr().equals(targetNetworkCidr)
+                .anyMatch(rule -> CidrCanonicalizer.sameBlock(rule.getDestinationCidr(), targetNetworkCidr)
                         && rule.isAccessAll() == all && Objects.equals(rule.getGroupId(), all ? "" : accessGroupId));
         if (exists) {
             throw invalid("An authorization rule for " + targetNetworkCidr + " already exists.");
@@ -370,11 +386,11 @@ public class Ec2ClientVpnService {
         rule.setGroupId(all ? "" : accessGroupId);
         rule.setAccessAll(all);
         rule.setDescription(description);
-        endpoint.getAuthorizationRules().add(rule);
+        endpoint.setAuthorizationRules(with(endpoint.getAuthorizationRules(), rule));
         endpoints.put(key(region, id), endpoint);
     }
 
-    public List<AuthorizationRule> describeAuthorizationRules(String region, String id) {
+    public synchronized List<AuthorizationRule> describeAuthorizationRules(String region, String id) {
         return require(region, id).getAuthorizationRules();
     }
 
@@ -383,13 +399,14 @@ public class Ec2ClientVpnService {
         ClientVpnEndpoint endpoint = require(region, id);
         requireCidr(targetNetworkCidr, "TargetNetworkCidr");
         boolean all = Boolean.TRUE.equals(revokeAllGroups);
-        boolean removed = endpoint.getAuthorizationRules().removeIf(rule ->
-                rule.getDestinationCidr().equals(targetNetworkCidr)
+        List<AuthorizationRule> kept = without(endpoint.getAuthorizationRules(), rule ->
+                CidrCanonicalizer.sameBlock(rule.getDestinationCidr(), targetNetworkCidr)
                         && (all ? rule.isAccessAll() : Objects.equals(rule.getGroupId(), accessGroupId)));
-        if (!removed) {
+        if (kept.size() == endpoint.getAuthorizationRules().size()) {
             throw new AwsException("InvalidClientVpnEndpointAuthorizationRuleNotFound",
                     "Authorization rule for " + targetNetworkCidr + " does not exist", 400);
         }
+        endpoint.setAuthorizationRules(kept);
         endpoints.put(key(region, id), endpoint);
     }
 
@@ -409,7 +426,7 @@ public class Ec2ClientVpnService {
             throw invalid("Subnet " + targetSubnet + " is not associated with " + id + ".");
         }
         boolean exists = endpoint.getRoutes().stream()
-                .anyMatch(route -> route.getDestinationCidr().equals(destinationCidr)
+                .anyMatch(route -> CidrCanonicalizer.sameBlock(route.getDestinationCidr(), destinationCidr)
                         && route.getTargetSubnet().equals(targetSubnet));
         if (exists) {
             throw new AwsException("InvalidClientVpnDuplicateRoute",
@@ -420,11 +437,11 @@ public class Ec2ClientVpnService {
         route.setTargetSubnet(targetSubnet);
         route.setOrigin(ORIGIN_ADD_ROUTE);
         route.setDescription(description);
-        endpoint.getRoutes().add(route);
+        endpoint.setRoutes(with(endpoint.getRoutes(), route));
         endpoints.put(key(region, id), endpoint);
     }
 
-    public List<Route> describeRoutes(String region, String id) {
+    public synchronized List<Route> describeRoutes(String region, String id) {
         return require(region, id).getRoutes();
     }
 
@@ -432,13 +449,14 @@ public class Ec2ClientVpnService {
     public synchronized void deleteRoute(String region, String id, String destinationCidr, String targetSubnet) {
         ClientVpnEndpoint endpoint = require(region, id);
         requireCidr(destinationCidr, "DestinationCidrBlock");
-        boolean removed = endpoint.getRoutes().removeIf(route -> ORIGIN_ADD_ROUTE.equals(route.getOrigin())
-                && route.getDestinationCidr().equals(destinationCidr)
+        List<Route> kept = without(endpoint.getRoutes(), route -> ORIGIN_ADD_ROUTE.equals(route.getOrigin())
+                && CidrCanonicalizer.sameBlock(route.getDestinationCidr(), destinationCidr)
                 && (targetSubnet == null || route.getTargetSubnet().equals(targetSubnet)));
-        if (!removed) {
+        if (kept.size() == endpoint.getRoutes().size()) {
             throw new AwsException("InvalidClientVpnRouteNotFound",
                     "Route " + destinationCidr + " does not exist", 400);
         }
+        endpoint.setRoutes(kept);
         endpoints.put(key(region, id), endpoint);
     }
 
@@ -475,8 +493,11 @@ public class Ec2ClientVpnService {
     private Optional<Certificate> serverCertificate(ClientVpnEndpoint endpoint, String region) {
         try {
             return Optional.ofNullable(acm.getCertificate(endpoint.getServerCertificateArn(), region));
-        } catch (RuntimeException notHeld) {
-            // An ARN ACM does not hold, or one it cannot read: the export goes without the CA.
+        } catch (AwsException expected) {
+            // A certificate ACM does not hold: the export goes without the CA. Anything else surfaces.
+            if (!"ResourceNotFoundException".equals(expected.getErrorCode())) {
+                throw expected;
+            }
             return Optional.empty();
         }
     }
@@ -498,12 +519,44 @@ public class Ec2ClientVpnService {
             return ec2.defaultSecurityGroupOf(region, vpcId).map(SecurityGroup::getGroupId)
                     .map(List::of).orElse(List.of());
         }
-        for (SecurityGroup group : ec2.describeSecurityGroups(region, requested, List.of(), Map.of())) {
+        List<SecurityGroup> found = ec2.describeSecurityGroups(region, requested, List.of(), Map.of());
+        for (String groupId : requested) {
+            SecurityGroup group = found.stream().filter(candidate -> groupId.equals(candidate.getGroupId()))
+                    .findFirst().orElseThrow(() -> new AwsException("InvalidGroup.NotFound",
+                            "The security group '" + groupId + "' does not exist", 400));
             if (!vpcId.equals(group.getVpcId())) {
-                throw invalid("Security group " + group.getGroupId() + " is not in VPC " + vpcId + ".");
+                throw invalid("Security group " + groupId + " is not in VPC " + vpcId + ".");
             }
         }
         return List.copyOf(requested);
+    }
+
+    // ── Subnet and VPC references ──
+
+    /** A plain read over the stored endpoints, taking no lock of this service, as the interface requires. */
+    @Override
+    public boolean hasSubnetDependency(String region, String subnetId) {
+        return associations(region).anyMatch(network -> subnetId.equals(network.getSubnetId()));
+    }
+
+    @Override
+    public boolean hasVpcDependency(String region, String vpcId) {
+        return associations(region).anyMatch(network -> vpcId.equals(network.getVpcId()));
+    }
+
+    private Stream<TargetNetwork> associations(String region) {
+        return endpoints.scan(key -> key.startsWith(region + "::")).stream()
+                .flatMap(endpoint -> endpoint.getTargetNetworks().stream());
+    }
+
+    private static <T> List<T> with(List<T> list, T item) {
+        List<T> copy = new ArrayList<>(list);
+        copy.add(item);
+        return copy;
+    }
+
+    private static <T> List<T> without(List<T> list, Predicate<T> drop) {
+        return new ArrayList<>(list.stream().filter(drop.negate()).toList());
     }
 
     private List<ClientVpnEndpoint> all(String region) {

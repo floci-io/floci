@@ -158,6 +158,94 @@ class Ec2ClientVpnIntegrationTest {
     }
 
     @Test
+    void describeFiltersSecurityGroupsSubnetPinsAndEquivalentCidrs() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String vpcId = ec2("CreateVpc").formParam("CidrBlock", "10.81.0.0/16").post("/").then().statusCode(200)
+                .extract().path("CreateVpcResponse.vpc.vpcId");
+        String subnetId = subnet(vpcId, "10.81.1.0/24", "us-east-1a");
+        String certificateArn = "arn:aws:acm:us-east-1:000000000000:certificate/" + UUID.randomUUID();
+
+        // Every requested security group must exist.
+        refused(endpoint(certificateArn, "udp").formParam("VpcId", vpcId)
+                        .formParam("SecurityGroupId.1", "sg-0000000000000000f"),
+                "InvalidGroup.NotFound", "The security group 'sg-0000000000000000f' does not exist");
+
+        String tagged = endpoint(certificateArn, "udp")
+                .formParam("TagSpecification.1.ResourceType", "client-vpn-endpoint")
+                .formParam("TagSpecification.1.Tag.1.Key", "Name")
+                .formParam("TagSpecification.1.Tag.1.Value", "filter-" + suffix)
+                .post("/").then().statusCode(200).extract().path("CreateClientVpnEndpointResponse.clientVpnEndpointId");
+        String portal = endpoint(certificateArn, "tcp").formParam("SelfServicePortal", "enabled")
+                .post("/").then().statusCode(200).extract().path("CreateClientVpnEndpointResponse.clientVpnEndpointId");
+
+        String item = "DescribeClientVpnEndpointsResponse.clientVpnEndpoint.item";
+        ec2("DescribeClientVpnEndpoints").formParam("Filter.1.Name", "tag:Name")
+                .formParam("Filter.1.Value.1", "filter-" + suffix).post("/").then().statusCode(200)
+                .body(item + ".clientVpnEndpointId", equalTo(tagged));
+        ec2("DescribeClientVpnEndpoints").formParam("Filter.1.Name", "endpoint-id")
+                .formParam("Filter.1.Value.1", tagged).formParam("Filter.1.Value.2", portal)
+                .formParam("Filter.2.Name", "transport-protocol").formParam("Filter.2.Value.1", "tcp")
+                .post("/").then().statusCode(200)
+                .body(item + ".clientVpnEndpointId", equalTo(portal))
+                .body(item + ".selfServicePortalUrl",
+                        equalTo("https://self-service.clientvpn.amazonaws.com/endpoints/" + portal));
+        refused(ec2("DescribeClientVpnEndpoints").formParam("Filter.1.Name", "bogus").formParam("Filter.1.Value.1", "x"),
+                "InvalidParameterValue", "The filter 'bogus' is invalid");
+
+        // An association pins its subnet until it is disassociated.
+        String associationId = ec2("AssociateClientVpnTargetNetwork").formParam("ClientVpnEndpointId", tagged)
+                .formParam("SubnetId", subnetId).post("/").then().statusCode(200)
+                .extract().path("AssociateClientVpnTargetNetworkResponse.associationId");
+        ec2("DeleteSubnet").formParam("SubnetId", subnetId).post("/").then().statusCode(400)
+                .body(containsString("<Code>DependencyViolation</Code>"));
+        String networks = "DescribeClientVpnTargetNetworksResponse.clientVpnTargetNetworks.item";
+        ec2("DescribeClientVpnTargetNetworks").formParam("ClientVpnEndpointId", tagged)
+                .formParam("Filter.1.Name", "vpc-id").formParam("Filter.1.Value.1", vpcId).post("/").then()
+                .body(networks + ".associationId", equalTo(associationId));
+        ec2("DescribeClientVpnTargetNetworks").formParam("ClientVpnEndpointId", tagged)
+                .formParam("Filter.1.Name", "association-id").formParam("Filter.1.Value.1", "cvpn-assoc-0").post("/")
+                .then().statusCode(200).body(not(containsString("<item>")));
+
+        // The same network spelled with host bits is the same rule and the same route.
+        ec2("AuthorizeClientVpnIngress").formParam("ClientVpnEndpointId", tagged)
+                .formParam("TargetNetworkCidr", "10.81.0.0/16").formParam("AuthorizeAllGroups", "true")
+                .post("/").then().statusCode(200);
+        ec2("AuthorizeClientVpnIngress").formParam("ClientVpnEndpointId", tagged)
+                .formParam("TargetNetworkCidr", "10.81.0.9/16").formParam("AuthorizeAllGroups", "true")
+                .post("/").then().statusCode(400).body(containsString("<Code>InvalidParameterValue</Code>"));
+        String rules = "DescribeClientVpnAuthorizationRulesResponse.authorizationRule.item";
+        ec2("DescribeClientVpnAuthorizationRules").formParam("ClientVpnEndpointId", tagged)
+                .formParam("Filter.1.Name", "destination-cidr").formParam("Filter.1.Value.1", "10.81.0.0/16")
+                .post("/").then().body(rules + ".destinationCidr", equalTo("10.81.0.0/16"));
+        ec2("DescribeClientVpnAuthorizationRules").formParam("ClientVpnEndpointId", tagged)
+                .formParam("Filter.1.Name", "destination-cidr").formParam("Filter.1.Value.1", "10.99.0.0/16")
+                .post("/").then().statusCode(200).body(not(containsString("<item>")));
+        ec2("RevokeClientVpnIngress").formParam("ClientVpnEndpointId", tagged)
+                .formParam("TargetNetworkCidr", "10.81.0.9/16").formParam("RevokeAllGroups", "true")
+                .post("/").then().statusCode(200);
+
+        String routes = "DescribeClientVpnRoutesResponse.routes.item";
+        ec2("CreateClientVpnRoute").formParam("ClientVpnEndpointId", tagged)
+                .formParam("DestinationCidrBlock", "192.168.0.0/16").formParam("TargetVpcSubnetId", subnetId)
+                .post("/").then().statusCode(200);
+        ec2("CreateClientVpnRoute").formParam("ClientVpnEndpointId", tagged)
+                .formParam("DestinationCidrBlock", "192.168.0.5/16").formParam("TargetVpcSubnetId", subnetId)
+                .post("/").then().statusCode(400).body(containsString("<Code>InvalidClientVpnDuplicateRoute</Code>"));
+        ec2("DescribeClientVpnRoutes").formParam("ClientVpnEndpointId", tagged)
+                .formParam("Filter.1.Name", "origin").formParam("Filter.1.Value.1", "associate").post("/").then()
+                .body(routes + ".destinationCidr", equalTo("10.81.0.0/16"));
+        ec2("DeleteClientVpnRoute").formParam("ClientVpnEndpointId", tagged)
+                .formParam("DestinationCidrBlock", "192.168.0.5/16").formParam("TargetVpcSubnetId", subnetId)
+                .post("/").then().statusCode(200);
+
+        ec2("DisassociateClientVpnTargetNetwork").formParam("ClientVpnEndpointId", tagged)
+                .formParam("AssociationId", associationId).post("/").then().statusCode(200);
+        ec2("DeleteSubnet").formParam("SubnetId", subnetId).post("/").then().statusCode(200);
+        ec2("DeleteClientVpnEndpoint").formParam("ClientVpnEndpointId", tagged).post("/").then().statusCode(200);
+        ec2("DeleteClientVpnEndpoint").formParam("ClientVpnEndpointId", portal).post("/").then().statusCode(200);
+    }
+
+    @Test
     void unknownAndMalformedEndpointIdsAreRefusedWithAwsErrors() {
         refused(ec2("DescribeClientVpnEndpoints").formParam("ClientVpnEndpointId.1", "cvpn-endpoint-0123456789abcdef0"),
                 "InvalidClientVpnEndpointId.NotFound", "Endpoint cvpn-endpoint-0123456789abcdef0 does not exist");
@@ -177,10 +265,19 @@ class Ec2ClientVpnIntegrationTest {
                 .extract().path("CreateSubnetResponse.subnet.subnetId");
     }
 
+    private static RequestSpecification endpoint(String certificateArn, String transport) {
+        return ec2("CreateClientVpnEndpoint").formParam("ClientCidrBlock", "172.16.0.0/22")
+                .formParam("ServerCertificateArn", certificateArn)
+                .formParam("Authentication.1.Type", "certificate-authentication")
+                .formParam("Authentication.1.MutualAuthentication.ClientRootCertificateChainArn", certificateArn)
+                .formParam("ConnectionLogOptions.Enabled", "false")
+                .formParam("TransportProtocol", transport);
+    }
+
     private static void refused(RequestSpecification request, String code, String message) {
         ValidatableResponse response = request.post("/").then().statusCode(400);
-        response.body(containsString("<Code>" + code + "</Code>"))
-                .body(containsString("<Message>" + message + "</Message>"));
+        response.body("Response.Errors.Error.Code", equalTo(code))
+                .body("Response.Errors.Error.Message", equalTo(message));
     }
 
     private static RequestSpecification ec2(String action) {

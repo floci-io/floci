@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ec2.model.ClientVpnEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.ClientVpnEndpoint.AuthorizationRule;
@@ -14,9 +15,13 @@ import jakarta.ws.rs.core.Response;
 
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.function.BiPredicate;
 
 /**
  * The wire shapes of the Client VPN operations, reached through {@link Ec2QueryHandler}: query
@@ -29,6 +34,11 @@ class Ec2ClientVpnHandler {
     /** AWS reports an endpoint's creation time without a zone or fraction. */
     private static final DateTimeFormatter CREATION_TIME =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss").withZone(ZoneOffset.UTC);
+
+    private static final Set<String> ENDPOINT_FILTERS = Set.of("endpoint-id", "transport-protocol", "tag-key");
+    private static final Set<String> TARGET_NETWORK_FILTERS = Set.of("association-id", "target-network-id", "vpc-id");
+    private static final Set<String> AUTHORIZATION_RULE_FILTERS = Set.of("description", "destination-cidr", "group-id");
+    private static final Set<String> ROUTE_FILTERS = Set.of("destination-cidr", "origin", "target-subnet");
 
     private final Ec2ClientVpnService clientVpn;
     private final Ec2Service ec2;
@@ -59,9 +69,19 @@ class Ec2ClientVpnHandler {
     }
 
     Response describe(MultivaluedMap<String, String> p, String region) {
+        List<Map.Entry<String, List<String>>> filters = filters(p, ENDPOINT_FILTERS);
         List<ClientVpnEndpoint> endpoints = clientVpn.describeEndpoints(region, list(p, "ClientVpnEndpointId"));
         XmlBuilder xml = response("DescribeClientVpnEndpointsResponse").start("clientVpnEndpoint");
         for (ClientVpnEndpoint endpoint : endpoints) {
+            List<Tag> tags = ec2.resourceTags(region, endpoint.getClientVpnEndpointId());
+            boolean matches = matches(filters, (name, values) -> switch (name) {
+                case "endpoint-id" -> Ec2Service.matchesFilterValue(values, endpoint.getClientVpnEndpointId());
+                case "transport-protocol" -> Ec2Service.matchesFilterValue(values, endpoint.getTransportProtocol());
+                default -> Ec2Service.matchesTagFilter(tags, name, values, Ec2Service::matchesFilterValue);
+            });
+            if (!matches) {
+                continue;
+            }
             endpoint(xml, endpoint, region);
         }
         xml.end("clientVpnEndpoint");
@@ -100,10 +120,20 @@ class Ec2ClientVpnHandler {
 
     Response describeTargetNetworks(MultivaluedMap<String, String> p, String region) {
         String id = p.getFirst("ClientVpnEndpointId");
+        List<Map.Entry<String, List<String>>> filters = filters(p, TARGET_NETWORK_FILTERS);
         List<TargetNetwork> networks = clientVpn.describeTargetNetworks(region, id, list(p, "AssociationIds"));
         List<String> securityGroups = clientVpn.require(region, id).getSecurityGroupIds();
         XmlBuilder xml = response("DescribeClientVpnTargetNetworksResponse").start("clientVpnTargetNetworks");
         for (TargetNetwork network : networks) {
+            boolean matches = matches(filters, (name, values) -> Ec2Service.matchesFilterValue(values,
+                    switch (name) {
+                        case "association-id" -> network.getAssociationId();
+                        case "target-network-id" -> network.getSubnetId();
+                        default -> network.getVpcId();
+                    }));
+            if (!matches) {
+                continue;
+            }
             xml.start("item")
                     .elem("associationId", network.getAssociationId())
                     .elem("clientVpnEndpointId", id)
@@ -142,8 +172,18 @@ class Ec2ClientVpnHandler {
 
     Response describeAuthorizationRules(MultivaluedMap<String, String> p, String region) {
         String id = p.getFirst("ClientVpnEndpointId");
+        List<Map.Entry<String, List<String>>> filters = filters(p, AUTHORIZATION_RULE_FILTERS);
         XmlBuilder xml = response("DescribeClientVpnAuthorizationRulesResponse").start("authorizationRule");
         for (AuthorizationRule rule : clientVpn.describeAuthorizationRules(region, id)) {
+            boolean matches = matches(filters, (name, values) -> Ec2Service.matchesFilterValue(values,
+                    switch (name) {
+                        case "description" -> rule.getDescription();
+                        case "destination-cidr" -> rule.getDestinationCidr();
+                        default -> rule.getGroupId();
+                    }));
+            if (!matches) {
+                continue;
+            }
             xml.start("item")
                     .elem("accessAll", rule.isAccessAll())
                     .elem("description", rule.getDescription())
@@ -175,8 +215,18 @@ class Ec2ClientVpnHandler {
 
     Response describeRoutes(MultivaluedMap<String, String> p, String region) {
         String id = p.getFirst("ClientVpnEndpointId");
+        List<Map.Entry<String, List<String>>> filters = filters(p, ROUTE_FILTERS);
         XmlBuilder xml = response("DescribeClientVpnRoutesResponse").start("routes");
         for (Route route : clientVpn.describeRoutes(region, id)) {
+            boolean matches = matches(filters, (name, values) -> Ec2Service.matchesFilterValue(values,
+                    switch (name) {
+                        case "destination-cidr" -> route.getDestinationCidr();
+                        case "origin" -> route.getOrigin();
+                        default -> route.getTargetSubnet();
+                    }));
+            if (!matches) {
+                continue;
+            }
             xml.start("item")
                     .elem("description", route.getDescription())
                     .elem("destinationCidr", route.getDestinationCidr())
@@ -258,6 +308,11 @@ class Ec2ClientVpnHandler {
                 .elem("endpointIpAddressType", endpoint.getEndpointIpAddressType());
         status(xml, Ec2ClientVpnService.statusOf(endpoint));
         items(xml, "securityGroupIdSet", endpoint.getSecurityGroupIds());
+        // The model reports the portal only as its URL, present while the portal is enabled.
+        if ("enabled".equals(endpoint.getSelfServicePortal())) {
+            xml.elem("selfServicePortalUrl", "https://self-service.clientvpn." + AwsRegions.dnsSuffixFor(region)
+                    + "/endpoints/" + id);
+        }
         xml.elem("serverCertificateArn", endpoint.getServerCertificateArn())
                 .elem("sessionTimeoutHours", endpoint.getSessionTimeoutHours())
                 .elem("splitTunnel", endpoint.isSplitTunnel());
@@ -293,6 +348,30 @@ class Ec2ClientVpnHandler {
             options.add(option);
         }
         return options;
+    }
+
+    /**
+     * The request's {@code Filter.N} entries, each name one the operation supports (a {@code tag:}
+     * name where it takes {@code tag-key}); an unsupported name is refused as AWS refuses it.
+     */
+    private static List<Map.Entry<String, List<String>>> filters(MultivaluedMap<String, String> p,
+                                                                Set<String> supported) {
+        List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = p.getFirst("Filter." + i + ".Name");
+            if (name == null) {
+                break;
+            }
+            filters.add(new AbstractMap.SimpleEntry<>(name, list(p, "Filter." + i + ".Value")));
+        }
+        Ec2Service.requireSupportedFilters(filters.stream().map(Map.Entry::getKey).toList(), supported);
+        return filters;
+    }
+
+    /** Every filter matches: AND across filters, OR across one filter's values. */
+    private static boolean matches(List<Map.Entry<String, List<String>>> filters,
+                                   BiPredicate<String, List<String>> matcher) {
+        return filters.stream().allMatch(filter -> matcher.test(filter.getKey(), filter.getValue()));
     }
 
     private static XmlBuilder response(String element) {

@@ -1231,7 +1231,20 @@ groups, the VPC's default security group.
   `Default Route` to the VPC's CIDR through the subnet (`origin` `associate`, `type` `Nat`), which
   goes with the association. An endpoint created without a VPC takes the first subnet's VPC and its
   default security group.
+- An association pins its subnet and VPC, as the network interface AWS places in the subnet does:
+  `DeleteSubnet` and `DeleteVpc` answer `DependencyViolation` until it is disassociated.
 - An endpoint with associated target networks cannot be deleted (`IncorrectState`).
+- Security groups named on create, modify or `ApplySecurityGroupsToClientVpnTargetNetwork` must
+  exist (`InvalidGroup.NotFound`) and be in the endpoint's VPC.
+- Authorization rules and routes compare networks, not spellings: `10.0.0.9/16` is the same network
+  as `10.0.0.0/16`, so it is a duplicate on create and matches on revoke or delete.
+- The describe operations take AWS's filters, with `*` and `?` wildcards: `endpoint-id`,
+  `transport-protocol`, `tag-key` and `tag:<key>` for endpoints; `association-id`,
+  `target-network-id` and `vpc-id` for target networks; `description`, `destination-cidr` and
+  `group-id` for authorization rules; `destination-cidr`, `origin` and `target-subnet` for routes.
+  Any other filter is `InvalidParameterValue` ("The filter '<name>' is invalid").
+- An endpoint with the self-service portal enabled reports `selfServicePortalUrl`,
+  `https://self-service.clientvpn.<dns suffix>/endpoints/<id>`.
 - The exported configuration names the endpoint's address, port and transport, carries the server
   certificate's chain from ACM as its `<ca>`, and verifies the certificate's domain name, as AWS's
   does. A server certificate ACM does not hold leaves those two parts out.
