@@ -129,7 +129,13 @@ Gateway Load Balancer listeners require omitted `Port` and `Protocol` fields on 
   Restarting Floci invalidates existing bindings. Application-cookie stickiness,
   weighted target-group affinity, and NLB stickiness are not implemented. Cookie
   stickiness is not applied with target-group cross-zone balancing disabled or `weighted_random` routing.
-- `routing.http.preserve_host_header.enabled` (default `false`) controls whether the original client Host header is forwarded to targets unchanged, or replaced with the target's `host:port`.
+- `routing.http.preserve_host_header.enabled` (default `false`) controls Host normalization for HTTP,
+  WebSocket and Lambda targets. By default the client host is retained: listener ports 80 and 443
+  remove an incoming port; other listener ports are appended only when the client supplied none.
+  An absolute HTTP(S) request target supplies the authority instead of the Host header. When enabled,
+  the original Host headers are preserved, including repeated values. These are the
+  [ALB Host header rules](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/edit-load-balancer-attributes.html#host-header-preservation);
+  the backend address is never substituted for the client authority.
 - `routing.http.xff_header_processing.mode` (default `append`) controls `X-Forwarded-For` for HTTP, WebSocket and Lambda targets. `append` adds the client address to any value the client sent, `preserve` forwards the client's header unchanged, and `remove` drops it. `routing.http.xff_client_port.enabled` (default `false`) adds the client port as `ip:port` or `[ipv6]:port`, in `append` mode only. `ModifyLoadBalancerAttributes` answers `InvalidConfigurationRequest` for any other value of either attribute.
 - `X-Forwarded-Proto` and `X-Forwarded-Port` are always set from the client's connection to the listener, replacing any value the client sent.
 - `RegisterTargets` rejects link-local and cloud instance-metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`) with `InvalidTarget`, and the load balancer and its health checks refuse to connect to them. Loopback and private addresses stay reachable so a load balancer can front a neighbouring container.
