@@ -353,6 +353,10 @@ public class CodeDeployService {
     }
 
     public Application getApplication(String region, String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ApplicationNameRequiredException",
+                    "The minimum number of required characters for applicationName is 1.", 400);
+        }
         Application app = applicationsFor(region).get(name);
         if (app == null) {
             throw new AwsException("ApplicationDoesNotExistException",
