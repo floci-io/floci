@@ -97,6 +97,32 @@ public class ControlTowerControlService {
                 .orElseThrow(() -> notFound("The request references an enabled control that does not exist."));
     }
 
+    public synchronized Map<String, String> listTags(String arn) {
+        Map<String, String> tags = get(AwsArnUtils.parse(arn).region(), arn).getTags();
+        return tags == null ? Map.of() : tags;
+    }
+
+    public synchronized void tagResource(String arn, Map<String, String> tags) {
+        String region = AwsArnUtils.parse(arn).region();
+        EnabledControl control = get(region, arn);
+        Map<String, String> merged = new LinkedHashMap<>(listTags(arn));
+        merged.putAll(tags);
+        if (merged.size() > 200 || merged.entrySet().stream().anyMatch(e -> !validTag(e.getKey(), e.getValue()))) {
+            throw validation("tags contain an invalid key or value.");
+        }
+        control.setTags(merged);
+        controls.put(key(region, control.getTargetIdentifier(), control.getControlIdentifier()), control);
+    }
+
+    public synchronized void untagResource(String arn, List<String> tagKeys) {
+        String region = AwsArnUtils.parse(arn).region();
+        EnabledControl control = get(region, arn);
+        Map<String, String> remaining = new LinkedHashMap<>(listTags(arn));
+        tagKeys.forEach(remaining::remove);
+        control.setTags(remaining);
+        controls.put(key(region, control.getTargetIdentifier(), control.getControlIdentifier()), control);
+    }
+
     public synchronized String update(String accountId, String region, JsonNode request) {
         requireObject(request);
         String identifier = requireArn(request, "enabledControlIdentifier");
@@ -208,6 +234,10 @@ public class ControlTowerControlService {
             }
         }
         return parameters.deepCopy();
+    }
+
+    private static boolean validTag(String key, String value) {
+        return !key.isBlank() && key.length() <= 128 && value != null && value.length() <= 256;
     }
 
     private static Map<String, String> validateTags(JsonNode tags) {

@@ -46,6 +46,9 @@ Enabled-baseline operations are recorded with AWS operation names such as `ENABL
 | `UpdateEnabledControl` | `POST /update-enabled-control` | Updates parameters when they differ from the current configuration |
 | `ResetEnabledControl` | `POST /reset-enabled-control` | Repairs non-SCP enabled controls and records a reset operation |
 | `GetControlOperation` | `POST /get-control-operation` | Reads a previously issued control operation |
+| `TagResource` | `POST /tags/{resourceArn}` | Adds tags to a landing zone or enabled control |
+| `UntagResource` | `DELETE /tags/{resourceArn}` | Removes tags from a landing zone or enabled control |
+| `ListTagsForResource` | `GET /tags/{resourceArn}` | Lists the tags of a landing zone or enabled control |
 
 ## Operation behavior
 
