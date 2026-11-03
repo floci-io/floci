@@ -61,7 +61,7 @@ public class Route53Service implements Resettable {
     private final StorageBackend<String, Map<String, String>> tagStore;
     private final StorageBackend<String, List<VpcAssociation>> vpcAuthorizationStore;
     private final List<String> nameServers;
-    private final List<Optional<String>> configuredNameServers;
+    private final List<Boolean> configuredNameServerSlots;
     private final String defaultAccountId;
     private final RegionResolver regionResolver;
     private final Ec2Service ec2Service;
@@ -90,16 +90,19 @@ public class Route53Service implements Resettable {
                 new TypeReference<Map<String, List<VpcAssociation>>>() {});
 
         EmulatorConfig.Route53ServiceConfig r53 = config.services().route53();
-        this.configuredNameServers = List.of(
+        List<Optional<String>> configuredNames = List.of(
                 r53.defaultNameserver1(),
                 r53.defaultNameserver2(),
                 r53.defaultNameserver3(),
                 r53.defaultNameserver4()
         );
         List<String> effectiveNames = new ArrayList<>(4);
+        List<Boolean> configuredSlots = new ArrayList<>(4);
         for (int i = 0; i < 4; i++) {
-            effectiveNames.add(delegationName(configuredNameServers.get(i).orElse(DEFAULT_NAME_SERVERS.get(i))));
+            configuredSlots.add(configuredNames.get(i).isPresent());
+            effectiveNames.add(delegationName(configuredNames.get(i).orElse(DEFAULT_NAME_SERVERS.get(i))));
         }
+        this.configuredNameServerSlots = List.copyOf(configuredSlots);
         this.nameServers = List.copyOf(effectiveNames);
         this.defaultAccountId = config.defaultAccountId();
         this.regionResolver = regionResolver;
@@ -180,7 +183,7 @@ public class Route53Service implements Resettable {
         BigInteger value = new BigInteger(id, 36);
         List<String> assigned = new ArrayList<>(4);
         for (int i = 0; i < 4; i++) {
-            if (configuredNameServers.get(i).isPresent()) {
+            if (configuredNameServerSlots.get(i)) {
                 assigned.add(nameServers.get(i));
             } else {
                 int slot = value.shiftRight(i * 18).intValue() & 0x3ffff;
