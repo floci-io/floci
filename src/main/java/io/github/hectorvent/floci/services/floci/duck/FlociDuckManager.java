@@ -116,6 +116,7 @@ public class FlociDuckManager {
 
         ContainerSpec spec = containerBuilder.newContainer(image)
                 .withName(containerName)
+                .withInit()
                 .withEnv("FLOCI_DUCK_S3_ACCESS_KEY", "test")
                 .withEnv("FLOCI_DUCK_S3_SECRET_KEY", "test")
                 .withEnv("FLOCI_DUCK_S3_REGION", config.defaultRegion())
