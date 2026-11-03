@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.kms;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.TestAccounts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
@@ -34,7 +35,6 @@ import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.emptyString;
@@ -871,36 +871,21 @@ class KmsIntegrationTest {
 
     @Test
     void listKeysPagesWithLimitAndMarker() {
-        String account = Long.toString(ThreadLocalRandom.current().nextLong(100_000_000_000L, 1_000_000_000_000L));
+        String account = TestAccounts.randomId();
         String authorization = "AWS4-HMAC-SHA256 Credential=" + account
                 + "/20261103/us-east-1/kms/aws4_request";
-        JsonPath initial = given()
-                .header("Authorization", authorization)
-                .header("X-Amz-Target", "TrentService.ListKeys")
-                .contentType(KMS_CONTENT_TYPE)
-                .body("{}")
-                .when().post("/")
+        JsonPath initial = kmsAs(authorization, "ListKeys", "{}")
                 .then().statusCode(200)
                 .extract().jsonPath();
         List<String> expectedKeyIds = new ArrayList<>(initial.getList("Keys.KeyId"));
         for (int i = 0; i < 2; i++) {
-            String keyId = given()
-                    .header("Authorization", authorization)
-                    .header("X-Amz-Target", "TrentService.CreateKey")
-                    .contentType(KMS_CONTENT_TYPE)
-                    .body("{}")
-                    .when().post("/")
+            String keyId = kmsAs(authorization, "CreateKey", "{}")
                     .then().statusCode(200)
                     .extract().path("KeyMetadata.KeyId");
             expectedKeyIds.add(keyId);
         }
 
-        JsonPath unpaged = given()
-                .header("Authorization", authorization)
-                .header("X-Amz-Target", "TrentService.ListKeys")
-                .contentType(KMS_CONTENT_TYPE)
-                .body("{}")
-                .when().post("/")
+        JsonPath unpaged = kmsAs(authorization, "ListKeys", "{}")
                 .then()
                 .statusCode(200)
                 .body("Truncated", equalTo(false))
@@ -914,12 +899,7 @@ class KmsIntegrationTest {
         String marker = null;
         do {
             String body = marker == null ? "{\"Limit\":1}" : "{\"Limit\":1,\"Marker\":\"" + marker + "\"}";
-            JsonPath page = given()
-                    .header("Authorization", authorization)
-                    .header("X-Amz-Target", "TrentService.ListKeys")
-                    .contentType(KMS_CONTENT_TYPE)
-                    .body(body)
-                    .when().post("/")
+            JsonPath page = kmsAs(authorization, "ListKeys", body)
                     .then()
                     .statusCode(200)
                     .body("Keys.size()", equalTo(1))
