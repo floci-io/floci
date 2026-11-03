@@ -278,6 +278,10 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
     "logs:PutDeliverySource": ([{"type": "delivery-source", "fill": {"DeliverySourceName": "name"}}],
                                "resourceArn is the ARN of the resource that sends the logs (an event bus, a load "
                                "balancer), never the delivery source's, which the request names by name"),
+    "logs:DeleteDeliverySource": ([{"type": "delivery-source", "fill": {"DeliverySourceName": "name"}}],
+                                  "the reference lists only delivery-destination, which nothing in the request names, "
+                                  "so the rule would authorize it on * and a deny on the source it deletes would not "
+                                  "apply; the request names that source by name"),
     "logs:PutDeliveryDestination": ([{"type": "delivery-destination", "fill": {"DeliveryDestinationName": "name"}}],
                                     "deliveryDestinationConfiguration.destinationResourceArn is the log group, bucket "
                                     "or stream the logs go to and roleArn a role, neither the delivery destination, "

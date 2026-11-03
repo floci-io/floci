@@ -788,7 +788,7 @@ class ResourceArnBuilderTest {
     @Test
     void deliveryActionsAreAuthorizedOnTheSourceDestinationOrDeliveryTheyName() {
         String prefix = "arn:aws:logs:us-east-1:" + ACCOUNT + ":";
-        for (String action : List.of("logs:PutDeliverySource", "logs:GetDeliverySource")) {
+        for (String action : List.of("logs:PutDeliverySource", "logs:GetDeliverySource", "logs:DeleteDeliverySource")) {
             setJsonBody("{\"name\":\"bus-source\"}");
             assertEquals(List.of(prefix + "delivery-source:bus-source"),
                     builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
@@ -809,9 +809,8 @@ class ResourceArnBuilderTest {
         assertEquals(List.of(prefix + "delivery-destination:bus-logs", prefix + "delivery:*",
                         prefix + "delivery-source:bus-source"),
                 builder.buildLogResources("logs:CreateDelivery", ctx, "us-east-1", ACCOUNT, "aws"));
-        // The Service Authorization Reference gives DeleteDeliverySource no resource of its own.
-        for (String action : List.of("logs:DeleteDeliverySource", "logs:DescribeDeliverySources",
-                "logs:DescribeDeliveryDestinations", "logs:DescribeDeliveries")) {
+        for (String action : List.of("logs:DescribeDeliverySources", "logs:DescribeDeliveryDestinations",
+                "logs:DescribeDeliveries")) {
             setJsonBody("{}");
             assertEquals(List.of("*"), builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
         }

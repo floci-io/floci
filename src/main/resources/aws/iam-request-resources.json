@@ -888,7 +888,7 @@
     "logs:CreateDelivery": {"action": "logs:CreateDelivery", "types": ["delivery", "delivery-destination", "delivery-source"], "resources": [{"types": ["delivery", "delivery-destination", "delivery-source"], "arn": "deliveryDestinationArn"}, {"type": "delivery", "fill": {}, "made": true}, {"type": "delivery-source", "fill": {"DeliverySourceName": "deliverySourceName"}}]},
     "logs:DeleteDelivery": {"action": "logs:DeleteDelivery", "types": ["delivery"], "resources": [{"type": "delivery", "fill": {"DeliveryName": "id"}}]},
     "logs:DeleteDeliveryDestination": {"action": "logs:DeleteDeliveryDestination", "types": ["delivery-destination"], "resources": [{"type": "delivery-destination", "fill": {"DeliveryDestinationName": "name"}}]},
-    "logs:DeleteDeliverySource": {"action": "logs:DeleteDeliverySource", "types": ["delivery-destination"], "resources": []},
+    "logs:DeleteDeliverySource": {"action": "logs:DeleteDeliverySource", "types": ["delivery-destination"], "resources": [{"type": "delivery-source", "fill": {"DeliverySourceName": "name"}}]},
     "logs:DescribeDeliveries": {"action": "logs:DescribeDeliveries", "types": [], "resources": []},
     "logs:DescribeDeliveryDestinations": {"action": "logs:DescribeDeliveryDestinations", "types": [], "resources": []},
     "logs:DescribeDeliverySources": {"action": "logs:DescribeDeliverySources", "types": [], "resources": []},
