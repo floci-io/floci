@@ -767,9 +767,22 @@ are not supported.`
 `DescribeAddresses` report the same address. It follows the `RunInstances` rules: an address outside
 the subnet's CIDR, or one of the five AWS reserves, fails with `InvalidParameterValue`, and one that
 an instance, network interface, NAT gateway or interface endpoint already holds fails with
-`InvalidIPAddress.InUse`. A gateway has its primary address only, so the secondary-address
-parameters (`SecondaryAllocationIds`, `SecondaryPrivateIpAddresses` and
-`SecondaryPrivateIpAddressCount`) fail with `UnsupportedOperation` before anything is created.
+`InvalidIPAddress.InUse`.
+
+Secondary addresses sit on the gateway's one interface and are listed after the primary address in
+`natGatewayAddressSet`, with `isPrimary` `false`. On a public gateway each `SecondaryAllocationIds`
+Elastic IP is paired with the `SecondaryPrivateIpAddresses` entry at the same position, or with the
+next free address, and is held like the primary one: `DescribeAddresses` shows it associated, another
+gateway given it is created `failed`, `ReleaseAddress` refuses it, and `DeleteNatGateway` hands it
+back. A private gateway takes the listed `SecondaryPrivateIpAddresses` plus
+`SecondaryPrivateIpAddressCount` more free addresses. Listed addresses follow the `PrivateIpAddress`
+rules. `SecondaryPrivateIpAddressCount` on a public gateway, or a secondary Elastic IP on a private
+one, fails with `InvalidParameterCombination`, and a count outside 1 to 31 with
+`InvalidParameterValue`. `AssociateNatGatewayAddress`, `DisassociateNatGatewayAddress`,
+`AssignPrivateNatGatewayAddress` and `UnassignPrivateNatGatewayAddress` are not implemented. An
+`AWS::EC2::NatGateway` whose secondary addresses change is still updated in place, as on AWS: it
+keeps its id, a secondary the template still names keeps its address, a dropped Elastic IP is handed
+back, and a new address that is already held fails the update and leaves the gateway as it was.
 
 ### Capacity Reservations
 

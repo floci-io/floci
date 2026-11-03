@@ -4481,14 +4481,15 @@ public class Ec2QueryHandler {
 
     private Response handleCreateNatGateway(MultivaluedMap<String, String> p, String region) {
         Ec2Service.requireZonalNatGateway(p.getFirst("AvailabilityMode"));
-        Ec2Service.requireNoSecondaryNatGatewayAddresses(getList(p, "SecondaryAllocationId"),
-                getList(p, "SecondaryPrivateIpAddress"), p.getFirst("SecondaryPrivateIpAddressCount"));
         NatGateway natGateway = service.createNatGateway(
                 region,
                 p.getFirst("SubnetId"),
                 p.getFirst("AllocationId"),
                 p.getFirst("ConnectivityType"),
                 p.getFirst("PrivateIpAddress"),
+                getList(p, "SecondaryAllocationId"),
+                getList(p, "SecondaryPrivateIpAddress"),
+                p.getFirst("SecondaryPrivateIpAddressCount"),
                 parseTagsForResource(p, "natgateway"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateNatGatewayResponse", AwsNamespaces.EC2)
