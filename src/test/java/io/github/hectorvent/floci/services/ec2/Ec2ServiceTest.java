@@ -2631,7 +2631,7 @@ class Ec2ServiceTest {
     void aNatGatewayCreateThatRunsOutOfAddressesGivesBackTheLeaseItTook() {
         VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
         Ec2Service service = mockedVpcNetworkService(vpcNetworks);
-        String subnetId = tinyNatSubnet(service);
+        String subnetId = privateSubnet(service, "us-east-1", "10.60.0.0/28");
         when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
                 .thenReturn(Optional.of("10.60.0.5"), Optional.empty());
 
@@ -2647,7 +2647,7 @@ class Ec2ServiceTest {
     void aNatGatewayUpdateThatRunsOutOfAddressesGivesBackTheLeaseItTook() {
         VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
         Ec2Service service = mockedVpcNetworkService(vpcNetworks);
-        String subnetId = tinyNatSubnet(service);
+        String subnetId = privateSubnet(service, "us-east-1", "10.60.0.0/28");
         when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
                 .thenReturn(Optional.of("10.60.0.6"), Optional.of("10.60.0.7"), Optional.empty());
         NatGateway nat = service.createNatGateway("us-east-1", subnetId, null, "private", List.of());
@@ -2660,11 +2660,6 @@ class Ec2ServiceTest {
         assertEquals(List.of("10.60.0.6"), service.describeNatGateways("us-east-1", List.of(nat.getNatGatewayId()),
                 Map.of()).getFirst().getNatGatewayAddresses().stream().map(NatGatewayAddress::getPrivateIp).toList(),
                 "the gateway keeps only its primary address");
-    }
-
-    private static String tinyNatSubnet(Ec2Service service) {
-        String vpcId = service.createVpc("us-east-1", "10.60.0.0/16", false).getVpcId();
-        return service.createSubnet("us-east-1", vpcId, "10.60.0.0/28", "us-east-1a").getSubnetId();
     }
 
     /**
