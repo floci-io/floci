@@ -179,6 +179,11 @@ final class PaymentCryptographyPinOperations {
         requireSymmetricMaterial(pvk, "generate a PIN verification value with");
         requireTdesKey(pvk, "generate a PIN verification value with");
         requireKeyMatchesFormat(pek, format, "EncryptionKeyIdentifier");
+        if (!givenBlock.isEmpty()) {
+            // The caller's own block is decrypted to recover the PIN, so the key has to be
+            // allowed to decrypt as well as to encrypt.
+            requireMode(pek.record, "Decrypt", "decrypting a PIN block");
+        }
 
         String pin;
         String encryptedPinBlock;

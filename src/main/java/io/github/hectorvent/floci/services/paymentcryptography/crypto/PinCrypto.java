@@ -58,12 +58,56 @@ public final class PinCrypto {
                 Hex.decode(pinField.toString()), Hex.decode(panField)));
     }
 
-    /** Recover the clear PIN digits from a Format-0 block. */
-    public static String decodeIso0PinBlock(String blockHex, String pan) {
+    /**
+     * Recover the clear PIN digits from a Format-0 or Format-3 block.
+     *
+     * <p>The block is checked before the PIN is read out of it. The format nibble says which
+     * format the block is, the length nibble says how long the PIN is, the digits have to be
+     * digits, and the fill has to be what the format says it is. A block that is not checked
+     * would give a PIN out of a block of another format, and a block that was made up would
+     * pass as one that was not.
+     *
+     * @param blockHex the clear block, as hexadecimal
+     * @param pan the account number the block is bound to
+     * @param format the format the block is in
+     * @return the PIN the block carries
+     */
+    public static String decodeIso0PinBlock(String blockHex, String pan, PinBlockFormat format) {
         String panField = "0000" + account12(pan);
-        String pinField = Hex.encode(Ciphers.xorPad(Hex.decode(blockHex), Hex.decode(panField)));
-        int len = Integer.parseInt(pinField.substring(1, 2), 16);
-        return pinField.substring(2, 2 + len);
+        String pinField = Hex.encodeUpper(Ciphers.xorPad(Hex.decode(blockHex), Hex.decode(panField)));
+        if (pinField.length() != 16) {
+            throw new IllegalArgumentException("the PIN block is " + pinField.length()
+                    + " characters; it is 16");
+        }
+        char formatNibble = pinField.charAt(0);
+        char wanted = format == PinBlockFormat.ISO_FORMAT_3 ? '3' : '0';
+        if (formatNibble != wanted) {
+            throw new IllegalArgumentException("the PIN block is a format " + formatNibble
+                    + " block, and a " + format.label() + " block was expected");
+        }
+        int len = Character.digit(pinField.charAt(1), 16);
+        if (len < 4 || len > 12) {
+            throw new IllegalArgumentException("the PIN block says the PIN is " + len
+                    + " digits; it is 4 to 12");
+        }
+        String pin = pinField.substring(2, 2 + len);
+        for (int i = 0; i < pin.length(); i++) {
+            if (!Character.isDigit(pin.charAt(i))) {
+                throw new IllegalArgumentException("the PIN block does not carry digits");
+            }
+        }
+        for (int i = 2 + len; i < pinField.length(); i++) {
+            char fill = pinField.charAt(i);
+            // Format 0 fills with F, and format 3 with a value in the range A to F.
+            boolean good = format == PinBlockFormat.ISO_FORMAT_3
+                    ? fill >= 'A' && fill <= 'F'
+                    : fill == 'F';
+            if (!good) {
+                throw new IllegalArgumentException("the PIN block does not carry the fill of a "
+                        + format.label() + " block");
+            }
+        }
+        return pin;
     }
 
     // ---- ISO 9564-1 Format 3 ------------------------------------------------
@@ -259,7 +303,8 @@ public final class PinCrypto {
             case ISO_FORMAT_0:
             case ISO_FORMAT_3:
                 return decodeIso0PinBlock(
-                        Hex.encodeUpper(Ciphers.tdesEcbDecrypt(Hex.decode(blockHex), key)), pan);
+                        Hex.encodeUpper(Ciphers.tdesEcbDecrypt(Hex.decode(blockHex), key)), pan,
+                        format);
             case ISO_FORMAT_4:
                 return decodeIso4PinBlock(blockHex, pan, key);
             default:
