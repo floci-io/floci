@@ -199,6 +199,25 @@ class AppSyncServiceTest {
     }
 
     @Test
+    void aRefusedApiKeyDescriptionLeavesTheExpiryAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-desc", "authenticationType", "API_KEY"), "us-east-1");
+        long original = NOW.getEpochSecond() + Duration.ofDays(10).getSeconds();
+        ApiKey created = service.createApiKey(api.getApiId(), Map.of("description", "kept", "expires", original));
+        ApiKey before = service.getApiKey(api.getApiId(), created.getId());
+        Long expiresBefore = before.getExpires();
+        Long deletesBefore = before.getDeletes();
+        long newExpires = NOW.getEpochSecond() + Duration.ofDays(30).getSeconds();
+
+        assertThrows(RuntimeException.class, () -> service.updateApiKey(api.getApiId(), created.getId(),
+                Map.of("expires", newExpires, "description", 42)));
+
+        ApiKey stored = service.getApiKey(api.getApiId(), created.getId());
+        assertEquals(expiresBefore, stored.getExpires());
+        assertEquals(deletesBefore, stored.getDeletes());
+        assertEquals("kept", stored.getDescription());
+    }
+
+    @Test
     void aRefusedDataSourceUpdateLeavesTheDescriptionAsItWas() {
         GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-ds", "authenticationType", "API_KEY"), "us-east-1");
         service.createDataSource(api.getApiId(), Map.of("name", "ds", "type", "NONE", "description", "kept"), "us-east-1");

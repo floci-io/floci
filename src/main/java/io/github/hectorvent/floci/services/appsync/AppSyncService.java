@@ -672,9 +672,9 @@ public class AppSyncService {
     }
 
     public ApiKey updateApiKey(String apiId, String keyId, Map<String, Object> request) {
-        ApiKey existing = getApiKey(apiId, keyId);
-        // The expiry is checked against the bounds before anything is written, so a refused
-        // update leaves the key as it was.
+        ApiKey existing = copyOf(getApiKey(apiId, keyId), ApiKey.class);
+        // Applied to a copy and stored last, so a refused expiry or a description of the wrong
+        // type leaves the stored key as it was.
         if (request.containsKey("expires")) {
             applyApiKeyExpires(existing, parseExpires(request.get("expires")));
         }
