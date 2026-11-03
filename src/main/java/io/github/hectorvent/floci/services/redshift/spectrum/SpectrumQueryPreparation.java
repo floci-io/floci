@@ -220,8 +220,9 @@ public class SpectrumQueryPreparation {
     private void dropTableLocked(ExternalStatement.DropTable statement, ExternalSchemaBinding binding,
                                  SpectrumSession session, BackendSql backend) {
         boolean exists = true;
+        Table existing = null;
         try {
-            glue.getTable(binding.glueDatabase(), statement.tableName());
+            existing = glue.getTable(binding.glueDatabase(), statement.tableName());
         } catch (AwsException exception) {
             if (!statement.ifExists() || !"EntityNotFoundException".equals(exception.getErrorCode())) {
                 throw exception;
@@ -229,9 +230,14 @@ public class SpectrumQueryPreparation {
             exists = false;
         }
         requireSchemaOwner(backend, binding.schemaName());
+        // The relation is a view when the last load of the table made one; a cold table has none, and then its
+        // Glue definition says what a load would make.
+        boolean partitioned = materializer.loadedAsPartitioned(session.clusterKey(), session.databaseName(),
+                binding.schemaName(), statement.tableName())
+                || existing != null && existing.getPartitionKeys() != null && !existing.getPartitionKeys().isEmpty();
         // Cold tables have no PostgreSQL relation. Check any cached relation's dependencies before deleting Glue metadata.
         backend.execute(ExternalTableMaterializer.dropRelationSql(binding.schemaName(), statement.tableName(),
-                statement.cascade()));
+                partitioned, statement.cascade()));
         materializer.forget(session.clusterKey(), session.databaseName(), binding.schemaName(), statement.tableName());
         if (exists) {
             glue.deleteTable(binding.glueDatabase(), statement.tableName());

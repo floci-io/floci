@@ -26,7 +26,6 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -61,9 +60,8 @@ public class ExternalTableMaterializer {
     private static final String SCRATCH_KEY_PREFIX = "spectrum-";
     private static final String HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__";
     static final String PARTITION_COLUMN = "_floci_partition";
-    /** Prefix of the table behind the view of a partitioned external table. */
-    public static final String BACKING_PREFIX = "_floci_spectrum_";
-    private static final int MAX_IDENTIFIER_BYTES = 63;
+    /** The schema of the tables behind the views of partitioned external tables. */
+    public static final String BACKING_SCHEMA = "floci_spectrum";
     private static final Duration STALE_SCRATCH_AGE = Duration.ofHours(1);
     private static final String ICEBERG_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
     private static final String ICEBERG_MANIFESTS = "SELECT DISTINCT manifest_path FROM read_avro(%s)";
@@ -788,24 +786,30 @@ public class ExternalTableMaterializer {
             }
             // A partitioned table keeps the partition each row came from in a backing table, and the name the
             // user queries is a view of the declared columns only, so that SELECT * returns what Glue declares.
-            String physical = hasPartitionKeys(table) ? schema + "." + quote(backingName(table.getName())) : target;
-            String view = physical.equals(target) ? "" : "CREATE OR REPLACE VIEW " + target + " AS SELECT "
+            boolean partitioned = hasPartitionKeys(table);
+            String physical = partitioned ? backingTable(binding.schemaName(), table.getName()) : target;
+            String view = !partitioned ? "" : "CREATE OR REPLACE VIEW " + target + " AS SELECT "
                     + plan.columns().stream().map(column -> quote(column.getName())).collect(Collectors.joining(", "))
                     + " FROM " + physical + "; ";
+            String backingSchema = partitioned ? "CREATE SCHEMA IF NOT EXISTS " + quote(BACKING_SCHEMA) + "; " : "";
             if (deletions != null) {
                 // the table already holds other partitions, so only the ones named here are replaced
                 String delete = deletions.isEmpty() ? "" : "DELETE FROM " + physical + " WHERE "
                         + deletions.stream().map(values -> quote(PARTITION_COLUMN) + " = '" + partitionId(values) + "'")
                         .distinct().collect(Collectors.joining(" OR ")) + "; ";
-                backend.execute("CREATE TABLE IF NOT EXISTS " + physical + " (" + definitions + "); " + delete
+                backend.execute(backingSchema + "CREATE TABLE IF NOT EXISTS " + physical + " (" + definitions + "); " + delete
                         + "INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view + "DROP TABLE " + staging);
             } else if (definitions.equals(loadedDefinitions)) {
-                backend.execute("CREATE TABLE IF NOT EXISTS " + physical + " (" + definitions + "); TRUNCATE " + physical
-                        + "; INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view + "DROP TABLE " + staging);
-            } else {
-                backend.execute(dropRelationSql(binding.schemaName(), table.getName(), false) + "; CREATE TABLE " + physical
-                        + " (" + definitions + "); INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view
+                backend.execute(backingSchema + "CREATE TABLE IF NOT EXISTS " + physical + " (" + definitions + "); TRUNCATE "
+                        + physical + "; INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view
                         + "DROP TABLE " + staging);
+            } else {
+                // the relation to replace is a view only if the last load of this table made one
+                boolean wasPartitioned = loadedDefinitions == null ? partitioned : loadedDefinitions.contains(quote(PARTITION_COLUMN));
+                String drop = dropRelationSql(binding.schemaName(), table.getName(), wasPartitioned, false) + "; ";
+                String dropBacking = partitioned && !wasPartitioned ? "DROP TABLE IF EXISTS " + physical + "; " : "";
+                backend.execute(backingSchema + drop + dropBacking + "CREATE TABLE " + physical + " (" + definitions
+                        + "); INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view + "DROP TABLE " + staging);
             }
             stagingCreated = false;
             return definitions;
@@ -860,29 +864,33 @@ public class ExternalTableMaterializer {
         return value;
     }
 
-    /** The table behind the view of a partitioned external table. PostgreSQL cuts an identifier at 63 bytes. */
-    static String backingName(String tableName) {
-        String name = BACKING_PREFIX + tableName;
-        return name.getBytes(StandardCharsets.UTF_8).length <= MAX_IDENTIFIER_BYTES ? name
-                : BACKING_PREFIX + Digests.sha256Hex(tableName).substring(0, 32);
+    /**
+     * The table behind the view of a partitioned external table. It lives in a schema of its own, under a name
+     * made from the schema and table it backs, so it cannot meet a table of the user's, and the name stays
+     * within the 63 bytes PostgreSQL keeps of an identifier.
+     */
+    static String backingTable(String schemaName, String tableName) {
+        return quote(BACKING_SCHEMA) + "." + quote("t_" + Digests.sha256Hex(schemaName + "\u0000" + tableName).substring(0, 32));
     }
 
     /**
-     * Drops what PostgreSQL holds for an external table: a view and its backing table when the table is
-     * partitioned, a plain table otherwise, whichever the name is now. Dependent objects stop a RESTRICT drop.
+     * Drops what PostgreSQL holds for an external table: the view and the backing table when it is partitioned,
+     * the table otherwise. Which one it is cannot be asked of PostgreSQL here, because DROP VIEW refuses a table
+     * and DROP TABLE a view. Dependent objects stop a RESTRICT drop.
      */
-    static String dropRelationSql(String schemaName, String tableName, boolean cascade) {
+    static String dropRelationSql(String schemaName, String tableName, boolean partitioned, boolean cascade) {
         String relation = quote(schemaName) + "." + quote(tableName);
         String mode = cascade ? " CASCADE" : " RESTRICT";
-        return "DO $floci$ BEGIN IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-                + "WHERE n.nspname = " + literal(schemaName) + " AND c.relname = " + literal(tableName)
-                + " AND c.relkind = 'v') THEN DROP VIEW " + relation + mode + "; ELSE DROP TABLE IF EXISTS " + relation
-                + mode + "; END IF; END $floci$; DROP TABLE IF EXISTS " + quote(schemaName) + "."
-                + quote(backingName(tableName)) + mode;
+        if (!partitioned) {
+            return "DROP TABLE IF EXISTS " + relation + mode;
+        }
+        return "DROP VIEW IF EXISTS " + relation + mode + "; DROP TABLE IF EXISTS " + backingTable(schemaName, tableName) + mode;
     }
 
-    private static String literal(String value) {
-        return "'" + value.replace("'", "''") + "'";
+    /** Whether the table in PostgreSQL was last loaded as a view over a backing table. */
+    public boolean loadedAsPartitioned(String clusterKey, String databaseName, String schemaName, String tableName) {
+        String signature = schemaSignatures.get(clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName);
+        return signature != null && signature.contains(quote(PARTITION_COLUMN));
     }
 
     static String partitionId(List<String> values) {
