@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.eks.EksService;
@@ -289,7 +290,12 @@ public class ResourceArnBuilder {
             return List.of("*");
         }
         if (LogGroupTagTarget.supports(action)) {
-            return List.of(LogGroupTagTarget.resolve(body.path("resourceArn").asText(), region, accountId, partition).arn());
+            String resourceArn = body.path("resourceArn").asText();
+            // A delivery source, destination or delivery is tagged through the same operations.
+            if (CloudWatchLogsDeliveryService.isDeliveryResourceArn(resourceArn)) {
+                return List.of(resourceArn);
+            }
+            return List.of(LogGroupTagTarget.resolve(resourceArn, region, accountId, partition).arn());
         }
         String name = body.path("logGroupName").asText();
         String resource = "log-group:" + name + (stream
