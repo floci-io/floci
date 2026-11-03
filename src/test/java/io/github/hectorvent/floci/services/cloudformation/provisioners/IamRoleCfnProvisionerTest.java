@@ -213,8 +213,8 @@ class IamRoleCfnProvisionerTest {
         // stay on the role while the stack still reported UPDATE_COMPLETE.
         IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
                 "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
-        existing.getInlinePolicies().put("keep", EMPTY_TRUST);
-        existing.getInlinePolicies().put("drop", EMPTY_TRUST);
+        existing.getInlinePolicies().put("keep,policy", EMPTY_TRUST);
+        existing.getInlinePolicies().put("drop,policy", EMPTY_TRUST);
         existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Keep");
         existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Drop");
         when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
@@ -224,7 +224,7 @@ class IamRoleCfnProvisionerTest {
         StackResource r = resource();
         r.setPhysicalId("app-role");
         r.getAttributes().put("RoleId", "AROAapp-role");
-        r.getAttributes().put("__FlociInlinePolicyNames", "keep\ndrop");
+        r.getAttributes().put("__FlociInlinePolicyNames", "keep,policy\ndrop,policy");
         r.getAttributes().put("__FlociManagedPolicyArns",
                 "arn:aws:iam::aws:policy/Keep\narn:aws:iam::aws:policy/Drop");
 
@@ -233,16 +233,16 @@ class IamRoleCfnProvisionerTest {
                   "RoleName": "app-role",
                   "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Keep"],
                   "Policies": [
-                    {"PolicyName": "keep", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                    {"PolicyName": "keep,policy", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
                   ]
                 }
                 """), ctx());
 
-        verify(iam).deleteRolePolicy("app-role", "drop");
+        verify(iam).deleteRolePolicy("app-role", "drop,policy");
         verify(iam).detachRolePolicy("app-role", "arn:aws:iam::aws:policy/Drop");
-        verify(iam, never()).deleteRolePolicy("app-role", "keep");
+        verify(iam, never()).deleteRolePolicy("app-role", "keep,policy");
         verify(iam, never()).detachRolePolicy("app-role", "arn:aws:iam::aws:policy/Keep");
-        assertEquals("keep", r.getAttributes().get("__FlociInlinePolicyNames"));
+        assertEquals("keep,policy", r.getAttributes().get("__FlociInlinePolicyNames"));
     }
 
     @Test

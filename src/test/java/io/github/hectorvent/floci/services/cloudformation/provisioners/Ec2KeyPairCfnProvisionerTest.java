@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -50,7 +51,7 @@ class Ec2KeyPairCfnProvisionerTest {
     private final Ec2Service ec2 = mock(Ec2Service.class);
     private final SsmService ssm = mock(SsmService.class);
     private final Ec2KeyPairCfnProvisioner provisioner = new Ec2KeyPairCfnProvisioner(ec2, ssm);
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
 
     @Test
     void aCreatedKeyBacksRefAndGetAttAndKeepsItsPrivateKeyInASecureStringParameter() throws Exception {
@@ -306,7 +307,8 @@ class Ec2KeyPairCfnProvisionerTest {
         when(ec2.describeKeyPairs(REGION, List.of("next"), List.of()))
                 .thenReturn(List.of(created("next", "key-2")));
 
-        assertTrue(realProvisioner.completeUpdate(previous).complete());
+        StackResource restored = mapper.readValue(mapper.writeValueAsBytes(previous), StackResource.class);
+        assertTrue(realProvisioner.completeUpdate(restored).complete());
 
         assertEquals("preexisting-value", realSsm.getParameter("/ec2/keypair/key-2", REGION).getValue());
         assertEquals("private-key-1", realSsm.getParameter("/ec2/keypair/key-1", REGION).getValue());

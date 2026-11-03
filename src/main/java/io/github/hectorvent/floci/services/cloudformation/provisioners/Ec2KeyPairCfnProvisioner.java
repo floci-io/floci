@@ -20,7 +20,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.TreeSet;
 
 /**
  * Provisions {@code AWS::EC2::KeyPair}. The key name is the physical id and {@code Ref};
@@ -98,7 +97,7 @@ public class Ec2KeyPairCfnProvisioner implements CfnResourceProvisioner {
         ObjectNode inputs = inputs(name, keyType, keyFormat, publicKeyMaterial, tags);
 
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
-        Set<String> unownedParameterIds = unownedParameters(r);
+        Set<String> unownedParameterIds = CfnTrackedSets.read(r, UNOWNED_PARAMETERS_ATTR);
         // A dispatcher stub created nothing, so a key that takes over its id is a create.
         if (ctx.isUpdate() && !CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore)) {
             if (madeFrom(readInputs(CREATE_ONLY_INPUTS.read(attributesBefore), r), inputs)) {
@@ -132,11 +131,11 @@ public class Ec2KeyPairCfnProvisioner implements CfnResourceProvisioner {
         }
         if (publicKeyMaterial == null) {
             unownedParameterIds.add(key.getKeyPairId());
-            putUnownedParameters(r, unownedParameterIds);
+            CfnTrackedSets.write(r, UNOWNED_PARAMETERS_ATTR, unownedParameterIds);
         }
         try {
             CfnRollback.guarded(r, ctx, true,
-                    () -> deleteKeyPair(key, ctx.region(), unownedParameters(r)),
+                    () -> deleteKeyPair(key, ctx.region(), CfnTrackedSets.read(r, UNOWNED_PARAMETERS_ATTR)),
                     () -> { },
                     () -> {
                         if (!tags.isEmpty()) {
@@ -174,47 +173,15 @@ public class Ec2KeyPairCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private static Set<String> unownedParameters(StackResource resource) {
-        Set<String> ids = new TreeSet<>();
-        String encoded = resource.getAttributes().get(UNOWNED_PARAMETERS_ATTR);
-        if (encoded == null) {
-            return ids;
-        }
-        try {
-            JsonNode recorded = MAPPER.readTree(encoded);
-            if (recorded == null || !recorded.isArray()) {
-                throw new IllegalStateException("Invalid " + UNOWNED_PARAMETERS_ATTR + " on " + resource.getLogicalId());
-            }
-            for (JsonNode id : recorded) {
-                if (!id.isTextual() || id.textValue().isBlank()) {
-                    throw new IllegalStateException("Invalid key pair id in " + UNOWNED_PARAMETERS_ATTR);
-                }
-                ids.add(id.textValue());
-            }
-            return ids;
-        } catch (JsonProcessingException failure) {
-            throw new IllegalStateException("Cannot read " + UNOWNED_PARAMETERS_ATTR + " on "
-                    + resource.getLogicalId(), failure);
-        }
-    }
-
     private static void recordParameterOwnership(StackResource resource, String keyPairId,
                                                  ParameterOwnership ownership) {
-        Set<String> ids = unownedParameters(resource);
+        Set<String> ids = CfnTrackedSets.read(resource, UNOWNED_PARAMETERS_ATTR);
         if (ownership == ParameterOwnership.UNOWNED) {
             ids.add(keyPairId);
         } else {
             ids.remove(keyPairId);
         }
-        putUnownedParameters(resource, ids);
-    }
-
-    private static void putUnownedParameters(StackResource resource, Set<String> ids) {
-        if (ids.isEmpty()) {
-            resource.getAttributes().remove(UNOWNED_PARAMETERS_ATTR);
-        } else {
-            resource.getAttributes().put(UNOWNED_PARAMETERS_ATTR, MAPPER.valueToTree(ids).toString());
-        }
+        CfnTrackedSets.write(resource, UNOWNED_PARAMETERS_ATTR, ids);
     }
 
     /**
@@ -314,7 +281,7 @@ public class Ec2KeyPairCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         deleteNamed(resource.getPhysicalId(), createdKeyId(resource.getAttributes(), resource), region,
-                unownedParameters(resource));
+                CfnTrackedSets.read(resource, UNOWNED_PARAMETERS_ATTR));
     }
 
     /**
@@ -375,7 +342,7 @@ public class Ec2KeyPairCfnProvisioner implements CfnResourceProvisioner {
     private ReplacementCleanup.Deleter owedDeleter(StackResource r) {
         return (type, name, region) -> {
             Map<String, String> owed = createdKeys(r);
-            deleteNamed(name, owed.get(name), region, unownedParameters(r));
+            deleteNamed(name, owed.get(name), region, CfnTrackedSets.read(r, UNOWNED_PARAMETERS_ATTR));
             if (owed.remove(name) != null) {
                 putCreatedKeys(r, owed);
             }
@@ -427,9 +394,9 @@ public class Ec2KeyPairCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
-        Set<String> unowned = unownedParameters(previous);
-        unowned.addAll(unownedParameters(attempted));
-        putUnownedParameters(previous, unowned);
+        Set<String> unowned = CfnTrackedSets.read(previous, UNOWNED_PARAMETERS_ATTR);
+        unowned.addAll(CfnTrackedSets.read(attempted, UNOWNED_PARAMETERS_ATTR));
+        CfnTrackedSets.write(previous, UNOWNED_PARAMETERS_ATTR, unowned);
         Map<String, String> owed = createdKeys(previous);
         createdKeys(attempted).forEach((name, id) -> {
             if (!name.equals(previous.getPhysicalId())) {
