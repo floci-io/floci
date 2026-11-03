@@ -87,7 +87,7 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
     }
 
     @Test
-    void theDerivationsAreTheOnesJposGives() {
+    void theDerivationsAreTheOnesTheStandardGives() {
         byte[] masterKey = EmvCrypto.deriveIccMasterKey(Hex.decode(IMK), PAN, PSN);
         assertEquals("4F5891BFD91C5B106B3445AB2AFD7A89", Hex.encodeUpper(masterKey));
         assertEquals("C764C813866737C7985192465B1AC8EA",

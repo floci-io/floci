@@ -81,7 +81,7 @@ class PaymentCryptographyCardValidationOperationsTest {
     }
 
     @Test
-    void theCardVerificationValueIsTheOneJposGives() {
+    void theCardVerificationValueIsTheOneTheStandardGives() {
         assertEquals("131", CvvCrypto.computeCvv(PAN, EXPIRY, "201", CVK));
         assertEquals("886", CvvCrypto.computeCvv(PAN, EXPIRY, "000", CVK));
         assertEquals("660", CvvCrypto.computeCvv(PAN, EXPIRY, "999", CVK));
