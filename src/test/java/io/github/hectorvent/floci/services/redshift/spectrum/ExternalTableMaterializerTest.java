@@ -1106,6 +1106,197 @@ class ExternalTableMaterializerTest {
         verify(duck, never()).query(anyString(), any(), anyString(), anyString(), any());
     }
 
+    private static final String DAY_ONE_SQL = "SELECT * FROM analytics.events WHERE day = '2026-01-01'";
+    private static final String DAY_TWO_SQL = "SELECT * FROM analytics.events WHERE day = '2026-01-02'";
+
+    private Table dayPartitionedTable() {
+        Table table = csvTable();
+        table.setPartitionKeys(List.of(new Column("day", "string")));
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        return table;
+    }
+
+    private Partition dayPartition(Table table, String day, String prefix, String etag) {
+        StorageDescriptor descriptor = new StorageDescriptor();
+        descriptor.setLocation("s3://bucket/" + prefix);
+        descriptor.setInputFormat("org.apache.hadoop.mapred.TextInputFormat");
+        descriptor.setColumns(table.getStorageDescriptor().getColumns());
+        Partition partition = new Partition();
+        partition.setValues(List.of(day));
+        partition.setStorageDescriptor(descriptor);
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq(prefix), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(new S3Object("bucket", prefix + "part-1.csv", new byte[]{1}, "text/csv", etag)),
+                        List.of(), false, null));
+        return partition;
+    }
+
+    @Test
+    void loadsOnlyThePartitionsTheWhereCanSelect() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_TWO_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/two/part-1.csv")
+                && !sql.contains("s3://bucket/one/")), any(), anyString(), eq(ACCOUNT));
+        verify(s3, never()).listObjectsWithPrefixes(eq("bucket"), eq("one/"), any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void addsAPartitionAnotherQueryNeedsWithoutRemovingTheOnesAlreadyLoaded() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+        materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL);
+        int loaded = backend.statements.size();
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_TWO_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        List<String> added = backend.statements.subList(loaded, backend.statements.size());
+        assertThat(added.stream().noneMatch(sql -> sql.contains("TRUNCATE") || sql.contains("DROP TABLE \"analytics\"")),
+                equalTo(true));
+        assertThat(added.stream().anyMatch(sql -> sql.contains("INSERT INTO \"analytics\".\"events\"")), equalTo(true));
+        assertThat(added.stream().noneMatch(sql -> sql.contains("DELETE FROM")), equalTo(true));
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", null),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+    }
+
+    @Test
+    void replacesOnlyAPartitionWhoseObjectsChanged() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+        materializer.ensureCurrent(backend, session(false), BINDING, "events", null);
+        dayPartition(table, "2026-01-01", "one/", "e1-changed");
+        int loaded = backend.statements.size();
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", null),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        List<String> changed = backend.statements.subList(loaded, backend.statements.size());
+        assertThat(changed.stream().anyMatch(sql -> sql.contains(
+                "DELETE FROM \"analytics\".\"events\" WHERE (\"day\" = CAST('2026-01-01' AS text))")), equalTo(true));
+        assertThat(changed.stream().noneMatch(sql -> sql.contains("2026-01-02")), equalTo(true));
+        verify(duck, times(2)).execute(anyString(), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void dropsTheRowsOfAPartitionGlueNoLongerHas() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+        materializer.ensureCurrent(backend, session(false), BINDING, "events", null);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one));
+        int loaded = backend.statements.size();
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        List<String> dropped = backend.statements.subList(loaded, backend.statements.size());
+        assertThat(dropped.stream().anyMatch(sql -> sql.contains(
+                "DELETE FROM \"analytics\".\"events\" WHERE (\"day\" = CAST('2026-01-02' AS text))")), equalTo(true));
+    }
+
+    @Test
+    void matchesTheNullPartitionRowsOfADeletedHiveDefaultPartition() {
+        Table table = dayPartitionedTable();
+        Partition defaultPartition = dayPartition(table, "__HIVE_DEFAULT_PARTITION__", "none/", "e0");
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(defaultPartition, one));
+        materializer.ensureCurrent(backend, session(false), BINDING, "events", null);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one));
+        int loaded = backend.statements.size();
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events", null);
+
+        assertThat(backend.statements.subList(loaded, backend.statements.size()).stream()
+                .anyMatch(sql -> sql.contains("WHERE (\"day\" IS NULL)")), equalTo(true));
+    }
+
+    @Test
+    void reloadsTheTableWhenItsDefinitionChanges() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one));
+        materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL);
+        table.setVersionId("2");
+        int loaded = backend.statements.size();
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        assertThat(backend.statements.subList(loaded, backend.statements.size()).stream()
+                .anyMatch(sql -> sql.contains("TRUNCATE")), equalTo(true));
+    }
+
+    @Test
+    void doesNotReadAPartitionTheWhereExcludesEvenWhenItsObjectsAreDenied() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+        doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)
+                .authorizeSignedGetObject(anyString(), anyString(), eq("bucket"), eq("two/part-1.csv"));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL);
+
+        SpectrumSqlException denied = assertThrows(SpectrumSqlException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_TWO_SQL));
+        assertThat(denied.sqlState(), equalTo("42501"));
+    }
+
+    @Test
+    void loadsEveryPartitionInATransactionAndOnAnExtendedQueryBackend() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+        materializer.ensureCurrent(backend, session(true), BINDING, "events", DAY_ONE_SQL);
+        RecordingBackend extended = new RecordingBackend();
+        extended.publicationAllowed = false;
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_ONE_SQL);
+
+        verify(duck, times(2)).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void loadsEveryPartitionWhenTheQueryHasNoPartitionPredicate() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE id = 1");
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void createsTheTableEmptyWhenNoPartitionIsSelected() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one));
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_TWO_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+        assertThat(backend.statements.stream().anyMatch(sql -> sql.contains("CREATE TABLE")), equalTo(true));
+    }
+
     private static Map<String, Object> schemaRow(String file, String name) {
         return Map.of("file_name", file, "name", name);
     }
