@@ -1528,10 +1528,10 @@ class RdsContainerManagerTest {
 
         assertTrue(script.contains("WITH (FORCE)"),
                 "Restore must terminate sessions such as pg_cron connected to the target database");
-        assertTrue(script.contains("datistemplate = false"),
-                "Script must only drop non-template databases");
-        assertTrue(script.contains("datname <> 'postgres'"),
-                "Script must preserve the postgres database");
+        assertTrue(script.contains("datname NOT IN ('postgres', 'template0', 'template1')"),
+                "Script must preserve the postgres database and the system templates");
+        assertTrue(script.contains("IS_TEMPLATE false"),
+                "Script must drop template databases an image created, which the dump creates again");
         assertTrue(script.contains("rolname <> current_user"),
                 "Script must not drop the current user");
         assertTrue(script.contains("rolname NOT LIKE 'pg_%'"),
