@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.testing.ContainerDataPlaneProfile;
 import io.github.hectorvent.floci.testing.DockerAvailability;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.S3TestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
@@ -91,7 +92,7 @@ class EmrDockerRunnerDockerIntegrationTest {
         cleanup.register(s3::close);
         bucket = "emr-docker-" + UUID.randomUUID().toString().substring(0, 8);
         s3.createBucket(request -> request.bucket(bucket));
-        cleanup.register(this::deleteBucket);
+        cleanup.register(() -> S3TestClients.deleteBucket(s3, bucket));
         put("in/words.txt", WORDS);
         put("side/mapper.py", MAPPER);
         put("side/reducer.py", REDUCER);
@@ -256,13 +257,6 @@ class EmrDockerRunnerDockerIntegrationTest {
         String stepId = emr("AddJobFlowSteps", request.toString())
                 .then().statusCode(200).extract().jsonPath().getString("StepIds[0]");
         return awaitStep(clusterId, stepId).jsonPath().getString("Step.Status.State");
-    }
-
-    /** Empties the test's bucket and deletes it. */
-    private void deleteBucket() {
-        s3.listObjectsV2Paginator(request -> request.bucket(bucket)).contents()
-                .forEach(object -> s3.deleteObject(request -> request.bucket(bucket).key(object.key())));
-        s3.deleteBucket(request -> request.bucket(bucket));
     }
 
     private void put(String key, String text) {

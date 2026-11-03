@@ -9,7 +9,7 @@ import software.amazon.awssdk.services.s3.S3Client;
 
 import java.net.URI;
 
-/** AWS SDK S3 clients pointed at the Floci instance a {@code @QuarkusTest} runs. */
+/** AWS SDK S3 clients pointed at the Floci instance a {@code @QuarkusTest} runs, and what a test does with them. */
 public final class S3TestClients {
 
     private S3TestClients() {
@@ -24,5 +24,12 @@ public final class S3TestClients {
                 .region(Region.US_EAST_1)
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("741624100001", "test")))
                 .build();
+    }
+
+    /** Empties {@code bucket}, every page of it, and deletes it, as a test cleans up the bucket it wrote to. */
+    public static void deleteBucket(S3Client s3, String bucket) {
+        s3.listObjectsV2Paginator(request -> request.bucket(bucket)).contents()
+                .forEach(object -> s3.deleteObject(request -> request.bucket(bucket).key(object.key())));
+        s3.deleteBucket(request -> request.bucket(bucket));
     }
 }

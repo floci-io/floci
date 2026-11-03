@@ -1388,6 +1388,7 @@ public class EmrService implements Resettable {
             }
             SparkJobRunner.Job job = application == null && command == null ? null
                     : new SparkJobRunner.Job(SERVICE, step.getId(), accountId, region, cluster.getReleaseLabel(),
+                    SparkJobRunner.Engine.SPARK,
                     cluster.getBootstrapImage() != null ? cluster.getBootstrapImage() : imageTemplate, null,
                     dockerNetwork, executionRole(cluster, step, accountId),
                     EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER),
