@@ -38,14 +38,22 @@ before(async () => {
     server.stderr.on('data', (chunk) => { stderr += chunk; });
     url = `http://127.0.0.1:${port}`;
     for (let attempt = 0; attempt < 100; attempt++) {
-      if (server.exitCode !== null) break;
+      if (server.exitCode !== null) {
+        break;
+      }
       try {
         const health = await fetch(`${url}/health`);
-        if (health.ok) return;
-      } catch { /* the runtime is still starting */ }
+        if (health.ok) {
+          return;
+        }
+      } catch (expected) {
+        // Health polling tolerates connection refusal until the runtime starts.
+      }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    if (!stderr.includes('EADDRINUSE')) break;
+    if (!stderr.includes('EADDRINUSE')) {
+      break;
+    }
   }
   throw new Error(`resolver runtime did not start: ${stderr}`);
 });
@@ -55,14 +63,16 @@ after(async () => {
     server.kill();
     await new Promise((resolve) => server.once('exit', resolve));
   }
-  if (runtimeDir) await rm(runtimeDir, { recursive: true, force: true });
+  if (runtimeDir) {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
 });
 
-async function evaluate(code, args = {}) {
+async function evaluate(code, args = {}, enforceSubset) {
   const response = await fetch(`${url}/evaluate`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ code, handler: 'request', context: { arguments: args } })
+    body: JSON.stringify({ code, handler: 'request', context: { arguments: args }, enforceSubset })
   });
   assert.equal(response.status, 200);
   return response.json();
@@ -166,3 +176,101 @@ for (const { name, args, expected } of cases) {
     assert.deepEqual(result.result, expected);
   });
 }
+
+test('a bounded number of subscription filter groups is accepted', async () => {
+  const fields = Object.fromEntries(Array.from({ length: 9 }, (_, i) =>
+    [`field${i}`, { eq: i, ne: i }]));
+  const result = await evaluate(resolver, { filter: fields });
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.equal(result.result.filterGroup.length, 512);
+});
+
+test('subscription filter expansion rejects excessive groups before allocating them', async () => {
+  const fields = Object.fromEntries(Array.from({ length: 10 }, (_, i) =>
+    [`field${i}`, { eq: i, ne: i }]));
+  const result = await evaluate(resolver, { filter: fields });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.type, 'RangeError');
+  assert.match(result.error.message, /subscription filter exceeds 1000 groups/i);
+});
+
+test('thirty double-operator fields are rejected without expanding their billion groups', async () => {
+  const fields = Object.fromEntries(Array.from({ length: 30 }, (_, i) =>
+    [`field${i}`, { eq: i, ne: i }]));
+  const result = await evaluate(resolver, { filter: fields });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.type, 'RangeError');
+  assert.match(result.error.message, /subscription filter exceeds 1000 groups/i);
+});
+
+test('subscription filter OR branches share the same group limit', async () => {
+  const branches = Array.from({ length: 1001 }, (_, i) => ({ field: { eq: i } }));
+  const withinBudget = await evaluate(resolver, { filter: { or: branches.slice(0, 1000) } });
+  assert.equal(withinBudget.ok, true, JSON.stringify(withinBudget.error));
+  assert.equal(withinBudget.result.filterGroup.length, 1000);
+  const result = await evaluate(resolver, { filter: { or: branches } });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.type, 'RangeError');
+  assert.match(result.error.message, /subscription filter exceeds 1000 groups/i);
+});
+
+test('strict filter rules share the same group limit', async () => {
+  const rules = Object.fromEntries(Array.from({ length: 1001 }, (_, i) =>
+    [`field${i}`, { eq: i }]));
+  const result = await evaluate(resolver, { filter: {}, rules });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.type, 'RangeError');
+  assert.match(result.error.message, /subscription filter exceeds 1000 groups/i);
+});
+
+test('subscription filter expansion also limits total emitted filter entries', async () => {
+  const branches = Array.from({ length: 1000 }, (_, i) => ({ branch: { eq: i } }));
+  const linearFields = Object.fromEntries(Array.from({ length: 9 }, (_, i) =>
+    [`field${i}`, { eq: i }]));
+  const withinBudget = await evaluate(resolver, {
+    filter: { or: branches, ...linearFields }
+  });
+  assert.equal(withinBudget.ok, true, JSON.stringify(withinBudget.error));
+  assert.equal(withinBudget.result.filterGroup.length, 1000);
+  assert.equal(withinBudget.result.filterGroup[0].filters.length, 10);
+
+  const result = await evaluate(resolver, {
+    filter: { or: branches, ...linearFields, overflow: { eq: true } }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.type, 'RangeError');
+  assert.match(result.error.message, /subscription filter exceeds 10000 filter entries/i);
+});
+
+test('repeated values cannot expand into an oversized subscription filter response', async () => {
+  const operators = Object.fromEntries(Array.from({ length: 1000 }, (_, i) =>
+    [`operator${i}`, i]));
+  const single = await evaluate(resolver, {
+    filter: { payload: { eq: 'x'.repeat(2 * 1024 * 1024) } }
+  });
+  assert.equal(single.ok, true, JSON.stringify(single.error));
+  const result = await evaluate(resolver, {
+    filter: { payload: { eq: 'x'.repeat(6144) }, choice: operators }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.type, 'RangeError');
+  assert.match(result.error.message, /subscription filter exceeds 5242880 output bytes/i);
+});
+
+test('output preflight stops serializing predicates as soon as the budget is exceeded', async () => {
+  const result = await evaluate(`
+    import { util } from '@aws-appsync/utils';
+    export function request() {
+      let calls = 0;
+      const value = { toJSON() { calls++; return 'x'.repeat(2 * 1024 * 1024); } };
+      try {
+        util.transform.toSubscriptionFilter({ choice: {
+          op0: value, op1: value, op2: value, op3: value
+        } });
+      } catch (error) {
+        return { calls, type: error.name };
+      }
+    }`, {}, false);
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  assert.deepEqual(result.result, { calls: 3, type: 'RangeError' });
+});
