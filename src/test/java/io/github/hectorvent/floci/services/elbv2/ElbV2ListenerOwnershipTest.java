@@ -474,6 +474,38 @@ class ElbV2ListenerOwnershipTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void bindRetryWaitsForBothTimerAndFailedServerClose(boolean timerFirst) {
+        Registry registry = new Registry();
+        Fixture fixture = new Fixture(registry);
+        Promise<Void> close = Promise.promise();
+        Listener listener = listener("delayed-close", 8443, false);
+        try {
+            fixture.nextClose = close;
+            fixture.failNextListenPort = 8443;
+            publishRuntime(fixture.plane, listener, REGION, null, List.of(rule("recovered")));
+            assertEquals(1, fixture.creations(8443));
+            assertEquals(1, fixture.closes(8443));
+            assertTrue(registry.containsKey(listener.getListenerArn()));
+            if (timerFirst) {
+                fixture.runNextTimer();
+                assertEquals(1, fixture.creations(8443), "timer must not bind while close is pending");
+                close.complete();
+            } else {
+                close.complete();
+                assertEquals(1, fixture.creations(8443), "close must not bypass the retry timer");
+                fixture.runNextTimer();
+            }
+            assertEquals(2, fixture.creations(8443));
+            assertTrue(fixture.timers.isEmpty());
+            fixture.serves(8443, "recovered");
+        } finally {
+            close.tryComplete();
+            fixture.plane.shutdown();
+        }
+    }
+
     @Test
     void repeatedBindFailuresBackOffWithoutDuplicatingPublication() {
         Fixture fixture = new Fixture(new Registry());
@@ -593,6 +625,7 @@ class ElbV2ListenerOwnershipTest {
         private final Map<Long, Handler<Long>> timers = new ConcurrentHashMap<>();
         private final AtomicLong timerSequence = new AtomicLong();
         private long nextTimerDelay;
+        private Promise<Void> nextClose;
         private volatile int failNextListenPort = -1;
 
         private Fixture(Registry registry) {
@@ -642,7 +675,9 @@ class ElbV2ListenerOwnershipTest {
                 });
                 when(server.close()).thenAnswer(ignored -> {
                     closed.computeIfAbsent(port, key -> new AtomicInteger()).incrementAndGet();
-                    return Future.succeededFuture();
+                    Promise<Void> pending = nextClose;
+                    nextClose = null;
+                    return pending == null ? Future.succeededFuture() : pending.future();
                 });
                 when(server.updateSSLOptions(any(SSLOptions.class), eq(true))).thenReturn(Future.succeededFuture(true));
                 return server;
