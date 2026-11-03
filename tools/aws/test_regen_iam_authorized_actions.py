@@ -209,7 +209,7 @@ def test_a_malformed_sdk_list_is_a_malformed_response():
 # validate: the offline --check gate
 # --------------------------------------------------------------------------- #
 def anchored(extra: dict[str, dict[str, str]] | None = None) -> dict:
-    document = r.build(ANCHOR_SERVICES, "a test")
+    document = r.build(ANCHOR_SERVICES, "a test", [])
     for namespace, operations in (extra or {}).items():
         document["authorizedActions"].setdefault(namespace, {}).update(operations)
     document["authorizedActions"] = {
@@ -219,39 +219,39 @@ def anchored(extra: dict[str, dict[str, str]] | None = None) -> dict:
 
 
 def test_a_freshly_built_document_validates():
-    assert r.validate(anchored()) == []
+    assert r.validate(anchored(), []) == []
 
 
 def test_an_action_in_another_namespace_is_rejected():
-    problems = r.validate(anchored({"sqs": {"PurgeQueueBatch": "sns:Publish"}}))
+    problems = r.validate(anchored({"sqs": {"PurgeQueueBatch": "sns:Publish"}}), [])
     assert any("not an action of sqs" in problem for problem in problems)
 
 
 def test_an_operation_mapped_to_its_own_name_is_rejected():
-    problems = r.validate(anchored({"sqs": {"Purgequeue": "sqs:PurgeQueue"}}))
+    problems = r.validate(anchored({"sqs": {"Purgequeue": "sqs:PurgeQueue"}}), [])
     assert any("its own name" in problem for problem in problems)
 
 
 def test_a_missing_anchor_is_rejected():
     document = anchored()
     del document["authorizedActions"]["sns"]
-    assert any("sns:PublishBatch" in problem for problem in r.validate(document))
+    assert any("sns:PublishBatch" in problem for problem in r.validate(document, []))
 
 
 def test_an_anchor_mapped_elsewhere_is_rejected():
     document = anchored()
     document["authorizedActions"]["sqs"]["SendMessageBatch"] = "sqs:ReceiveMessage"
-    assert any("sqs:SendMessageBatch" in problem for problem in r.validate(document))
+    assert any("sqs:SendMessageBatch" in problem for problem in r.validate(document, []))
 
 
 def test_an_unsorted_namespace_map_is_rejected():
     document = anchored()
     document["authorizedActions"] = dict(reversed(list(document["authorizedActions"].items())))
-    assert "authorizedActions is not sorted by namespace" in r.validate(document)
+    assert "authorizedActions is not sorted by namespace" in r.validate(document, [])
 
 
 def test_an_empty_map_is_rejected():
-    assert r.validate({"authorizedActions": {}}) == ["authorizedActions is missing or empty"]
+    assert r.validate({"authorizedActions": {}}, []) == ["authorizedActions is missing or empty"]
 
 
 # --------------------------------------------------------------------------- #
@@ -289,9 +289,17 @@ def test_generating_from_saved_files_writes_a_file_check_accepts(tmp_path):
     for document in ANCHOR_SERVICES:
         (sources / f"{document['Name']}.json").write_text(json.dumps(document), encoding="utf-8")
     output = tmp_path / "iam-authorized-actions.json"
-    assert r.main(["--source-dir", str(sources), "--output", str(output)]) == 0
-    assert r.main(["--check", "--output", str(output)]) == 0
+    routes = no_routes(tmp_path)
+    assert r.main(["--source-dir", str(sources), "--output", str(output), "--routes", routes]) == 0
+    assert r.main(["--check", "--output", str(output), "--routes", routes]) == 0
     assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output)]) == 0
+
+
+def no_routes(tmp_path) -> str:
+    """A routes file reading no scope's routes."""
+    routes = tmp_path / "rest-routes.json"
+    routes.write_text(json.dumps({"handRouted": {}, "models": {}}), encoding="utf-8")
+    return str(routes)
 
 
 def saved_sources(tmp_path, documents: list[dict]):
@@ -309,16 +317,84 @@ MALFORMED = {"Name": "sqs", "Operations": [
 def test_a_malformed_record_makes_generation_write_nothing(tmp_path):
     sources = saved_sources(tmp_path, ANCHOR_SERVICES + [MALFORMED])
     output = tmp_path / "iam-authorized-actions.json"
-    assert r.main(["--source-dir", str(sources), "--output", str(output)]) == 2
+    assert r.main(["--source-dir", str(sources), "--output", str(output), "--routes", no_routes(tmp_path)]) == 2
     assert not output.exists()
 
 
 def test_verify_reports_a_malformed_record_as_an_unreadable_reference(tmp_path):
     # Status 2 tells CI the reference could not be read, rather than that the vendored map is wrong.
     output = tmp_path / "iam-authorized-actions.json"
-    assert r.main(["--source-dir", str(saved_sources(tmp_path, ANCHOR_SERVICES)), "--output", str(output)]) == 0
+    assert r.main(["--source-dir", str(saved_sources(tmp_path, ANCHOR_SERVICES)), "--output", str(output),
+                   "--routes", no_routes(tmp_path)]) == 0
     malformed = tmp_path / "malformed"
     malformed.mkdir()
     (malformed / "sqs.json").write_text(json.dumps({"Name": "sqs", "Operations": [
         {"Name": "SendMessageBatch", "AuthorizedActions": [None]}]}), encoding="utf-8")
     assert r.main(["--verify", "--source-dir", str(malformed), "--output", str(output)]) == 2
+
+
+# --------------------------------------------------------------------------- #
+# actionsWithoutResourceTypes: the actions a route no rule maps may be checked as
+# --------------------------------------------------------------------------- #
+def typed(namespace: str, actions: dict[str, list[str]]) -> dict:
+    """A reference document whose actions act on the resource types given."""
+    return {"Name": namespace, "Operations": [],
+            "Actions": [{"Name": name, "Resources": [{"Name": kind} for kind in kinds]}
+                        for name, kinds in actions.items()]}
+
+
+ROUTES = {"handRouted": {"hand": "the rules route it alone"},
+          "models": {"svc": {"credentialScope": "svc"}, "svc-v2": {"credentialScope": "svc"},
+                     "other": {"credentialScope": "other"}, "hand": {"credentialScope": "hand"}}}
+
+
+def test_the_routed_scopes_are_every_models_but_the_hand_routed_ones():
+    assert r.routed_namespaces(ROUTES) == ["other", "svc"]
+
+
+def test_each_routed_scope_lists_its_actions_of_no_resource_type():
+    documents = [typed("svc", {"ListThings": [], "GetThing": ["thing"], "CreateThing": ["thing", "tag"]}),
+                 typed("other", {"GetOther": ["other"]}), typed("unrouted", {"ListUnrouted": []})]
+    assert r.actions_without_resource_types(documents, ["other", "svc"]) == {"other": [], "svc": ["ListThings"]}
+    built = r.build(ANCHOR_SERVICES + documents, "a test", ["other", "svc"])
+    assert built["actionsWithoutResourceTypes"] == {"other": [], "svc": ["ListThings"]}
+    assert r.validate(built, ["other", "svc"]) == []
+
+
+def test_a_routed_scope_the_reference_does_not_have_is_an_error():
+    with pytest.raises(ValueError, match="no namespace svc"):
+        r.actions_without_resource_types([typed("other", {})], ["other", "svc"])
+
+
+def test_the_listed_scopes_must_be_the_routed_ones_each_sorted():
+    document = r.build(ANCHOR_SERVICES + [typed("svc", {"ListThings": [], "ListMore": []})], "a test", ["svc"])
+    assert r.validate(document, ["svc"]) == []
+    assert any("not the scopes rest-routes.json reads" in problem for problem in r.validate(document, ["other", "svc"]))
+    document["actionsWithoutResourceTypes"]["svc"].reverse()
+    assert "actionsWithoutResourceTypes.svc is not sorted, or repeats an action" in r.validate(document, ["svc"])
+    del document["actionsWithoutResourceTypes"]
+    assert "actionsWithoutResourceTypes is missing" in r.validate(document, ["svc"])
+
+
+def test_verify_fails_on_a_listed_action_aws_gives_a_resource_type_and_reports_one_it_added():
+    untrue, added = r.verify_unscoped_against({"svc": ["GetThing", "ListThings"]},
+                                              {"svc": ["ListThings", "ListMore"]})
+    assert untrue == ["AWS gives svc:GetThing a resource type, or no longer has it"]
+    assert added == ["svc:ListMore"]
+    assert r.verify_unscoped_against({"svc": ["ListThings"]}, {"svc": ["ListThings"]}) == ([], [])
+
+
+def test_the_round_trip_lists_the_routed_scopes_actions(tmp_path):
+    documents = ANCHOR_SERVICES + [typed("svc", {"ListThings": [], "GetThing": ["thing"]}), typed("other", {})]
+    sources = saved_sources(tmp_path, documents)
+    routes = tmp_path / "rest-routes.json"
+    routes.write_text(json.dumps(ROUTES), encoding="utf-8")
+    output = tmp_path / "iam-authorized-actions.json"
+    assert r.main(["--source-dir", str(sources), "--output", str(output), "--routes", str(routes)]) == 0
+    assert json.loads(output.read_text())["actionsWithoutResourceTypes"] == {"other": [], "svc": ["ListThings"]}
+    assert r.main(["--check", "--output", str(output), "--routes", str(routes)]) == 0
+    assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output)]) == 0
+    (tmp_path / "later").mkdir()
+    given = saved_sources(tmp_path / "later", ANCHOR_SERVICES + [typed("svc", {"ListThings": ["thing"]}),
+                                                                 typed("other", {})])
+    assert r.main(["--verify", "--source-dir", str(given), "--output", str(output)]) == 1

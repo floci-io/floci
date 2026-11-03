@@ -1839,8 +1839,25 @@ it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
 `resourceArn` query parameter on the other bare routes.
 
-A route no rule maps is not checked, as an unsigned REST request is not; the other REST services'
-routes are not mapped yet.
+A route no rule maps is the operation whose route it matches in botocore's model of its service,
+vendored in `src/main/resources/aws/rest-routes.json` (`make aws-data-sync` regenerates it): of the
+routes it matches, the most specific, segment by segment from the left a literal before a label and a
+label before a greedy one, then the route naming more of the query. It is checked as that operation's
+action, the way a request naming its operation is, when Floci checks it on the resources AWS does:
+those its request names, which Floci builds for the service itself or reads from the request, or none,
+when the Service Reference gives the action no resource type, as AWS authorizes such an action on `*`.
+The actions of no resource type are vendored in `src/main/resources/aws/iam-authorized-actions.json`
+for each scope whose routes are read (`make iam-authorized-actions-sync` regenerates them). So
+OpenSearch Service's `ListDomainNames`, `ListVersions` and VPC endpoint operations, in both API
+versions, and Access Analyzer's `ListAnalyzers` and `ValidatePolicy` are checked by their routes. A
+route whose action AWS checks on a resource Floci neither builds nor reads, OpenSearch's domain
+operations and Access Analyzer's analyzer operations among them, is not checked: checked on `*`, a
+grant scoped to the domain or analyzer would be refused. The routes of
+Lambda, EKS, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL are all mapped by their rules,
+so none is checked differently. S3 and API Gateway are routed by their rules alone: S3 tells apart the
+operations of one route by their query and headers, and API Gateway is checked by HTTP method. A route
+matching nothing is not checked, as an unsigned REST request is not; the other REST services' routes
+are not vendored yet.
 
 An S3 `CreateBucket` is checked as `s3:CreateBucket`, and also needs one action for each header
 that configures the new bucket, as the CreateBucket API reference lists them:

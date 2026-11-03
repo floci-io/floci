@@ -55,6 +55,11 @@ public final class RequestResources {
         return operation != null && RequestResourceMembers.table().operations().containsKey(operation);
     }
 
+    /** Whether {@code ResourceArnBuilder} builds the resources of this namespace's requests itself. */
+    public static boolean builtByHand(String namespace) {
+        return namespace != null && RequestResourceMembers.table().handBuilt().contains(namespace);
+    }
+
     /**
      * The ARNs of the resources a request names, in the request's partition, Region and account: empty when the
      * table does not read the operation or its request names none, so it is checked on {@code *}. The operation,
