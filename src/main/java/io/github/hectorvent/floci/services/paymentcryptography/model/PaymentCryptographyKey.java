@@ -29,6 +29,11 @@ public class PaymentCryptographyKey {
     private String keyAlgorithm;
     private String keyClass;
     private String keyUsage;
+    /**
+     * The usage a key derives other keys for, when the key is a derivation key.
+     * Empty for a key that derives nothing.
+     */
+    private String deriveKeyUsage;
     private Map<String, Boolean> keyModesOfUse = new HashMap<>();
     private String keyOrigin = "AWS_PAYMENT_CRYPTOGRAPHY";
     private String keyCheckValue;
@@ -37,11 +42,38 @@ public class PaymentCryptographyKey {
     private boolean exportable;
     private boolean enabled = true;
     private String keyMaterialHex;
+    /**
+     * The public half of an asymmetric key, base64 of the DER of its
+     * SubjectPublicKeyInfo. Empty for a symmetric key, which has one blob of
+     * material instead.
+     */
+    private String keyPublicKeyBase64;
+    /**
+     * The private half of an asymmetric key, base64 of the DER of its PKCS#8
+     * encoding. Empty for a public key, which has no private half.
+     *
+     * <p>It is not written to the store, for the same reason the symmetric
+     * material is not: a private key in clear in the data directory is a
+     * secret on disk.
+     */
+    private String keyPrivateKeyBase64;
+    /**
+     * The certificate an imported public key arrived with, in PEM. A key the
+     * service made has none, and gets a self-signed one when one is asked for.
+     */
+    private String keyCertificatePem;
     private long createTimestamp;
     private long usageStartTimestamp;
     private long deletePendingTimestamp;
     private long deleteTimestamp;
     private Map<String, String> tags = new HashMap<>();
+    /** The region of the primary of a multi-region key, and its own region otherwise. */
+
+    /** The regions a multi-region key is in, besides the primary's. */
+
+    /** Whether this record is the primary of a multi-region key or a replica of one. */
+
+    /** Whether the key took the account's default replication regions. */
 
     public String getKeyId() { return keyId; }
     public void setKeyId(String keyId) { this.keyId = keyId; }
@@ -60,6 +92,9 @@ public class PaymentCryptographyKey {
 
     public String getKeyUsage() { return keyUsage; }
     public void setKeyUsage(String keyUsage) { this.keyUsage = keyUsage; }
+
+    public String getDeriveKeyUsage() { return deriveKeyUsage; }
+    public void setDeriveKeyUsage(String deriveKeyUsage) { this.deriveKeyUsage = deriveKeyUsage; }
 
     public Map<String, Boolean> getKeyModesOfUse() { return keyModesOfUse; }
     public void setKeyModesOfUse(Map<String, Boolean> keyModesOfUse) { this.keyModesOfUse = keyModesOfUse; }
@@ -88,6 +123,28 @@ public class PaymentCryptographyKey {
     @JsonIgnore
     public String getKeyMaterialHex() { return keyMaterialHex; }
     public void setKeyMaterialHex(String keyMaterialHex) { this.keyMaterialHex = keyMaterialHex; }
+
+    public String getKeyPublicKeyBase64() { return keyPublicKeyBase64; }
+    public void setKeyPublicKeyBase64(String keyPublicKeyBase64) {
+        this.keyPublicKeyBase64 = keyPublicKeyBase64;
+    }
+
+    /**
+     * The private half of an asymmetric key.
+     *
+     * <p>It is held by the key and never written to the store, like the
+     * symmetric material.
+     */
+    @JsonIgnore
+    public String getKeyPrivateKeyBase64() { return keyPrivateKeyBase64; }
+    public void setKeyPrivateKeyBase64(String keyPrivateKeyBase64) {
+        this.keyPrivateKeyBase64 = keyPrivateKeyBase64;
+    }
+
+    public String getKeyCertificatePem() { return keyCertificatePem; }
+    public void setKeyCertificatePem(String keyCertificatePem) {
+        this.keyCertificatePem = keyCertificatePem;
+    }
 
     public long getCreateTimestamp() { return createTimestamp; }
     public void setCreateTimestamp(long createTimestamp) { this.createTimestamp = createTimestamp; }
