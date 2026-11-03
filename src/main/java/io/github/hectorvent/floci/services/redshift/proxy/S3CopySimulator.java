@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -209,7 +208,7 @@ public final class S3CopySimulator {
         if (spec.iamRoleArn() != null) {
             return RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket());
         }
-        return AwsArnUtils.Arn.global(AwsRegions.partitionFor(s3.getBucketRegion(spec.bucket())), "s3", "",
+        return AwsArnUtils.Arn.global(s3.bucketPartition(spec.bucket()), "s3", "",
                 spec.bucket()).toString();
     }
 

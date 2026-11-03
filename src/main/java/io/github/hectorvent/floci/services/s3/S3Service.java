@@ -7505,7 +7505,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * partition can still reach the bucket, and a policy naming it must match as written. A
      * bucket that does not exist yet takes the request's partition, where it would be created.
      */
-    String bucketPartition(String bucketName) {
+    public String bucketPartition(String bucketName) {
         return resolveBucket(bucketName)
                 .map(Bucket::getRegion)
                 .map(AwsRegions::partitionFor)

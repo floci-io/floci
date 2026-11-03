@@ -40,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
@@ -213,7 +214,7 @@ class S3CopySimulatorTest {
     @Test
     void keysAuthorizeAgainstTheArnsOfTheBucketsPartition() {
         IamService iamService = knownKey();
-        when(s3.getBucketRegion("bucket")).thenReturn("cn-north-1");
+        when(s3.bucketPartition("bucket")).thenReturn("aws-cn");
         when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
                 "{\"Effect\":\"Allow\",\"Action\":\"s3:*\","
                         + "\"Resource\":[\"arn:aws-cn:s3:::bucket\",\"arn:aws-cn:s3:::bucket/*\"]}"))));
@@ -268,6 +269,7 @@ class S3CopySimulatorTest {
         backendListener.close();
 
         s3 = mock(S3Service.class);
+        when(s3.bucketPartition(anyString())).thenReturn("aws");
     }
 
     @AfterEach

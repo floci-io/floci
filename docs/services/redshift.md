@@ -777,9 +777,13 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   request. `IAM_ROLE default` uses the cluster's default role with the same permission checks.
 - `REGION '<region>'` is accepted and ignored: Floci has one S3.
 - `CREDENTIALS 'aws_iam_role=<arn>'` behaves like `IAM_ROLE`. `ACCESS_KEY_ID` with `SECRET_ACCESS_KEY`
-  (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...'`,
-  are accepted but never verified or stored: S3 is read as an unsigned request, the same as with no
-  authorization clause. Combining key credentials with `IAM_ROLE`, or giving only one of the pair, is
+  (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...[;token=...]'`,
+  make S3 be read as that principal when S3 authorization is enforced. IAM must know the access key (a temporary
+  key also needs its session token) and the secret must match, otherwise the `COPY` fails with SQLSTATE `XX000`.
+  The key's identity policy must allow `s3:ListBucket` and `s3:GetObject`, and any bucket policy must not deny
+  the request (`42501` otherwise). With S3 authorization off the keys are ignored, so placeholder keys keep
+  working, and a statement with no authorization clause reads S3 as an unsigned request. The keys are not
+  stored. Combining key credentials with `IAM_ROLE`, or giving only one of the pair, is
   not intercepted, and neither is a blank key, secret, token or role.
 - `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
   (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
@@ -886,8 +890,9 @@ the result to S3 as one or more objects under `<prefix>`.
   AWS, the compression suffix is added only when no extension is given, so `EXTENSION 'txt.gz' GZIP`
   gives `<prefix>0000_part_00.txt.gz`. The value is not validated; an empty value or one containing
   `/` is not intercepted. AWS does not document whether it inserts the dot itself.
-- `REGION` and the credential clauses (`CREDENTIALS`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`,
-  `SESSION_TOKEN`) behave as described for COPY.
+- `REGION` behaves as described for COPY. The key credential clauses (`CREDENTIALS 'aws_access_key_id=...'`,
+  `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `SESSION_TOKEN`) are accepted but ignored by UNLOAD, which writes
+  as the role or as an unsigned request. Only COPY reads S3 as the principal those clauses name.
 - `ESCAPE` is accepted and relies on PostgreSQL text framing, which already escapes the backslash,
   newline, carriage return and the delimiter. It is only valid with text framing: combined with
   `CSV`, `ADDQUOTES` or `HEADER` (which switch the framing to CSV here) the statement is not
