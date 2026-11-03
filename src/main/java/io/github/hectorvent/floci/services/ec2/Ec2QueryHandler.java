@@ -26,6 +26,14 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.function.Consumer;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2QueryProtocol.boolParam;
+import static io.github.hectorvent.floci.services.ec2.Ec2QueryProtocol.booleanResponse;
+import static io.github.hectorvent.floci.services.ec2.Ec2QueryProtocol.getFiltersList;
+import static io.github.hectorvent.floci.services.ec2.Ec2QueryProtocol.getList;
+import static io.github.hectorvent.floci.services.ec2.Ec2QueryProtocol.intParam;
+import static io.github.hectorvent.floci.services.ec2.Ec2QueryProtocol.tagSetXml;
+import static io.github.hectorvent.floci.services.ec2.Ec2QueryProtocol.xmlResponse;
+
 @ApplicationScoped
 public class Ec2QueryHandler {
 
@@ -396,24 +404,6 @@ public class Ec2QueryHandler {
 
     // ─── Parameter helpers ────────────────────────────────────────────────────
 
-    private List<String> getList(MultivaluedMap<String, String> p, String prefix) {
-        List<String> result = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String v = p.getFirst(prefix + "." + i);
-            if (v == null) break;
-            result.add(v);
-        }
-        return result;
-    }
-
-    private List<String> getList(MultivaluedMap<String, String> p, String... prefixes) {
-        List<String> result = new ArrayList<>();
-        for (String prefix : prefixes) {
-            result.addAll(getList(p, prefix));
-        }
-        return result;
-    }
-
     private String firstPresent(MultivaluedMap<String, String> p, String first, String second) {
         String value = p.getFirst(first);
         return value != null && !value.isBlank() ? value : p.getFirst(second);
@@ -439,26 +429,6 @@ public class Ec2QueryHandler {
             throw new AwsException("InvalidMaxResults",
                     "The specified value for MaxResults is not valid.", 400);
         }
-    }
-
-    /**
-     * Returns filters as a list of entries to preserve multiple filters with the same name
-     * (AND semantics across filters, OR within values of the same filter).
-     */
-    private List<Map.Entry<String, List<String>>> getFiltersList(MultivaluedMap<String, String> p) {
-        List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String name = p.getFirst("Filter." + i + ".Name");
-            if (name == null) break;
-            List<String> values = new ArrayList<>();
-            for (int j = 1; ; j++) {
-                String v = p.getFirst("Filter." + i + ".Value." + j);
-                if (v == null) break;
-                values.add(v);
-            }
-            filters.add(new AbstractMap.SimpleEntry<>(name, values));
-        }
-        return filters;
     }
 
     private List<BlockDeviceMapping> parseBlockDeviceMappings(MultivaluedMap<String, String> p) {
@@ -818,20 +788,6 @@ public class Ec2QueryHandler {
                 .elem("kmsKeyId", kmsKeyId)
                 .end(rootElement);
         return xmlResponse(xml.build());
-    }
-
-    private Response xmlResponse(String xml) {
-        return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
-    }
-
-    private Response booleanResponse(String action) {
-        String xml = new XmlBuilder()
-                .start(action + "Response", AwsNamespaces.EC2)
-                .elem("requestId", UUID.randomUUID().toString())
-                .elem("return", "true")
-                .end(action + "Response")
-                .build();
-        return xmlResponse(xml);
     }
 
     // ─── Instance handlers ────────────────────────────────────────────────────
@@ -6380,23 +6336,6 @@ public class Ec2QueryHandler {
         return value != null && !value.isBlank();
     }
 
-    private Boolean boolParam(MultivaluedMap<String, String> p, String name) {
-        String value = p.getFirst(name);
-        return isSet(value) ? Boolean.valueOf(Boolean.parseBoolean(value)) : null;
-    }
-
-    private Integer intParam(MultivaluedMap<String, String> p, String name) {
-        String value = p.getFirst(name);
-        if (!isSet(value)) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(value);
-        } catch (NumberFormatException e) {
-            throw new AwsException("InvalidParameterValue", name + " is not a valid integer.", 400);
-        }
-    }
-
     private Double doubleParam(MultivaluedMap<String, String> p, String name) {
         String value = p.getFirst(name);
         if (!isSet(value)) {
@@ -6483,21 +6422,6 @@ public class Ec2QueryHandler {
                 .elem("networkInterfaceId", addr.getNetworkInterfaceId())
                 .elem("privateIpAddress", addr.getPrivateIpAddress())
                 .raw(tagSetXml(addr.getTags()));
-        return xml.build();
-    }
-
-    private String tagSetXml(List<Tag> tagList) {
-        if (tagList == null || tagList.isEmpty()) {
-            return "<tagSet/>";
-        }
-        XmlBuilder xml = new XmlBuilder().start("tagSet");
-        for (Tag tag : tagList) {
-            xml.start("item")
-                    .elem("key", tag.getKey())
-                    .elem("value", tag.getValue())
-                    .end("item");
-        }
-        xml.end("tagSet");
         return xml.build();
     }
 

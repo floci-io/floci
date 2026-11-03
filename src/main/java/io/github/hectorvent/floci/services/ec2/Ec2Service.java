@@ -156,6 +156,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2Ids.randomHex;
+
 @ApplicationScoped
 public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettable {
 
@@ -2212,15 +2214,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private Object higherLockOf(String keyA, String keyB) {
         return resourceLocks[Math.max(stripeOf(keyA), stripeOf(keyB))];
-    }
-
-    private String randomHex(int len) {
-        StringBuilder sb = new StringBuilder(len);
-        Random rand = new Random();
-        for (int i = 0; i < len; i++) {
-            sb.append(Integer.toHexString(rand.nextInt(16)));
-        }
-        return sb.toString();
     }
 
     /** Synthesizes a locally-administered unicast MAC (AWS never discloses how it derives its own). */
@@ -7001,7 +6994,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(endpoint -> matchesFilters(endpoint, filters, region))
                 .collect(Collectors.toList());
     }
-
 
     public List<VpcEndpoint> deleteVpcEndpoints(String region, List<String> endpointIds) {
         ensureDefaultResources(region);
@@ -12140,7 +12132,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public Optional<String> findVpcOwnerAccount(String region, String vpcId) {
         return findAnyVpcEntry(region, vpcId).map(AccountAwareStorageBackend.OwnedEntry::account);
     }
-
 
     public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,
                                                                      Map<String, List<String>> filters) {

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.testing.Ec2Requests;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -24,7 +25,8 @@ import static org.hamcrest.Matchers.not;
 @QuarkusTest
 class Ec2ClientVpnIntegrationTest {
 
-    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20261103/us-east-1/ec2/aws4_request";
+    private static final String ACCOUNT = "000000000000";
+    private static final String REGION = "us-east-1";
     private static final String ACM_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20261103/us-east-1/acm/aws4_request";
 
@@ -281,6 +283,6 @@ class Ec2ClientVpnIntegrationTest {
     }
 
     private static RequestSpecification ec2(String action) {
-        return given().header("Authorization", AUTH).formParam("Action", action);
+        return Ec2Requests.ec2(action, ACCOUNT, REGION);
     }
 }

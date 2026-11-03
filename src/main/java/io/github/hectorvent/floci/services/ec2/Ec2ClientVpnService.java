@@ -25,10 +25,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+
+import static io.github.hectorvent.floci.services.ec2.Ec2Ids.randomHex;
 
 /**
  * EC2 Client VPN: endpoints, their target network associations, authorization rules and routes, and
@@ -583,14 +584,6 @@ public class Ec2ClientVpnService implements VpcDependencyProvider {
 
     private static AwsException missing(String member) {
         return new AwsException("MissingParameter", "The request must contain the parameter " + member, 400);
-    }
-
-    private static String randomHex(int length) {
-        StringBuilder value = new StringBuilder(length);
-        for (int i = 0; i < length; i++) {
-            value.append(Character.forDigit(ThreadLocalRandom.current().nextInt(16), 16));
-        }
-        return value.toString();
     }
 
     private static String key(String region, String id) {
