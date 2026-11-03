@@ -325,6 +325,9 @@ public class ApiGatewayService implements ResourceProvider {
         if (request.get("policy") instanceof String policy && !policy.isEmpty()) {
             api.setPolicy(policy);
         }
+        if (request.get("apiKeySource") != null) {
+            api.setApiKeySource(apiKeySource(request.get("apiKeySource")));
+        }
 
         EndpointConfiguration endpointConfiguration = new EndpointConfiguration();
         if (request.get(EPC_KEY) instanceof Map<?, ?> epMap) {
@@ -377,6 +380,14 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     /** The endpoint type {@code value} names, in any case. */
+    /** A valid {@code apiKeySource}: {@code HEADER} or {@code AUTHORIZER}, as AWS spells them. */
+    private static String apiKeySource(Object value) {
+        if (RestApi.API_KEY_SOURCE_HEADER.equals(value) || RestApi.API_KEY_SOURCE_AUTHORIZER.equals(value)) {
+            return (String) value;
+        }
+        throw new AwsException("BadRequestException", "API key source must be HEADER or AUTHORIZER.", 400);
+    }
+
     private static EndpointType endpointType(String value) {
         try {
             return EndpointType.valueOf(value.toUpperCase());
@@ -3176,6 +3187,8 @@ public class ApiGatewayService implements ResourceProvider {
                 // aws_api_gateway_rest_api_policy writes the policy this way, and clears it by
                 // replacing it with an empty string.
                 else if ("/policy" .equals(path)) api.setPolicy(value == null || value.isEmpty() ? null : value);
+                // aws_api_gateway_rest_api sends this for a changed api_key_source.
+                else if ("/apiKeySource" .equals(path)) api.setApiKeySource(apiKeySource(value));
             }
             if (endpointConfiguration != null) {
                 api.setEndpointConfiguration(endpointConfiguration);
@@ -4160,6 +4173,10 @@ public class ApiGatewayService implements ResourceProvider {
             Object policy = topExtensions.get("x-amazon-apigateway-policy");
             if (policy != null) {
                 api.setPolicy(JSON.valueToTree(policy).toString());
+            }
+            Object keySource = topExtensions.get("x-amazon-apigateway-api-key-source");
+            if (keySource != null) {
+                api.setApiKeySource(apiKeySource(keySource));
             }
             apiStore.put(apiKey(region, apiId), api);
             Map<String, Object> validators = (Map<String, Object>) topExtensions
