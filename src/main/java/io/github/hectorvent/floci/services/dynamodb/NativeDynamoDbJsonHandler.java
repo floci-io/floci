@@ -2794,9 +2794,14 @@ public class NativeDynamoDbJsonHandler {
 
     private static void requireTransactItemOrKey(TransactAction action) {
         JsonNode op = action.op();
+        JsonNode values = op.get("Put".equals(action.type()) ? "Item" : "Key");
+        // In a request too deep for the newer validator, DynamoDB checks the top-level names before the depth
+        // and the names inside a map after it.
+        DynamoDbAttributeValueValidator.requireNonEmptyNames(values);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
-        requireReadableValues(op.get("Put".equals(action.type()) ? "Item" : "Key"), "");
+        requireReadableValues(values, "");
+        DynamoDbAttributeValueValidator.requireNonEmptyMemberNames(values);
     }
 
     private void requireValidTransactExpressions(JsonNode op, boolean older) {
@@ -2812,6 +2817,7 @@ public class NativeDynamoDbJsonHandler {
             requireNamedExpressionValues(exprAttrValues);
         } else {
             requireReadableValues(exprAttrValues, "");
+            DynamoDbAttributeValueValidator.requireNonEmptyMemberNames(exprAttrValues);
         }
 
         requireNonEmptyExpression(conditionExpression, "ConditionExpression");
@@ -2847,6 +2853,7 @@ public class NativeDynamoDbJsonHandler {
             try {
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(value, false);
                 requireReadableValues(value, "");
+                DynamoDbAttributeValueValidator.requireNonEmptyMemberNames(value);
             } catch (AwsException e) {
                 throw new AwsException("ValidationException", "ExpressionAttributeValues contains invalid value: "
                         + e.getMessage() + " for key " + entry.getKey(), 400);

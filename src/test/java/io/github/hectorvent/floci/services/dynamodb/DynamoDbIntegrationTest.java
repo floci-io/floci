@@ -5843,6 +5843,28 @@ given()
         deleteTable("SyntaxTable");
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "": {"S": "x"}}}}
+            {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "l": {"L": [{"M": {"": {"S": "x"}}}]}}}}
+            {"ConditionCheck": {"TableName": "EmptyNameTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "m = :m", "ExpressionAttributeValues": {":m": {"M": {"": {"S": "x"}}}}}}
+            """)
+    void transactWriteItemsRefusesAnEmptyAttributeName(String action) {
+        createOnDemandTableForGsiUpdates("EmptyNameTable");
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TransactItems\": [" + action + "]}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Empty attribute name"));
+
+        deleteTable("EmptyNameTable");
+    }
+
     private void deleteTable(String tableName) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")

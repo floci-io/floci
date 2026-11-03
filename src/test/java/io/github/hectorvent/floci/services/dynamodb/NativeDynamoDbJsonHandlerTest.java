@@ -2388,6 +2388,10 @@ class NativeDynamoDbJsonHandlerTest {
             [{"ConditionCheck":{"TableName":"Missing","Key":{},"ConditionExpression":"d = :deep","ExpressionAttributeValues":{":deep":"DEEP"}}}] | ExpressionAttributeValues contains invalid value: Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit for key :deep
             [{"Put":{"TableName":"Missing","Item":{"d":"DEEP"},"ConditionExpression":"a = :n","ExpressionAttributeValues":{":n":{"N":"abc"}}}}] | ExpressionAttributeValues contains invalid value: The parameter cannot be converted to a numeric value: abc for key :n
             [{"Put":{"TableName":"Missing","Item":{},"ExpressionAttributeValues":{":deep":"DEEP"}}}] | Requested resource not found
+            [{"Put":{"TableName":"Missing","Item":{"d":"DEEP","":{"S":"x"}}}}] | Empty attribute name
+            [{"Put":{"TableName":"Missing","Item":{"d":"DEEP","m":{"M":{"":{"S":"x"}}}}}}] | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            [{"Put":{"TableName":"Missing","Item":{"":{"S":"x"},"d":"DEEP"},"ConditionExpression":"a = = b"}}] | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
+            [{"Put":{"TableName":"Missing","Item":{"d":"DEEP"},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"M":{"":{"S":"x"}}}}}}] | ExpressionAttributeValues contains invalid value: Empty attribute name for key :v
             [{"Put":{"TableName":"bad!name","Item":{"d":"DEEP"},"ReturnValuesOnConditionCheckFailure":"BOGUS"}}] | 1 validation error detected: Value 'BOGUS' at 'transactItems.1.member.put.returnValuesOnConditionCheckFailure' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]
             """)
     void aTransactionTooDeepForTheNewerValidatorChecksItsExpressionsBeforeItsItem(String items, String message)
@@ -2429,6 +2433,10 @@ class NativeDynamoDbJsonHandlerTest {
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":""}}] | Invalid UpdateExpression: The expression can not be empty;
             [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":"   "}}] | Invalid ConditionExpression: Syntax error; token: "<EOF>", near: "   "
             [{"Put":{"TableName":"Missing","Item":{}}},{"ConditionCheck":{"TableName":"Missing","Key":{},"ConditionExpression":"attribute_not_exists("}}] | Invalid ConditionExpression: Syntax error; token: "<EOF>", near: "("
+            [{"Put":{"TableName":"Missing","Item":{"":{"S":"x"}},"ReturnValuesOnConditionCheckFailure":"BOGUS"}}] | Empty attribute name
+            [{"Delete":{"TableName":"Missing","Key":{"l":{"L":[{"M":{"":{"S":"x"}}}]}}}}] | Empty attribute name
+            [{"ConditionCheck":{"TableName":"Missing","Key":{},"ConditionExpression":"a = = b","ExpressionAttributeValues":{":v":{"M":{"":{"S":"x"}}}}}}] | Empty attribute name
+            [{"Put":{"TableName":"Missing","Item":{},"ExpressionAttributeValues":{":v":{"M":{"":{"S":"x"}}}}}}] | Requested resource not found
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :zz","ConditionExpression":"a = :yy"}}] | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :yy
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :zz","ConditionExpression":"contains(a, a)"}}] | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [a]
             [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":"attribute_not_exists(a)","ExpressionAttributeNames":{"#n":"n"},"ExpressionAttributeValues":{":v":{"S":"x"}}}}] | Value provided in ExpressionAttributeNames unused in expressions: keys: {#n}
