@@ -3210,11 +3210,7 @@ public class ApiGatewayExecuteController {
 
             List<String> audiences = authorizer.getJwtConfiguration().audience();
             if (audiences != null && !audiences.isEmpty()) {
-                // Cognito access tokens omit `aud` and use `client_id` instead.
-                // Match either to support both ID tokens and access tokens.
-                boolean audMatch = audiences.stream().anyMatch(a ->
-                        a.equals(claims.aud) || a.equals(claims.clientId));
-                if (!audMatch) {
+                if (!audienceMatches(audiences, claims)) {
                     return new JwtAuthorizerResult(Response.status(401)
                             .entity(jsonMessage("Unauthorized"))
                             .type(MediaType.APPLICATION_JSON).build(), null);
@@ -3652,8 +3648,38 @@ public class ApiGatewayExecuteController {
     // `scopes` is the token's own scope list (scp claim first, else scope) or null when it has
     // neither - kept separate from `raw` because scope matching needs the pre-rendered values.
     // Package-private (like buildV2ProxyEvent) so the wire-format rendering is unit-testable.
-    record JwtClaims(String iss, String aud, String clientId, long exp,
+    record JwtClaims(String iss, List<String> audiences, String clientId, long exp,
                      Map<String, String> raw, List<String> scopes) {}
+
+    /**
+     * Whether a token satisfies a JWT authorizer's configured audience list. Like real API
+     * Gateway, the token's {@code aud} may be a single string or an array (RFC 7519 §4.1.3);
+     * it matches when any configured audience is among the token's audiences. Auth0, for one,
+     * issues an array {@code aud} (the API plus its {@code /userinfo} endpoint) whenever the
+     * {@code openid} scope is requested. Cognito access tokens omit {@code aud} and carry
+     * {@code client_id} instead, so that is accepted too.
+     */
+    static boolean audienceMatches(List<String> configuredAudiences, JwtClaims claims) {
+        return configuredAudiences.stream().anyMatch(a ->
+                claims.audiences().contains(a) || a.equals(claims.clientId()));
+    }
+
+    /** The token's {@code aud} claim as a list: a string becomes one entry, an array keeps its strings. */
+    private static List<String> parseAudiences(JsonNode aud) {
+        if (aud.isTextual()) {
+            return List.of(aud.asText());
+        }
+        if (aud.isArray()) {
+            List<String> audiences = new ArrayList<>();
+            for (JsonNode item : aud) {
+                if (item.isTextual()) {
+                    audiences.add(item.asText());
+                }
+            }
+            return List.copyOf(audiences);
+        }
+        return List.of();
+    }
 
     JwtClaims parseJwtClaims(String token) {
         try {
@@ -3663,7 +3689,7 @@ public class ApiGatewayExecuteController {
             String payload = new String(payloadBytes, StandardCharsets.UTF_8);
             JsonNode claims = objectMapper.readTree(payload);
             String iss = claims.path("iss").asText(null);
-            String aud = claims.path("aud").asText(null);
+            List<String> audiences = parseAudiences(claims.path("aud"));
             // Cognito access tokens omit `aud` and use `client_id` instead. AWS HTTP API
             // JWT authorizers accept either when matching the configured audience list.
             String clientId = claims.path("client_id").asText(null);
@@ -3681,7 +3707,7 @@ public class ApiGatewayExecuteController {
                 if (rendered != null) raw.put(field.getKey(), rendered);
             }
 
-            return new JwtClaims(iss, aud, clientId, exp, raw, deriveJwtScopes(claims));
+            return new JwtClaims(iss, audiences, clientId, exp, raw, deriveJwtScopes(claims));
         } catch (Exception e) {
             LOG.debugv("JWT parse error: {0}", e.getMessage());
             return null;
