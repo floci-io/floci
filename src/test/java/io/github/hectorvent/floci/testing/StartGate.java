@@ -33,6 +33,7 @@ public final class StartGate {
         CountDownLatch doneGate = new CountDownLatch(threadCount);
         Object[] values = new Object[threadCount];
         List<Throwable> errors = Collections.synchronizedList(new ArrayList<>());
+        Throwable failure = null;
         try {
             for (int i = 0; i < threadCount; i++) {
                 int index = i;
@@ -50,10 +51,34 @@ public final class StartGate {
             startGate.countDown();
             assertTrue(doneGate.await(30, TimeUnit.SECONDS),
                     "concurrent tasks did not complete within 30s");
+        } catch (InterruptedException | RuntimeException | Error e) {
+            failure = e;
+            throw e;
         } finally {
-            pool.shutdownNow();
-            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS),
-                    "thread pool did not terminate");
+            try {
+                pool.shutdownNow();
+                assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS),
+                        "thread pool did not terminate");
+            } catch (InterruptedException | RuntimeException | Error cleanupFailure) {
+                if (failure == null) {
+                    failure = cleanupFailure;
+                    throw cleanupFailure;
+                }
+                failure.addSuppressed(cleanupFailure);
+                if (cleanupFailure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+            } finally {
+                if (failure != null) {
+                    synchronized (errors) {
+                        for (Throwable workerFailure : errors) {
+                            if (workerFailure != failure) {
+                                failure.addSuppressed(workerFailure);
+                            }
+                        }
+                    }
+                }
+            }
         }
         @SuppressWarnings("unchecked")
         List<T> results = (List<T>) Arrays.asList(values);
