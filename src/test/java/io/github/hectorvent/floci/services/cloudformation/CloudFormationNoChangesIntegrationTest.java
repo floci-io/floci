@@ -400,6 +400,46 @@ class CloudFormationNoChangesIntegrationTest {
         }
     }
 
+    /**
+     * A nested stack's child template is read again before the comparison, as an AWS::Include
+     * fragment is: the same parent with the same child is not an update, and with the child changed
+     * in S3 it is. Regression for the rejection reported on PR #7383: without the nested-stack
+     * exception the comparison only sees the unchanged parent and answers "No updates are to be
+     * performed." before the child is ever read.
+     */
+    @Test
+    void aNestedStackWhoseChildTemplateChangedInS3IsAnUpdate() {
+        String bucket = name("nested-child");
+        s3Service.createBucket(bucket, "us-east-1");
+        putChildTemplate(bucket, "Description: first\n");
+        String parent = """
+                Resources:
+                  Child:
+                    Type: AWS::CloudFormation::Stack
+                    Properties:
+                      TemplateURL: http://localhost/%s/child.yaml
+                """.formatted(bucket);
+        String stackName = name("no-change-nested");
+        try {
+            create(stackName, parent);
+
+            update(stackName, parent)
+                    .statusCode(400)
+                    .body(containsString("No updates are to be performed."));
+
+            putChildTemplate(bucket, "Description: second\n");
+            update(stackName, parent).statusCode(200);
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+        } finally {
+            s3Service.deleteObject(bucket, "child.yaml");
+            s3Service.deleteBucket(bucket);
+        }
+    }
+
+    private void putChildTemplate(String bucket, String content) {
+        s3Service.putObject(bucket, "child.yaml", content.getBytes(StandardCharsets.UTF_8), "text/yaml", Map.of());
+    }
+
     private void putFragment(String bucket, String content) {
         s3Service.putObject(bucket, "fragment.yaml", content.getBytes(StandardCharsets.UTF_8), "text/yaml", Map.of());
     }

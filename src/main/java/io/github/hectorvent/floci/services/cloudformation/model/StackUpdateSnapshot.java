@@ -9,6 +9,8 @@ import java.util.Map;
  * A stack's state from before an update, which the rollback of that update restores. A rollback
  * that fails keeps it on the stack, so ContinueUpdateRollback can run the rollback again after the
  * update that took it has returned, or after a restart.
+ *
+ * @param tags prior tags, or null when a legacy snapshot did not capture them
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -20,5 +22,14 @@ public record StackUpdateSnapshot(
         Map<String, String> outputs,
         Map<String, String> exports,
         Map<String, String> outputExportNames,
-        Map<String, StackResource> resources) {
+        Map<String, StackResource> resources,
+        Map<String, String> tags) {
+
+    public StackUpdateSnapshot(String templateBody, String originalTemplateBody,
+                               Map<String, String> parameters, Map<String, String> resolvedParameters,
+                               Map<String, String> outputs, Map<String, String> exports,
+                               Map<String, String> outputExportNames, Map<String, StackResource> resources) {
+        this(templateBody, originalTemplateBody, parameters, resolvedParameters, outputs, exports,
+                outputExportNames, resources, null);
+    }
 }

@@ -41,6 +41,15 @@ public final class CfnRollback {
      */
     public static final String UPDATE_ROLLBACK_FAILURE_ATTR = "__FlociUpdateRollbackFailure";
 
+    /**
+     * Holds the child stack deployment a nested-stack resource carried before the update in flight
+     * re-provisioned it: the tags it ran with, its template body, and the parameter values it was
+     * given, so a failed parent update can restore the child to that state instead of only its tags.
+     * Written by {@code CloudFormationService.executeNestedStack} before it runs the child's
+     * template and spent once the update commits or the rollback restores the child.
+     */
+    public static final String NESTED_STACK_UPDATE_SNAPSHOT_ATTR = "__FlociNestedStackUpdateSnapshot";
+
     /** The namespace, credentials, secret and attributes overwritten by a Serverless namespace update. */
     public static final String REDSHIFT_SERVERLESS_NAMESPACE_UPDATE_SNAPSHOT_ATTR =
             "__FlociRedshiftServerlessNamespaceUpdateSnapshot";
