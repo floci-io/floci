@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -182,6 +183,54 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
             .body("Table.StreamSpecification.StreamViewType", equalTo("NEW_AND_OLD_IMAGES"));
         describeTimeToLive(table).body("TimeToLiveDescription.TimeToLiveStatus", equalTo("DISABLED"));
 
+        deleteStack(stack);
+    }
+
+    /**
+     * A committed in-place update is never rolled back. A later replacing update fails and cannot
+     * delete the table it created, so its rollback fails; retrying that rollback must keep the tags
+     * the committed update set rather than put back the ones from before it.
+     */
+    @Test
+    void retryingAFailedReplacementRollbackKeepsTheCommittedTags() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-retry-" + suffix;
+        String table = "ttl-retry-table-" + suffix;
+        String replacement = "ttl-retry-new-" + suffix;
+
+        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", "", ""));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        String tableArn = dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(200)
+            .extract().path("Table.TableArn");
+        cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(table, "prod", "", ""));
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+        failNextUpdateTimeToLive();
+        Mockito.doThrow(new IllegalStateException("simulated DeleteTable failure"))
+                .doCallRealMethod()
+                .when(dynamoDbService)
+                .deleteTable(anyString(), anyString());
+        try {
+            cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(replacement, "prod", TTL_ENABLED, ""));
+            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        } finally {
+            Mockito.doCallRealMethod().when(dynamoDbService)
+                    .updateTimeToLive(anyString(), anyString(), anyBoolean(), anyString());
+            Mockito.doCallRealMethod().when(dynamoDbService).deleteTable(anyString(), anyString());
+        }
+
+        continueUpdateRollback(stack);
+        assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status(),
+                "a replacing table update still has no rollback, so the retry fails again");
+
+        dynamoDb("ListTagsOfResource", "{\"ResourceArn\": \"" + tableArn + "\"}")
+            .statusCode(200)
+            .body("Tags.Value", contains("prod"));
+
+        continueUpdateRollback(stack, "Orders");
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        dynamoDb("DeleteTable", "{\"TableName\": \"" + replacement + "\"}");
         deleteStack(stack);
     }
 
@@ -372,6 +421,18 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
             .formParam("StackName", stack)
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200);
+    }
+
+    private void continueUpdateRollback(String stack, String... resourcesToSkip) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "ContinueUpdateRollback")
+            .formParam("StackName", stack);
+        for (int i = 0; i < resourcesToSkip.length; i++) {
+            request.formParam("ResourcesToSkip.member." + (i + 1), resourcesToSkip[i]);
+        }
+        request.when().post("/").then().statusCode(200);
     }
 
     private void deleteStack(String stack) {
