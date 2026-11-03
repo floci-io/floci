@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -275,18 +276,19 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
                   }
                 }
                 """;
-        String stackId = createStack(stackName, template);
-        String groupId = output(stackName, "RefId");
-        String vpcId = output(stackName, "VpcId");
-        String callerId = null;
+        String groupId = null;
+        String vpcId = null;
         try {
+            String stackId = createStack(stackName, template);
+            groupId = output(stackName, "RefId");
+            vpcId = output(stackName, "VpcId");
             given()
                 .header("Authorization", EC2_AUTH)
                 .formParam("Action", "DescribeVpcs")
                 .formParam("Filter.1.Name", "vpc-id")
                 .formParam("Filter.1.Value.1", vpcId)
             .when().post("/").then().statusCode(200).body(containsString("<vpcId>" + vpcId + "</vpcId>"));
-            callerId = createStack(callerStack, standaloneIngressTemplate(groupId, "10.2.0.0/16"));
+            String callerId = createStack(callerStack, standaloneIngressTemplate(groupId, "10.2.0.0/16"));
             updateStack(stackName, template.replace("10.1.0.0/16", "10.3.0.0/16"));
             assertTrue(awaitStackStatus(stackId, "UPDATE_COMPLETE"));
             assertEquals(groupId, output(stackName, "RefId"));
@@ -298,15 +300,15 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
                     "frontend update removed another stack's permission");
 
             deleteStack(callerStack, callerId);
-            callerId = null;
             group = describeGroup(groupId);
             assertFalse(group.contains("<cidrIp>10.2.0.0/16</cidrIp>"));
             assertTrue(group.contains("<cidrIp>10.3.0.0/16</cidrIp>"));
         } finally {
-            if (callerId != null) {
-                deleteStack(callerStack, callerId);
+            try {
+                deleteStackIfPresent(callerStack);
+            } finally {
+                deleteStackIfPresent(stackName);
             }
-            deleteStack(stackName, stackId);
         }
         assertFalse(describeGroup(groupId).contains("<groupId>"));
         given()
@@ -315,6 +317,24 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
             .formParam("Filter.1.Name", "vpc-id")
             .formParam("Filter.1.Value.1", vpcId)
         .when().post("/").then().statusCode(200).body(not(containsString("<vpcId>")));
+    }
+
+    private static void deleteStackIfPresent(String name) throws InterruptedException {
+        Response response = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", name)
+        .when().post("/");
+        String body = response.asString();
+        if (response.statusCode() == 400 && body.contains("<Code>ValidationError</Code>")
+                && body.contains("Stack with id " + name + " does not exist")) {
+            return;
+        }
+        response.then().statusCode(200);
+        String id = between(body, "<StackId>", "</StackId>");
+        assertFalse(id.isBlank(), "owned stack has no id");
+        deleteStack(name, id);
     }
 
     private static void deleteStack(String name, String id) throws InterruptedException {
