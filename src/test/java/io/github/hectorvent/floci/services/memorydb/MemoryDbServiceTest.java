@@ -518,18 +518,18 @@ class MemoryDbServiceTest {
         } finally {
             otherCreateDone.countDown();
         }
-        slowCreate.join(5000);
 
-        List<CompletableFuture<Cluster>> outcomes = List.of(slow, other);
-        assertEquals(1, outcomes.stream().filter(f -> !f.isCompletedExceptionally()).count(),
-                "exactly one create of the name succeeds");
-        for (CompletableFuture<Cluster> outcome : outcomes) {
-            if (outcome.isCompletedExceptionally()) {
-                ExecutionException refused = assertThrows(ExecutionException.class, outcome::get);
+        int succeeded = 0;
+        for (CompletableFuture<Cluster> outcome : List.of(slow, other)) {
+            try {
+                outcome.get(5, TimeUnit.SECONDS);
+                succeeded++;
+            } catch (ExecutionException refused) {
                 AwsException cause = assertInstanceOf(AwsException.class, refused.getCause());
                 assertEquals("ClusterAlreadyExistsFault", cause.jsonType());
             }
         }
+        assertEquals(1, succeeded, "exactly one create of the name succeeds");
         verify(containerManager, times(1)).tryStart(anyString(), anyString());
     }
 
