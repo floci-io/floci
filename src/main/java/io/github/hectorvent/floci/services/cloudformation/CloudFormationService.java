@@ -121,6 +121,10 @@ public class CloudFormationService implements ResourceProvider {
     private final ConcurrentHashMap<String, DeletedStackEntry> deletedStacks = new ConcurrentHashMap<>();
     // Account-scoped exports registry: account:region:exportName -> exportValue
     private final ConcurrentHashMap<String, String> exports = new ConcurrentHashMap<>();
+    // The execution running on a stack, by stack id, completed once it and any delete it deferred end.
+    private final ConcurrentHashMap<String, CompletableFuture<Void>> runningExecutions = new ConcurrentHashMap<>();
+    // A delete requested while its stack's execution runs, by stack id, with the resources it retains.
+    private final ConcurrentHashMap<String, List<String>> deferredDeletes = new ConcurrentHashMap<>();
     private final ExecutorService executor = newOperationExecutor();
 
     static ThreadPoolExecutor newOperationExecutor() {
@@ -1182,7 +1186,7 @@ public class CloudFormationService implements ResourceProvider {
         return claimAndSubmitExecution(stackName, changeSetName, region, accountId, false);
     }
 
-    private record ClaimedExecution(ChangeSet changeSet, boolean isCreate) {}
+    private record ClaimedExecution(ChangeSet changeSet, boolean isCreate, CompletableFuture<Void> done) {}
 
     private record ChangeSetState(String status, String executionStatus) {}
 
@@ -1205,9 +1209,13 @@ public class CloudFormationService implements ResourceProvider {
                         "Stack with id " + stackNameOrArn + " does not exist", 400);
             }
             ChangeSet cs = getChangeSetOrThrow(existing, changeSetName, region, accountId);
-            if (isBeingDeleted(existing.getStatus())) {
+            // A delete deferred to the running execution has been accepted, so the stack is being
+            // deleted even before that execution ends and the delete reports DELETE_IN_PROGRESS.
+            String deletingStatus = deferredDeletes.containsKey(existing.getStackId())
+                    ? "DELETE_IN_PROGRESS" : existing.getStatus();
+            if (isBeingDeleted(deletingStatus)) {
                 throw new AwsException("InvalidChangeSetStatus", "ChangeSet [" + cs.getChangeSetId()
-                        + "] cannot be executed while its stack is in status [" + existing.getStatus() + "]", 400);
+                        + "] cannot be executed while its stack is in status [" + deletingStatus + "]", 400);
             }
             String executionStatus = cs.getExecutionStatus();
             boolean eligible = requireAvailable
@@ -1236,18 +1244,24 @@ public class CloudFormationService implements ResourceProvider {
             existing.setLastUpdatedTime(now());
             addEvent(existing, existing.getStackName(), existing.getStackId(),
                     "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
-            claimed[0] = new ClaimedExecution(cs, isCreate);
+            CompletableFuture<Void> done = new CompletableFuture<>();
+            runningExecutions.put(existing.getStackId(), done);
+            claimed[0] = new ClaimedExecution(cs, isCreate, done);
             return existing;
         });
         try {
             persistStack(stack);
-            return submitExecution(stack, claimed[0].changeSet(), claimed[0].isCreate(), region, accountId);
-        } catch (AwsException e) {
-            if ("LimitExceededException".equals(e.getErrorCode())) {
-                Stack restored = restoreStack(accountId, canonicalStackName, region, snapshot[0]);
-                if (restored != null) {
-                    persistStack(restored);
+            return submitExecution(stack, claimed[0], region, accountId);
+        } catch (RuntimeException e) {
+            try {
+                if (e instanceof AwsException aws && "LimitExceededException".equals(aws.getErrorCode())) {
+                    Stack restored = restoreStack(accountId, canonicalStackName, region, snapshot[0]);
+                    if (restored != null) {
+                        persistStack(restored);
+                    }
                 }
+            } finally {
+                endExecution(stack, claimed[0].done(), region, accountId);
             }
             throw e;
         }
@@ -1261,17 +1275,60 @@ public class CloudFormationService implements ResourceProvider {
                 "ChangeSet [" + cs.getChangeSetId() + "] cannot be executed in its current " + detail, 400);
     }
 
-    private Future<?> submitExecution(Stack stack, ChangeSet cs, boolean isCreate, String region, String accountId) {
+    private Future<?> submitExecution(Stack stack, ClaimedExecution claimed, String region, String accountId) {
+        ChangeSet cs = claimed.changeSet();
         String templateBody = cs.getTemplateBody();
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
 
         return submitOperation(() -> RequestScopes.runAs(accountId, region, () -> {
-            executeTemplate(stack, templateBody, params, cs.getTags(), isCreate, region, accountId);
-            String status = stack.getStatus();
-            cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
-                ? "EXECUTE_FAILED" : "EXECUTE_COMPLETE");
-            persistStack(stack);
+            try {
+                executeTemplate(stack, templateBody, params, cs.getTags(), claimed.isCreate(), region, accountId);
+                String status = stack.getStatus();
+                cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
+                    ? "EXECUTE_FAILED" : "EXECUTE_COMPLETE");
+                persistStack(stack);
+            } finally {
+                endExecution(stack, claimed.done(), region, accountId);
+            }
         }));
+    }
+
+    /**
+     * Ends an execution and runs the delete requested while it ran, if any. Both happen under the
+     * stack's lock, so a DeleteStack either defers to the execution or finds it ended and deletes the
+     * stack itself; it never deletes alongside a running execution. An execution that a newer one
+     * has replaced leaves the deferred delete to the newer one, which the delete is waiting on.
+     * {@code done} fails when the deferred delete does, as the future of a delete started directly.
+     */
+    private void endExecution(Stack stack, CompletableFuture<Void> done, String region, String accountId) {
+        String stackId = stack.getStackId();
+        List<List<String>> deferred = new ArrayList<>(1);
+        try {
+            stacks.compute(stackKey(accountId, stack.getStackName(), region), (k, existing) -> {
+                if (!runningExecutions.remove(stackId, done)) {
+                    return existing;
+                }
+                List<String> retain = deferredDeletes.remove(stackId);
+                if (retain != null && existing != null && stackId.equals(existing.getStackId())) {
+                    startDelete(existing, retain);
+                    deferred.add(retain);
+                }
+                return existing;
+            });
+            if (!deferred.isEmpty()) {
+                deleteStackResources(stack, deferred.getFirst(), region, accountId);
+            }
+            done.complete(null);
+        } catch (RuntimeException e) {
+            done.completeExceptionally(e);
+        }
+    }
+
+    private void startDelete(Stack stack, List<String> retain) {
+        stack.setRetainResources(retain);
+        stack.setStatus("DELETE_IN_PROGRESS");
+        addEvent(stack, stack.getStackName(), stack.getStackId(),
+                "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
     }
 
     // ── DeleteChangeSet ───────────────────────────────────────────────────────
@@ -1373,11 +1430,16 @@ public class CloudFormationService implements ResourceProvider {
                     }
                 }
             }
+            CompletableFuture<Void> running = runningExecutions.get(existing.getStackId());
+            if (running != null) {
+                // The execution deletes the stack once it ends: a create stops before its next
+                // resource, an update finishes, and the delete then removes all that was built.
+                deferredDeletes.putIfAbsent(existing.getStackId(), retain);
+                submitted[0] = running;
+                return existing;
+            }
             StackMutationSnapshot snapshot = snapshot(existing);
-            existing.setRetainResources(retain);
-            existing.setStatus("DELETE_IN_PROGRESS");
-            addEvent(existing, existing.getStackName(), existing.getStackId(),
-                    "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
+            startDelete(existing, retain);
             try {
                 submitted[0] = submitOperation(() -> RequestScopes.runAs(accountId, region,
                         () -> deleteStackResources(existing, retain, region, accountId)));
@@ -2058,6 +2120,11 @@ public class CloudFormationService implements ResourceProvider {
                 }
 
                 for (String logicalId : sortedLogicalIds) {
+                    if (isCreate && deferredDeletes.containsKey(stack.getStackId())) {
+                        LOG.infov("Stack {0} is being deleted, so its create stops before {1}",
+                                stack.getStackName(), logicalId);
+                        return;
+                    }
                     if (!isCreate && !changedResourceIds.contains(logicalId)) {
                         continue;
                     }
