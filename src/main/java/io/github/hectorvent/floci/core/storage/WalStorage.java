@@ -186,11 +186,6 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public boolean hasUncertainWriteFailure() {
-        return walFailure != null;
-    }
-
-    @Override
     public void delete(K key) {
         byte[] record = encodeDelete(Objects.requireNonNull(key));
         compactionLock.writeLock().lock();

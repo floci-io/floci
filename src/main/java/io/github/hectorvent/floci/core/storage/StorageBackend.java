@@ -37,11 +37,6 @@ public interface StorageBackend<K, V> {
 
     Optional<V> get(K key);
 
-    /** A failed write may have left durable state that is not visible through get(). */
-    default boolean hasUncertainWriteFailure() {
-        return false;
-    }
-
     void delete(K key);
 
     /** Remove keys as one storage commit, with the same durability guarantees as atomic puts. */

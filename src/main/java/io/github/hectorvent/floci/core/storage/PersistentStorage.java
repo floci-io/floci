@@ -30,7 +30,6 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     private static final Logger LOG = Logger.getLogger(PersistentStorage.class);
 
     private volatile ConcurrentHashMap<K, V> store = new ConcurrentHashMap<>();
-    private volatile boolean uncertainWriteFailure;
     private final Path filePath;
     private final ObjectMapper objectMapper;
     private final TypeReference<Map<K, V>> typeReference;
@@ -73,17 +72,11 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
             throw new UncheckedIOException("Failed to commit atomic batch to " + filePath, exception);
         }
         store = candidate;
-        uncertainWriteFailure = false;
     }
 
     @Override
     public Optional<V> get(K key) {
         return Optional.ofNullable(store.get(key));
-    }
-
-    @Override
-    public boolean hasUncertainWriteFailure() {
-        return uncertainWriteFailure;
     }
 
     @Override
@@ -105,7 +98,6 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
             throw new UncheckedIOException("Failed to commit atomic deletions to " + filePath, exception);
         }
         store = candidate;
-        uncertainWriteFailure = false;
     }
 
     @Override
@@ -141,7 +133,6 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
             Map<K, V> data = objectMapper.readValue(filePath.toFile(), typeReference);
             store.clear();
             store.putAll(data);
-            uncertainWriteFailure = false;
             LOG.infov("Loaded {0} entries from {1}", store.size(), filePath);
         } catch (IOException e) {
             // Starting empty here silently drops all persisted state for this store, which can leave
@@ -161,9 +152,7 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     private synchronized void persistToDisk() {
         try {
             StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), store));
-            uncertainWriteFailure = false;
         } catch (IOException e) {
-            uncertainWriteFailure = true;
             LOG.errorv(e, "Failed to persist data to {0}", filePath);
         }
     }

@@ -1050,19 +1050,18 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (RuntimeException | Error rollbackFailure) {
                 addSuppressedUnlessSelf(failure, rollbackFailure);
                 if (!proxyStartAttempted
-                        && (clusterRollback == null || !clusterRollback.memberMutationStarted())
-                        && !instances.hasUncertainWriteFailure()) {
+                        && (clusterRollback == null || !clusterRollback.memberMutationStarted())) {
                     try {
                         if (!scopedKeyExists(instances, accountId, dbResourceKey(region, id))) {
-                            releaseProxyPort(proxyPort);
+                            if (clusterRollback != null || cleanupFailedStandaloneResources(
+                                    failure, instance, region, managedPassword, mock)) {
+                                releaseProxyPort(proxyPort);
+                            }
                         }
                     } catch (RuntimeException | Error verificationFailure) {
                         addSuppressedUnlessSelf(failure, verificationFailure);
                     }
                 }
-                return;
-            }
-            if (instances.hasUncertainWriteFailure()) {
                 return;
             }
         }
@@ -1075,9 +1074,6 @@ public class RdsService implements Resettable, ResourceProvider {
                 cluster.getDbClusterMembers().addAll(clusterRollback.originalMembers());
                 cluster.setClusterWriterIdentifier(clusterRollback.originalWriter());
                 putClusterForScope(accountId, region, cluster.getDbClusterIdentifier(), cluster);
-                if (clusters.hasUncertainWriteFailure()) {
-                    cleanupComplete = false;
-                }
             } catch (RuntimeException | Error rollbackFailure) {
                 cleanupComplete = false;
                 addSuppressedUnlessSelf(failure, rollbackFailure);
@@ -1095,33 +1091,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         if (clusterRollback == null) {
-            if (!mock && instance.getDockerVolumeName() != null) {
-                try {
-                    if (instance.getContainerId() != null) {
-                        containerManager.stop(buildHandle(instance));
-                    } else {
-                        containerManager.stopForDelete(
-                                instance.getDbInstanceArn(), instance.getDockerVolumeName());
-                    }
-                    containerManager.removeVolume(instance.getDbInstanceArn(),
-                            resolvedInstanceStorageResourceId(instance),
-                            resolvedInstanceDockerVolumeName(instance));
-                    instance.setContainerId(null);
-                    instance.setBackendCleanupRequired(false);
-                } catch (RuntimeException | Error cleanupFailure) {
-                    cleanupComplete = false;
-                    addSuppressedUnlessSelf(failure, cleanupFailure);
-                }
-            }
-            if (managedPassword && (instance.getMasterUserSecretArn() != null
-                    || instance.isManagedSecretCleanupRequired())) {
-                try {
-                    cleanupFailedCreateManagedSecret(instance, region);
-                } catch (RuntimeException | Error cleanupFailure) {
-                    cleanupComplete = false;
-                    addSuppressedUnlessSelf(failure, cleanupFailure);
-                }
-            }
+            cleanupComplete = cleanupFailedStandaloneResources(failure, instance, region, managedPassword, mock);
         }
 
         boolean instanceRemoved = !tombstoneWriteNeeded;
@@ -1132,13 +1102,12 @@ public class RdsService implements Resettable, ResourceProvider {
                 addSuppressedUnlessSelf(failure, rollbackFailure);
             }
             try {
-                instanceRemoved = !scopedKeyExists(instances, accountId, dbResourceKey(region, id))
-                        && !instances.hasUncertainWriteFailure();
+                instanceRemoved = !scopedKeyExists(instances, accountId, dbResourceKey(region, id));
             } catch (RuntimeException | Error verificationFailure) {
                 addSuppressedUnlessSelf(failure, verificationFailure);
             }
         }
-        boolean releasePort = proxyStopped && instanceRemoved && !instances.hasUncertainWriteFailure();
+        boolean releasePort = proxyStopped && instanceRemoved;
         if (!instanceRemoved) {
             DbEndpoint originalEndpoint = instance.getEndpoint();
             if (proxyStopped) {
@@ -1147,12 +1116,7 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             try {
                 putInstanceForScope(accountId, region, id, instance);
-                if (instances.hasUncertainWriteFailure()) {
-                    instance.setProxyPort(proxyPort);
-                    instance.setEndpoint(originalEndpoint);
-                } else {
-                    releasePort = proxyStopped;
-                }
+                releasePort = proxyStopped;
             } catch (RuntimeException | Error rollbackFailure) {
                 instance.setProxyPort(proxyPort);
                 instance.setEndpoint(originalEndpoint);
@@ -1162,6 +1126,39 @@ public class RdsService implements Resettable, ResourceProvider {
         if (releasePort) {
             releaseProxyPort(proxyPort);
         }
+    }
+
+    private boolean cleanupFailedStandaloneResources(
+            Throwable failure, DbInstance instance, String region, boolean managedPassword, boolean mock) {
+        boolean cleanupComplete = true;
+        if (!mock && instance.getDockerVolumeName() != null) {
+            try {
+                if (instance.getContainerId() != null) {
+                    containerManager.stop(buildHandle(instance));
+                } else {
+                    containerManager.stopForDelete(
+                            instance.getDbInstanceArn(), instance.getDockerVolumeName());
+                }
+                containerManager.removeVolume(instance.getDbInstanceArn(),
+                        resolvedInstanceStorageResourceId(instance),
+                        resolvedInstanceDockerVolumeName(instance));
+                instance.setContainerId(null);
+                instance.setBackendCleanupRequired(false);
+            } catch (RuntimeException | Error cleanupFailure) {
+                cleanupComplete = false;
+                addSuppressedUnlessSelf(failure, cleanupFailure);
+            }
+        }
+        if (managedPassword && (instance.getMasterUserSecretArn() != null
+                || instance.isManagedSecretCleanupRequired())) {
+            try {
+                cleanupFailedCreateManagedSecret(instance, region);
+            } catch (RuntimeException | Error cleanupFailure) {
+                cleanupComplete = false;
+                addSuppressedUnlessSelf(failure, cleanupFailure);
+            }
+        }
+        return cleanupComplete;
     }
 
     public DbSnapshot createDbSnapshot(String snapshotId, String instanceId) {
@@ -5113,9 +5110,6 @@ public class RdsService implements Resettable, ResourceProvider {
                 ? retainedInstanceBackupOf(instance, effectiveRegion) : null;
         instance.setStatus(DbInstanceStatus.DELETING);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
-        if (instances.hasUncertainWriteFailure()) {
-            throw new IllegalStateException("Failed to persist DB instance deletion tombstone");
-        }
         detachReadReplicaLinksBeforeDelete(instance);
 
         boolean mock = config.services().rds().mock();
@@ -5160,18 +5154,12 @@ public class RdsService implements Resettable, ResourceProvider {
                 // Losing the writer promotes a remaining member, as Aurora fails over on its own.
                 cluster.setClusterWriterIdentifier(cluster.resolveWriterIdentifier());
                 putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
-                if (clusters.hasUncertainWriteFailure()) {
-                    throw new IllegalStateException("Failed to persist DB cluster membership during instance deletion");
-                }
                 dropFromClusterEndpoints(effectiveRegion, clusterId, id);
             }
         }
 
         try {
             deleteInstanceForScope(currentAccountId(), effectiveRegion, id);
-            if (instances.hasUncertainWriteFailure()) {
-                throw new IllegalStateException("Failed to persist DB instance deletion");
-            }
         } catch (RuntimeException | Error failure) {
             try {
                 putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);

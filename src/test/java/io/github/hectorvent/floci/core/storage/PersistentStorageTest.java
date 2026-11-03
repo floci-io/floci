@@ -5,7 +5,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -42,25 +41,6 @@ class PersistentStorageTest {
         store2.load();
         assertEquals("value1", store2.get("key1").orElseThrow());
         assertEquals("value2", store2.get("key2").orElseThrow());
-    }
-
-    @Test
-    void failedDiskWriteMarksStateUncertainUntilNextSuccessfulWrite() throws Exception {
-        Path tempFile = tempDir.resolve("test-store.json.tmp");
-        storage.put("key1", "value1");
-        Files.createDirectory(tempFile);
-
-        storage.delete("key1");
-        assertTrue(storage.hasUncertainWriteFailure());
-        assertTrue(storage.get("key1").isEmpty());
-
-        Files.delete(tempFile);
-        storage.put("key2", "value2");
-        assertFalse(storage.hasUncertainWriteFailure());
-        PersistentStorage<String, String> reloaded = new PersistentStorage<>(
-                tempDir.resolve("test-store.json"), new TypeReference<Map<String, String>>() {});
-        reloaded.load();
-        assertEquals("value2", reloaded.get("key2").orElseThrow());
     }
 
     @Test

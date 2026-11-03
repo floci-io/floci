@@ -1221,6 +1221,7 @@ class RdsServiceTest {
     @Test
     void failedInitialStandaloneWritesWithoutRecordReleasePort() {
         when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        String instanceArn = "arn:aws:rds:us-east-1:123456789012:db:failed-instance";
         InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
         RdsService service = newService(containerManager, proxyManager, instances,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
@@ -1234,10 +1235,42 @@ class RdsServiceTest {
                         "app", "db.t3.micro", 20, false, null, null, null)));
         assertTrue(List.of(initialFailure.getSuppressed()).contains(tombstoneFailure));
         assertTrue(instances.get("us-east-1::failed-instance").isEmpty());
+        ArgumentCaptor<String> volumeName = ArgumentCaptor.forClass(String.class);
+        verify(containerManager).tryStart(eq(instanceArn), eq("failed-instance"), any(), volumeName.capture(),
+                any(), any(), any(), any(), any(), any());
+        verify(containerManager).stop(ArgumentMatchers.argThat(
+                handle -> "cont-id".equals(handle.getContainerId())));
+        verify(containerManager).removeVolume(eq(instanceArn), any(), eq(volumeName.getValue()));
 
         DbInstance retried = service.createDbInstance("another-instance", "postgres", "13",
                 "admin", "secret", "app", "db.t3.micro", 20, false, null, null, null);
         assertEquals(7000, retried.getProxyPort());
+    }
+
+    @Test
+    void failedInitialStandaloneWritesKeepPortWhenBackendCleanupFails() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
+        RdsService service = newService(containerManager, proxyManager, instances,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        IllegalStateException initialFailure = new IllegalStateException("initial write failed before insert");
+        IllegalStateException tombstoneFailure = new IllegalStateException("tombstone write failed before insert");
+        IllegalStateException cleanupFailure = new IllegalStateException("volume removal failed");
+        doThrow(initialFailure).doThrow(tombstoneFailure)
+                .when(instances).put(eq("us-east-1::failed-instance"), any());
+        doThrow(cleanupFailure).when(containerManager).removeVolume(any(), any(), any());
+
+        assertSame(initialFailure, assertThrows(IllegalStateException.class, () ->
+                service.createDbInstance("failed-instance", "postgres", "13", "admin", "secret",
+                        "app", "db.t3.micro", 20, false, null, null, null)));
+        assertTrue(List.of(initialFailure.getSuppressed()).contains(tombstoneFailure));
+        assertTrue(List.of(initialFailure.getSuppressed()).contains(cleanupFailure));
+        assertTrue(instances.get("us-east-1::failed-instance").isEmpty());
+        verify(containerManager).stop(ArgumentMatchers.argThat(
+                handle -> "cont-id".equals(handle.getContainerId())));
+        assertEquals("InsufficientDBInstanceCapacity", assertThrows(AwsException.class, () ->
+                service.createDbInstance("another-instance", "postgres", "13", "admin", "secret",
+                        "app", "db.t3.micro", 20, false, null, null, null)).getErrorCode());
     }
 
     @Test
@@ -1274,139 +1307,6 @@ class RdsServiceTest {
         DbInstance retained = service.getDbInstance("failed-instance");
         assertEquals(7000, retained.getProxyPort());
         assertEquals(7000, retained.getEndpoint().port());
-    }
-
-    @Test
-    void failedStandaloneTombstoneDiskWriteKeepsProxyAndPort(@TempDir Path tempDir) throws Exception {
-        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
-        Path file = tempDir.resolve("tombstone-write.json");
-        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
-        PersistentStorage<String, DbInstance> instances = spy(new PersistentStorage<>(file, type));
-        RdsService service = newService(containerManager, proxyManager, instances,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
-        IllegalStateException startupFailure = new IllegalStateException("proxy start failed");
-        doThrow(startupFailure).when(proxyManager).startProxy(
-                any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                any(), any(), any(), any(), any(), any());
-        doCallRealMethod().doAnswer(invocation -> {
-            Files.createDirectory(file.resolveSibling("tombstone-write.json.tmp"));
-            return invocation.callRealMethod();
-        }).when(instances).put(eq("us-east-1::failed-instance"), any());
-
-        assertSame(startupFailure, assertThrows(IllegalStateException.class, () ->
-                service.createDbInstance("failed-instance", "postgres", "13", "admin", "secret",
-                        "app", "db.t3.micro", 20, false, null, null, null)));
-        verify(proxyManager, never()).stopProxy(any());
-        assertTrue(instances.hasUncertainWriteFailure());
-        PersistentStorage<String, DbInstance> reloaded = new PersistentStorage<>(file, type);
-        reloaded.load();
-        assertEquals(7000, reloaded.get("us-east-1::failed-instance").orElseThrow().getProxyPort());
-        assertEquals("InsufficientDBInstanceCapacity", assertThrows(AwsException.class, () ->
-                service.createDbInstance("another-instance", "postgres", "13", "admin", "secret",
-                        "app", "db.t3.micro", 20, false, null, null, null)).getErrorCode());
-    }
-
-    @Test
-    void failedStandaloneDeleteDiskWriteKeepsPortReserved(@TempDir Path tempDir) throws Exception {
-        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
-        Path file = tempDir.resolve("delete-write.json");
-        Path blockedTempFile = file.resolveSibling("delete-write.json.tmp");
-        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
-        PersistentStorage<String, DbInstance> instances = spy(new PersistentStorage<>(file, type));
-        RdsService service = newService(containerManager, proxyManager, instances,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
-        IllegalStateException startupFailure = new IllegalStateException("proxy start failed");
-        doThrow(startupFailure).doNothing().when(proxyManager).startProxy(
-                any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                any(), any(), any(), any(), any(), any());
-        doAnswer(invocation -> {
-            Files.createDirectory(blockedTempFile);
-            return invocation.callRealMethod();
-        }).doCallRealMethod().when(instances).delete("us-east-1::failed-instance");
-
-        assertSame(startupFailure, assertThrows(IllegalStateException.class, () ->
-                service.createDbInstance("failed-instance", "postgres", "13", "admin", "secret",
-                        "app", "db.t3.micro", 20, false, null, null, null)));
-        assertTrue(instances.hasUncertainWriteFailure());
-        PersistentStorage<String, DbInstance> reloaded = new PersistentStorage<>(file, type);
-        reloaded.load();
-        assertEquals(7000, reloaded.get("us-east-1::failed-instance").orElseThrow().getProxyPort());
-        assertEquals("InsufficientDBInstanceCapacity", assertThrows(AwsException.class, () ->
-                service.createDbInstance("another-instance", "postgres", "13", "admin", "secret",
-                        "app", "db.t3.micro", 20, false, null, null, null)).getErrorCode());
-        assertEquals(7000, service.getDbInstance("failed-instance").getProxyPort());
-        assertThrows(IllegalStateException.class, () -> service.deleteDbInstance("failed-instance"));
-        assertEquals(7000, service.getDbInstance("failed-instance").getProxyPort());
-        Files.delete(blockedTempFile);
-        service.deleteDbInstance("failed-instance");
-        assertEquals(7000, service.createDbInstance("another-instance", "postgres", "13",
-                "admin", "secret", "app", "db.t3.micro", 20, false, null, null, null).getProxyPort());
-    }
-
-    @Test
-    void failedStandalonePortClearDiskWriteRetainsPortForDeleteRetry(@TempDir Path tempDir) throws Exception {
-        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
-        Path file = tempDir.resolve("port-clear-write.json");
-        Path blockedTempFile = file.resolveSibling("port-clear-write.json.tmp");
-        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
-        PersistentStorage<String, DbInstance> instances = spy(new PersistentStorage<>(file, type));
-        RdsService service = newService(containerManager, proxyManager, instances,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
-        IllegalStateException startupFailure = new IllegalStateException("proxy start failed");
-        doThrow(startupFailure).doNothing().when(proxyManager).startProxy(
-                any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
-                any(), any(), any(), any(), any(), any());
-        doThrow(new IllegalStateException("backend cleanup unavailable")).doNothing()
-                .when(containerManager).removeVolume(any(), any(), any());
-        doCallRealMethod().doCallRealMethod().doAnswer(invocation -> {
-            Files.createDirectory(blockedTempFile);
-            return invocation.callRealMethod();
-        }).doCallRealMethod().when(instances).put(eq("us-east-1::failed-instance"), any());
-
-        assertSame(startupFailure, assertThrows(IllegalStateException.class, () ->
-                service.createDbInstance("failed-instance", "postgres", "13", "admin", "secret",
-                        "app", "db.t3.micro", 20, false, null, null, null)));
-        DbInstance retained = service.getDbInstance("failed-instance");
-        assertEquals(7000, retained.getProxyPort());
-        assertEquals(7000, retained.getEndpoint().port());
-        assertTrue(instances.hasUncertainWriteFailure());
-        Files.delete(blockedTempFile);
-
-        service.deleteDbInstance("failed-instance");
-        assertEquals(7000, service.createDbInstance("another-instance", "postgres", "13",
-                "admin", "secret", "app", "db.t3.micro", 20, false, null, null, null).getProxyPort());
-    }
-
-    @Test
-    void deleteDbInstanceDiskWriteFailureKeepsTombstoneAndPortForRetry(@TempDir Path tempDir) throws Exception {
-        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
-        Path file = tempDir.resolve("delete-retry-write.json");
-        Path blockedTempFile = file.resolveSibling("delete-retry-write.json.tmp");
-        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
-        PersistentStorage<String, DbInstance> instances = spy(new PersistentStorage<>(file, type));
-        RdsService service = newService(containerManager, proxyManager, instances,
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
-        service.createDbInstance("failed-instance", "postgres", "13", "admin", "secret",
-                "app", "db.t3.micro", 20, false, null, null, null);
-        doAnswer(invocation -> {
-            Files.createDirectory(blockedTempFile);
-            return invocation.callRealMethod();
-        }).doCallRealMethod().when(instances).delete("us-east-1::failed-instance");
-
-        assertThrows(IllegalStateException.class, () -> service.deleteDbInstance("failed-instance"));
-        assertTrue(instances.hasUncertainWriteFailure());
-        assertEquals(7000, service.getDbInstance("failed-instance").getProxyPort());
-        PersistentStorage<String, DbInstance> reloaded = new PersistentStorage<>(file, type);
-        reloaded.load();
-        assertEquals(7000, reloaded.get("us-east-1::failed-instance").orElseThrow().getProxyPort());
-        assertEquals("InsufficientDBInstanceCapacity", assertThrows(AwsException.class, () ->
-                service.createDbInstance("another-instance", "postgres", "13", "admin", "secret",
-                        "app", "db.t3.micro", 20, false, null, null, null)).getErrorCode());
-
-        Files.delete(blockedTempFile);
-        service.deleteDbInstance("failed-instance");
-        assertEquals(7000, service.createDbInstance("another-instance", "postgres", "13",
-                "admin", "secret", "app", "db.t3.micro", 20, false, null, null, null).getProxyPort());
     }
 
     @ParameterizedTest
@@ -2010,26 +1910,51 @@ class RdsServiceTest {
     }
 
     @Test
-    void failedInitialClusterMemberWriteWithUncertainWalKeepsPort() {
+    void unrelatedStorageWriteFailureDoesNotBlockMemberRollback(@TempDir Path tempDir) throws Exception {
         when(rdsConfig.proxyMaxPort()).thenReturn(7001);
-        InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
-        doReturn(true).when(instances).hasUncertainWriteFailure();
+        Path file = tempDir.resolve("member-instances.json");
+        Path blockedTempFile = tempDir.resolve("member-instances.json.tmp");
+        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
+        PersistentStorage<String, DbInstance> instances = spy(new PersistentStorage<>(file, type));
         RdsService service = newService(containerManager, proxyManager, instances,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
-        service.createDbCluster("member-cluster", "aurora-postgresql", "16.3",
+        DbCluster cluster = service.createDbCluster("member-cluster", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, null);
-        IllegalStateException writeFailure = new IllegalStateException("WAL outcome uncertain");
-        doThrow(writeFailure).when(instances).put(eq("us-east-1::failed-member"), any());
-
-        assertSame(writeFailure, assertThrows(IllegalStateException.class, () ->
-                service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
-                        null, null, "dbname", "db.serverless", 0, false,
-                        null, null, "member-cluster")));
+        IllegalStateException initialFailure = new IllegalStateException("initial member write failed");
+        CountDownLatch tombstoneWritten = new CountDownLatch(1);
+        CountDownLatch resumeRollback = new CountDownLatch(1);
+        doThrow(initialFailure).doAnswer(invocation -> {
+            invocation.callRealMethod();
+            tombstoneWritten.countDown();
+            assertTrue(resumeRollback.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(instances).put(eq("us-east-1::failed-member"), any());
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<Throwable> failedCreate = executor.submit(() -> assertThrows(IllegalStateException.class, () ->
+                    service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
+                            null, null, "dbname", "db.serverless", 0, false,
+                            null, null, "member-cluster")));
+            assertTrue(tombstoneWritten.await(5, TimeUnit.SECONDS));
+            Files.createDirectory(blockedTempFile);
+            instances.delete("unrelated-instance");
+            Files.delete(blockedTempFile);
+            resumeRollback.countDown();
+            assertSame(initialFailure, failedCreate.get(5, TimeUnit.SECONDS));
+        } finally {
+            resumeRollback.countDown();
+            executor.shutdownNow();
+            Files.deleteIfExists(blockedTempFile);
+        }
         assertTrue(instances.get("us-east-1::failed-member").isEmpty());
-        assertEquals("InsufficientDBInstanceCapacity", assertThrows(AwsException.class, () ->
-                service.createDbInstance("other-member", "aurora-postgresql", "16.3",
-                        null, null, "dbname", "db.serverless", 0, false,
-                        null, null, "member-cluster")).getErrorCode());
+        assertTrue(cluster.getDbClusterMembers().isEmpty());
+        PersistentStorage<String, DbInstance> reloaded = new PersistentStorage<>(file, type);
+        reloaded.load();
+        assertTrue(reloaded.get("us-east-1::failed-member").isEmpty());
+        DbInstance retried = service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
+                null, null, "dbname", "db.serverless", 0, false,
+                null, null, "member-cluster");
+        assertEquals(7001, retried.getProxyPort());
     }
 
     @Test
@@ -2110,54 +2035,6 @@ class RdsServiceTest {
         assertTrue(reloadedInstances.get("us-east-1::failed-member").isEmpty());
         reloaded.load();
         assertTrue(reloaded.get("us-east-1::member-cluster").orElseThrow().getDbClusterMembers().isEmpty());
-    }
-
-    @Test
-    void failedClusterMembershipRestoreDiskWriteRetainsMemberForDeleteRetry(@TempDir Path tempDir)
-            throws Exception {
-        Path clusterFile = tempDir.resolve("member-cluster.json");
-        TypeReference<Map<String, DbCluster>> clusterType = new TypeReference<>() {};
-        PersistentStorage<String, DbCluster> clusters = spy(new PersistentStorage<>(clusterFile, clusterType));
-        Path instanceFile = tempDir.resolve("member-instance.json");
-        TypeReference<Map<String, DbInstance>> instanceType = new TypeReference<>() {};
-        PersistentStorage<String, DbInstance> instances = new PersistentStorage<>(instanceFile, instanceType);
-        RdsService service = newService(containerManager, proxyManager, instances,
-                clusters, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
-        service.createDbCluster("member-cluster", "aurora-postgresql", "16.3",
-                "admin", "password", "dbname", false, null);
-        IllegalStateException publicationFailure = new IllegalStateException("cluster write failed");
-        doAnswer(invocation -> {
-            invocation.callRealMethod();
-            Files.createDirectory(clusterFile.resolveSibling("member-cluster.json.tmp"));
-            throw publicationFailure;
-        }).doCallRealMethod().when(clusters).put(eq("us-east-1::member-cluster"), any());
-
-        assertSame(publicationFailure, assertThrows(IllegalStateException.class, () ->
-                service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
-                        null, null, "dbname", "db.serverless", 0, false,
-                        null, null, "member-cluster")));
-        assertTrue(clusters.hasUncertainWriteFailure());
-        PersistentStorage<String, DbCluster> reloadedClusters =
-                new PersistentStorage<>(clusterFile, clusterType);
-        reloadedClusters.load();
-        assertEquals(List.of("failed-member"),
-                reloadedClusters.get("us-east-1::member-cluster").orElseThrow().getDbClusterMembers());
-        assertEquals(DbInstanceStatus.DELETING, service.getDbInstance("failed-member").getStatus());
-        PersistentStorage<String, DbInstance> reloadedInstances =
-                new PersistentStorage<>(instanceFile, instanceType);
-        reloadedInstances.load();
-        assertEquals(DbInstanceStatus.DELETING,
-                reloadedInstances.get("us-east-1::failed-member").orElseThrow().getStatus());
-        assertThrows(IllegalStateException.class, () -> service.deleteDbInstance("failed-member"));
-        assertEquals(DbInstanceStatus.DELETING, service.getDbInstance("failed-member").getStatus());
-        reloadedInstances.load();
-        assertTrue(reloadedInstances.get("us-east-1::failed-member").isPresent());
-        reloadedClusters.load();
-        assertEquals(List.of("failed-member"),
-                reloadedClusters.get("us-east-1::member-cluster").orElseThrow().getDbClusterMembers());
-        Files.delete(clusterFile.resolveSibling("member-cluster.json.tmp"));
-        service.deleteDbInstance("failed-member");
-        assertThrows(AwsException.class, () -> service.getDbInstance("failed-member"));
     }
 
     @Test

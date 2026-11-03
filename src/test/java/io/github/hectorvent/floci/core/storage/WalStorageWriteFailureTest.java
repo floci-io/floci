@@ -25,7 +25,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -66,7 +65,6 @@ class WalStorageWriteFailureTest {
             });
             assertThrows(UncheckedIOException.class, () -> mutate(store, mutation));
             assertOldValue(store);
-            assertTrue(store.hasUncertainWriteFailure());
         } finally {
             store.shutdown();
         }
@@ -86,7 +84,6 @@ class WalStorageWriteFailureTest {
             try {
                 assertThrows(UncheckedIOException.class, () -> mutate(store, mutation));
                 assertOldValue(store);
-                assertFalse(store.hasUncertainWriteFailure());
             } finally {
                 Files.delete(log);
                 Files.move(savedLog, log);
@@ -146,7 +143,6 @@ class WalStorageWriteFailureTest {
             UncheckedIOException failure = assertThrows(UncheckedIOException.class, () -> store.put("keep", "new"));
             assertEquals(1, failure.getCause().getSuppressed().length);
             assertOldValue(store);
-            assertTrue(store.hasUncertainWriteFailure());
             assertThrows(IllegalStateException.class, () -> store.put("later", "unsafe"));
             store.flush();
             assertTrue(Files.notExists(directory.resolve("snapshot.json")));
@@ -177,7 +173,6 @@ class WalStorageWriteFailureTest {
             UncheckedIOException failure = assertThrows(UncheckedIOException.class, () -> store.put("keep", "new"));
             assertSame(original, failure.getCause());
             assertOldValue(store);
-            assertTrue(store.hasUncertainWriteFailure());
             assertThrows(IllegalStateException.class, () -> store.put("later", "unsafe"));
         } finally {
             store.shutdown();

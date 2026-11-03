@@ -36,20 +36,6 @@ class AccountAwareStorageBackendTest {
     }
 
     @Test
-    void uncertainWriteStateIsVisibleThroughAccountScope() {
-        InMemoryStorage<String, String> raw = new InMemoryStorage<>() {
-            @Override
-            public boolean hasUncertainWriteFailure() {
-                return true;
-            }
-        };
-        AccountAwareStorageBackend<String> storage =
-                new AccountAwareStorageBackend<>(raw, null, "111111111111");
-
-        assertTrue(storage.hasUncertainWriteFailure());
-    }
-
-    @Test
     void isEmptyLooksOnlyAtTheCurrentAccount() {
         InMemoryStorage<String, String> raw = new InMemoryStorage<>();
         AccountAwareStorageBackend<String> first =
