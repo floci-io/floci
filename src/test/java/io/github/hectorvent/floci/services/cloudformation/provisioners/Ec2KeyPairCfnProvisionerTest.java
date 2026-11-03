@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -50,7 +51,7 @@ class Ec2KeyPairCfnProvisionerTest {
     private final Ec2Service ec2 = mock(Ec2Service.class);
     private final SsmService ssm = mock(SsmService.class);
     private final Ec2KeyPairCfnProvisioner provisioner = new Ec2KeyPairCfnProvisioner(ec2, ssm);
-    private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
 
     @Test
     void aCreatedKeyBacksRefAndGetAttAndKeepsItsPrivateKeyInASecureStringParameter() throws Exception {
@@ -214,6 +215,22 @@ class Ec2KeyPairCfnProvisionerTest {
     }
 
     @Test
+    void aPreexistingParameterSurvivesARejectedCreate() {
+        SsmService realSsm = realSsm(new InMemoryStorage<>(), new InMemoryStorage<>());
+        realSsm.putParameter("/ec2/keypair/key-1", "preexisting-value", "SecureString", null, false, REGION);
+        when(ec2.createKeyPair(REGION, "deploy", null, null)).thenReturn(created("deploy", "key-1"));
+        Ec2KeyPairCfnProvisioner realProvisioner = new Ec2KeyPairCfnProvisioner(ec2, realSsm);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> realProvisioner.provision(resource(), props("{\"KeyName\": \"deploy\"}"), ctx(null)));
+
+        assertEquals("ParameterAlreadyExists", failure.getErrorCode());
+        assertEquals("preexisting-value", realSsm.getParameter("/ec2/keypair/key-1", REGION).getValue());
+        assertEquals(1, realSsm.getParameterHistory("/ec2/keypair/key-1", REGION).size());
+        verify(ec2).deleteKeyPair(REGION, null, "key-1");
+    }
+
+    @Test
     void aFailedParameterUndoRetainsTheKeyForTheStackRollback() throws Exception {
         InMemoryStorage<String, Parameter> parameters = spy(new InMemoryStorage<>());
         InMemoryStorage<String, List<ParameterHistory>> history = spy(new InMemoryStorage<>());
@@ -240,6 +257,63 @@ class Ec2KeyPairCfnProvisionerTest {
         assertEquals("ParameterNotFound", assertThrows(AwsException.class,
                 () -> realSsm.getParameter("/ec2/keypair/key-1", REGION)).getErrorCode());
         verify(ec2).deleteKeyPair(REGION, null, "key-1");
+    }
+
+    @Test
+    void aPreexistingParameterSurvivesTheStackRollbackAfterKeyDeletionFails() throws Exception {
+        SsmService realSsm = realSsm(new InMemoryStorage<>(), new InMemoryStorage<>());
+        realSsm.putParameter("/ec2/keypair/key-1", "private-key-1", "SecureString", null, false, REGION);
+        when(ec2.createKeyPair(REGION, "deploy", null, null)).thenReturn(created("deploy", "key-1"));
+        when(ec2.deleteKeyPair(REGION, null, "key-1"))
+                .thenThrow(new IllegalStateException("simulated key delete failure"))
+                .thenReturn(null);
+        Ec2KeyPairCfnProvisioner realProvisioner = new Ec2KeyPairCfnProvisioner(ec2, realSsm);
+        StackResource resource = resource();
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> realProvisioner.provision(resource, props("{\"KeyName\": \"deploy\"}"), ctx(null)));
+        assertEquals("ParameterAlreadyExists", failure.getErrorCode());
+        assertEquals("true", resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+
+        when(ec2.describeKeyPairs(REGION, List.of("deploy"), List.of()))
+                .thenReturn(List.of(created("deploy", "key-1")));
+        realProvisioner.delete(resource, REGION);
+
+        assertEquals("private-key-1", realSsm.getParameter("/ec2/keypair/key-1", REGION).getValue());
+        verify(ec2, times(2)).deleteKeyPair(REGION, null, "key-1");
+    }
+
+    @Test
+    void aFailedReplacementCarriesItsUnownedParameterIntoCleanup() throws Exception {
+        SsmService realSsm = realSsm(new InMemoryStorage<>(), new InMemoryStorage<>());
+        when(ec2.createKeyPair(REGION, "first", null, null)).thenReturn(created("first", "key-1"));
+        when(ec2.createKeyPair(REGION, "next", null, null)).thenReturn(created("next", "key-2"));
+        Ec2KeyPairCfnProvisioner realProvisioner = new Ec2KeyPairCfnProvisioner(ec2, realSsm);
+        StackResource previous = resource();
+        realProvisioner.provision(previous, props("{\"KeyName\": \"first\"}"), ctx(null));
+        realSsm.putParameter("/ec2/keypair/key-2", "preexisting-value", "SecureString", null, false, REGION);
+        when(ec2.deleteKeyPair(REGION, null, "key-2"))
+                .thenThrow(new IllegalStateException("simulated key delete failure"))
+                .thenReturn(null);
+        StackResource attempted = resource();
+        attempted.setPhysicalId(previous.getPhysicalId());
+        attempted.getAttributes().putAll(previous.getAttributes());
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> realProvisioner.provision(attempted, props("{\"KeyName\": \"next\"}"), ctx("first")));
+        assertEquals("ParameterAlreadyExists", failure.getErrorCode());
+        ReplacementCleanup.mergeDisplaced(previous, attempted);
+        realProvisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+        when(ec2.describeKeyPairs(REGION, List.of("next"), List.of()))
+                .thenReturn(List.of(created("next", "key-2")));
+
+        StackResource restored = mapper.readValue(mapper.writeValueAsBytes(previous), StackResource.class);
+        assertTrue(realProvisioner.completeUpdate(restored).complete());
+
+        assertEquals("preexisting-value", realSsm.getParameter("/ec2/keypair/key-2", REGION).getValue());
+        assertEquals("private-key-1", realSsm.getParameter("/ec2/keypair/key-1", REGION).getValue());
+        verify(ec2, times(2)).deleteKeyPair(REGION, null, "key-2");
+        verify(ec2, never()).deleteKeyPair(REGION, null, "key-1");
     }
 
     @Test
@@ -276,20 +350,17 @@ class Ec2KeyPairCfnProvisionerTest {
     }
 
     @Test
-    void aFailedTagWriteDeletesTheNewKeyAndToleratesItsMissingParameter() {
+    void aFailedTagWriteDeletesTheNewKeyBeforeAnyParameterIsWritten() {
         when(ec2.createKeyPair(REGION, "deploy", null, null)).thenReturn(created("deploy", "key-1"));
         AwsException tagFailure = new AwsException("TagLimitExceeded", "simulated tag failure", 400);
         doThrow(tagFailure).when(ec2).createTags(anyString(), anyList(), anyList());
-        doThrow(new AwsException("ParameterNotFound", "The parameter was never written", 400))
-                .when(ssm).deleteParameter("/ec2/keypair/key-1", REGION);
 
         assertSame(tagFailure, assertThrows(AwsException.class,
                 () -> provisioner.provision(resource(), props("{\"KeyName\": \"deploy\","
                         + " \"Tags\": [{\"Key\": \"team\", \"Value\": \"infra\"}]}"), ctx(null))));
 
         verify(ec2).deleteKeyPair(REGION, null, "key-1");
-        verify(ssm).deleteParameter("/ec2/keypair/key-1", REGION);
-        verify(ssm, never()).putParameter(anyString(), anyString(), anyString(), any(), anyBoolean(), anyString());
+        verifyNoInteractions(ssm);
     }
 
     /** The engine's create rollback deletes a key the provision's own undo could not. */

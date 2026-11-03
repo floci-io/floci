@@ -10,7 +10,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -131,8 +130,8 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         // What the previous execution of this resource wrote, so an update can take out what the
         // template stopped declaring. Only these names are removed, which leaves inline policies and
         // attachments added out of band alone.
-        Set<String> previousInlineNames = readTrackedSet(r, INLINE_NAMES_ATTR);
-        Set<String> previousManagedArns = readTrackedSet(r, MANAGED_ARNS_ATTR);
+        Set<String> previousInlineNames = CfnTrackedSets.read(r, INLINE_NAMES_ATTR);
+        Set<String> previousManagedArns = CfnTrackedSets.read(r, MANAGED_ARNS_ATTR);
 
         Set<String> originalPolicyArns = new HashSet<>(role.getAttachedPolicyArns());
         LinkedHashSet<String> attachedByThisAttempt = new LinkedHashSet<>();
@@ -295,28 +294,8 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         }
 
         // What the next execution compares its template against.
-        writeTrackedSet(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
-        writeTrackedSet(r, MANAGED_ARNS_ATTR, managedPolicyArns);
-    }
-
-    private static Set<String> readTrackedSet(StackResource r, String attribute) {
-        String raw = r.getAttributes().get(attribute);
-        if (raw == null || raw.isEmpty()) {
-            return Set.of();
-        }
-        return new LinkedHashSet<>(List.of(raw.split("\n")));
-    }
-
-    /**
-     * Newline separated because an IAM policy name may contain a comma, per the
-     * {@code [\w+=,.@-]+} pattern CloudFormation documents for {@code PolicyName}.
-     */
-    private static void writeTrackedSet(StackResource r, String attribute, Collection<String> values) {
-        if (values.isEmpty()) {
-            r.getAttributes().remove(attribute);
-            return;
-        }
-        r.getAttributes().put(attribute, String.join("\n", values));
+        CfnTrackedSets.write(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
+        CfnTrackedSets.write(r, MANAGED_ARNS_ATTR, managedPolicyArns);
     }
 
     @Override
