@@ -97,6 +97,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1096,6 +1097,282 @@ class RdsServiceTest {
                 "admin", "secret123", null, "db.t3.micro",
                 20, false, null, null, null, null, false));
         assertThrows(AwsException.class, () -> rdsService.getDbInstance("mypostgres"));
+    }
+
+    @Test
+    void failedInstanceProxyStartCleansBackendAndReusesPort() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        String instanceArn = "arn:aws:rds:us-east-1:123456789012:db:retry-instance";
+        IllegalStateException startupFailure = new IllegalStateException("proxy start failed");
+        doThrow(startupFailure).doNothing().when(proxyManager).startProxy(
+                any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), any());
+
+        assertSame(startupFailure, assertThrows(IllegalStateException.class, () ->
+                rdsService.createDbInstance("retry-instance", "postgres", "13",
+                        "admin", "secret123", null, "db.t3.micro",
+                        20, false, null, null, null, null, false)));
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("retry-instance"));
+
+        ArgumentCaptor<String> volumeName = ArgumentCaptor.forClass(String.class);
+        verify(containerManager).tryStart(eq(instanceArn), eq("retry-instance"), any(), volumeName.capture(),
+                any(), any(), any(), any(), any(), any());
+        verify(proxyManager).stopProxy("rds-resource:" + instanceArn);
+        verify(containerManager).stop(ArgumentMatchers.argThat(
+                handle -> "cont-id".equals(handle.getContainerId())));
+        verify(containerManager).removeVolume(eq(instanceArn), any(), eq(volumeName.getValue()));
+
+        DbInstance retried = rdsService.createDbInstance("retry-instance", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro",
+                20, false, null, null, null, null, false);
+        assertEquals(7000, retried.getProxyPort());
+    }
+
+    @Test
+    void failedInstanceProxyCleanupRetainsRecordAndPort() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        IllegalStateException startupFailure = new IllegalStateException("proxy start failed");
+        IllegalStateException cleanupFailure = new IllegalStateException("proxy stop failed");
+        doThrow(startupFailure).when(proxyManager).startProxy(
+                any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), any());
+        doThrow(cleanupFailure).when(proxyManager).stopProxy(any());
+
+        assertSame(startupFailure, assertThrows(IllegalStateException.class, () ->
+                rdsService.createDbInstance("failed-instance", "postgres", "13",
+                        "admin", "secret123", null, "db.t3.micro",
+                        20, false, null, null, null, null, false)));
+
+        DbInstance retained = rdsService.getDbInstance("failed-instance");
+        assertEquals(DbInstanceStatus.DELETING, retained.getStatus());
+        assertEquals(7000, retained.getProxyPort());
+        AwsException noPort = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("another-instance", "postgres", "13",
+                        "admin", "secret123", null, "db.t3.micro",
+                        20, false, null, null, null, null, false));
+        assertEquals("InsufficientDBInstanceCapacity", noPort.getErrorCode());
+    }
+
+    @Test
+    void failedInstanceStartRetainsNamedCleanupAfterRestart(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("rds-instance-cleanup.json");
+        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
+        PersistentStorage<String, DbInstance> storage = new PersistentStorage<>(file, type);
+        RdsService service = newService(containerManager, proxyManager, storage,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        IllegalStateException startupFailure = new IllegalStateException("Docker create result lost");
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenThrow(startupFailure);
+        doThrow(new IllegalStateException("cleanup unavailable"))
+                .when(containerManager).stopForDelete(any(), any());
+
+        assertSame(startupFailure, assertThrows(IllegalStateException.class, () ->
+                service.createDbInstance("failed-instance", "postgres", "13", "admin", "secret",
+                        "app", "db.t3.micro", 20, false, null, null, null)));
+        PersistentStorage<String, DbInstance> reloaded = new PersistentStorage<>(file, type);
+        reloaded.load();
+        DbInstance retained = reloaded.get("us-east-1::failed-instance").orElseThrow();
+        assertEquals(DbInstanceStatus.DELETING, retained.getStatus());
+        assertTrue(retained.isBackendCleanupRequired());
+        assertNotNull(retained.getDockerVolumeName());
+
+        RdsContainerManager restartedManager = mock(RdsContainerManager.class);
+        RdsService restarted = newService(restartedManager, mock(RdsProxyManager.class), reloaded,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        restarted.restorePersistedRuntime();
+        restarted.deleteDbInstance("failed-instance");
+        verify(restartedManager).stopForDelete(retained.getDbInstanceArn(), retained.getDockerVolumeName());
+        verify(restartedManager).removeVolume(retained.getDbInstanceArn(),
+                retained.getContainerStorageResourceId(), retained.getDockerVolumeName());
+    }
+
+    @Test
+    void failedInstanceCreatePersistsCleanupBeforeStoppingProxy(@TempDir Path tempDir) throws Exception {
+        Path file = tempDir.resolve("rds-instance-cleanup-order.json");
+        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
+        PersistentStorage<String, DbInstance> storage = new PersistentStorage<>(file, type);
+        RdsService service = newService(containerManager, proxyManager, storage,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        IllegalStateException startupFailure = new IllegalStateException("proxy start failed");
+        doThrow(startupFailure).when(proxyManager).startProxy(
+                any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), any());
+        AtomicReference<DbInstance> persistedAtCleanup = new AtomicReference<>();
+        doAnswer(invocation -> {
+            PersistentStorage<String, DbInstance> reloaded = new PersistentStorage<>(file, type);
+            reloaded.load();
+            persistedAtCleanup.set(reloaded.get("us-east-1::failed-instance").orElse(null));
+            return null;
+        }).when(proxyManager).stopProxy(any());
+
+        assertSame(startupFailure, assertThrows(IllegalStateException.class, () ->
+                service.createDbInstance("failed-instance", "postgres", "13", "admin", "secret",
+                        "app", "db.t3.micro", 20, false, null, null, null)));
+        DbInstance retained = persistedAtCleanup.get();
+        assertNotNull(retained);
+        assertEquals(DbInstanceStatus.DELETING, retained.getStatus());
+        assertNotNull(retained.getDockerVolumeName());
+        assertThrows(AwsException.class, () -> service.getDbInstance("failed-instance"));
+    }
+
+    @Test
+    void failedInstanceRollbackKeepsPortOwnedUntilCleanupFinishes() throws Exception {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        IllegalStateException startupFailure = new IllegalStateException("backend startup failed");
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any())).thenThrow(startupFailure).thenReturn(null);
+        CountDownLatch cleanupEntered = new CountDownLatch(1);
+        CountDownLatch allowCleanup = new CountDownLatch(1);
+        AtomicBoolean firstCleanup = new AtomicBoolean(true);
+        doAnswer(invocation -> {
+            if (firstCleanup.compareAndSet(true, false)) {
+                cleanupEntered.countDown();
+                assertTrue(allowCleanup.await(10, TimeUnit.SECONDS));
+            }
+            return null;
+        }).when(containerManager).stopForDelete(any(), any());
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        Future<?> create = executor.submit(() -> assertSame(startupFailure,
+                assertThrows(IllegalStateException.class, () -> service.createDbInstance(
+                        "failed-instance", "postgres", "13", "admin", "secret", "app",
+                        "db.t3.micro", 20, false, null, null, null))));
+        try {
+            assertTrue(cleanupEntered.await(10, TimeUnit.SECONDS));
+            AtomicReference<Thread> deleteThread = new AtomicReference<>();
+            Future<?> delete = executor.submit(() -> {
+                deleteThread.set(Thread.currentThread());
+                try {
+                    service.deleteDbInstance("failed-instance");
+                } catch (AwsException e) {
+                    assertEquals("DBInstanceNotFound", e.getErrorCode());
+                }
+            });
+            awaitBlockedOrDone(deleteThread, delete);
+            assertFalse(delete.isDone(), "delete must wait while failed-create rollback owns the instance");
+            assertEquals(Thread.State.BLOCKED, deleteThread.get().getState());
+
+            allowCleanup.countDown();
+            create.get(10, TimeUnit.SECONDS);
+            delete.get(10, TimeUnit.SECONDS);
+            DbInstance next = service.createDbInstance("next-instance", "postgres", "13",
+                    "admin", "secret", "app", "db.t3.micro", 20, false, null, null,
+                    null, null, false, false, null, Map.of(), List.of(), null,
+                    "us-east-1", true, DbInstanceSettings.defaults(), null, 7000);
+            assertEquals(7000, next.getProxyPort());
+            AwsException conflict = assertThrows(AwsException.class, () ->
+                    service.createDbInstance("another-instance", "postgres", "13",
+                            "admin", "secret", "app", "db.t3.micro", 20, false,
+                            null, null, null, null, false, false, null, Map.of(),
+                            List.of(), null, "us-east-1", true,
+                            DbInstanceSettings.defaults(), null, 7000));
+            assertEquals("InvalidParameterValue", conflict.getErrorCode());
+        } finally {
+            allowCleanup.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void invalidInstancePlacementReleasesRequestedPort() {
+        AwsException invalid = assertThrows(AwsException.class, () -> rdsService.createDbInstance(
+                "invalid-placement", "postgres", "13", "admin", "secret123", null,
+                "db.t3.micro", 20, false, null, null, null, "not-an-az", false,
+                false, null, Map.of(), List.of(), null, "us-east-1", true,
+                DbInstanceSettings.defaults(), null, 7005));
+        assertEquals("InvalidVPCNetworkStateFault", invalid.getErrorCode());
+
+        DbInstance retried = rdsService.createDbInstance("valid-placement", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro", 20, false, null,
+                null, null, null, false, false, null, Map.of(), List.of(), null,
+                "us-east-1", true, DbInstanceSettings.defaults(), null, 7005);
+        assertEquals(7005, retried.getProxyPort());
+    }
+
+    @Test
+    void failedInstanceEndpointResolutionReleasesPortBeforeBackendStart() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        IllegalStateException endpointFailure = new IllegalStateException("endpoint unavailable");
+        when(rdsConfig.endpointHost()).thenThrow(endpointFailure).thenReturn(Optional.empty());
+
+        assertSame(endpointFailure, assertThrows(IllegalStateException.class, () ->
+                rdsService.createDbInstance("failed-endpoint", "postgres", "13", "admin",
+                        "secret123", null, "db.t3.micro", 20, false, null, null, null,
+                        null, false)));
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("failed-endpoint"));
+        verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any());
+
+        DbInstance retried = rdsService.createDbInstance("valid-endpoint", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro", 20, false, null, null,
+                null, null, false);
+        assertEquals(7000, retried.getProxyPort());
+    }
+
+    @Test
+    void failedInstanceMetadataInitializationReleasesPortBeforeBackendStart() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        DbInstanceSettings settings = new DbInstanceSettings(null, null, null, null, null, null,
+                null, null, null, null, null, Collections.singletonList(null), null, null);
+
+        assertThrows(NullPointerException.class, () -> rdsService.createDbInstance(
+                "failed-metadata", "postgres", "13", "admin", "secret123", null,
+                "db.t3.micro", 20, false, null, null, null, null, false, false,
+                null, Map.of(), List.of(), null, "us-east-1", true, settings, null, 7000));
+        assertThrows(AwsException.class, () -> rdsService.getDbInstance("failed-metadata"));
+        verify(containerManager, never()).tryStart(any(), any(), any(), any(), any(), any(),
+                any(), any(), any(), any());
+
+        DbInstance retried = rdsService.createDbInstance("valid-metadata", "postgres", "13",
+                "admin", "secret123", null, "db.t3.micro", 20, false, null, null,
+                null, null, false);
+        assertEquals(7000, retried.getProxyPort());
+    }
+
+    @Test
+    void failedInstanceSecretWriteRetainsOwnedIdentityForStrictRetry() {
+        when(rdsConfig.mock()).thenReturn(true);
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        AtomicReference<Secret> written = new AtomicReference<>();
+        IllegalStateException writeFailure = new IllegalStateException("secret response lost");
+        IllegalStateException deleteFailure = new IllegalStateException("secret delete failed");
+        when(secrets.createSecret(any(), any(), isNull(), any(), eq("kms-key-1"),
+                any(), eq("rds"), eq("us-east-1"))).thenAnswer(invocation -> {
+            Secret secret = new Secret();
+            secret.setName(invocation.getArgument(0));
+            secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:partial-instance");
+            secret.setOwningService("rds");
+            secret.setTags(invocation.getArgument(5));
+            written.set(secret);
+            throw writeFailure;
+        });
+        when(secrets.describeSecret(anyString(), eq("us-east-1"))).thenAnswer(invocation -> written.get());
+        when(secrets.deleteSecret(anyString(), isNull(), eq(true), eq("us-east-1")))
+                .thenThrow(deleteFailure).thenThrow(deleteFailure).thenReturn(new Secret());
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), secrets);
+
+        assertSame(writeFailure, assertThrows(IllegalStateException.class, () ->
+                service.createDbInstance("failed-instance", "postgres", "13", "admin", null,
+                        "app", "db.t3.micro", 20, false, null, null, null, true, "kms-key-1")));
+        DbInstance retained = service.getDbInstance("failed-instance");
+        assertEquals(DbInstanceStatus.DELETING, retained.getStatus());
+        assertEquals(written.get().getArn(), retained.getMasterUserSecretArn());
+        assertTrue(retained.isManagedSecretCleanupRequired());
+        assertSame(deleteFailure, assertThrows(IllegalStateException.class,
+                () -> service.deleteDbInstance("failed-instance")));
+        service.deleteDbInstance("failed-instance");
+        assertThrows(AwsException.class, () -> service.getDbInstance("failed-instance"));
+        verify(secrets, times(3)).deleteSecret(eq(written.get().getArn()),
+                isNull(), eq(true), eq("us-east-1"));
     }
 
     @Test

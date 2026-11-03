@@ -790,6 +790,8 @@ public class RdsService implements Resettable, ResourceProvider {
         String instanceVolumeId = null;
         String instanceDockerVolumeName = null;
         String instanceStorageResourceId = dbiResourceId;
+        String instanceImage = null;
+        Map<String, String> instanceEngineParameters = null;
         PlacementResolution placement;
         DbCluster publicationCluster = null;
 
@@ -825,64 +827,91 @@ public class RdsService implements Resettable, ResourceProvider {
             instanceStorageResourceId = resolvedClusterStorageResourceId(cluster);
             placement = PlacementResolution.fromCluster(cluster);
         } else {
-            placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
+            try {
+                placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
+            } catch (RuntimeException | Error failure) {
+                releaseProxyPort(proxyPort);
+                throw failure;
+            }
             if (!mock) {
                 // Standalone instance, so it starts its own container. The record itself is metadata:
                 // identifier, ARN, endpoint and tags come from configuration, so the instance is
                 // created and reaches 'available' even when no Docker daemon is reachable.
-                String image = imageForEngine(engine, engineVersion);
-                instanceVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
-                instanceDockerVolumeName = newVolumeName(
-                        instanceVolumeId, instanceStorageResourceId);
+                try {
+                    instanceImage = imageForEngine(engine, engineVersion);
+                    instanceEngineParameters = instanceEngineParameters(
+                            currentAccountId(), effectiveRegion, paramGroupName);
+                    instanceVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
+                    instanceDockerVolumeName = newVolumeName(
+                            instanceVolumeId, instanceStorageResourceId);
+                } catch (RuntimeException | Error failure) {
+                    releaseProxyPort(proxyPort);
+                    throw failure;
+                }
+            }
+        }
+
+        DbEndpoint endpoint;
+        DbInstance instance;
+        try {
+            endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
+            instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
+                    dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.CREATING,
+                    endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
+            instance.setOptionGroupName(optionGroupName);
+            instance.setDbSubnetGroupName(dbSubnetGroupName);
+            instance.setContainerId(containerId);
+            instance.setContainerHost(containerHost);
+            instance.setContainerPort(containerPort);
+            instance.setVolumeId(instanceVolumeId);
+            instance.setDockerVolumeName(instanceDockerVolumeName);
+            instance.setContainerStorageResourceId(instanceStorageResourceId);
+            instance.setTags(tags);
+            instance.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+            instance.setDbSubnetGroupName(placement.dbSubnetGroupName());
+            instance.setVpcId(placement.vpcId());
+            instance.setAvailabilityZone(placement.availabilityZone());
+            instance.setMultiAz(placement.multiAz());
+            instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
+            instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
+            instance.setEngineIdentifier(engineIdentifier);
+            resolvedSettings.applyTo(instance);
+            instance.setPubliclyAccessible(publiclyAccessible != null
+                    ? publiclyAccessible
+                    : defaultPubliclyAccessible(engineParam, dbSubnetGroupName));
+            instance.setDeletionProtection(Boolean.TRUE.equals(deletionProtection));
+            instance.setDbiResourceId(dbiResourceId);
+            instance.setDbInstanceArn(dbInstanceArn);
+        } catch (RuntimeException | Error failure) {
+            releaseProxyPort(proxyPort);
+            throw failure;
+        }
+        String accountId = accountIdFromArn(instance.getDbInstanceArn());
+        if (isBlank(dbClusterIdentifier) && !mock) {
+            try {
                 RdsContainerHandle handle = containerManager.tryStart(
                         dbInstanceArn, id, instanceStorageResourceId,
-                        instanceDockerVolumeName, engine, image,
-                        masterUsername, masterPassword, dbName,
-                        instanceEngineParameters(currentAccountId(), effectiveRegion, paramGroupName));
+                        instanceDockerVolumeName, engine, instanceImage,
+                        masterUsername, masterPassword, dbName, instanceEngineParameters);
                 if (handle != null) {
                     backendHost = handle.getHost();
                     backendPort = handle.getPort();
-                    containerId = handle.getContainerId();
-                    containerHost = handle.getHost();
-                    containerPort = handle.getPort();
+                    instance.setContainerId(handle.getContainerId());
+                    instance.setContainerHost(handle.getHost());
+                    instance.setContainerPort(handle.getPort());
                 } else if (!containerManager.refusedParameterGroup(dbInstanceArn)) {
                     LOG.warnv("DB instance {0} created without a backing database container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
                             + "the database do not until a daemon appears.", id);
                 }
+            } catch (RuntimeException | Error failure) {
+                synchronized (instance) {
+                    rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
+                            effectiveRegion, false, false, mock);
+                }
+                throw failure;
             }
         }
-
-        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
-        DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
-                dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.CREATING,
-                endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
-        instance.setOptionGroupName(optionGroupName);
-        instance.setDbSubnetGroupName(dbSubnetGroupName);
-        instance.setContainerId(containerId);
-        instance.setContainerHost(containerHost);
-        instance.setContainerPort(containerPort);
-        instance.setVolumeId(instanceVolumeId);
-        instance.setDockerVolumeName(instanceDockerVolumeName);
-        instance.setContainerStorageResourceId(instanceStorageResourceId);
-        instance.setTags(tags);
-        instance.setVpcSecurityGroupIds(vpcSecurityGroupIds);
-        instance.setDbSubnetGroupName(placement.dbSubnetGroupName());
-        instance.setVpcId(placement.vpcId());
-        instance.setAvailabilityZone(placement.availabilityZone());
-        instance.setMultiAz(placement.multiAz());
-        instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
-        instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
-        instance.setEngineIdentifier(engineIdentifier);
-        resolvedSettings.applyTo(instance);
-        instance.setPubliclyAccessible(publiclyAccessible != null
-                ? publiclyAccessible
-                : defaultPubliclyAccessible(engineParam, dbSubnetGroupName));
-        instance.setDeletionProtection(Boolean.TRUE.equals(deletionProtection));
-
-        instance.setDbiResourceId(dbiResourceId);
-        instance.setDbInstanceArn(dbInstanceArn);
-        String accountId = accountIdFromArn(instance.getDbInstanceArn());
         // The canonical cluster owns member publication and cluster changes. Standalone
         // publication and slow relay/storage work do not hold the service-wide monitor.
         synchronized (publicationCluster != null ? publicationCluster : instance) {
@@ -925,49 +954,141 @@ public class RdsService implements Resettable, ResourceProvider {
                     }
                 }
             }
-            if (manageInstancePassword) {
-                attachManagedMasterUserSecret(instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
-            }
-            putInstanceForScope(accountId, effectiveRegion, id, instance);
+            boolean proxyStartAttempted = false;
+            try {
+                if (manageInstancePassword) {
+                    attachManagedMasterUserSecret(
+                            instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
+                }
+                putInstanceForScope(accountId, effectiveRegion, id, instance);
 
-            if (!mock && hasBackend(backendHost, backendPort)) {
-                final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
-                InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
-                try {
-                    proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                    backendIdentity.runtimeId(),
-                            engine, iamEnabled, proxyPort, backendHost, backendPort,
-                            instance.getEndpoint().address(),
-                            instance.getMasterUsername(), instance.getMasterPassword(), dbName,
-                            (user, pw) -> validateDbPasswordForScope(
-                                    accountId, instanceRegion, id, user, pw),
-                            proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                    instanceRegion, accountId, backendIdentity.dbUserResourceId()));
-                } catch (RuntimeException | Error e) {
+                if (!mock && hasBackend(backendHost, backendPort)) {
+                    final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
+                    InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
                     try {
-                        deleteInstanceForScope(accountId, effectiveRegion, id);
-                    } catch (RuntimeException rollbackFailure) {
-                        e.addSuppressed(rollbackFailure);
+                        proxyStartAttempted = true;
+                        proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                                backendIdentity.runtimeId(), engine, iamEnabled, proxyPort,
+                                backendHost, backendPort, instance.getEndpoint().address(),
+                                instance.getMasterUsername(), instance.getMasterPassword(), dbName,
+                                (user, pw) -> validateDbPasswordForScope(
+                                        accountId, instanceRegion, id, user, pw),
+                                proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
+                                        instanceRegion, accountId, backendIdentity.dbUserResourceId()));
+                    } catch (RuntimeException | Error failure) {
+                        if (!isBlank(dbClusterIdentifier)) {
+                            try {
+                                deleteInstanceForScope(accountId, effectiveRegion, id);
+                            } catch (RuntimeException | Error rollbackFailure) {
+                                addSuppressedUnlessSelf(failure, rollbackFailure);
+                            }
+                        }
+                        throw failure;
                     }
-                    throw e;
                 }
-            }
 
-            if (currentCluster != null) {
-                currentCluster.getDbClusterMembers().add(id);
-                if (currentCluster.resolveWriterIdentifier() == null
-                        || !currentCluster.getDbClusterMembers().contains(currentCluster.getClusterWriterIdentifier())) {
-                    currentCluster.setClusterWriterIdentifier(currentCluster.resolveWriterIdentifier());
+                if (currentCluster != null) {
+                    currentCluster.getDbClusterMembers().add(id);
+                    if (currentCluster.resolveWriterIdentifier() == null
+                            || !currentCluster.getDbClusterMembers().contains(currentCluster.getClusterWriterIdentifier())) {
+                        currentCluster.setClusterWriterIdentifier(currentCluster.resolveWriterIdentifier());
+                    }
+                    putClusterForScope(accountId, effectiveRegion, dbClusterIdentifier, currentCluster);
                 }
-                putClusterForScope(accountId, effectiveRegion, dbClusterIdentifier, currentCluster);
-            }
 
-            instance.setStatus(DbInstanceStatus.AVAILABLE);
-            putInstanceForScope(accountId, effectiveRegion, id, instance);
+                instance.setStatus(DbInstanceStatus.AVAILABLE);
+                putInstanceForScope(accountId, effectiveRegion, id, instance);
+            } catch (RuntimeException | Error failure) {
+                if (isBlank(dbClusterIdentifier)) {
+                    rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
+                            effectiveRegion, proxyStartAttempted, manageInstancePassword, mock);
+                }
+                throw failure;
+            }
         }
         LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}",
                 id, engine, endpoint.address(), String.valueOf(endpoint.port()));
         return instance;
+    }
+
+    private void rollbackFailedStandaloneInstanceCreate(
+            Throwable failure, DbInstance instance, String accountId, String region,
+            boolean proxyStartAttempted, boolean managedPassword, boolean mock) {
+        String id = instance.getDbInstanceIdentifier();
+        instance.setStatus(DbInstanceStatus.DELETING);
+        instance.setDeletionProtection(false);
+        instance.setBackendCleanupRequired(!mock && instance.getDockerVolumeName() != null);
+        instance.setManagedSecretCleanupRequired(managedPassword
+                && (instance.getMasterUserSecretArn() != null
+                || instance.isManagedSecretCleanupRequired()));
+        try {
+            putInstanceForScope(accountId, region, id, instance);
+        } catch (RuntimeException | Error persistenceFailure) {
+            addSuppressedUnlessSelf(failure, persistenceFailure);
+            return;
+        }
+
+        boolean cleanupComplete = true;
+        boolean proxyStopped = !proxyStartAttempted;
+        if (proxyStartAttempted) {
+            try {
+                proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+                proxyStopped = true;
+            } catch (RuntimeException | Error cleanupFailure) {
+                cleanupComplete = false;
+                addSuppressedUnlessSelf(failure, cleanupFailure);
+            }
+        }
+        if (!mock && instance.getDockerVolumeName() != null) {
+            try {
+                if (instance.getContainerId() != null) {
+                    containerManager.stop(buildHandle(instance));
+                } else {
+                    containerManager.stopForDelete(
+                            instance.getDbInstanceArn(), instance.getDockerVolumeName());
+                }
+                containerManager.removeVolume(instance.getDbInstanceArn(),
+                        resolvedInstanceStorageResourceId(instance),
+                        resolvedInstanceDockerVolumeName(instance));
+                instance.setContainerId(null);
+                instance.setBackendCleanupRequired(false);
+            } catch (RuntimeException | Error cleanupFailure) {
+                cleanupComplete = false;
+                addSuppressedUnlessSelf(failure, cleanupFailure);
+            }
+        }
+        if (managedPassword && (instance.getMasterUserSecretArn() != null
+                || instance.isManagedSecretCleanupRequired())) {
+            try {
+                cleanupFailedCreateManagedSecret(instance, region);
+            } catch (RuntimeException | Error cleanupFailure) {
+                cleanupComplete = false;
+                addSuppressedUnlessSelf(failure, cleanupFailure);
+            }
+        }
+        if (proxyStopped) {
+            releaseProxyPort(instance.getProxyPort());
+            instance.setProxyPort(0);
+            instance.setEndpoint(null);
+        }
+        if (!cleanupComplete) {
+            try {
+                putInstanceForScope(accountId, region, id, instance);
+            } catch (RuntimeException | Error persistenceFailure) {
+                addSuppressedUnlessSelf(failure, persistenceFailure);
+            }
+            return;
+        }
+        try {
+            deleteInstanceForScope(accountId, region, id);
+        } catch (RuntimeException | Error deletionFailure) {
+            addSuppressedUnlessSelf(failure, deletionFailure);
+            try {
+                putInstanceForScope(accountId, region, id, instance);
+            } catch (RuntimeException | Error persistenceFailure) {
+                addSuppressedUnlessSelf(failure, persistenceFailure);
+            }
+        }
     }
 
     public DbSnapshot createDbSnapshot(String snapshotId, String instanceId) {
@@ -3240,6 +3361,7 @@ public class RdsService implements Resettable, ResourceProvider {
         List<Secret.Tag> tags = List.of(
                 new Secret.Tag("aws:rds:primaryDBInstanceArn", instance.getDbInstanceArn()),
                 new Secret.Tag("aws:secretsmanager:owningService", MANAGED_SECRET_OWNING_SERVICE));
+        instance.setManagedSecretCleanupRequired(true);
         Secret secret = secretsManagerService.createSecret(
                 secretName,
                 managedMasterSecretString(instance),
@@ -3252,6 +3374,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setMasterUserSecretArn(secret.getArn());
         instance.setMasterUserSecretStatus("active");
         instance.setMasterUserSecretKmsKeyId(effectiveKmsKeyId);
+        instance.setManagedSecretCleanupRequired(false);
     }
 
     private static String managedMasterSecretString(DbInstance instance) {
@@ -4971,9 +5094,7 @@ public class RdsService implements Resettable, ResourceProvider {
             try {
                 putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
             } catch (RuntimeException | Error restoreFailure) {
-                if (restoreFailure != failure) {
-                    failure.addSuppressed(restoreFailure);
-                }
+                addSuppressedUnlessSelf(failure, restoreFailure);
             }
             throw failure;
         }
@@ -5240,9 +5361,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     clusterRemoved = !scopedKeyExists(
                             clusters, clusterAccountId, dbResourceKey(effectiveRegion, id));
                 } catch (RuntimeException verificationFailure) {
-                    if (verificationFailure != e) {
-                        e.addSuppressed(verificationFailure);
-                    }
+                    addSuppressedUnlessSelf(e, verificationFailure);
                 }
             }
             if (clusterRemoved) {
@@ -5252,9 +5371,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         proxyManager.stopProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id));
                         proxyStopped = true;
                     } catch (RuntimeException cleanupFailure) {
-                        if (cleanupFailure != e) {
-                            e.addSuppressed(cleanupFailure);
-                        }
+                        addSuppressedUnlessSelf(e, cleanupFailure);
                     }
                     if (cluster.getContainerId() != null) {
                         attemptRollback(e, () -> containerManager.stop(buildClusterHandle(cluster)));
@@ -5900,9 +6017,7 @@ public class RdsService implements Resettable, ResourceProvider {
             try {
                 putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
             } catch (RuntimeException | Error restoreFailure) {
-                if (restoreFailure != failure) {
-                    failure.addSuppressed(restoreFailure);
-                }
+                addSuppressedUnlessSelf(failure, restoreFailure);
             }
             throw failure;
         }
@@ -8878,9 +8993,13 @@ public class RdsService implements Resettable, ResourceProvider {
         try {
             rollback.run();
         } catch (RuntimeException rollbackFailure) {
-            if (rollbackFailure != failure) {
-                failure.addSuppressed(rollbackFailure);
-            }
+            addSuppressedUnlessSelf(failure, rollbackFailure);
+        }
+    }
+
+    private static void addSuppressedUnlessSelf(Throwable failure, Throwable extra) {
+        if (extra != failure) {
+            failure.addSuppressed(extra);
         }
     }
 
