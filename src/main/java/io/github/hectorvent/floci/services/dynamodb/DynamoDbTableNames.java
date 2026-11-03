@@ -109,15 +109,23 @@ public final class DynamoDbTableNames {
     }
 
     private static void validateTableName(String tableName) {
+        String violation = nameViolation(tableName);
+        if (violation != null) {
+            throw SmithyValidationErrors.validationException(violation);
+        }
+    }
+
+    /** The violation for a short table name, or {@code null} for a valid one. A bad length hides a bad pattern. */
+    static String nameViolation(String tableName) {
         String lengthViolation = SmithyValidationErrors.lengthOutOfRange("tableName", tableName, 3, 255);
         if (lengthViolation != null) {
-            throw SmithyValidationErrors.validationException(lengthViolation);
+            return lengthViolation;
         }
         if (!TABLE_NAME_CHARS.matcher(tableName).matches()) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + tableName
-                    + "' at 'tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+");
+            return "Value '" + tableName
+                    + "' at 'tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+";
         }
+        return null;
     }
 
     private static AwsException invalid(String message) {

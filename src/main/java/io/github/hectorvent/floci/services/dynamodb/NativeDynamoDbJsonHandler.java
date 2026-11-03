@@ -565,7 +565,6 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
-    private static final Set<String> VALID_RETURN_VALUES_PUT = Set.of("NONE", "ALL_OLD");
     private static final Set<String> VALID_RETURN_CONSUMED_CAPACITY = Set.of("INDEXES", "TOTAL", "NONE");
     private static final Set<String> VALID_RETURN_ITEM_COLLECTION_METRICS = Set.of("SIZE", "NONE");
 
@@ -588,9 +587,37 @@ public class NativeDynamoDbJsonHandler {
                 + "Member must satisfy enum value set: [SIZE, NONE]";
     }
 
+    // DynamoDB names neither the member nor the value outside the enum, and spells UPDATED_NEW as UPDATE_NEW.
+    private static String itemWriteReturnValuesError(JsonNode request) {
+        JsonNode value = request.get("ReturnValues");
+        if (value == null || value.isNull() || VALID_RETURN_VALUES_ITEM_WRITE.contains(value.asText())) {
+            return null;
+        }
+        if (VALID_RETURN_VALUES_UPDATE.contains(value.asText())) {
+            return "ReturnValues can only be ALL_OLD or NONE";
+        }
+        return "Failed to satisfy constraint: Member must satisfy enum value set: "
+                + "[ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]";
+    }
+
+    // PutItem and DeleteItem list a bad short table name together with their bad enums.
+    private static void requireValidItemWriteMembers(JsonNode request, String tableName) {
+        List<String> validationErrors = new ArrayList<>();
+        if (tableName == null || tableName.isEmpty() || AwsArnUtils.looksLikeArn(tableName)) {
+            DynamoDbTableNames.resolve(tableName);
+        } else {
+            addIfPresent(validationErrors, DynamoDbTableNames.nameViolation(tableName));
+        }
+        addReturnConsumedCapacityError(request, validationErrors);
+        addIfPresent(validationErrors, itemWriteReturnValuesError(request));
+        addIfPresent(validationErrors, returnItemCollectionMetricsError(request));
+        addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
+        throwValidationErrors(validationErrors);
+    }
+
     private Response handlePutItem(JsonNode request, String region) {
         String tableName = request.has("TableName") ? request.path("TableName").asText() : null;
-        DynamoDbTableNames.resolve(tableName); // validate tableName before other params
+        requireValidItemWriteMembers(request, tableName);
         JsonNode item = request.path("Item");
         String returnValues = request.path("ReturnValues").asText("NONE");
         String returnValuesOnConditionCheckFailure = request.path("ReturnValuesOnConditionCheckFailure").asText("NONE");
@@ -601,20 +628,6 @@ public class NativeDynamoDbJsonHandler {
         JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
                 ? request.get("ExpressionAttributeValues") : null;
 
-        List<String> validationErrors = new ArrayList<>();
-        addReturnConsumedCapacityError(request, validationErrors);
-        String ricm = request.has("ReturnItemCollectionMetrics") ? request.get("ReturnItemCollectionMetrics").asText() : null;
-        if (ricm != null && !VALID_RETURN_ITEM_COLLECTION_METRICS.contains(ricm)) {
-            validationErrors.add("Value '" + ricm + "' at 'returnItemCollectionMetrics' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [SIZE, NONE]");
-        }
-        if (!VALID_RETURN_VALUES_PUT.contains(returnValues)) {
-            validationErrors.add("Value '" + returnValues + "' at 'returnValues' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [NONE, ALL_OLD]");
-        }
-        if (!validationErrors.isEmpty()) {
-            throw SmithyValidationErrors.validationException(validationErrors);
-        }
         requireReadableValues(item, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
@@ -704,13 +717,13 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
-    private static final Set<String> VALID_RETURN_VALUES_DELETE = Set.of("NONE", "ALL_OLD");
+    private static final Set<String> VALID_RETURN_VALUES_ITEM_WRITE = Set.of("NONE", "ALL_OLD");
     private static final Set<String> VALID_RETURN_VALUES_UPDATE =
             Set.of("NONE", "ALL_OLD", "ALL_NEW", "UPDATED_OLD", "UPDATED_NEW");
 
     private Response handleDeleteItem(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
-        DynamoDbTableNames.resolve(tableName); // validate tableName first
+        requireValidItemWriteMembers(request, tableName);
         JsonNode key = request.path("Key");
         String returnValues = request.path("ReturnValues").asText("NONE");
         String returnValuesOnConditionCheckFailure = request.path("ReturnValuesOnConditionCheckFailure").asText("NONE");
@@ -721,16 +734,6 @@ public class NativeDynamoDbJsonHandler {
         JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
                 ? request.get("ExpressionAttributeValues") : null;
 
-        // Validate ReturnValues + ReturnConsumedCapacity together
-        List<String> delValidationErrors = new ArrayList<>();
-        addReturnConsumedCapacityError(request, delValidationErrors);
-        if (!VALID_RETURN_VALUES_DELETE.contains(returnValues)) {
-            delValidationErrors.add("Value '" + returnValues + "' at 'returnValues' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [NONE, ALL_OLD]");
-        }
-        if (!delValidationErrors.isEmpty()) {
-            throw SmithyValidationErrors.validationException(delValidationErrors);
-        }
         requireReadableValues(key, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
