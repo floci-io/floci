@@ -549,17 +549,11 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
      */
     @SuppressWarnings("unchecked")
     private void restoreSnapshot(StackResource r) {
-        String raw = r.getAttributes().get(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
-        if (raw == null) {
+        JsonNode node = CfnRollback.updateSnapshot(r, CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
+        if (node == null) {
             return;
         }
-        Map<String, Object> snapshot;
-        try {
-            snapshot = MAPPER.readValue(raw, OBJECT_MAP);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Could not read the AppSync update snapshot for "
-                    + r.getLogicalId(), e);
-        }
+        Map<String, Object> snapshot = MAPPER.convertValue(node, OBJECT_MAP);
         Map<String, Object> members = (Map<String, Object>) snapshot.get("members");
         String apiId = str(snapshot.get("apiId"));
         switch (r.getResourceType()) {

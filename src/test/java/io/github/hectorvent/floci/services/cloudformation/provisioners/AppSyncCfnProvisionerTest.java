@@ -22,8 +22,10 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1257,6 +1259,25 @@ class AppSyncCfnProvisionerTest {
         assertEquals("after", stored.getDescription());
         assertEquals(laterExpiry - laterExpiry % 3600, stored.getExpires());
         assertTrue(r.getAttributes().containsKey(SNAPSHOT));
+    }
+
+    @Test
+    void aSnapshotThatIsNotJsonFailsTheRollbackNamingTheResourceAndChangesNothing() {
+        AppSyncService real = AppSyncServiceFixture.create(Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC));
+        AppSyncCfnProvisioner onRealService = new AppSyncCfnProvisioner(real);
+        GraphqlApi created = real.createGraphqlApi(Map.of("name", "corrupt", "authenticationType", "API_KEY"), "eu-west-1");
+        real.createDataSource(created.getApiId(), Map.of("name", "ds", "type", "NONE", "description", "kept"), "eu-west-1");
+        StackResource r = resource("AWS::AppSync::DataSource", "CorruptSnapshotDs");
+        r.getAttributes().put("ApiId", created.getApiId());
+        r.getAttributes().put("Name", "ds");
+        r.getAttributes().put(SNAPSHOT, "this is { not json");
+
+        Exception failure = assertThrows(Exception.class, () -> onRealService.rollbackUpdate(r));
+
+        assertTrue(failure.getMessage().contains("CorruptSnapshotDs"));
+        DataSource stored = real.getDataSource(created.getApiId(), "ds");
+        assertEquals("kept", stored.getDescription());
+        assertEquals(DataSourceType.NONE, stored.getType());
     }
 
     @Test
