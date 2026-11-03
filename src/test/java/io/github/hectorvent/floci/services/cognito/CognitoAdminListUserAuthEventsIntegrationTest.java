@@ -209,6 +209,32 @@ class CognitoAdminListUserAuthEventsIntegrationTest {
     }
 
     @Test
+    void maxResultsThatIsNotAnIntegerIsASerializationException() throws Exception {
+        String poolId = createEligiblePool("AUDIT");
+        String username = createUser(poolId);
+        for (String bad : new String[] {"1.5", "\"2\"", "4294967297", "true"}) {
+            listEvents(poolId, username, "\"MaxResults\":" + bad)
+                    .then().statusCode(400)
+                    .body("__type", equalTo("SerializationException"))
+                    .body("message", equalTo("MaxResults must be an integer."));
+        }
+    }
+
+    @Test
+    void nullMaxResultsBehavesLikeAnOmittedOne() throws Exception {
+        String poolId = createEligiblePool("AUDIT");
+        String clientId = createClient(poolId);
+        String username = createUser(poolId);
+        for (int i = 0; i < 3; i++) {
+            cognitoJson("InitiateAuth", passwordAuth(clientId, username, PASSWORD));
+        }
+        listEvents(poolId, username, "\"MaxResults\":null")
+                .then().statusCode(200)
+                .body("AuthEvents.size()", equalTo(3))
+                .body("containsKey('NextToken')", equalTo(false));
+    }
+
+    @Test
     void newPasswordChallengeStaysInProgressUntilItIsAnswered() throws Exception {
         String poolId = createEligiblePool("ENFORCED");
         String clientId = createClient(poolId);
