@@ -16,6 +16,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -62,6 +63,7 @@ import java.util.Optional;
  */
 @Path("/codeartifact/nuget/{domain}/{repository}")
 public class CodeArtifactNuGetController {
+    private static final Logger LOG = Logger.getLogger(CodeArtifactNuGetController.class);
 
     private final CodeArtifactService service;
     private final BagetterSidecarClient bagetter;
@@ -93,6 +95,14 @@ public class CodeArtifactNuGetController {
     public Response serviceIndex(@Context HttpHeaders headers, @PathParam("domain") String domain,
                                   @PathParam("repository") String repository) {
         RepositoryHandle handle = requireRepository(headers, domain, repository);
+        try {
+            return serviceIndexWithLease(handle);
+        } finally {
+            endUse(handle.repoId());
+        }
+    }
+
+    private Response serviceIndexWithLease(RepositoryHandle handle) {
         // domain and repository are free to embed here unescaped: requireRepository above only
         // returns once CodeArtifactService has confirmed a repository by this exact name already
         // exists, which it could only do if that name already passed CreateRepository's own
@@ -115,9 +125,13 @@ public class CodeArtifactNuGetController {
     @Produces(MediaType.APPLICATION_JSON)
     public Response packageVersions(@Context HttpHeaders headers, @PathParam("domain") String domain,
                                      @PathParam("repository") String repository, @PathParam("id") String id) {
-        String baseUrl = requireRepository(headers, domain, repository).baseUrl();
-        return proxyGet(baseUrl, "/v3/package/" + SidecarUriUtils.encodeSegment(id) + "/index.json",
-                MediaType.APPLICATION_JSON);
+        RepositoryHandle handle = requireRepository(headers, domain, repository);
+        try {
+            return proxyGet(handle.baseUrl(), "/v3/package/" + SidecarUriUtils.encodeSegment(id) + "/index.json",
+                    MediaType.APPLICATION_JSON);
+        } finally {
+            endUse(handle.repoId());
+        }
     }
 
     /**
@@ -136,6 +150,15 @@ public class CodeArtifactNuGetController {
                                     @PathParam("repository") String repository, @PathParam("id") String id,
                                     @PathParam("version") String version, @PathParam("filename") String filename) {
         RepositoryHandle handle = requireRepository(headers, domain, repository);
+        try {
+            return packageContentWithLease(handle, domain, repository, id, version, filename);
+        } finally {
+            endUse(handle.repoId());
+        }
+    }
+
+    private Response packageContentWithLease(RepositoryHandle handle, String domain, String repository, String id,
+            String version, String filename) {
         try {
             service.requireContainerBackedVersionDownloadable(handle.owner(), handle.region(), domain, repository,
                     "nuget", null, id, version, handle.repoId());
@@ -197,6 +220,15 @@ public class CodeArtifactNuGetController {
         }
         RepositoryHandle handle = requireRepository(headers, domain, repository);
 
+        try {
+            return pushWithLease(headers, domain, repository, content, handle);
+        } finally {
+            endUse(handle.repoId());
+        }
+    }
+
+    private Response pushWithLease(HttpHeaders headers, String domain, String repository, byte[] content,
+            RepositoryHandle handle) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String boundary = MultipartFormParser.extractBoundary(contentType).orElse(null);
         if (boundary == null) {
@@ -282,16 +314,8 @@ public class CodeArtifactNuGetController {
                     || response.getStatus() == 202;
         }
         if (pushSucceeded) {
-            service.recordContainerBackedAssetBytes(handle.region(), domain, handle.owner(), repository,
-                    "nuget", null, packageName, nupkgBytes.length, fenceSnapshot);
-            // Found by Qodo review: a real dotnet nuget push that republishes a coordinate an
-            // earlier updatePackageVersionsStatus/disposePackageVersions call left Archived or
-            // Disposed would otherwise still have its fresh content blocked by that stale
-            // override, the same gap closed for Maven/npm/pypi's own native publish paths. Cleared
-            // only if still unchanged since the guard above ran (Greptile review): a status change
-            // that landed while forwardPush was in flight must not be erased by this.
-            service.forgetContainerBackedStatusOverrideIfUnchanged(handle.region(), domain, handle.owner(),
-                    repository, "nuget", null, packageName, version, beforeRevision);
+            service.completeNugetPushIfCurrentRepository(handle.region(), domain, handle.owner(), repository,
+                    handle.repoId(), packageName, version, nupkgBytes.length, fenceSnapshot, beforeRevision);
         }
         return response;
     }
@@ -370,10 +394,29 @@ public class CodeArtifactNuGetController {
                 .orElseThrow(() -> new NotAuthorizedException("Basic realm=\"floci-codeartifact\""));
         String repoId;
         try {
-            repoId = service.ensureFormatContainerId("nuget", scope.region(), domain, scope.owner(), repository);
+            repoId = service.resolveContainerIdAndBeginUse("nuget", scope.region(), domain, scope.owner(),
+                    repository, bagetter);
         } catch (AwsException e) {
             throw new NotFoundException();
         }
+        try {
+            return readyRepository(scope, domain, repository, repoId);
+        } catch (RuntimeException e) {
+            endUse(repoId);
+            throw e;
+        }
+    }
+
+    private void endUse(String repoId) {
+        try {
+            bagetter.endUse(repoId);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not end NuGet sidecar use for {0}; teardown can retry cleanup.", repoId);
+        }
+    }
+
+    private RepositoryHandle readyRepository(AuthorizationTokenScope scope, String domain, String repository,
+            String repoId) {
         String baseUrl = bagetter.ensureReady(repoId, null);
         // The real GetRepositoryEndpoint value, not just this controller's own path: a NuGet
         // client's own service-index parser only keeps a resource whose @id parses as an

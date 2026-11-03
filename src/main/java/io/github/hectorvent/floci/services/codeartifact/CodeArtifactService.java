@@ -707,6 +707,17 @@ public class CodeArtifactService implements Resettable {
         return id;
     }
 
+    private void endSidecarUse(String format, RepositorySidecarManager manager, String repoId) {
+        try {
+            manager.endUse(repoId);
+        } catch (RuntimeException e) {
+            if (!"nuget".equals(format)) {
+                throw e;
+            }
+            LOG.warnv(e, "Could not end NuGet sidecar use for {0}; teardown can retry cleanup.", repoId);
+        }
+    }
+
     public synchronized CodeArtifactRepository updateRepository(String region, String domain, String domainOwner,
                                                                   String repository, String description,
                                                                   List<String> upstreams) {
@@ -1101,7 +1112,7 @@ public class CodeArtifactService implements Resettable {
                 revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
                         packageName, version, repoId).revision();
             } finally {
-                manager.endUse(repoId);
+                endSidecarUse(format, manager, repoId);
             }
         } else {
             String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
@@ -1212,7 +1223,7 @@ public class CodeArtifactService implements Resettable {
                 preferredDisplayVersion = manager.preferredDisplayVersion(repoId, domain, repository, namespace,
                         packageName).orElse(null);
             } finally {
-                manager.endUse(repoId);
+                endSidecarUse(format, manager, repoId);
             }
             Set<String> coveredVersions = raw.stream().map(RepositorySidecarManager.PackageVersionTimestamp::version)
                     .collect(Collectors.toSet());
@@ -2549,7 +2560,7 @@ public class CodeArtifactService implements Resettable {
                     version));
             return pv;
         } finally {
-            manager.endUse(repoId);
+            endSidecarUse(format, manager, repoId);
         }
     }
 
@@ -2658,7 +2669,7 @@ public class CodeArtifactService implements Resettable {
                 throw new AwsException("InternalServerException", "Listing " + format + " packages is not yet "
                         + "supported by this emulator.", 500);
             } finally {
-                manager.endUse(repoId);
+                endSidecarUse(format, manager, repoId);
             }
             // Raised by Greptile's review: disposing a container-backed package's last version
             // deletes its real sidecar content, so the sidecar's own listing above no longer names
@@ -3257,11 +3268,18 @@ public class CodeArtifactService implements Resettable {
     private boolean retentionWriteStillAllowed(String region, String domain, String domainOwner, String repository,
             String format, String namespace, String packageName, String version, String repoId,
             long versionFenceSnapshot, long episodeId) {
+        String owner = effectiveOwner(domainOwner);
+        if ("nuget".equals(format)) {
+            CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain,
+                    repository)).orElse(null);
+            if (current == null || !Objects.equals(repoId, current.getSidecarContainerIds().get(format))) {
+                return false;
+            }
+        }
         if (currentContainerBackedVersionFence(region, domain, domainOwner, repository, format, namespace,
                 packageName, version) != versionFenceSnapshot) {
             return false;
         }
-        String owner = effectiveOwner(domainOwner);
         String status = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
                 packageName, version, repoId).status();
         if ("Disposed".equals(status) || "Archived".equals(status)) {
@@ -3395,7 +3413,7 @@ public class CodeArtifactService implements Resettable {
         try {
             return manager.packageExists(repoId, domain, repository, namespace, packageName);
         } finally {
-            manager.endUse(repoId);
+            endSidecarUse(format, manager, repoId);
         }
     }
 
@@ -3687,7 +3705,7 @@ public class CodeArtifactService implements Resettable {
             asset.setHashes(computeHashes(content));
             return new PackageVersionAssetResult(asset, revision);
         } finally {
-            manager.endUse(repoId);
+            endSidecarUse(format, manager, repoId);
         }
     }
 
@@ -4502,17 +4520,25 @@ public class CodeArtifactService implements Resettable {
         validatePackageCoordinates(format, namespace, packageName, "reading the readme of");
         String owner = effectiveOwner(domainOwner);
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
+        if ("nuget".equals(format)) {
+            RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                    .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                            + "' was not found.", version, "package-version"));
+            String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
+            try {
+                String revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format,
+                        namespace, packageName, version, repoId).revision();
+                String readme = manager.fetchPackageVersionReadme(repoId, domain, repository, namespace, packageName,
+                        version).orElseThrow(() -> notFound("Package version '" + version + "' of package '"
+                                + packageName + "' was not found.", version, "package-version"));
+                return new PackageVersionReadmeResult(format, namespace, packageName, version, revision, readme);
+            } finally {
+                endSidecarUse(format, manager, repoId);
+            }
+        }
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
         String revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
                 packageName, version, repoId).revision();
-        if ("nuget".equals(format)) {
-            String readme = sidecarRegistry.forFormat(format)
-                    .flatMap(manager -> manager.fetchPackageVersionReadme(repoId, domain, repository, namespace,
-                            packageName, version))
-                    .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
-                            + "' was not found.", version, "package-version"));
-            return new PackageVersionReadmeResult(format, namespace, packageName, version, revision, readme);
-        }
         // npm and pypi: neither can be answered live (see this method's own javadoc), so a
         // version that was never captured here means it was never published.
         String key = packageVersionKey(region, domain, repository, format, namespace,
@@ -4929,6 +4955,25 @@ public class CodeArtifactService implements Resettable {
         String ownerScopedKey = ownerScopedKey(owner, key);
         long existing = containerBackedAssetBytes.getOrDefault(ownerScopedKey, 0L);
         containerBackedAssetBytes.put(ownerScopedKey, existing + bytes);
+    }
+
+    /** Completes a NuGet push only while its leased sidecar still belongs to the same repository creation. */
+    public synchronized void completeNugetPushIfCurrentRepository(String region, String domain, String domainOwner,
+            String repository, String repositoryContainerId, String packageName, String version, long bytes,
+            long packageFenceSnapshot, String expectedRevisionOrNull) {
+        String owner = effectiveOwner(domainOwner);
+        CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain, repository))
+                .orElse(null);
+        if (current == null || !Objects.equals(repositoryContainerId,
+                current.getSidecarContainerIds().get("nuget"))) {
+            LOG.warnv("Skipping NuGet publish bookkeeping for {0}/{1}: the repository was replaced while its "
+                    + "sidecar request was in flight.", domain, repository);
+            return;
+        }
+        recordContainerBackedAssetBytes(region, domain, owner, repository, "nuget", null, packageName, bytes,
+                packageFenceSnapshot);
+        forgetContainerBackedStatusOverrideIfUnchanged(region, domain, owner, repository, "nuget", null,
+                packageName, version, expectedRevisionOrNull);
     }
 
     /**
