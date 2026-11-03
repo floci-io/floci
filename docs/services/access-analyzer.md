@@ -11,7 +11,7 @@ Floci supports the analyzer lifecycle and basic policy validation used by local 
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `ValidatePolicy` | - |
+| `ValidatePolicy` | Checks basic policy syntax and grammar and returns paginated findings with source locations. |
 | `ListAnalyzers` | - |
 | `CreateAnalyzer` | - |
 | `DeleteAnalyzer` | - |
@@ -24,7 +24,7 @@ Analyzer state is account and Region scoped and persisted through `StorageFactor
 
 `ValidatePolicy` accepts a JSON policy string at `POST /policy/validation`. It does not require an analyzer, persist the submitted policy, or change permissions. It supports `IDENTITY_POLICY`, `RESOURCE_POLICY`, `SERVICE_CONTROL_POLICY`, and `RESOURCE_CONTROL_POLICY` requests. With IAM enforcement enabled, callers need `access-analyzer:ValidatePolicy` on `Resource: "*"`.
 
-The local checks cover malformed JSON, repeated object keys, document and statement shapes, required elements, mutually exclusive elements, policy versions, duplicate statement identifiers, principal key names, condition operator names, and selected empty-value suggestions. Resource policies accept the API's supported `validatePolicyResourceType` values; the IAM trust-policy type permits statements without a resource element. Generic resource policies containing trust actions use the same trust-policy context.
+The local checks cover malformed JSON, repeated object keys, document and statement shapes, required elements, mutually exclusive elements, policy versions, duplicate statement identifiers, principal key names, condition operator names, and selected empty-value suggestions. Resource policies accept the API's supported `validatePolicyResourceType` values; the IAM trust-policy type permits statements without a resource element. Generic resource policies containing trust actions use the same trust-policy context. `BinaryEquals` is recognized as policy syntax, but Floci's IAM evaluator does not execute it.
 
 Findings include an issue code, severity, explanation, documentation link, JSON path, and source span. Spans refer to the original policy string, with zero-based offsets and columns, one-based lines, and an exclusive end. Malformed policy JSON and repeated object keys return `JSON_SYNTAX_ERROR` findings in a successful response. Repeated-key findings point to the repeated key in the submitted text. Invalid request members return `ValidationException`; malformed outer request JSON returns `SerializationException`.
 

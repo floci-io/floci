@@ -48,6 +48,28 @@ class PolicyValidationServiceTest {
                 .anyMatch(finding -> code.equals(finding.path("issueCode").asText())), result::toString);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"BinaryEquals", "ForAnyValue:BinaryEqualsIfExists", "ForAllValues:StringEqualsIfExists"})
+    void sharedIamNamesRemainValidSyntaxEvenWhenAnOperatorIsNotEvaluated(String operator) {
+        JsonNode result = validate("""
+                {"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"s3:GetObject","Resource":"*",
+                  "Condition":{"%s":{"aws:PrincipalTag/team":"YQ=="}}}}
+                """.formatted(operator));
+        assertEquals(0, result.path("findings").size(), result::toString);
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"NullIfExists|NULL_WITH_IF_EXISTS", "ForAllValues:NullIfExists|NULL_WITH_IF_EXISTS",
+            "forallvalues:StringEquals|INVALID_CONDITION_OPERATOR",
+            "StringEqualsIfExistsIfExists|INVALID_CONDITION_OPERATOR"}, delimiter = '|')
+    void sharedOperatorParsingPreservesSpecificModifierFindings(String operator, String code) {
+        JsonNode result = validate("""
+                {"Version":"2012-10-17","Statement":{"Effect":"Allow","Action":"s3:GetObject","Resource":"*",
+                  "Condition":{"%s":{"aws:PrincipalTag/team":"false"}}}}
+                """.formatted(operator));
+        assertEquals(code, result.at("/findings/0/issueCode").asText(), result::toString);
+    }
+
     @Test
     void findingSpanPointsToTheSubmittedValueAndUsesAnArrayPath() {
         String policy = """

@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.SignedMarkers;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -42,12 +43,6 @@ public class PolicyValidationService {
             + "access-analyzer-reference-policy-checks.html";
     private final ObjectMapper mapper;
     private final SignedMarkers markers = new SignedMarkers(2048);
-    private static final Set<String> CONDITION_OPERATORS = Set.of("StringEquals", "StringNotEquals",
-            "StringEqualsIgnoreCase", "StringNotEqualsIgnoreCase", "StringLike", "StringNotLike",
-            "NumericEquals", "NumericNotEquals", "NumericLessThan", "NumericLessThanEquals",
-            "NumericGreaterThan", "NumericGreaterThanEquals", "DateEquals", "DateNotEquals",
-            "DateLessThan", "DateLessThanEquals", "DateGreaterThan", "DateGreaterThanEquals",
-            "Bool", "BinaryEquals", "IpAddress", "NotIpAddress", "ArnEquals", "ArnNotEquals", "ArnLike", "ArnNotLike", "Null");
 
     @Inject
     public PolicyValidationService(ObjectMapper mapper) {
@@ -311,17 +306,10 @@ public class PolicyValidationService {
                 if (!operator.getValue().isObject()) {
                     source.dataType(operatorPath, "a condition-key object");
                 }
-                String name = operator.getKey();
-                if (name.startsWith("ForAllValues:") || name.startsWith("ForAnyValue:")) {
-                    name = name.substring(name.indexOf(':') + 1);
-                }
-                if ("NullIfExists".equals(name)) {
+                if (IamPolicyEvaluator.isNullConditionOperatorWithIfExists(operator.getKey())) {
                     source.addKey(operatorPath, "NULL_WITH_IF_EXISTS", "ERROR", "The Null operator cannot use IfExists.");
-                } else {
-                    String base = name.endsWith("IfExists") ? name.substring(0, name.length() - "IfExists".length()) : name;
-                    if (!CONDITION_OPERATORS.contains(base)) {
-                        source.addKey(operatorPath, "INVALID_CONDITION_OPERATOR", "ERROR", "Choose a supported condition operator.");
-                    }
+                } else if (!IamPolicyEvaluator.isKnownConditionOperator(operator.getKey())) {
+                    source.addKey(operatorPath, "INVALID_CONDITION_OPERATOR", "ERROR", "Choose a supported condition operator.");
                 }
             });
         }
