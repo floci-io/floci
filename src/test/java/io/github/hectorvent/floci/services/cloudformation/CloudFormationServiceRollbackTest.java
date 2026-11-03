@@ -88,12 +88,39 @@ class CloudFormationServiceRollbackTest {
         assertGrandchildDeploymentRestored(false);
     }
 
+    @Test
+    void parentRollback_recreatesGrandchildRemovedByChildUpdate() throws Exception {
+        assertGrandchildDeploymentRestored(true, true);
+    }
+
+    @Test
+    void parentRollback_recreatesRemovedGrandchildWithoutTagChanges() throws Exception {
+        assertGrandchildDeploymentRestored(false, true);
+    }
+
+    @Test
+    void parentRollback_reusesGrandchildRetainedByChildUpdate() throws Exception {
+        assertGrandchildDeploymentRestored(true, true, true);
+    }
+
     private void assertGrandchildDeploymentRestored(boolean changeTags) throws Exception {
+        assertGrandchildDeploymentRestored(changeTags, false);
+    }
+
+    private void assertGrandchildDeploymentRestored(boolean changeTags, boolean removeGrandchild) throws Exception {
+        assertGrandchildDeploymentRestored(changeTags, removeGrandchild, false);
+    }
+
+    private void assertGrandchildDeploymentRestored(
+            boolean changeTags, boolean removeGrandchild, boolean retainGrandchild) throws Exception {
         when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
         String childTemplate = """
                 {"Resources":{"Grandchild":{"Type":"AWS::CloudFormation::Stack",
                   "Properties":{"TemplateURL":"http://localhost/templates/grandchild.json"}}}}
                 """;
+        if (retainGrandchild) {
+            childTemplate = childTemplate.replace("\"Properties\":", "\"DeletionPolicy\":\"Retain\",\"Properties\":");
+        }
         String previousGrandchild = """
                 {"Resources":{},"Outputs":{"Revision":{"Value":"previous"}}}
                 """;
@@ -118,7 +145,8 @@ class CloudFormationServiceRollbackTest {
         assertEquals("previous", grandchild.getOutputs().get("Revision"));
 
         grandchildTemplate.set(previousGrandchild.replace("previous", "changed"));
-        childTemplateInS3.set(childTemplate.replace("\"Resources\":", "\"Description\":\"changed child\",\"Resources\":"));
+        childTemplateInS3.set(removeGrandchild ? "{\"Resources\":{}}"
+                : childTemplate.replace("\"Resources\":", "\"Description\":\"changed child\",\"Resources\":"));
         String failingParent = parentTemplate.replace("\"Child\":", "\"ZFail\":{\"Type\":\"AWS::CloudFormation::Stack\","
                 + "\"DependsOn\":\"Child\",\"Properties\":{}},\"Child\":");
         service.createChangeSet("rollback-tree", "update", "UPDATE", failingParent, null,
@@ -129,9 +157,18 @@ class CloudFormationServiceRollbackTest {
         assertTrue(service.describeStackEvents("rollback-tree", REGION).stream()
                 .anyMatch(event -> "ZFail".equals(event.getLogicalResourceId())
                         && "Missing TemplateURL".equals(event.getResourceStatusReason())));
-        assertEquals(previousGrandchild, grandchild.getTemplateBody());
-        assertEquals("previous", grandchild.getOutputs().get("Revision"));
-        assertEquals(Map.of("team", "old"), grandchild.tagsSnapshot());
+        Stack restoredGrandchild = service.describeStacks("rollback-tree-Child-Grandchild", REGION, ACCOUNT).getFirst();
+        assertEquals(previousGrandchild, restoredGrandchild.getTemplateBody());
+        assertEquals("previous", restoredGrandchild.getOutputs().get("Revision"));
+        assertEquals(Map.of("team", "old"), restoredGrandchild.tagsSnapshot());
+        if (removeGrandchild && retainGrandchild) {
+            assertEquals(grandchild.getStackId(), restoredGrandchild.getStackId());
+        } else if (removeGrandchild) {
+            assertEquals("DELETE_COMPLETE", grandchild.getStatus());
+            assertEquals("CREATE_COMPLETE", restoredGrandchild.getStatus());
+            Stack child = service.describeStacks("rollback-tree-Child", REGION, ACCOUNT).getFirst();
+            assertEquals(restoredGrandchild.getStackId(), child.getResources().get("Grandchild").getPhysicalId());
+        }
     }
 
     @Test
