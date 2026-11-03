@@ -14,6 +14,7 @@ import org.junit.jupiter.api.TestFactory;
 import java.io.ByteArrayInputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,11 +43,19 @@ class RequestResourceMembersTest {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
         assertTrue(table.handBuilt().contains("lambda"));
-        assertEquals(Set.of("dynamodb"), table.namespaces().stream().filter(table.handBuilt()::contains)
+        assertEquals(Set.of("dynamodb", "logs"), table.namespaces().stream().filter(table.handBuilt()::contains)
                 .collect(Collectors.toSet()));
-        assertEquals(Set.of("dynamodb:ListTables"), table.operations().keySet().stream()
+        Set<String> logsDelivery = Stream.of("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource",
+                "DescribeDeliverySources", "PutDeliveryDestination", "GetDeliveryDestination",
+                "DeleteDeliveryDestination", "DescribeDeliveryDestinations", "CreateDelivery", "GetDelivery",
+                "UpdateDeliveryConfiguration", "DeleteDelivery", "DescribeDeliveries")
+                .map(operation -> "logs:" + operation).collect(Collectors.toSet());
+        Set<String> expected = new HashSet<>(logsDelivery);
+        expected.add("dynamodb:ListTables");
+        assertEquals(expected, table.operations().keySet().stream()
                 .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
-                .collect(Collectors.toSet()), "only explicit corrections override hand-built operations");
+                .collect(Collectors.toSet()),
+                "only explicit corrections and the operations listed to read override hand-built operations");
         assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
         assertTrue(table.otherNamespaces().stream().noneMatch(table.notCovered()::contains));
         table.operations().forEach((operation, resources) -> {

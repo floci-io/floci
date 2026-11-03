@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.testing.LogsRequests.logs;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -147,10 +148,5 @@ class CloudWatchLogsGroupPaginationIntegrationTest {
             logs("CreateLogGroup", Map.of("logGroupName", group)).then().statusCode(200);
             groups.add(group);
         }
-    }
-
-    private Response logs(String action, Map<String, ?> body) {
-        return given().contentType("application/x-amz-json-1.1")
-                .header("X-Amz-Target", "Logs_20140328." + action).body(body).post("/");
     }
 }
