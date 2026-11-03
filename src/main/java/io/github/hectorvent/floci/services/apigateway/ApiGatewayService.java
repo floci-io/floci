@@ -379,7 +379,6 @@ public class ApiGatewayService implements ResourceProvider {
         return api;
     }
 
-    /** The endpoint type {@code value} names, in any case. */
     /** A valid {@code apiKeySource}: {@code HEADER} or {@code AUTHORIZER}, as AWS spells them. */
     private static String apiKeySource(Object value) {
         if (RestApi.API_KEY_SOURCE_HEADER.equals(value) || RestApi.API_KEY_SOURCE_AUTHORIZER.equals(value)) {
@@ -388,6 +387,7 @@ public class ApiGatewayService implements ResourceProvider {
         throw new AwsException("BadRequestException", "API key source must be HEADER or AUTHORIZER.", 400);
     }
 
+    /** The endpoint type {@code value} names, in any case. */
     private static EndpointType endpointType(String value) {
         try {
             return EndpointType.valueOf(value.toUpperCase());
