@@ -138,6 +138,13 @@ enum PaymentCryptographyKeyAlgorithm {
         return sb.toString();
     }
 
+    /** The usages a key pair is made of, and the symmetric ones are the rest. */
+    private static final List<String> ASYMMETRIC_USAGES = List.of(
+            "TR31_D1_ASYMMETRIC_KEY_FOR_DATA_ENCRYPTION",
+            "TR31_K2_TR34_ASYMMETRIC_KEY",
+            "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT",
+            "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+
     /**
      * The algorithms a key of a usage may be made of.
      *
@@ -149,8 +156,9 @@ enum PaymentCryptographyKeyAlgorithm {
      * @return the algorithms the usage allows
      */
     static List<PaymentCryptographyKeyAlgorithm> allowedOf(String usage) {
-        if ("TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE".equals(usage)) {
-            // The asymmetric usage is the one a key pair is made of.
+        if (ASYMMETRIC_USAGES.contains(usage)) {
+            // The asymmetric usages are the ones a key pair is made of: the data
+            // encryption key, the key agreement key, the TR-34 key and the signing key.
             return List.of(RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384,
                     ECC_NIST_P521);
         }
