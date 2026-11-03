@@ -35,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -58,6 +59,9 @@ public class OpenSearchService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final OpenSearchDomainManager domainManager;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
+    // One monitor per account and storage key, held by createDomain from its existence check to the
+    // save, so a concurrent create of the same name sees the first domain and starts no container.
+    private final ConcurrentHashMap<String, Object> createLocks = new ConcurrentHashMap<>();
 
     @Inject
     public OpenSearchService(StorageFactory storageFactory, EmulatorConfig config,
@@ -125,11 +129,6 @@ public class OpenSearchService implements ResourceProvider {
         validateOptions(options);
 
         String accountId = regionResolver.getAccountId();
-        if (findDomain(accountId, region, domainName).isPresent()) {
-            throw new AwsException("ResourceAlreadyExistsException",
-                    "Domain with name " + domainName + " already exists.", 409);
-        }
-
         Domain domain = new Domain();
         domain.setDomainName(domainName);
         domain.setDomainId(accountId + "/" + domainName);
@@ -159,18 +158,23 @@ public class OpenSearchService implements ResourceProvider {
         }
         applyDomainOptions(domain, options);
 
-        if (config.services().opensearch().mock()) {
-            domain.setProcessing(false);
-            domain.setEndpoint(synthesizedEndpoint(domain, region));
-        } else {
-            domain.setProcessing(true);
-            if (!domainManager.tryStartDomain(domain)) {
+        synchronized (createLockFor(accountId, region, domainName)) {
+            if (findDomain(accountId, region, domainName).isPresent()) {
+                throw new AwsException("ResourceAlreadyExistsException",
+                        "Domain with name " + domainName + " already exists.", 409);
+            }
+            if (config.services().opensearch().mock()) {
                 domain.setProcessing(false);
                 domain.setEndpoint(synthesizedEndpoint(domain, region));
+            } else {
+                domain.setProcessing(true);
+                if (!domainManager.tryStartDomain(domain)) {
+                    domain.setProcessing(false);
+                    domain.setEndpoint(synthesizedEndpoint(domain, region));
+                }
             }
+            domainStore.putForAccount(accountId, storageKey(region, domainName), domain);
         }
-
-        domainStore.putForAccount(accountId, storageKey(region, domainName), domain);
         LOG.infov("Created OpenSearch domain: {0}", domainName);
         return domain;
     }
@@ -399,6 +403,10 @@ public class OpenSearchService implements ResourceProvider {
         } catch (IllegalArgumentException e) {
             return false;
         }
+    }
+
+    private Object createLockFor(String accountId, String region, String domainName) {
+        return createLocks.computeIfAbsent(accountId + "/" + storageKey(region, domainName), k -> new Object());
     }
 
     private static String storageKey(String region, String domainName) {

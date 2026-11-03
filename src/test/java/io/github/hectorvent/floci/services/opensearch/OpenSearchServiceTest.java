@@ -13,9 +13,15 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -68,6 +74,53 @@ class OpenSearchServiceTest {
                 "the readiness poller flips Processing once the container answers");
         assertTrue(service.describeDomain("docker-domain", US_EAST_1).isProcessing());
         verify(domainManager).tryStartDomain(any());
+    }
+
+    /**
+     * Two concurrent creates of one name start one container: the second waits for the first and
+     * is refused as the name already exists, rather than starting a second container whose
+     * domain overwrites the first and leaves the first container running with nothing to stop it.
+     */
+    @Test
+    void concurrentCreatesOfOneNameStartOneContainerAndRefuseTheSecond() throws Exception {
+        CountDownLatch firstStarting = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        CountDownLatch secondStarting = new CountDownLatch(1);
+        AtomicInteger starts = new AtomicInteger();
+        when(domainManager.tryStartDomain(any())).thenAnswer(invocation -> {
+            if (starts.incrementAndGet() == 1) {
+                firstStarting.countDown();
+                assertTrue(releaseFirst.await(10, TimeUnit.SECONDS), "the test never released the first start");
+            } else {
+                secondStarting.countDown();
+            }
+            return true;
+        });
+
+        CompletableFuture<Domain> first = CompletableFuture.supplyAsync(() -> service.createDomain(
+                "raced-domain", "OpenSearch_2.11", null, null, null, US_EAST_1));
+        assertTrue(firstStarting.await(10, TimeUnit.SECONDS), "the first create never started its container");
+        CompletableFuture<Domain> second = new CompletableFuture<>();
+        Thread secondCreate = new Thread(() -> {
+            try {
+                second.complete(service.createDomain("raced-domain", "OpenSearch_2.11", null, null, null, US_EAST_1));
+            } catch (RuntimeException e) {
+                second.completeExceptionally(e);
+            }
+        });
+        secondCreate.start();
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (secondStarting.getCount() > 0 && secondCreate.getState() != Thread.State.BLOCKED
+                && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        releaseFirst.countDown();
+
+        first.get(10, TimeUnit.SECONDS);
+        ExecutionException refused = assertThrows(ExecutionException.class, () -> second.get(10, TimeUnit.SECONDS));
+        AwsException cause = assertInstanceOf(AwsException.class, refused.getCause());
+        assertEquals("ResourceAlreadyExistsException", cause.getErrorCode());
+        assertEquals(1, starts.get());
     }
 
     /**
