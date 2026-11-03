@@ -121,6 +121,23 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aUsageThatTheAlgorithmCannotServeIsRefused() {
+        // A key pair has no material a symmetric usage would bind it to, and a symmetric
+        // key has no pair a key pair's usage would bind it to.
+        assertValidation(() -> createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                "TR31_M1_ISO_9797_1_MAC_KEY", Map.of("Generate", Boolean.TRUE)),
+                "may not be made of");
+        assertValidation(() -> createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE)),
+                "may not be made of");
+        // The usage the algorithm does serve is made.
+        PaymentCryptographyKey key = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
+                Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE));
+        assertEquals("RSA_2048", key.getKeyAlgorithm());
+    }
+
+    @Test
     void aClassThatContradictsTheAlgorithmIsRefused() {
         assertValidation(() -> createKey("us-east-1", "AES_256", "ASYMMETRIC_KEY_PAIR",
                 "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Verify", Boolean.TRUE)),

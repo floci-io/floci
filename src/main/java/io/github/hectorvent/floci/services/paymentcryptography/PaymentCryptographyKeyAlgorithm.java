@@ -149,28 +149,35 @@ enum PaymentCryptographyKeyAlgorithm {
      * @return the algorithms the usage allows
      */
     static List<PaymentCryptographyKeyAlgorithm> allowedOf(String usage) {
+        if ("TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE".equals(usage)) {
+            // The asymmetric usage is the one a key pair is made of.
+            return List.of(RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384,
+                    ECC_NIST_P521);
+        }
         if ("TR31_M1_ISO_9797_1_MAC_KEY".equals(usage)
                 || "TR31_M3_ISO_9797_3_MAC_KEY".equals(usage)
                 || "TR31_M0_ISO_16609_MAC_KEY".equals(usage)) {
             // The ISO 9797 MACs are defined over Triple DES.
             return List.of(TDES_2KEY, TDES_3KEY);
         }
-        // Every other symmetric usage takes every symmetric algorithm.
+        // Every other usage takes every symmetric algorithm.
         return List.of(TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256);
     }
 
     /**
      * The reason an algorithm is refused for a usage, in words a caller can act on.
      *
-     * <p>An asymmetric algorithm is not refused for a usage: a key pair has no material a
-     * symmetric usage would bind it to, and the usage that names it is the asymmetric one.
+     * <p>An algorithm is refused for a usage the usage does not allow, whether it is symmetric
+     * or not: a key pair has no material a symmetric usage would bind it to, and a symmetric
+     * key has no pair a key pair's usage would bind it to. A key that claims a purpose its own
+     * material cannot serve is not a key the service makes.
      *
      * @param usage the TR-31 usage name of the key
      * @param algorithm the algorithm of the key
      * @return the message, or null when the combination is allowed
      */
     static String refusal(String usage, PaymentCryptographyKeyAlgorithm algorithm) {
-        if (algorithm == null || !algorithm.symmetric()) {
+        if (algorithm == null) {
             return null;
         }
         if (allowedOf(usage).contains(algorithm)) {
