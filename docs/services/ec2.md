@@ -1486,6 +1486,37 @@ include every image that process should expose. Missing or invalid files fail on
 catalog use; leaving the setting unset preserves the bundled catalog. Containerized
 Floci needs the file mounted at the configured container path.
 
+For an image whose guest kubelet registers its own EKS Node, set
+`kubeletRegistersNode: true` on that image entry. This is explicit image capability
+metadata, independent of `guestRuntime`: systemd guests do not necessarily run
+kubelet. For example, a locally built worker can use:
+
+```yaml
+defaultDockerImage: example/base:1
+images:
+  - imageId: ami-kubelet-worker
+    aliases: [ami-kubelet-alias]
+    dockerImage: example/kubelet-worker:1
+    name: kubelet-worker
+    description: Linux guest with kubelet and cluster bootstrap support
+    architecture: arm64
+    creationDate: '2026-01-01T00:00:00.000Z'
+    guestRuntime: systemd
+    kubeletRegistersNode: true
+```
+
+With this capability, Floci tracks the instance's cluster join and notifies join
+listeners, but does not create a synthetic Kubernetes Node or patch its capacity,
+allocatable resources or Ready condition. The same rule applies when joined nodes
+are replayed after cluster recreation or process restart. Both the image ID and its
+aliases use the capability. Keep the configured catalog available across restarts.
+Omitting the field, setting it to `false`, or using an unknown image ID preserves
+simulated Node registration. No bundled image opts in automatically.
+
+This setting does not install, start or authenticate kubelet, or set up worker
+networking. The image and its bootstrap configuration must do that. If kubelet
+fails to join, Floci will not synthesize a Ready Node to hide the failure.
+
 ### Public IPv4 addresses
 
 Whether an instance has an automatic public IPv4 address is decided by the same rule with and

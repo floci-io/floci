@@ -554,7 +554,7 @@ For local testing workflows that rely on automatic volume binding without a CSI 
 
 ## Joining EC2 instances as cluster nodes
 
-Floci allows EC2 instances to join an EKS cluster as Kubernetes worker nodes. Launching an instance via `RunInstances` with user data targeting a cluster automatically registers a matching Kubernetes node.
+Floci allows EC2 instances to join an EKS cluster as Kubernetes worker nodes. Launching an instance via `RunInstances` with user data targeting a cluster records its join and, by default, registers a matching Kubernetes node.
 
 ### Join mechanisms
 
@@ -566,15 +566,27 @@ On AWS, EC2 does not fail instance launches if a target cluster is missing. Floc
 
 ### Node metadata and AWS outcome alignment
 
-When an instance joins a cluster, Floci registers a Kubernetes `Node` matching AWS conventions:
+For simulated workers, Floci registers a Kubernetes `Node` matching AWS conventions:
 - **Node name**: Uses the instance's private DNS name (`privateDnsName`), matching AWS EKS conventions.
 - **Provider ID**: Set to `spec.providerID: aws:///<availability-zone>/<instance-id>`.
 - **Labels & Status**: Includes topology and instance-type labels, ready status, internal IP, and catalog capacity.
 - **EC2 persistence**: The instance remains an authentic EC2 instance reported by `DescribeInstances`.
 
+### Guest kubelet registration
+
+For custom images that run kubelet, set `kubeletRegistersNode: true` in the
+[EC2 image catalog](ec2.md#external-image-catalog). Floci then leaves Node creation,
+capacity, allocatable resources and readiness to the guest kubelet, on both initial
+join and replay. Join tracking, persisted instance IDs and registration listeners
+still run. The image and bootstrap configuration remain responsible for starting
+and authenticating kubelet and providing worker networking.
+
+The capability is opt-in per image, including its aliases. A systemd runtime alone
+does not enable it; omitted or false values keep the simulated behavior.
+
 ### Differences and limitations
 
-- Floci registers the `Node` directly in the control plane with matching provider ID, labels, and ready status.
+- For simulated workers, Floci registers the `Node` directly in the control plane with matching provider ID, labels, and ready status.
 - Node cleanup on termination is handled in part two; an instance can belong to at most one cluster at a time.
 
 ## Configuration
