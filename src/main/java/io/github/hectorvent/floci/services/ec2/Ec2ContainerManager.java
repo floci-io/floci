@@ -54,7 +54,9 @@ import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.Semaphore;
@@ -162,6 +164,12 @@ public class Ec2ContainerManager {
     /** Instances whose service-network lookup failed and is retried on the next address read. */
     private final Set<String> serviceNetworkRetries = ConcurrentHashMap.newKeySet();
     private final Set<String> serviceNetworkRetriesRunning = ConcurrentHashMap.newKeySet();
+    /**
+     * Runs the retries on their own virtual threads, never on {@link #executor}: that pool blocks a
+     * full queue's submitters, and a launch worker waiting on it for a retry could stall them all.
+     */
+    private Executor serviceNetworkRetryExecutor =
+            Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("ec2-service-network-retry-", 0).factory());
     private final Duration userDataExecutionTimeout;
     private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
 
@@ -396,10 +404,17 @@ public class Ec2ContainerManager {
                 BLOCKING_BACKPRESSURE);
     }
 
+    void useServiceNetworkRetryExecutorForTest(Executor retryExecutor) {
+        this.serviceNetworkRetryExecutor = retryExecutor;
+    }
+
     @PreDestroy
     void stop() {
         closeActiveUserDataCallbacks();
         executor.shutdownNow();
+        if (serviceNetworkRetryExecutor instanceof ExecutorService retries) {
+            retries.shutdownNow();
+        }
         closeActiveUserDataCallbacks();
     }
 
@@ -1366,7 +1381,7 @@ public class Ec2ContainerManager {
     }
 
     /**
-     * Retries a failed {@link #refreshServiceNetworkIp} on the executor, at most one attempt per
+     * Retries a failed {@link #refreshServiceNetworkIp} in the background, at most one attempt per
      * instance at a time, so the address read that notices it never waits on Docker.
      */
     private void retryServiceNetworkIp(Instance instance) {
@@ -1375,7 +1390,7 @@ public class Ec2ContainerManager {
             return;
         }
         try {
-            executor.execute(() -> {
+            serviceNetworkRetryExecutor.execute(() -> {
                 try {
                     refreshServiceNetworkIp(instance);
                 } finally {
@@ -1383,7 +1398,10 @@ public class Ec2ContainerManager {
                 }
             });
         } catch (RuntimeException e) {
+            // Only a shutting-down executor refuses; the next address read tries again.
             serviceNetworkRetriesRunning.remove(instanceId);
+            LOG.warnv("Could not schedule the service-network lookup retry for {0}: {1}",
+                    instanceId, e.getMessage());
         }
     }
 

@@ -1133,10 +1133,10 @@ class Ec2ContainerManagerTest {
         InspectContainerResponse guest = docker.inspectContainerCmd(TEST_CONTAINER_ID).exec();
         when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec())
                 .thenThrow(new IllegalStateException("daemon busy")).thenReturn(guest);
+        ExecutorService launchExecutor = mock(ExecutorService.class);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker, launchExecutor);
         List<Runnable> tasks = new ArrayList<>();
-        ExecutorService executor = mock(ExecutorService.class);
-        doAnswer(invocation -> tasks.add(invocation.getArgument(0))).when(executor).execute(any(Runnable.class));
-        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker, executor);
+        manager.useServiceNetworkRetryExecutorForTest(tasks::add);
         Instance instance = serviceNetworkInstance();
         manager.refreshServiceNetworkIp(instance);
         clearInvocations(docker);
@@ -1150,6 +1150,9 @@ class Ec2ContainerManagerTest {
 
         assertEquals("172.20.0.9", manager.reachablePublicAddress(instance));
         assertEquals(1, tasks.size());
+        // Never on the launch pool, whose blocking backpressure could stall the workers behind it.
+        verify(launchExecutor, never()).execute(any(Runnable.class));
+        verify(launchExecutor, never()).submit(any(Runnable.class));
     }
 
     @Test
