@@ -1720,7 +1720,9 @@ gives. IAM Identity Center's `CreateAccountAssignment`, `DeleteAccountAssignment
 `ProvisionPermissionSet` are checked on the account their `TargetId` names, `account/<id>`, beside the
 instance and the permission set, and a `ProvisionPermissionSet` for `ALL_PROVISIONED_ACCOUNTS` on each
 account the permission set is provisioned to. AWS does not document which accounts such a request is
-authorized on, so checking each one it provisions is Floci's reading. A permission set, an application or a trusted token issuer
+authorized on, so checking each one it provisions is Floci's reading, and it provisions to the accounts it was
+checked on: one another request provisions the permission set to while it runs is left as that request
+left it. A permission set, an application or a trusted token issuer
 a create makes has the id of the instance its `InstanceArn` names, `permissionSet/<instance id>/*`.
 Cost Explorer's `GetAnomalyMonitors` and `GetAnomalySubscriptions` are checked on each ARN their
 `MonitorArnList` or `SubscriptionArnList` gives, and Timestream for InfluxDB's `RebootDbCluster` on the
