@@ -1211,6 +1211,60 @@ Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived det
 |--------|-------------|
 | DescribeVpnGateways | Returns an empty gateway set (no stored gateways). |
 
+### Client VPN
+
+| Action | Description |
+|--------|-------------|
+| CreateClientVpnEndpoint | Creates an endpoint; a `client-vpn-endpoint` `TagSpecification` tags it. |
+| DescribeClientVpnEndpoints | Lists endpoints, or the ones `ClientVpnEndpointId.N` names. |
+| ModifyClientVpnEndpoint | Changes the members the request gives. |
+| DeleteClientVpnEndpoint | Deletes an endpoint with no associated target networks. |
+| AssociateClientVpnTargetNetwork | Associates a subnet and adds the route to its VPC through it. |
+| DescribeClientVpnTargetNetworks | Lists an endpoint's associations. |
+| DisassociateClientVpnTargetNetwork | Removes an association and the routes through its subnet. |
+| ApplySecurityGroupsToClientVpnTargetNetwork | Sets the security groups the endpoint applies in its VPC. |
+| AuthorizeClientVpnIngress | Adds an authorization rule for a network, for one group or all. |
+| DescribeClientVpnAuthorizationRules | Lists an endpoint's authorization rules. |
+| RevokeClientVpnIngress | Removes an authorization rule. |
+| CreateClientVpnRoute | Adds a route through an associated subnet. |
+| DescribeClientVpnRoutes | Lists an endpoint's routes, the ones associations added included. |
+| DeleteClientVpnRoute | Removes a route the endpoint was given. |
+| ExportClientVpnClientConfiguration | Returns the OpenVPN client configuration for the endpoint. |
+
+Client VPN is a configuration registry: no VPN server runs, so clients cannot connect. An endpoint
+is `pending-associate` until a subnet is associated, then `available`, and its DNS name is
+`*.cvpn-endpoint-<id>.prod.clientvpn.<region>.<dns suffix>`. Defaults are AWS's: `udp` on port 443,
+a 24-hour session timeout, the self-service portal disabled, and, for a VPC given without security
+groups, the VPC's default security group.
+
+- Associations settle as `associated`, authorization rules and routes as `active`, at once; the
+  operation's response carries the transitional status AWS answers with (`associating`,
+  `authorizing`, `creating`).
+- An association needs a subnet of the endpoint's VPC, one per Availability Zone. It adds a
+  `Default Route` to the VPC's CIDR through the subnet (`origin` `associate`, `type` `Nat`), which
+  goes with the association. An endpoint created without a VPC takes the first subnet's VPC and its
+  default security group.
+- An association pins its subnet and VPC, as the network interface AWS places in the subnet does:
+  `DeleteSubnet` and `DeleteVpc` answer `DependencyViolation` until it is disassociated.
+- An endpoint with associated target networks cannot be deleted (`IncorrectState`).
+- Security groups named on create, modify or `ApplySecurityGroupsToClientVpnTargetNetwork` must
+  exist (`InvalidGroup.NotFound`) and be in the endpoint's VPC.
+- Authorization rules and routes compare networks, not spellings: `10.0.0.9/16` is the same network
+  as `10.0.0.0/16`, so it is a duplicate on create and matches on revoke or delete.
+- The describe operations take AWS's filters, with `*` and `?` wildcards: `endpoint-id`,
+  `transport-protocol`, `tag-key` and `tag:<key>` for endpoints; `association-id`,
+  `target-network-id` and `vpc-id` for target networks; `description`, `destination-cidr` and
+  `group-id` for authorization rules; `destination-cidr`, `origin` and `target-subnet` for routes.
+  Any other filter is `InvalidParameterValue` ("The filter '<name>' is invalid").
+- An endpoint with the self-service portal enabled reports `selfServicePortalUrl`,
+  `https://self-service.clientvpn.<dns suffix>/endpoints/<id>`.
+- The exported configuration names the endpoint's address, port and transport, carries the server
+  certificate's chain from ACM as its `<ca>`, and verifies the certificate's domain name, as AWS's
+  does. A server certificate ACM does not hold leaves those two parts out.
+- An unknown endpoint id is `InvalidClientVpnEndpointId.NotFound` ("Endpoint `<id>` does not
+  exist"), and a malformed one `InvalidParameterValue` ("ClientVpnEndpointId you provided is not
+  valid").
+
 ### EBS Encryption Defaults
 
 | Action | Description |

@@ -39,6 +39,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.GZIPOutputStream;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2Ids.randomHex;
+
 /**
  * Manages VPC Flow Logs (a floci addition — absent upstream) and a background
  * generator that synthesizes realistic VPC flow-log records and delivers them
@@ -647,16 +649,6 @@ public class FlowLogService {
 
     private static String nz(String s) {
         return (s == null || s.isEmpty()) ? "-" : s;
-    }
-
-    private static String randomHex(int len) {
-        String chars = "0123456789abcdef";
-        StringBuilder sb = new StringBuilder(len);
-        ThreadLocalRandom r = ThreadLocalRandom.current();
-        for (int i = 0; i < len; i++) {
-            sb.append(chars.charAt(r.nextInt(chars.length())));
-        }
-        return sb.toString();
     }
 
     /** Lightweight holder for the ENI fields a flow record needs. */
