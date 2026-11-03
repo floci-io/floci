@@ -116,6 +116,17 @@ class RedshiftAuditLogPublisherTest {
                 "ALTER USER alice PASSWORD 'top-secret'"));
     }
 
+    @Test
+    void redactsCopyCredentialClausesFromActivityRecords() {
+        assertEquals("COPY t FROM 's3://b/k' ACCESS_KEY_ID 'AKIAEXAMPLE' SECRET_ACCESS_KEY '[REDACTED]' "
+                        + "SESSION_TOKEN '[REDACTED]'",
+                RedshiftAuditLogPublisher.sanitizeSql("COPY t FROM 's3://b/k' ACCESS_KEY_ID 'AKIAEXAMPLE' "
+                        + "SECRET_ACCESS_KEY 'top-secret' SESSION_TOKEN 'tok'"));
+        assertEquals("COPY t FROM 's3://b/k' CREDENTIALS '[REDACTED]' CSV",
+                RedshiftAuditLogPublisher.sanitizeSql("COPY t FROM 's3://b/k' "
+                        + "CREDENTIALS 'aws_access_key_id=AKIA;aws_secret_access_key=top-secret' CSV"));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
             "ALTER USER alice PASSWORD /* rotation */ 'secret'",

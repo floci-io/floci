@@ -179,9 +179,8 @@ public final class RedshiftRoleAccess {
         Map<String, List<String>> context = new HashMap<>(conditionContext);
         iamService.resolveCallerArns(session.accessKeyId())
                 .ifPresent(callerArns -> callerArns.putPrincipalKeys(context));
-        IamPolicyEvaluator.SimulationDecision decision =
-                ROLE_POLICY_EVALUATOR.simulatePrincipalPolicy(caller, action, resourceArn, context);
-        if (decision != IamPolicyEvaluator.SimulationDecision.ALLOWED) {
+        String accountId = iamService.findAccountForAccessKeyId(session.accessKeyId()).orElse(null);
+        if (!allowedUnderOrganizationPolicies(iamService, caller, accountId, action, resourceArn, context)) {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "S3 access denied for access key '" + session.accessKeyId() + "': " + action + " on "
                             + resourceArn, null);
@@ -217,12 +216,24 @@ public final class RedshiftRoleAccess {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "IAM Role '" + roleArn + "' could not be assumed: " + e.getMessage(), e);
         }
-        IamPolicyEvaluator.SimulationDecision decision =
-                ROLE_POLICY_EVALUATOR.simulatePrincipalPolicy(caller, action, resourceArn, conditionContext);
-        if (decision != IamPolicyEvaluator.SimulationDecision.ALLOWED) {
+        if (!allowedUnderOrganizationPolicies(iamService, caller, AwsArnUtils.parse(roleArn).accountId(), action,
+                resourceArn, conditionContext)) {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "S3 access denied for IAM Role '" + roleArn + "': " + action + " on " + resourceArn, null);
         }
+    }
+
+    /**
+     * Identity, session and boundary policies as {@code simulatePrincipalPolicy} reads them, plus the
+     * service control policies of the principal's account, which that simulation leaves out.
+     */
+    private static boolean allowedUnderOrganizationPolicies(IamService iamService, CallerContext caller,
+                                                            String accountId, String action, String resourceArn,
+                                                            Map<String, List<String>> context) {
+        List<List<String>> scpLevels = accountId == null ? null : iamService.effectiveScpLevels(accountId);
+        CallerContext capped = scpLevels == null ? caller : caller.withScpLevels(scpLevels);
+        return ROLE_POLICY_EVALUATOR.evaluate(capped, List.of(), action, resourceArn, context)
+                == IamPolicyEvaluator.Decision.ALLOW;
     }
 
     /**

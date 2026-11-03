@@ -52,6 +52,7 @@ import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -445,6 +446,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * caller names, so a China ARN resolves under any signing scope and lists in China scope.
      */
     private final Map<String, Map<String, IamPolicy>> awsManagedPoliciesByPartition = new ConcurrentHashMap<>();
+
+    /**
+     * Lazy so IAM never depends on Organizations at construction (Organizations already depends on
+     * IAM). Null when the service is built by hand, where no organization exists.
+     */
+    @Inject
+    Instance<ScpProvider> scpProvider;
+
+    /**
+     * The service control policy levels that cap {@code accountId}, or null when SCPs do not apply
+     * to it, for callers that evaluate a principal outside the request filter.
+     */
+    public List<List<String>> effectiveScpLevels(String accountId) {
+        return scpProvider != null && scpProvider.isResolvable()
+                ? scpProvider.get().effectiveScpLevels(accountId) : null;
+    }
 
     @Inject
     public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
