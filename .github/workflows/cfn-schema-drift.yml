@@ -1,5 +1,6 @@
 name: CloudFormation Schema Drift
-# Checks the vendored CloudFormation property types against the resource schemas AWS publishes.
+# Checks the vendored CloudFormation property types, and the schema surface CfnSchemaCoverageTest
+# reads, against the resource schemas AWS publishes.
 # They come from AWS's live schema archive rather than from a pinned dependency, so, as with the
 # IAM data in iam-data-drift.yml, this check can fail without anything in the repository having
 # changed, and it runs on its own, never as part of a job that ordinary changes trigger.
@@ -19,6 +20,9 @@ on:
       - 'src/main/resources/aws/cfn-property-types.json'
       - 'tools/aws/regen_cfn_property_types.py'
       - 'tools/aws/test_regen_cfn_property_types.py'
+      - 'src/test/resources/cloudformation/schema-surface.tsv'
+      - 'tools/aws/regen_cfn_schema_surface.py'
+      - 'tools/aws/test_regen_cfn_schema_surface.py'
       - '.github/workflows/cfn-schema-drift.yml'
   schedule:
     # Mondays at 06:10 UTC, beside the IAM data drift check.
@@ -34,17 +38,22 @@ concurrency:
 
 jobs:
   cfn-schema-drift:
-    name: Vendored CloudFormation property types still match AWS
+    name: Vendored CloudFormation property types and schema surface still match AWS
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.x"
 
       # No dependency install: the generator is stdlib-only.
       - name: Check the vendored property types still match AWS's schemas
         run: make cfn-property-types-verify
+
+      # Runs even when the property types check failed, so one run reports both drifts.
+      - name: Check the committed schema surface still matches AWS's schemas
+        if: always()
+        run: make cfn-schema-surface-verify

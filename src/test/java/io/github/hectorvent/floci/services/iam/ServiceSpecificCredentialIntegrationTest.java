@@ -587,10 +587,9 @@ class ServiceSpecificCredentialIntegrationTest {
             .when().post("/").then().statusCode(400)
                 .body(containsString("ValidationError"))
                 .body(containsString("1 validation error detected"))
-                .body(containsString("Member must satisfy enum value set"))
-                // AWS names neither the offending value nor the permitted set. The trailing colon
-                // is the tell for the set, and "Deleted" for the value.
-                .body(not(containsString("enum value set:")))
+                .body(containsString("Member must satisfy enum value set: "
+                        + "[Expired, Active, Inactive]"))
+                // The error lists the set but does not echo the rejected value.
                 .body(not(containsString("Deleted")));
         }
 

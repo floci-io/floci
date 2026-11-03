@@ -83,7 +83,7 @@ public class ServiceCallAuthorizer {
                 .filter(document -> document != null && !document.isBlank())
                 .toList();
         Map<String, List<String>> context = IamConditionContextResolver.serviceCallContext(
-                servicePrincipal, resourceArn, ownerAccountId, sourceArn, sourceAccount);
+                servicePrincipal, resourceArn, ownerAccountId, sourceArn, sourceAccount, action);
         context.putAll(requestKeys);
         Decision decision = evaluator.evaluateServicePrincipal(
                 documents.isEmpty() ? null : documents, servicePrincipal, action, resourceArn, context);

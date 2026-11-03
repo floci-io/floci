@@ -83,8 +83,11 @@ retained version's own origin checked against any later asset request for the sa
 (rejecting one that would mix in a different connection's bytes), and a direct `mvn deploy` of a
 version already present in the connection rejected with `ConflictException`. See the
 upstream-resolution limitation further down for exactly what this does not yet cover (a
-repository-to-repository `upstreams` chain, for any format including Maven; npm/pypi/nuget's own
-external connections).
+repository-to-repository `upstreams` chain, for any format including Maven). npm's own `public:npmjs`
+external connection and NuGet's own `public:nuget-org` one resolve the same way, each against its
+own format's one real public connection and documented rules; see their own repository endpoint
+sections and the known-limitations entry below for exactly how. pypi's own external connection does
+not yet.
 
 `PublishPackageVersion` creates a package version in the `Unfinished` state when the `unfinished`
 flag is set, and `Published` otherwise. While still `Unfinished`, publishing a new asset name is
@@ -340,11 +343,11 @@ state.
   would mean isolating each sidecar on its own Docker network reachable only from Floci's own
   process, a change that would need to apply uniformly across all four sidecar-backed formats, not
   a one-off fix to any single proxy.
-- **Only the Maven endpoint's own external connection actually resolves; nothing else does.**
+- **The Maven, NuGet, and npm endpoints' own external connections resolve; pypi's does not.**
   On real CodeArtifact, a repository with another repository configured as an upstream
   (`UpdateRepository`'s `upstreams`) or with an `AssociateExternalConnection` to a public
   repository serves packages from those sources too, not just its own. Floci's Maven endpoint
-  now does this for a direct external connection to one of the 5 real public Maven repositories
+  does this for a direct external connection to one of the 5 real public Maven repositories
   (`public:maven-central`, `public:maven-clojars`, `public:maven-commonsware`,
   `public:maven-googleandroid`, `public:maven-gradleplugins`): a GET/HEAD miss fetches and
   retains the package version from the real public repository, following AWS's own documented
@@ -352,13 +355,22 @@ state.
   name imported only on demand; a retained version's origin checked against any later asset
   fetched for it, rejecting one from a different connection; `upstream: BLOCK` respected). A real
   `mvn deploy` of a version already present in the external connection is also rejected (409),
-  matching AWS's documented publish-side behavior. None of this applies to a repository-to-
-  repository upstream (`UpdateRepository`'s `upstreams`, for any format including Maven, which is
-  a materially different mechanism, not yet built) or to npm, pypi, or nuget's own external
-  connections, which still 404 exactly as before: the pypi proxy's pypiserver container is
-  started with `--disable-fallback`, and the nuget proxy's BaGetter container with
-  `Mirror__Enabled=false`, specifically so neither ever silently redirects a missing package to
-  the real, public PyPI or nuget.org.
+  matching AWS's documented publish-side behavior. NuGet's own `public:nuget-org` external
+  connection works the same way, against its own one real public connection and its own
+  single-asset-per-version shape; a real `nuget push`/`dotnet nuget push` of a version already
+  present in the connection is rejected the same way. npm's own `public:npmjs` external connection
+  works differently, since `npm install <pkg>@<version>` never names a single version on the wire
+  the way Maven's GAV layout or NuGet's content route do, only the bare package: a packument read
+  merges the real registry's own versions and dist-tags into whatever this repository already
+  knows (never written back to Verdaccio itself, since its publish protocol has no way to record a
+  version's metadata without that version's real tarball bytes in the same call), and a tarball
+  download for a version not yet genuinely retained triggers the real fetch and retention, using
+  the same claim/fence/origin-tracking machinery. None of this applies to a repository-to-
+  repository upstream (`UpdateRepository`'s `upstreams`, for any format including Maven, NuGet,
+  and npm, which is a materially different mechanism, not yet built) or to pypi's own external
+  connection, which still 404s exactly as before: the pypi proxy's pypiserver container is started
+  with `--disable-fallback`, specifically so it never silently redirects a missing package to the
+  real, public PyPI.
 - **Maven external-connection retention is the one place this emulator makes a real outbound
   call to the public internet**, rather than only ever talking to a container it started itself.
   An offline environment, or a real outage of the public repository being connected to, means a

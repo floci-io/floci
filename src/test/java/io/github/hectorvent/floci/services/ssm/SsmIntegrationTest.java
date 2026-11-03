@@ -2118,7 +2118,7 @@ class SsmIntegrationTest {
             .header("X-Amz-Target", "AmazonSSM.GetParameters")
             .contentType(SSM_CONTENT_TYPE)
             .body("""
-                { "Names": ["/selector/param:1", "/selector/param:9"] }
+                { "Names": ["/selector/param:1", "/selector/param:9"], "WithDecryption": true }
                 """)
         .when()
             .post("/")

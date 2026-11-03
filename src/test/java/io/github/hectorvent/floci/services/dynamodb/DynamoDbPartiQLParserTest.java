@@ -454,6 +454,36 @@ class DynamoDbPartiQLParserTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {
+            "SELECT * FROM \"t\" WHERE pk = 1 # note",
+            "SELECT FROM WHERE #",
+            "SELECT * FROM \"t\" WHERE pk = 1e200 #",
+            "SELECT * FROM \"t\" WHERE pk = 1 ~",
+            "SELECT * FROM \"t\" WHERE pk = 1 !",
+            "SELECT * FROM \"t\" WHERE pk = 1 `",
+            "SELECT * FROM \"t\" WHERE é = 1",
+            "SELECT * FROM \"t\" WHERE pk = 1١",
+            "SELECT * FROM \"t\" WHERE pk = 1 ",
+            "SELECT * FROM \"t\" WHERE pk = 1\u001c",
+            "\0SELECT * FROM \"t\" WHERE pk = 1",
+            "SELECT * FROM \"t\" WHERE pk = 'abc",
+            "SELECT * FROM \"t\" WHERE pk = 'a''",
+            "SELECT * FROM \"t\" WHERE \"pk = 1",
+            "SELECT * FROM \"t"})
+    void refusesAStatementTheLexerCannotRead(String statement) {
+        assertEquals("Statement wasn't well formed, can't be processed: ", refusal(statement));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"$x", "x$", "$", "a$1"})
+    void readsADollarSignInAName(String name) {
+        Cond cond = firstCond("SELECT pk FROM \"t\" WHERE " + name + " = 1");
+
+        Path path = assertInstanceOf(Cond.Eq.class, cond).path();
+        assertEquals(List.of(new Seg.Name(name)), path.segments());
+    }
+
+    @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             SELECT * FROM "t" WHERE pk = 1e126                                        | OVERFLOW under root
             SELECT * FROM "t" WHERE pk = -1e-131                                      | UNDERFLOW under root

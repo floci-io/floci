@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.testing.QueryRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.ValidatableResponse;
@@ -9,7 +10,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -574,13 +574,6 @@ class Ec2LaunchBlockDeviceMappingsIntegrationTest {
     }
 
     private static RequestSpecification request(String account, String action, String... params) {
-        RequestSpecification request = given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account
-                        + "/20261022/us-east-1/ec2/aws4_request, SignedHeaders=host, Signature=abc")
-                .formParam("Action", action);
-        for (int i = 0; i < params.length; i += 2) {
-            request = request.formParam(params[i], params[i + 1]);
-        }
-        return request;
+        return QueryRequests.request(account, "ec2", action, params);
     }
 }

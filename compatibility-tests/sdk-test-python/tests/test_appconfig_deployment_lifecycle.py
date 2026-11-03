@@ -1,0 +1,117 @@
+"""AppConfig baking and manual rollback through both retrieval APIs."""
+
+from contextlib import ExitStack
+from datetime import datetime
+
+import boto3
+import pytest
+from botocore.exceptions import ClientError
+
+
+@pytest.mark.parametrize("zero_padded", [False, True], ids=["decimal", "zero-padded"])
+@pytest.mark.parametrize("delete_previous", [False, True], ids=["restore", "deleted"])
+def test_deployment_rollback_restores_both_retrieval_apis(
+        aws_config, client_config, unique_name, delete_previous, zero_padded):
+    with ExitStack() as cleanup:
+        client = boto3.client("appconfig", config=client_config, **aws_config)
+        data = boto3.client("appconfigdata", config=client_config, **aws_config)
+        cleanup.callback(client.close)
+        cleanup.callback(data.close)
+        app = client.create_application(Name=unique_name)["Id"]
+        cleanup.callback(client.delete_application, ApplicationId=app)
+        profile = client.create_configuration_profile(
+            ApplicationId=app, Name="settings", LocationUri="hosted", Type="AWS.Freeform"
+        )["Id"]
+        cleanup.callback(
+            client.delete_configuration_profile, ApplicationId=app, ConfigurationProfileId=profile)
+        versions = []
+        for content in (b'{"version":1}', b'{"version":2}'):
+            version = client.create_hosted_configuration_version(
+                ApplicationId=app, ConfigurationProfileId=profile,
+                Content=content, ContentType="application/json",
+            )["VersionNumber"]
+            versions.append(version)
+            cleanup.callback(
+                client.delete_hosted_configuration_version, ApplicationId=app,
+                ConfigurationProfileId=profile, VersionNumber=version,
+            )
+        strategies = []
+        for bake in (0, 1):
+            strategy = client.create_deployment_strategy(
+                Name=f"{unique_name}-{bake}", DeploymentDurationInMinutes=0,
+                FinalBakeTimeInMinutes=bake, GrowthFactor=100,
+                GrowthType="LINEAR", ReplicateTo="NONE",
+            )["Id"]
+            strategies.append(strategy)
+            cleanup.callback(client.delete_deployment_strategy, DeploymentStrategyId=strategy)
+        env = client.create_environment(ApplicationId=app, Name="local")["Id"]
+        cleanup.callback(client.delete_environment, ApplicationId=app, EnvironmentId=env)
+        scope = {"ApplicationId": app, "EnvironmentId": env}
+
+        def deploy(version, strategy):
+            return client.start_deployment(
+                **scope, ConfigurationProfileId=profile,
+                ConfigurationVersion=str(version), DeploymentStrategyId=strategy)
+
+        def assert_content(version, content):
+            response = client.get_configuration(
+                Application=app, Environment=env, Configuration=profile, ClientId=unique_name)
+            with response["Content"] as stream:
+                assert stream.read() == content
+            assert response["ConfigurationVersion"] == str(version)
+            token = data.start_configuration_session(
+                ApplicationIdentifier=app, EnvironmentIdentifier=env,
+                ConfigurationProfileIdentifier=profile,
+            )["InitialConfigurationToken"]
+            response = data.get_latest_configuration(ConfigurationToken=token)
+            with response["Configuration"] as stream:
+                assert stream.read() == content
+
+        previous_version = ("0" if zero_padded else "") + str(versions[0])
+        first = deploy(previous_version, strategies[0])
+        assert first["State"] == "COMPLETE"
+        assert isinstance(first["StartedAt"], datetime)
+        assert first["CompletedAt"] == first["StartedAt"]
+        assert_content(previous_version, b'{"version":1}')
+        second = deploy(versions[1], strategies[1])
+        target = {**scope, "DeploymentNumber": second["DeploymentNumber"]}
+        assert second["State"] == "BAKING"
+        assert second["PercentageComplete"] == 100
+        assert second["FinalBakeTimeInMinutes"] == 1
+        assert "CompletedAt" not in second
+        assert_content(versions[1], b'{"version":2}')
+        assert client.get_deployment(**target)["State"] == "BAKING"
+        with pytest.raises(ClientError) as error:
+            client.stop_deployment(**target)
+        assert error.value.response["Error"]["Code"] == "BadRequestException"
+        assert client.get_deployment(**target)["State"] == "BAKING"
+
+        if delete_previous:
+            client.delete_hosted_configuration_version(
+                ApplicationId=app, ConfigurationProfileId=profile, VersionNumber=versions[0])
+            before = client.get_deployment(**target)
+            with pytest.raises(ClientError) as error:
+                client.stop_deployment(**target, AllowRevert=True)
+            assert error.value.response["Error"]["Code"] == "BadRequestException"
+            assert error.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+            after = client.get_deployment(**target)
+            assert after["State"] == before["State"]
+            assert after.get("CompletedAt") == before.get("CompletedAt")
+            assert after["PercentageComplete"] == before["PercentageComplete"]
+            assert_content(versions[1], b'{"version":2}')
+            return
+
+        stopped = client.stop_deployment(**target, AllowRevert=True)
+        assert stopped["ResponseMetadata"]["HTTPStatusCode"] == 202
+        assert stopped["State"] == "ROLLED_BACK"
+        assert isinstance(stopped["CompletedAt"], datetime)
+        assert client.get_deployment(**target)["State"] == "ROLLED_BACK"
+        listed = {
+            row["DeploymentNumber"]: row for row in client.list_deployments(**scope)["Items"]}
+        assert listed[second["DeploymentNumber"]]["State"] == "ROLLED_BACK"
+        assert listed[second["DeploymentNumber"]]["CompletedAt"] == stopped["CompletedAt"]
+        assert_content(previous_version, b'{"version":1}')
+        with pytest.raises(ClientError) as error:
+            client.stop_deployment(**target, AllowRevert=True)
+        assert error.value.response["Error"]["Code"] == "BadRequestException"
+        assert_content(previous_version, b'{"version":1}')

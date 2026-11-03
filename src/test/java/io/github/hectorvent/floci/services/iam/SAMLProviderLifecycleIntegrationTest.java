@@ -9,6 +9,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -55,6 +56,58 @@ class SAMLProviderLifecycleIntegrationTest {
             .body(containsString("https://idp.example.test/updated"))
             .body(containsString("dXBkYXRlZA=="))
             .body(not(containsString("https://idp.example.test/original")));
+    }
+
+    /**
+     * An IdP's own metadata as uploaded: a default namespace rather than an {@code md:} prefix,
+     * an IDPSSODescriptor with SingleSignOnService endpoints, whitespace, and a {@code &amp;} in
+     * a URL. AWS returns the document as uploaded, so it must read back character for character.
+     */
+    private static String idpMetadata(String entityId, String certBase64) {
+        return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                + "<EntityDescriptor xmlns=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"" + entityId + "\">\n"
+                + "  <IDPSSODescriptor WantAuthnRequestsSigned=\"false\""
+                + " protocolSupportEnumeration=\"urn:oasis:names:tc:SAML:2.0:protocol\">\n"
+                + "    <KeyDescriptor use=\"signing\">\n"
+                + "      <ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data>"
+                + "<ds:X509Certificate>" + certBase64 + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo>\n"
+                + "    </KeyDescriptor>\n"
+                + "    <NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</NameIDFormat>\n"
+                + "    <SingleSignOnService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect\""
+                + " Location=\"https://idp.example.test/sso?app=aws&amp;mode=redirect\"/>\n"
+                + "    <SingleSignOnService Binding=\"urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST\""
+                + " Location=\"https://idp.example.test/sso?app=aws&amp;mode=post\"/>\n"
+                + "  </IDPSSODescriptor>\n"
+                + "  <!-- " + "x".repeat(SamlMetadata.MINIMUM_LENGTH) + " -->\n"
+                + "</EntityDescriptor>\n";
+    }
+
+    private static String getMetadataDocument(String arn) {
+        return iam("GetSAMLProvider").formParam("SAMLProviderArn", arn)
+            .when().post("/").then().statusCode(200)
+            .extract().xmlPath()
+            .getString("GetSAMLProviderResponse.GetSAMLProviderResult.SAMLMetadataDocument");
+    }
+
+    @Test
+    void getSamlProviderReturnsTheMetadataDocumentAsUploadedAfterCreateAndUpdate() {
+        String name = "verbatim-saml-" + System.nanoTime();
+        String arn = "arn:aws:iam::000000000000:saml-provider/" + name;
+        String original = idpMetadata("https://idp.example.test/verbatim", "b3JpZ2luYWw=");
+        iam("CreateSAMLProvider")
+            .formParam("Name", name)
+            .formParam("SAMLMetadataDocument", original)
+        .when().post("/").then().statusCode(200);
+
+        assertEquals(original, getMetadataDocument(arn));
+
+        String updated = idpMetadata("https://idp.example.test/verbatim-updated", "dXBkYXRlZA==");
+        iam("UpdateSAMLProvider")
+            .formParam("SAMLProviderArn", arn)
+            .formParam("SAMLMetadataDocument", updated)
+        .when().post("/").then().statusCode(200);
+
+        assertEquals(updated, getMetadataDocument(arn));
     }
 
     @Test

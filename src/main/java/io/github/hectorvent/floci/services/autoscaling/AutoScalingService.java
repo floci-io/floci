@@ -91,6 +91,13 @@ public class AutoScalingService implements PassedRoleLookup {
                     + "capacity-reservations-only, capacity-reservations-first, none, default.";
     static final String CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE =
             "You cannot specify a CapacityReservationTarget when CapacityReservationPreference is none.";
+    // AWS returns "Resoure" verbatim; retain it for callers that classify service errors by message.
+    static final String MULTIPLE_CAPACITY_RESERVATION_TARGETS_MESSAGE =
+            "Specifying more than one target CapacityReservationIds or CapacityReservationResoureGroupArns "
+                    + "is not supported.";
+    static final String MIXED_CAPACITY_RESERVATION_TARGETS_MESSAGE =
+            "You can't specify CapacityReservationIds and CapacityReservationResourceGroupArns in the same request. "
+                    + "Remove either CapacityReservationIds or CapacityReservationResourceGroupArns.";
     static final int MAX_SERVICE_LINKED_ROLE_ARN_LENGTH = 1600;
     static final int MAX_RESOURCE_NAME_LENGTH = 1600;
     private static final Pattern CAPACITY_RESERVATION_ID_PATTERN = Pattern.compile("^[A-Za-z0-9\\-_/]+$");
@@ -1007,16 +1014,18 @@ public class AutoScalingService implements PassedRoleLookup {
             }
             List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
                     .filter(instanceIds::contains).toList();
+            InstanceRefresh refresh = activeInstanceRefresh(asg);
             if (!detached.isEmpty()) {
                 deregisterFromTargetGroups(elbV2Service, asg, detached);
                 deregisterFromClassicLoadBalancers(elbClassicService, asg, detached);
                 // Detaching removes only the group-name tag, and only where it still names this group.
                 ec2Service.deleteSystemTag(region, detached, GROUP_NAME_TAG, name);
+                completeInstanceRefreshIfSettled(region, name, asg);
             }
-            releaseRefreshOwnership(asg, detached);
+            releaseRefreshOwnership(refresh, detached);
             asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
             if (decrementDesiredCapacity) {
-                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
+                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - detached.size());
                 asg.setDesiredCapacity(newDesired);
             }
             groups.put(key, asg);
@@ -1026,7 +1035,9 @@ public class AutoScalingService implements PassedRoleLookup {
     public void terminateInstanceInAutoScalingGroup(String region, String instanceId,
                                                      boolean decrementDesiredCapacity) {
         updateGroupOfInstance(region, instanceId, asg -> {
-            releaseRefreshOwnership(asg, List.of(instanceId));
+            InstanceRefresh refresh = activeInstanceRefresh(asg);
+            completeInstanceRefreshIfSettled(region, asg.getAutoScalingGroupName(), asg);
+            releaseRefreshOwnership(refresh, List.of(instanceId));
             asg.getInstances().stream()
                     .filter(i -> instanceId.equals(i.getInstanceId()))
                     .findFirst()
@@ -1056,6 +1067,9 @@ public class AutoScalingService implements PassedRoleLookup {
             if (newDesired != desired) {
                 requireDesiredCapacityWithinBounds(asg, newDesired,
                         "To place into standby " + moving.size() + " instances");
+            }
+            if (!moving.isEmpty()) {
+                completeInstanceRefreshIfSettled(region, name, asg);
             }
             Instant now = Instant.now();
             List<ScalingActivity> started = new ArrayList<>();
@@ -1171,8 +1185,7 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
-    private void releaseRefreshOwnership(AutoScalingGroup asg, List<String> instanceIds) {
-        InstanceRefresh refresh = activeInstanceRefresh(asg);
+    private void releaseRefreshOwnership(InstanceRefresh refresh, List<String> instanceIds) {
         if (refresh != null && refresh.getReplacements() != null) {
             refresh.getReplacements().removeIf(replacement -> instanceIds.stream().anyMatch(instanceId ->
                     instanceId.equals(replacement.getOriginalInstanceId())
@@ -1257,7 +1270,10 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     public void completeInstanceRefreshIfSettled(String region, String asgName) {
-        AutoScalingGroup asg = requireGroup(region, asgName);
+        completeInstanceRefreshIfSettled(region, asgName, requireGroup(region, asgName));
+    }
+
+    private void completeInstanceRefreshIfSettled(String region, String asgName, AutoScalingGroup asg) {
         List<InstanceRefresh> activeRefreshes = instanceRefreshes.values().stream()
                 .filter(r -> region.equals(r.getRegion()))
                 .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
@@ -1930,9 +1946,13 @@ public class AutoScalingService implements PassedRoleLookup {
         if ("none".equals(preference) && specification.hasTarget()) {
             throw new AwsException("ValidationError", CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE, 400);
         }
+        if (!specification.getCapacityReservationIds().isEmpty()
+                && !specification.getCapacityReservationResourceGroupArns().isEmpty()) {
+            throw new AwsException("ValidationError", MIXED_CAPACITY_RESERVATION_TARGETS_MESSAGE, 400);
+        }
         if (specification.getCapacityReservationIds().size()
                 + specification.getCapacityReservationResourceGroupArns().size() > 1) {
-            throw new AwsException("ValidationError", "Specify only one Capacity Reservation target.", 400);
+            throw new AwsException("ValidationError", MULTIPLE_CAPACITY_RESERVATION_TARGETS_MESSAGE, 400);
         }
         for (String id : specification.getCapacityReservationIds()) {
             if (id == null || id.isEmpty() || id.length() > 255

@@ -31,6 +31,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -89,6 +90,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     private final Map<String, String> activeStorageOwners = new ConcurrentHashMap<>();
     private final Set<String> claimedRuntimes = ConcurrentHashMap.newKeySet();
     private final Set<String> cleanupPending = ConcurrentHashMap.newKeySet();
+    private final Set<String> preCreateCleanupPending = ConcurrentHashMap.newKeySet();
     private final Set<String> parameterGroupRefusals = ConcurrentHashMap.newKeySet();
     private volatile boolean dockerUnavailableLogged;
     // Auto-pause state of every running container, by runtime id. The timer thread only keeps
@@ -259,7 +261,8 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
     private void discardNeverCreatedIdentity(String runtimeId, String containerName) {
         RdsContainerHandle retained = activeContainers.get(runtimeId);
-        if (retained == null || retained.getHost() != null
+        if (retained == null || !preCreateCleanupPending.contains(runtimeId)
+                || retained.getHost() != null
                 || !retained.getContainerId().equals(containerName)) {
             return;
         }
@@ -272,7 +275,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             String dockerVolumeName, DatabaseEngine engine, String image,
             String masterUsername, String masterPassword, String dbName) {
         return start(runtimeId, instanceId, containerStorageResourceId, dockerVolumeName,
-                engine, image, masterUsername, masterPassword, dbName, Map.of());
+                engine, image, masterUsername, masterPassword, dbName, Map.of(), false);
     }
 
     public RdsContainerHandle start(
@@ -280,6 +283,42 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             String dockerVolumeName, DatabaseEngine engine, String image,
             String masterUsername, String masterPassword, String dbName,
             Map<String, String> engineParameters) {
+        return start(runtimeId, instanceId, containerStorageResourceId, dockerVolumeName,
+                engine, image, masterUsername, masterPassword, dbName, engineParameters, false);
+    }
+
+    /**
+     * Starts the PostgreSQL container a snapshot export restores into. {@code runtimeArn} gives it
+     * the task's account and region, and {@code volumeId}, unique to the task, names the container
+     * and its volume. It backs no DB instance, so its log goes to no instance's log group, it never
+     * pauses, and its data lives in a Docker volume of its own in every storage mode, which
+     * {@link #discardExport} removes once the export ends.
+     */
+    public RdsContainerHandle startForExport(String runtimeArn, String exportTaskIdentifier, String volumeId,
+                                             String image, String masterUsername, String masterPassword) {
+        return start(runtimeArn, exportTaskIdentifier, volumeId, exportVolumeName(volumeId),
+                DatabaseEngine.POSTGRES, image, masterUsername, masterPassword, null, Map.of(), true);
+    }
+
+    /**
+     * Removes an export's container, if it is still there, and its volume, which no storage mode
+     * keeps. Also clears what an export left behind when Floci stopped while it ran.
+     */
+    public void discardExport(String volumeId) {
+        String volumeName = exportVolumeName(volumeId);
+        lifecycleManager.removeIfExistsStrict(ContainerStorageHelper.dockerName(config, volumeName));
+        lifecycleManager.removeVolumeStrict(volumeName);
+    }
+
+    private String exportVolumeName(String volumeId) {
+        return ContainerStorageHelper.resourceName(config, "rds", volumeId, volumeId);
+    }
+
+    private RdsContainerHandle start(
+            String runtimeId, String instanceId, String containerStorageResourceId,
+            String dockerVolumeName, DatabaseEngine engine, String image,
+            String masterUsername, String masterPassword, String dbName,
+            Map<String, String> engineParameters, boolean ephemeral) {
         LOG.infov("Starting RDS backend container for instance: {0} engine={1}", instanceId, engine);
 
         String effectiveRuntimeId = runtimeId == null || runtimeId.isBlank()
@@ -313,6 +352,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         }
 
         String cleanupContainerId = containerName;
+        boolean createAttempted = false;
         RdsContainerHandle handle = null;
         try {
             // Remove any stale container with the same name only after storage ownership is
@@ -349,8 +389,13 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             }
 
         // Handle persistence mounting
-            addPersistenceMounts(
-                    specBuilder, storageResourceId, exactVolumeName, engine, image);
+            if (ephemeral) {
+                ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager, exactVolumeName,
+                        engineDefaultDataPath(engine, image));
+            } else {
+                addPersistenceMounts(
+                        specBuilder, storageResourceId, exactVolumeName, engine, image);
+            }
 
         // Add engine-specific command
         List<String> cmd = buildContainerCmd(engine, image, engineParameters);
@@ -364,6 +409,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
             // The fixed name remains a valid cleanup identity if create succeeds but its response
             // is lost before Docker returns the generated ID.
             cleanupContainerId = containerName;
+            createAttempted = true;
             String createdContainerId = lifecycleManager.create(spec);
             cleanupContainerId = createdContainerId;
             if (needsMasterGrant(engine, masterUsername)) {
@@ -383,23 +429,27 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     endpoint.host(), endpoint.port(), storageKey, containerKey);
 
         // Attach log streaming
-            String shortId = info.containerId().length() >= 8
-                    ? info.containerId().substring(0, 8)
-                    : info.containerId();
-            String logGroup = "/aws/rds/instance/" + instanceId + "/error";
-            String logStream = logStreamer.generateLogStreamName(shortId);
+            if (!ephemeral) {
+                String shortId = info.containerId().length() >= 8
+                        ? info.containerId().substring(0, 8)
+                        : info.containerId();
+                String logGroup = "/aws/rds/instance/" + instanceId + "/error";
+                String logStream = logStreamer.generateLogStreamName(shortId);
 
-            Closeable logHandle = runtimeIdentity.arnAccountId() != null
-                    ? logStreamer.attachForAccount(
-                            runtimeIdentity.arnAccountId(), info.containerId(), logGroup,
-                            logStream, runtimeIdentity.region(), "rds:" + effectiveRuntimeId)
-                    : logStreamer.attach(
-                            info.containerId(), logGroup, logStream, runtimeIdentity.region(),
-                            "rds:" + effectiveRuntimeId);
-            handle.setLogStream(logHandle);
+                Closeable logHandle = runtimeIdentity.arnAccountId() != null
+                        ? logStreamer.attachForAccount(
+                                runtimeIdentity.arnAccountId(), info.containerId(), logGroup,
+                                logStream, runtimeIdentity.region(), "rds:" + effectiveRuntimeId)
+                        : logStreamer.attach(
+                                info.containerId(), logGroup, logStream, runtimeIdentity.region(),
+                                "rds:" + effectiveRuntimeId);
+                handle.setLogStream(logHandle);
+            }
             // Before the handle is returned, so that the connections of every proxy started on it
             // are counted from the first one.
-            registerAutoPause(effectiveRuntimeId, handle);
+            if (!ephemeral) {
+                registerAutoPause(effectiveRuntimeId, handle);
+            }
             activeContainers.put(effectiveRuntimeId, handle);
 
             return handle;
@@ -422,6 +472,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                             null, 0, storageKey, containerKey);
                     activeContainers.put(effectiveRuntimeId, retained);
                     cleanupPending.add(effectiveRuntimeId);
+                    if (!createAttempted) {
+                        preCreateCleanupPending.add(effectiveRuntimeId);
+                    }
                     LOG.errorv(cleanupFailure,
                             "Failed to clean up RDS container {0}; retaining storage ownership for {1}",
                             cleanupContainerId, effectiveRuntimeId);
@@ -498,6 +551,44 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         RdsContainerHandle active = activeContainers.get(runtimeId);
         if (active != null) {
             stop(active);
+        }
+    }
+
+    /** Removes a failed creation's container even after its transient Docker handle is lost. */
+    public void stopForDelete(String runtimeId, String dockerVolumeName) {
+        stopByRuntimeId(runtimeId);
+        String exactVolumeName = requireSafeStorageComponent(dockerVolumeName, "Docker volume name");
+        String currentName = ContainerStorageHelper.dockerName(config, exactVolumeName);
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, exactVolumeName);
+        String currentKey = "container:" + currentName;
+        String legacyKey = legacyName.equals(currentName) ? null : "container:" + legacyName;
+        if (!claimedRuntimes.add(runtimeId)) {
+            throw new IllegalStateException("RDS runtime " + runtimeId + " already has an active container");
+        }
+        boolean cleanupPendingForRetry = false;
+        String cleanupName = currentName;
+        try {
+            claimStorage(currentKey, runtimeId);
+            if (legacyKey != null) {
+                claimStorage(legacyKey, runtimeId);
+            }
+            try {
+                lifecycleManager.removeIfExistsStrict(currentName);
+                if (legacyKey != null) {
+                    cleanupName = legacyName;
+                    lifecycleManager.removeIfExistsStrict(legacyName);
+                }
+            } catch (RuntimeException | Error e) {
+                activeContainers.put(runtimeId, new RdsContainerHandle(
+                        cleanupName, runtimeId, runtimeId, null, 0, currentKey, legacyKey));
+                cleanupPending.add(runtimeId);
+                cleanupPendingForRetry = true;
+                throw e;
+            }
+        } finally {
+            if (!cleanupPendingForRetry) {
+                releaseOwnership(currentKey, legacyKey, runtimeId);
+            }
         }
     }
 
@@ -1084,6 +1175,40 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         }
     }
 
+    /**
+     * Runs one query as the master user and returns its rows, one per line, unaligned and without
+     * headers. The session uses ISO dates in UTC, so a value's text output does not depend on the
+     * image's defaults.
+     */
+    public String queryPostgres(String containerId, String masterUsername, String database, String sql) {
+        ByteArrayOutputStream rows = new ByteArrayOutputStream();
+        queryPostgres(containerId, masterUsername, database, sql, rows, 600);
+        return rows.toString(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * {@link #queryPostgres(String, String, String, String)} writing the rows to {@code rows} as
+     * psql prints them, so a large result never has to be held in memory.
+     */
+    public void queryPostgres(String containerId, String masterUsername, String database, String sql,
+                              OutputStream rows, int timeoutSeconds) {
+        String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        String[] cmd = {
+                "env", "PGOPTIONS=-c DateStyle=ISO -c TimeZone=UTC -c IntervalStyle=postgres",
+                "psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1",
+                "-U", effectiveUser, "-d", database, "-c", sql
+        };
+        ByteArrayOutputStream errors = new ByteArrayOutputStream();
+        try (Lease _ = holdContainer(containerId)) {
+            ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd,
+                    timeoutSeconds, rows, errors).throwIfTimedOut(containerId);
+            if (result.exitCode() != 0) {
+                throw new IllegalStateException("psql failed with exit code " + result.exitCode() + ": "
+                        + errors.toString(StandardCharsets.UTF_8).trim());
+            }
+        }
+    }
+
     public void restorePostgresSnapshot(String containerId, String masterUsername, String sqlDump) {
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
 
@@ -1168,11 +1293,14 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 set -e
                 USER="$1"
 
-                # Terminate target connections (including pg_cron workers) when dropping databases
+                # Drop every database but postgres, template0 and template1, including template
+                # databases an image creates at startup (PostGIS's template_postgis), which the dump
+                # creates again. Terminate target connections (including pg_cron workers).
                 psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -tAc \\
-                  "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres'" \\
+                  "SELECT datname FROM pg_database WHERE datname NOT IN ('postgres', 'template0', 'template1')" \\
                   | while read -r db; do
                       [ -z "$db" ] && continue
+                      psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "ALTER DATABASE \\"$db\\" IS_TEMPLATE false"
                       psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \\"$db\\" WITH (FORCE)"
                     done
 
@@ -1261,6 +1389,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
         }
         claimedRuntimes.remove(runtimeId);
         cleanupPending.remove(runtimeId);
+        preCreateCleanupPending.remove(runtimeId);
     }
 
     private static String requireSafeStorageComponent(String value, String label) {

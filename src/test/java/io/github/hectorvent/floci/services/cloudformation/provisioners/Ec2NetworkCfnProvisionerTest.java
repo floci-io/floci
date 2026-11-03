@@ -830,6 +830,138 @@ class Ec2NetworkCfnProvisionerTest {
         verify(ec2, never()).createTags(any(), any(), any());
     }
 
+    /** Stubs one reused entity of each taggable type, every one carrying the given tags, and returns their resources. */
+    private List<StackResource> reusedEntitiesCarrying(List<Tag> tags) {
+        Subnet subnet = subnet();
+        subnet.setTags(tags);
+        when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(subnet));
+        RouteTable rt = new RouteTable();
+        rt.setRouteTableId(RTB_ID);
+        rt.setVpcId(VPC_ID);
+        rt.setTags(tags);
+        when(ec2.describeRouteTables(REGION, List.of(RTB_ID), Map.of())).thenReturn(List.of(rt));
+        InternetGateway igw = new InternetGateway();
+        igw.setInternetGatewayId(IGW_ID);
+        igw.setTags(tags);
+        when(ec2.describeInternetGateways(REGION, List.of(IGW_ID), Map.of())).thenReturn(List.of(igw));
+        NatGateway nat = natGateway(NAT_ID);
+        nat.setSubnetId(SUBNET_ID);
+        nat.setAllocationId(ALLOC_ID);
+        nat.setTags(tags);
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of())).thenReturn(List.of(nat));
+        Address addr = new Address();
+        addr.setAllocationId(ALLOC_ID);
+        addr.setPublicIp(PUBLIC_IP);
+        addr.setTags(tags);
+        when(ec2.describeAddresses(REGION, List.of(ALLOC_ID), Map.of())).thenReturn(List.of(addr));
+        return List.of(
+                prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID)),
+                prior("AWS::EC2::RouteTable", "Rtb", RTB_ID, Map.of("RouteTableId", RTB_ID)),
+                prior("AWS::EC2::InternetGateway", "Igw", IGW_ID, Map.of("InternetGatewayId", IGW_ID)),
+                prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID)),
+                prior("AWS::EC2::EIP", "Eip", PUBLIC_IP, Map.of("AllocationId", ALLOC_ID, "PublicIp", PUBLIC_IP)));
+    }
+
+    /** Updates each of those resources to a template that has no Tags, after {@code previous} as the prior properties. */
+    private void updateWithoutTags(List<StackResource> resources, JsonNode previous) {
+        provisioner.provision(resources.get(0), mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.0/24"),
+                ctx(SUBNET_ID, previous));
+        provisioner.provision(resources.get(1), mapper.createObjectNode().put("VpcId", VPC_ID), ctx(RTB_ID, previous));
+        provisioner.provision(resources.get(2), mapper.createObjectNode(), ctx(IGW_ID, previous));
+        provisioner.provision(resources.get(3),
+                mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID), ctx(NAT_ID, previous));
+        provisioner.provision(resources.get(4), mapper.createObjectNode(), ctx(PUBLIC_IP, previous));
+    }
+
+    @Test
+    void droppingTheTagsThePreviousTemplateDeclaredRemovesThemFromEveryTaggableType() {
+        List<StackResource> resources = reusedEntitiesCarrying(List.of(new Tag("team", "net"),
+                new Tag("aws:cloudformation:stack-id", "stack")));
+
+        updateWithoutTags(resources, withTags(mapper.createObjectNode(), "team", "net"));
+
+        for (String id : List.of(SUBNET_ID, RTB_ID, IGW_ID, NAT_ID, ALLOC_ID)) {
+            ArgumentCaptor<List<Tag>> removed = ArgumentCaptor.captor();
+            verify(ec2).deleteTags(eq(REGION), eq(List.of(id)), removed.capture());
+            assertEquals(List.of("team=null"), pairs(removed.getValue()), id);
+        }
+        verify(ec2, never()).createTags(any(), any(), any());
+    }
+
+    @Test
+    void tagsNoTemplateEverDeclaredStayOnEveryTaggableType() {
+        List<StackResource> resources = reusedEntitiesCarrying(List.of(new Tag("owner", "ops")));
+
+        updateWithoutTags(resources, mapper.createObjectNode());
+
+        verify(ec2, never()).deleteTags(any(), any(), any());
+        verify(ec2, never()).createTags(any(), any(), any());
+    }
+
+    @Test
+    void aStackRolledBackAfterItsTagsWereClearedGetsThemBack() {
+        List<StackResource> resources = reusedEntitiesCarrying(List.of(new Tag("team", "net"), new Tag("Name", "rt")));
+
+        updateWithoutTags(resources, withTags(mapper.createObjectNode(), "team", "net"));
+        StackResource routeTable = resources.get(1);
+        assertTrue(routeTable.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+        assertTrue(provisioner.rollbackUpdate(routeTable));
+
+        ArgumentCaptor<List<Tag>> written = ArgumentCaptor.captor();
+        verify(ec2).createTags(eq(REGION), eq(List.of(RTB_ID)), written.capture());
+        assertEquals(List.of("team=net", "Name=rt"), pairs(written.getValue()));
+        assertFalse(routeTable.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void aFailedSubnetAttributeChangeAfterTheTagsWereClearedPutsThemBack() {
+        Subnet current = subnet();
+        current.setMapPublicIpOnLaunch(true);
+        current.setTags(List.of(new Tag("team", "net")));
+        when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(current));
+        doThrow(new AwsException("InvalidParameterValue", "nope", 400))
+                .when(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "false");
+        StackResource r = prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID));
+        JsonNode previous = withTags(mapper.createObjectNode().put("MapPublicIpOnLaunch", true), "team", "net");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r,
+                mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.0/24"), ctx(SUBNET_ID, previous)));
+
+        verify(ec2).deleteTags(eq(REGION), eq(List.of(SUBNET_ID)), any());
+        assertEquals(List.of("team=net"), tagsWritten(SUBNET_ID));
+        verify(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "true");
+        assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void droppingMapPublicIpOnLaunchThePreviousTemplateDeclaredTurnsItOffAndARollbackTurnsItOn() {
+        Subnet current = subnet();
+        current.setMapPublicIpOnLaunch(true);
+        when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(current));
+        StackResource r = prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID));
+        JsonNode previous = mapper.createObjectNode().put("MapPublicIpOnLaunch", true);
+
+        provisioner.provision(r, mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.0/24"),
+                ctx(SUBNET_ID, previous));
+
+        verify(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "false");
+        assertTrue(provisioner.rollbackUpdate(r));
+        verify(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "true");
+    }
+
+    @Test
+    void aSubnetWhoseTemplatesNeverDeclaredMapPublicIpOnLaunchKeepsTheValueItCarries() {
+        Subnet current = subnet();
+        current.setMapPublicIpOnLaunch(true);
+        when(ec2.describeSubnets(REGION, List.of(SUBNET_ID), Map.of())).thenReturn(List.of(current));
+        StackResource r = prior("AWS::EC2::Subnet", "Subnet", SUBNET_ID, Map.of("SubnetId", SUBNET_ID));
+
+        provisioner.provision(r, mapper.createObjectNode().put("VpcId", VPC_ID).put("CidrBlock", "10.0.1.0/24"),
+                ctx(SUBNET_ID, mapper.createObjectNode().put("VpcId", VPC_ID)));
+
+        verify(ec2, never()).modifySubnetAttribute(any(), any(), any(), any());
+    }
+
     @Test
     void requiredPropertiesAreValidatedBeforeAnyServiceCall() {
         record Case(String type, ObjectNode props, String expected) { }

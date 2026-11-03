@@ -12,10 +12,12 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -51,6 +53,7 @@ class AppSyncCfnIntegrationTest {
     private static final String APPSYNC_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260905/us-east-1/appsync/aws4_request";
     private static final String STACK = "appsync-cfn-it";
+    private static final String REMOVAL_STACK = "appsync-cfn-removal-it";
 
     private static final String TEMPLATE = """
         {
@@ -149,10 +152,43 @@ class AppSyncCfnIntegrationTest {
         }
         """;
 
+    private static final String REMOVAL_FIRST = """
+        {
+          "Conditions": {"Off": {"Fn::Equals": ["a", "b"]}},
+          "Resources": {
+            "GraphQlApi": {
+              "Type": "AWS::AppSync::GraphQLApi",
+              "Properties": {
+                "Name": "appsync-cfn-removal-it-api",
+                "AuthenticationType": "API_KEY",
+                "OwnerContact": "platform-team",
+                "IntrospectionConfig": {"Fn::If": ["Off", "DISABLED", {"Ref": "AWS::NoValue"}]}
+              }
+            }
+          },
+          "Outputs": {"ApiId": {"Value": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]}}}
+        }
+        """;
+
+    private static final String REMOVAL_SECOND = """
+        {
+          "Resources": {
+            "GraphQlApi": {
+              "Type": "AWS::AppSync::GraphQLApi",
+              "Properties": {
+                "Name": "appsync-cfn-removal-it-api",
+                "AuthenticationType": "API_KEY"
+              }
+            }
+          },
+          "Outputs": {"ApiId": {"Value": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]}}}
+        }
+        """;
+
     @Test
     void createUpdateAndDeleteAnAppSyncApi() {
-        cloudFormation("CreateStack", Map.of("FieldLogLevel", "ERROR"));
-        String created = describeStacks("CREATE_COMPLETE");
+        cloudFormation("CreateStack", STACK, TEMPLATE, Map.of("FieldLogLevel", "ERROR"));
+        String created = describeStacks(STACK, "CREATE_COMPLETE");
 
         String apiId = outputValue(created, "ApiId");
         String functionId = outputValue(created, "FunctionId");
@@ -216,8 +252,8 @@ class AppSyncCfnIntegrationTest {
             .body("apiKeys[0].id", equalTo(apiKey))
             .body("apiKeys[0].description", equalTo("integration"));
 
-        cloudFormation("UpdateStack", Map.of("FieldLogLevel", "ALL"));
-        String updated = describeStacks("UPDATE_COMPLETE");
+        cloudFormation("UpdateStack", STACK, TEMPLATE, Map.of("FieldLogLevel", "ALL"));
+        String updated = describeStacks(STACK, "UPDATE_COMPLETE");
 
         // Nothing is replaced by a second deploy: the same API, data source and function, updated
         // in place. Re-creating instead would answer 400 on the duplicate name.
@@ -228,20 +264,52 @@ class AppSyncCfnIntegrationTest {
             .statusCode(200)
             .body("resolver.pipelineConfig.functions[0]", equalTo(functionId));
 
-        cloudFormation("DeleteStack", Map.of());
+        cloudFormation("DeleteStack", STACK, null, Map.of());
         CfnStackWaits.awaitStackDeleted(STACK);
 
         appSync("/v1/apis/" + apiId).statusCode(404);
     }
 
-    private static void cloudFormation(String action, Map<String, String> parameters) {
-        RequestSpecification request = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", action)
-            .formParam("StackName", STACK);
-        if (!"DeleteStack".equals(action)) {
-            request.formParam("TemplateBody", TEMPLATE);
+    /**
+     * An update that drops an AppSync property clears it, and one the stack never declared keeps
+     * the value set outside it. Run through CreateStack and UpdateStack so the previous template's
+     * properties, evaluated under its conditions, reach the provisioner the way they do for a user:
+     * a {@code Fn::If} that chose {@code AWS::NoValue} on the first template counts as not declared.
+     */
+    @Test
+    void anUpdateClearsWhatTheNewTemplateDropsAndKeepsWhatTheStackNeverDeclared() {
+        cloudFormation("CreateStack", REMOVAL_STACK, REMOVAL_FIRST, Map.of());
+        CfnStackWaits.awaitStatus(REMOVAL_STACK, "CREATE_COMPLETE");
+        String apiId = outputValue(describeStacks(REMOVAL_STACK, "CREATE_COMPLETE"), "ApiId");
+
+        appSync("/v1/apis/" + apiId)
+            .statusCode(200)
+            .body("graphqlApi.ownerContact", equalTo("platform-team"))
+            .body("graphqlApi.introspectionConfig", nullValue());
+
+        // Set outside the stack, which the first template left to AWS::NoValue.
+        given().contentType("application/json").header("Authorization", APPSYNC_AUTH)
+            .body("{\"name\":\"appsync-cfn-removal-it-api\",\"authenticationType\":\"API_KEY\","
+                    + "\"introspectionConfig\":\"DISABLED\"}")
+        .when().post("/v1/apis/" + apiId).then().statusCode(200);
+
+        cloudFormation("UpdateStack", REMOVAL_STACK, REMOVAL_SECOND, Map.of());
+        CfnStackWaits.awaitStatus(REMOVAL_STACK, "UPDATE_COMPLETE");
+
+        appSync("/v1/apis/" + apiId)
+            .statusCode(200)
+            .body("graphqlApi.ownerContact", nullValue())
+            .body("graphqlApi.introspectionConfig", equalTo("DISABLED"));
+
+        cloudFormation("DeleteStack", REMOVAL_STACK, null, Map.of());
+        CfnStackWaits.awaitStackDeleted(REMOVAL_STACK);
+    }
+
+    private static void cloudFormation(String action, String stackName, String template,
+            Map<String, String> parameters) {
+        RequestSpecification request = cfn(action, stackName).header("Authorization", CFN_AUTH);
+        if (template != null) {
+            request.formParam("TemplateBody", template);
         }
         int index = 1;
         for (Map.Entry<String, String> parameter : parameters.entrySet()) {
@@ -252,12 +320,8 @@ class AppSyncCfnIntegrationTest {
         request.when().post("/").then().statusCode(200);
     }
 
-    private static String describeStacks(String expectedStatus) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", STACK)
+    private static String describeStacks(String stackName, String expectedStatus) {
+        return cfn("DescribeStacks", stackName).header("Authorization", CFN_AUTH)
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();

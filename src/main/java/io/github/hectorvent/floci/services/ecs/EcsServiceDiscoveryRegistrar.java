@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -292,13 +293,14 @@ public class EcsServiceDiscoveryRegistrar {
         }
     }
 
-    /** The trailing name of an ARN, which for a cluster ARN is the cluster name. */
+    /** The trailing name of an ECS ARN, which for a cluster ARN is the cluster name. */
     private static String nameFromArn(String arn) {
         if (arn == null) {
             return null;
         }
-        int lastSlash = arn.lastIndexOf('/');
-        return lastSlash >= 0 ? arn.substring(lastSlash + 1) : arn;
+        return AwsArnUtils.resourceIfArnFor(arn, "ecs")
+                .map(resource -> resource.substring(resource.lastIndexOf('/') + 1))
+                .orElse(arn);
     }
 
     /** The family out of {@code .../task-definition/<family>:<revision>}, without the revision. */
@@ -356,20 +358,21 @@ public class EcsServiceDiscoveryRegistrar {
         if (registryArn == null || registryArn.isBlank()) {
             return null;
         }
-        int lastSlash = registryArn.lastIndexOf('/');
-        if (lastSlash < 0 || lastSlash == registryArn.length() - 1) {
+        String serviceId = AwsArnUtils.resourceIfArnFor(registryArn, "servicediscovery")
+                .filter(resource -> resource.startsWith("service/"))
+                .map(resource -> resource.substring("service/".length()))
+                .orElse("");
+        if (serviceId.isEmpty() || serviceId.contains("/")) {
             LOG.warnv("Ignoring an ECS service registry whose registryArn names no Cloud Map service: {0}",
                     registryArn);
             return null;
         }
-        return registryArn.substring(lastSlash + 1);
+        return serviceId;
     }
 
     /** ECS registers a task under its task id, so a replacement task supersedes its predecessor. */
     private String instanceId(EcsTask task) {
-        String arn = task.getTaskArn();
-        int lastSlash = arn.lastIndexOf('/');
-        return lastSlash >= 0 ? arn.substring(lastSlash + 1) : arn;
+        return nameFromArn(task.getTaskArn());
     }
 
     private static String string(Map<String, Object> registry, String key) {

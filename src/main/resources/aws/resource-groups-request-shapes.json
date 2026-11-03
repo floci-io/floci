@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_resource_groups_shapes.py",
-    "botocore": "botocore 1.43.108 (installed package)"
+    "botocore": "botocore 1.43.118 (local/aws/botocore)"
   },
   "operations": {
     "CreateGroup": "CreateGroupInput",

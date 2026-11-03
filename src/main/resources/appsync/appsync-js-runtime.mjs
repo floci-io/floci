@@ -182,7 +182,9 @@ export const util = {
     toElasticsearchQueryDSL: unsupported('transform.toElasticsearchQueryDSL')
   },
   str: {
-    normalize: (v) => String(v).normalize(),
+    normalize: (v, form) => String(v).normalize(
+      form === undefined ? 'NFC' : String(form).toUpperCase()
+    ),
     toUpper: (v) => String(v).toUpperCase(),
     toLower: (v) => String(v).toLowerCase()
   }
@@ -454,74 +456,302 @@ const BANNED_CONSTRUCTS = [
   [/(?<![.\w$])Promise(?![\w$])/, 'promises']
 ];
 
-// Replaces the contents of comments, strings, template text and regex literals with spaces, so a
-// keyword inside one is not mistaken for code. Offsets are preserved, which keeps line numbers
-// honest. Expressions inside a template hole stay as code, because that is what they are.
+// Keep offsets while hiding text that is not executable JavaScript. Template holes are scanned
+// separately so braces and slashes in template text or regex character classes cannot close one.
 function blankLiterals(src) {
   const out = src.split('');
+  let regexStart = -1;
+  const wordAt = /^[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*/u;
+  const numberAt = /^(?:0[xX][\da-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.[\d_]+)(?:[eE][+-]?[\d_]+)?)(?:n)?/;
+  const regexPrefixWords = new Set([
+    'return', 'throw', 'case', 'delete', 'void', 'typeof', 'instanceof', 'new',
+    'in', 'await', 'yield', 'else', 'do', 'var', 'let', 'const', 'export',
+    'default', 'import', 'function', 'extends'
+  ]);
+  const controlWords = new Set(['if', 'while', 'for', 'switch', 'catch', 'with']);
   const blank = (from, to) => {
     for (let i = from; i < to && i < out.length; i++) {
       if (out[i] !== '\n') out[i] = ' ';
     }
   };
-  let i = 0;
-  while (i < src.length) {
-    const c = src[i];
-    const next = src[i + 1];
-    if (c === '/' && next === '/') {
-      const end = src.indexOf('\n', i);
-      const stop = end === -1 ? src.length : end;
-      blank(i, stop);
-      i = stop;
-      continue;
-    }
-    if (c === '/' && next === '*') {
-      const end = src.indexOf('*/', i + 2);
-      const stop = end === -1 ? src.length : end + 2;
-      blank(i, stop);
-      i = stop;
-      continue;
-    }
-    if (c === "'" || c === '"') {
-      let j = i + 1;
-      while (j < src.length && src[j] !== c) {
-        if (src[j] === '\\') j++;
-        j++;
+
+  function scanTemplate(start) {
+    let i = start + 1;
+    let textStart = start;
+    while (i < src.length) {
+      if (src[i] === '\\') { i += 2; continue; }
+      if (src[i] === '`') {
+        blank(textStart, i + 1);
+        return i + 1;
       }
-      blank(i + 1, j);
-      i = j + 1;
-      continue;
-    }
-    if (c === String.fromCharCode(96)) {
+      if (src[i] === '$' && src[i + 1] === '{') {
+        blank(textStart, i + 2);
+        i = scanCode(i + 2, true);
+        textStart = i;
+        continue;
+      }
       i++;
-      let j = i;
-      while (j < src.length) {
-        if (src[j] === '\\') { j += 2; continue; }
-        if (src[j] === String.fromCharCode(96)) { blank(i, j); i = j + 1; break; }
-        if (src[j] === '$' && src[j + 1] === '{') { blank(i, j); i = j + 2; break; }
-        j++;
-      }
-      if (j >= src.length) { blank(i, src.length); i = src.length; }
-      continue;
     }
-    i++;
+    blank(textStart, src.length);
+    return src.length;
   }
-  return out.join('');
+
+  function scanCode(start, inTemplateHole) {
+    let i = start;
+    let canEndExpression = false;
+    let lastToken = '';
+    let lastControlWord = '';
+    let memberName = false;
+    let pendingFunctionExpression = null;
+    let functionBodyExpression = null;
+    let switchBodyPending = false;
+    let statementStart = true;
+    let labelCandidate = false;
+    let caseLabelDepth = null;
+    let caseTernaryDepth = 0;
+    let statementColon = false;
+    let bracketDepth = 0;
+    const parens = [];
+    const braces = [];
+    const switchBodies = [];
+    const atCaseLabelDepth = () => caseLabelDepth !== null
+      && caseLabelDepth.braces === braces.length
+      && caseLabelDepth.parens === parens.length
+      && caseLabelDepth.brackets === bracketDepth;
+    while (i < src.length) {
+      const c = src[i];
+      const next = src[i + 1];
+      if (/\s/.test(c)) {
+        if (/[\r\n\u2028\u2029]/.test(c)) {
+          if (lastToken === 'return') lastToken = ';';
+          if (canEndExpression || lastToken === ';') statementStart = true;
+        }
+        i++;
+        continue;
+      }
+      if (c === '/' && next === '/') {
+        let stop = i + 2;
+        while (stop < src.length && !/[\r\n\u2028\u2029]/.test(src[stop])) stop++;
+        blank(i, stop);
+        i = stop;
+        continue;
+      }
+      if (c === '/' && next === '*') {
+        const end = src.indexOf('*/', i + 2);
+        const stop = end === -1 ? src.length : end + 2;
+        blank(i, stop);
+        i = stop;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        let j = i + 1;
+        while (j < src.length && src[j] !== c) {
+          if (src[j] === '\\') j++;
+          j++;
+        }
+        j = Math.min(j + 1, src.length);
+        blank(i, j);
+        i = j;
+        canEndExpression = true;
+        lastToken = 'value';
+        statementStart = false;
+        labelCandidate = false;
+      } else if (c === '`') {
+        i = scanTemplate(i);
+        canEndExpression = true;
+        lastToken = 'value';
+        statementStart = false;
+        labelCandidate = false;
+      } else if (c === '/' && !canEndExpression) {
+        let j = i + 1;
+        let inClass = false;
+        let closed = false;
+        while (j < src.length && !/[\r\n\u2028\u2029]/.test(src[j])) {
+          if (src[j] === '\\') { j += 2; continue; }
+          if (src[j] === '[') inClass = true;
+          else if (src[j] === ']') inClass = false;
+          else if (src[j] === '/' && !inClass) { j++; closed = true; break; }
+          j++;
+        }
+        if (closed) {
+          while (j < src.length && /[a-z]/i.test(src[j])) j++;
+          if (regexStart === -1) regexStart = i;
+        }
+        blank(i, j);
+        i = j;
+        canEndExpression = true;
+        lastToken = 'value';
+        statementStart = false;
+        labelCandidate = false;
+      } else if (c === '/') {
+        i += next === '=' ? 2 : 1;
+        canEndExpression = false;
+        lastToken = '/';
+        statementStart = false;
+        labelCandidate = false;
+      } else if (c === '}' && inTemplateHole && braces.length === 0) {
+        blank(i, i + 1);
+        return i + 1;
+      } else if (c === '(') {
+        parens.push(pendingFunctionExpression === null ? lastControlWord
+          : pendingFunctionExpression ? 'function-expression' : 'function-declaration');
+        pendingFunctionExpression = null;
+        i++;
+        canEndExpression = false;
+        lastToken = '(';
+        statementStart = false;
+        labelCandidate = false;
+      } else if (c === ')') {
+        const context = parens.pop();
+        if (context === 'function-expression' || context === 'function-declaration') {
+          functionBodyExpression = context === 'function-expression';
+        }
+        switchBodyPending = context === 'switch';
+        canEndExpression = context === '';
+        i++;
+        lastToken = ')';
+        statementStart = controlWords.has(context);
+        labelCandidate = false;
+      } else if (c === '[') {
+        bracketDepth++;
+        i++;
+        canEndExpression = false;
+        lastToken = '[';
+        statementStart = false;
+        labelCandidate = false;
+      } else if (c === ']') {
+        bracketDepth--;
+        i++;
+        canEndExpression = true;
+        lastToken = ']';
+        statementStart = false;
+        labelCandidate = false;
+      } else if (c === '{') {
+        const afterOperator = ['=', '(', '[', ',', ':', 'return', 'case', '?', '??', '&', '|',
+          '+', '-', '*', '/', '%', '!', '~', '^', '<', '>'].includes(lastToken);
+        const expressionBrace = functionBodyExpression
+          ?? (afterOperator && !(lastToken === ':' && statementColon));
+        braces.push(expressionBrace);
+        switchBodies.push(switchBodyPending);
+        switchBodyPending = false;
+        functionBodyExpression = null;
+        i++;
+        canEndExpression = false;
+        lastToken = '{';
+        statementStart = !expressionBrace;
+        labelCandidate = false;
+        statementColon = false;
+      } else if (c === '}') {
+        const expressionBrace = braces.pop() ?? false;
+        switchBodies.pop();
+        canEndExpression = expressionBrace;
+        i++;
+        lastToken = '}';
+        statementStart = !expressionBrace;
+        labelCandidate = false;
+      } else if (c === '.' || (c === '?' && next === '.')) {
+        i += c === '?' ? 2 : 1;
+        canEndExpression = false;
+        lastToken = '.';
+        memberName = true;
+        statementStart = false;
+        labelCandidate = false;
+      } else if (c === ':') {
+        const atCaseLevel = atCaseLabelDepth();
+        const caseSeparator = atCaseLevel && caseTernaryDepth === 0;
+        statementColon = caseSeparator || labelCandidate;
+        if (caseSeparator) caseLabelDepth = null;
+        if (atCaseLevel && !caseSeparator) caseTernaryDepth--;
+        i++;
+        canEndExpression = false;
+        lastToken = ':';
+        statementStart = statementColon;
+        labelCandidate = false;
+      } else {
+        const word = wordAt.exec(src.slice(i));
+        const number = !word && numberAt.exec(src.slice(i));
+        if (word) {
+          const value = word[0];
+          const atStatementStart = statementStart;
+          if (value === 'function' && !memberName) {
+            pendingFunctionExpression = ['=', '(', '[', ',', ':', 'return', '?', '&', '|', '>']
+              .includes(lastToken);
+          }
+          const keyword = !memberName && regexPrefixWords.has(value);
+          const forOf = value === 'of' && parens.at(-1) === 'for'
+            && canEndExpression && !memberName;
+          canEndExpression = !keyword && !forOf;
+          if (atStatementStart && switchBodies.at(-1)
+            && (value === 'case' || value === 'default')) {
+            caseLabelDepth = { braces: braces.length, parens: parens.length,
+              brackets: bracketDepth };
+            caseTernaryDepth = 0;
+          }
+          labelCandidate = atStatementStart && !memberName
+            && value !== 'case' && value !== 'default';
+          statementStart = value === 'else' || value === 'do';
+          lastControlWord = !memberName && controlWords.has(value) ? value : '';
+          lastToken = value;
+          i += value.length;
+        } else if (number) {
+          i += number[0].length;
+          canEndExpression = true;
+          lastToken = 'value';
+          statementStart = false;
+          labelCandidate = false;
+        } else if ((c === '+' && next === '+') || (c === '-' && next === '-')) {
+          i += 2;
+          lastToken = c + next;
+          statementStart = false;
+          labelCandidate = false;
+        } else if (c === '?' && next === '?') {
+          i += 2;
+          canEndExpression = false;
+          lastToken = '??';
+          statementStart = false;
+          labelCandidate = false;
+        } else {
+          i++;
+          canEndExpression = false;
+          lastToken = c;
+          if (c === '?' && atCaseLabelDepth()) caseTernaryDepth++;
+          statementStart = c === ';';
+          labelCandidate = false;
+        }
+      }
+      if (lastToken !== '.') memberName = false;
+      if (lastToken !== 'if' && lastToken !== 'while' && lastToken !== 'for'
+        && lastToken !== 'switch' && lastToken !== 'catch' && lastToken !== 'with') {
+        lastControlWord = '';
+      }
+    }
+    return i;
+  }
+
+  scanCode(0, false);
+  return { scanned: out.join(''), regexStart };
+}
+
+function unsupportedConstruct(description, line) {
+  return {
+    message: 'Unsupported in the APPSYNC_JS runtime: ' + description + ' (line ' + line
+      + '). AWS runs resolvers on a restricted JavaScript runtime, not Node, so this code '
+      + 'would be rejected on deploy.',
+    type: 'UnsupportedFeature'
+  };
 }
 
 function validateAppSyncSubset(code) {
-  const scanned = blankLiterals(code);
+  const literals = blankLiterals(code);
+  const lineNumber = (index) => code.slice(0, index).split(/\r\n|[\r\n\u2028\u2029]/).length;
   for (const [pattern, description] of BANNED_CONSTRUCTS) {
-    const match = pattern.exec(scanned);
+    const match = pattern.exec(literals.scanned);
     if (match) {
-      const line = code.slice(0, match.index).split('\n').length;
-      return {
-        message: 'Unsupported in the APPSYNC_JS runtime: ' + description + ' (line ' + line
-          + '). AWS runs resolvers on a restricted JavaScript runtime, not Node, so this code '
-          + 'would be rejected on deploy.',
-        type: 'UnsupportedFeature'
-      };
+      return unsupportedConstruct(description, lineNumber(match.index));
     }
+  }
+  if (literals.regexStart !== -1) {
+    return unsupportedConstruct('regular expressions', lineNumber(literals.regexStart));
   }
   return null;
 }

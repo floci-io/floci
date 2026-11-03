@@ -3,13 +3,17 @@ package io.github.hectorvent.floci.core.common.docker;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.BuildImageCmd;
 import com.github.dockerjava.api.command.BuildImageResultCallback;
+import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.command.InspectImageCmd;
-import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Info;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.InputStream;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -21,12 +25,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Covers the decisions this helper makes before it ever touches a Dockerfile: that a caller pointed
- * at something other than Floci's own default is left to pull that image itself, that an image
- * already in the daemon is not rebuilt, and that a build which produces no image id fails instead
- * of reporting success. All are branches the callers depend on and none needs a real daemon, so
- * they are pinned here rather than only through the EC2 security-group path, which uses the default
- * image and is skipped without Docker.
+ * Covers custom image selection, reuse of the current recipe on the correct platform, stale-cache
+ * rebuilding and failure when a build produces no image. Real Docker coverage lives separately.
  */
 class LocallyBuiltHelperImageTest {
 
@@ -35,11 +35,16 @@ class LocallyBuiltHelperImageTest {
 
     private DockerClient dockerClient;
     private ContainerBuilder containerBuilder;
+    private Info daemon;
 
     @BeforeEach
     void setUp() {
         dockerClient = mock(DockerClient.class);
         containerBuilder = mock(ContainerBuilder.class);
+        daemon = new Info().withArchitecture("x86_64").withOsType("linux");
+        InfoCmd info = mock(InfoCmd.class);
+        when(info.exec()).thenReturn(daemon);
+        when(dockerClient.infoCmd()).thenReturn(info);
     }
 
     @Test
@@ -54,11 +59,9 @@ class LocallyBuiltHelperImageTest {
     }
 
     @Test
-    void buildsNothingWhenTheImageIsAlreadyInTheDaemon() {
+    void buildsNothingWhenTheImageHasTheCurrentRecipeAndPlatform() throws Exception {
         stubResolvedImage();
-        InspectImageCmd inspectCmd = mock(InspectImageCmd.class);
-        when(dockerClient.inspectImageCmd(DEFAULT_IMAGE)).thenReturn(inspectCmd);
-        when(inspectCmd.exec()).thenReturn(mock(InspectImageResponse.class));
+        CachedImageStubs.image(dockerClient, DEFAULT_IMAGE, "linux", "amd64", recipe());
 
         LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
                 DEFAULT_IMAGE, DEFAULT_IMAGE, DOCKERFILE);
@@ -67,14 +70,45 @@ class LocallyBuiltHelperImageTest {
     }
 
     @Test
-    void buildsFromTheDockerfileWhenTheImageIsMissing() {
+    void buildsFromTheDockerfileWhenTheImageIsMissing() throws Exception {
         stubMissingImage();
-        stubBuildReturning("sha256:built");
+        BuildImageCmd build = stubBuildReturning("sha256:built");
 
         LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
                 DEFAULT_IMAGE, DEFAULT_IMAGE, DOCKERFILE);
 
         verify(dockerClient).buildImageCmd(any(InputStream.class));
+        verify(build).withPlatform("linux/amd64");
+        verify(build).withLabels(Map.of(LocallyBuiltHelperImage.RECIPE_LABEL, recipe()));
+        verify(build).withPull(true);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"missing", "old-recipe"})
+    void replacesNativeHelperFromAnOlderRecipe(String previous) {
+        stubResolvedImage();
+        CachedImageStubs.image(dockerClient, DEFAULT_IMAGE, "linux", "amd64",
+                "missing".equals(previous) ? null : previous);
+        BuildImageCmd build = stubBuildReturning("sha256:rebuilt");
+
+        LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
+                DEFAULT_IMAGE, DEFAULT_IMAGE, DOCKERFILE);
+
+        verify(build).withPlatform("linux/amd64");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"x86_64,arm64,linux/amd64", "aarch64,amd64,linux/arm64"})
+    void replacesForeignCachedHelperWithTheDaemonPlatform(String host, String cached, String expected) throws Exception {
+        daemon.withArchitecture(host);
+        stubResolvedImage();
+        CachedImageStubs.image(dockerClient, DEFAULT_IMAGE, "linux", cached, recipe());
+        BuildImageCmd build = stubBuildReturning("sha256:rebuilt");
+
+        LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
+                DEFAULT_IMAGE, DEFAULT_IMAGE, DOCKERFILE);
+
+        verify(build).withPlatform(expected);
     }
 
     @Test
@@ -105,6 +139,10 @@ class LocallyBuiltHelperImageTest {
         when(containerBuilder.resolveImage(DEFAULT_IMAGE)).thenReturn(DEFAULT_IMAGE);
     }
 
+    private static String recipe() {
+        return CachedImageStubs.recipe(DOCKERFILE);
+    }
+
     private void stubMissingImage() {
         stubResolvedImage();
         InspectImageCmd inspectCmd = mock(InspectImageCmd.class);
@@ -116,11 +154,12 @@ class LocallyBuiltHelperImageTest {
      * Returns a stub callback rather than the one the helper passes in: awaiting the real
      * {@link BuildImageResultCallback} would block, since no daemon ever feeds it events.
      */
-    private void stubBuildReturning(String imageId) {
+    private BuildImageCmd stubBuildReturning(String imageId) {
         BuildImageCmd buildCmd = mock(BuildImageCmd.class, RETURNS_SELF);
         when(dockerClient.buildImageCmd(any(InputStream.class))).thenReturn(buildCmd);
         BuildImageResultCallback result = mock(BuildImageResultCallback.class);
         when(result.awaitImageId()).thenReturn(imageId);
         when(buildCmd.exec(any())).thenReturn(result);
+        return buildCmd;
     }
 }

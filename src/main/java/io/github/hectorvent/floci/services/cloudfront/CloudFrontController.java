@@ -3529,26 +3529,38 @@ public class CloudFrontController {
         return inv;
     }
 
+    /**
+     * Text of a direct child of the config root. Policy configs nest other {@code Name} elements
+     * (cookie, header and query-string items) that a flat first-match lookup would pick up.
+     */
+    private static String directChildText(XmlParser.XmlElement root, String name) {
+        XmlParser.XmlElement child = root == null ? null : root.child(name);
+        return child == null ? null : child.rawText();
+    }
+
     private CachePolicy parseCachePolicy(String body) {
         CachePolicy policy = new CachePolicy();
-        policy.setName(XmlParser.extractFirst(body, "Name", null));
-        policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(body);
+        policy.setName(directChildText(root, "Name"));
+        policy.setComment(directChildText(root, "Comment"));
         policy.setConfig(CloudFrontPolicyConfigCodec.parseCachePolicy(body));
         return policy;
     }
 
     private OriginRequestPolicy parseOriginRequestPolicy(String body) {
         OriginRequestPolicy policy = new OriginRequestPolicy();
-        policy.setName(XmlParser.extractFirst(body, "Name", null));
-        policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(body);
+        policy.setName(directChildText(root, "Name"));
+        policy.setComment(directChildText(root, "Comment"));
         policy.setConfig(CloudFrontPolicyConfigCodec.parseOriginRequestPolicy(body));
         return policy;
     }
 
     private ResponseHeadersPolicy parseResponseHeadersPolicy(String body) {
         ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
-        policy.setName(XmlParser.extractFirst(body, "Name", null));
-        policy.setComment(XmlParser.extractFirst(body, "Comment", null));
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(body);
+        policy.setName(directChildText(root, "Name"));
+        policy.setComment(directChildText(root, "Comment"));
         policy.setConfig(ResponseHeadersPolicyConfigCodec.parse(body));
         return policy;
     }

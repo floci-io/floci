@@ -10,6 +10,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
+import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
+import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvFileSource;
@@ -47,8 +49,15 @@ class IamActionRegistryTest {
             "/%70olicy;ignored=yes/%76alidation;ignored=yes/", "/policy/%2e/validation",
             "/x/%2e%2e/policy/validation", "//policy//validation"})
     void validatePolicyResolvesThroughTheRouteTable(String path) {
-        ContainerRequestContext ctx = mockCtx("POST", path,
+        ContainerRequestContext sent = mockCtx("POST", path,
                 new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        UriInfo uriInfo = sent.getUriInfo();
+        ResteasyReactiveContainerRequestContext ctx = Mockito.mock(ResteasyReactiveContainerRequestContext.class);
+        ResteasyReactiveRequestContext routed = Mockito.mock(ResteasyReactiveRequestContext.class);
+        when(ctx.getMethod()).thenReturn("POST");
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getServerRequestContext()).thenReturn(routed);
+        when(routed.getPathWithoutPrefix()).thenReturn("/policy/validation");
         assertEquals("access-analyzer:ValidatePolicy", registry.resolveRoute("access-analyzer", ctx));
     }
 
@@ -106,6 +115,29 @@ class IamActionRegistryTest {
                 new MultivaluedHashMap<>(), null, "")));
         assertNull(registry.resolveRoute("resource-groups", mockCtx("POST", "/_rg/" + path + "/extra",
                 new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"POST,/2021-01-01/opensearch/vpcEndpoints,CreateVpcEndpoint",
+            "GET,/2021-01-01/opensearch/vpcEndpoints,ListVpcEndpoints",
+            "POST,/2021-01-01/opensearch/vpcEndpoints/describe,DescribeVpcEndpoints",
+            "POST,/2021-01-01/opensearch/vpcEndpoints/update,UpdateVpcEndpoint",
+            "DELETE,/2021-01-01/opensearch/vpcEndpoints/aos-0123456789ab,DeleteVpcEndpoint",
+            "GET,/2021-01-01/opensearch/domain/orders/vpcEndpoints,ListVpcEndpointsForDomain"})
+    void openSearchVpcEndpointRoutesResolveTheirOwnActions(String method, String path, String operation) {
+        ContainerRequestContext ctx = mockCtx(method, path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("es:" + operation, registry.resolveRoute("es", ctx));
+    }
+
+    @Test
+    void inspector2DisableRouteResolvesItsAction() {
+        ContainerRequestContext ctx = mockCtx("POST", "/disable",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+
+        assertEquals("inspector2:Disable", registry.resolveRoute("inspector2", ctx));
+        assertNull(registry.resolveRoute("inspector2", mockCtx("GET", "/disable",
+                new MultivaluedHashMap<>(), null, "")));
     }
 
     @Test
@@ -384,6 +416,21 @@ class IamActionRegistryTest {
         assertEquals("lambda:PutResourcePolicy", lambdaAction("PUT", "/2025-03-07/resource-policy/" + arn));
         assertEquals("lambda:GetResourcePolicy", lambdaAction("GET", "/2025-03-07/resource-policy/" + arn));
         assertEquals("lambda:DeleteResourcePolicy", lambdaAction("DELETE", "/2025-03-07/resource-policy/" + arn));
+    }
+
+    @Test
+    void bedrockResourcePolicyRoutesResolveToTheirActions() {
+        String arn = "arn%3Aaws%3Abedrock%3Aus-east-1%3A000000000000%3Aguardrail%2Fabc123def456";
+        assertEquals("bedrock:PutResourcePolicy", bedrockAction("POST", "/resource-policy"));
+        assertEquals("bedrock:GetResourcePolicy", bedrockAction("GET", "/resource-policy/" + arn));
+        assertEquals("bedrock:DeleteResourcePolicy", bedrockAction("DELETE", "/resource-policy/" + arn));
+        assertNull(bedrockAction("GET", "/resource-policy"));
+        assertNull(bedrockAction("POST", "/resource-policy/" + arn));
+    }
+
+    private String bedrockAction(String method, String path) {
+        return registry.resolveRoute("bedrock",
+                mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
     }
 
     private String lambdaAction(String method, String path) {

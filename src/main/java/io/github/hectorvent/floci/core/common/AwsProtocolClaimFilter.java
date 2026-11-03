@@ -47,6 +47,7 @@ public class AwsProtocolClaimFilter implements ContainerRequestFilter {
     // Lazily resolved: JAX-RS providers are instantiated before runtime config
     // mappings exist (same pattern as GlobalCorsFilter).
     private final jakarta.inject.Provider<EmulatorConfig> configProvider;
+    private volatile EmulatorConfig config;
 
     @Inject
     public AwsProtocolClaimFilter(ProtocolClaimer claimer, ResolvedServiceCatalog catalog,
@@ -54,6 +55,15 @@ public class AwsProtocolClaimFilter implements ContainerRequestFilter {
         this.claimer = claimer;
         this.catalog = catalog;
         this.configProvider = configProvider;
+    }
+
+    private EmulatorConfig config() {
+        EmulatorConfig resolved = config;
+        if (resolved == null) {
+            resolved = configProvider.get();
+            config = resolved;
+        }
+        return resolved;
     }
 
     @Override
@@ -64,7 +74,7 @@ public class AwsProtocolClaimFilter implements ContainerRequestFilter {
         if (claim.isEmpty()) {
             LOG.warnv("Unclaimable RPC-signaled request: {0} {1} Content-Type={2} Smithy-Protocol={3}",
                     signals.method(), signals.path(), signals.contentType(), signals.smithyProtocol());
-            if (configProvider.get().protocols().strictClaiming()) {
+            if (config().protocols().strictClaiming()) {
                 ctx.abortWith(unknownOperationResponse(404,
                         "Unable to determine the wire protocol for this request"));
             }
@@ -79,14 +89,14 @@ public class AwsProtocolClaimFilter implements ContainerRequestFilter {
                     .replacePath(AwsQueryController.QUERY_GET_PATH).build());
         }
         if (resolved.protocol() == WireProtocol.REST) {
-            refuseUnknownServiceScope(ctx, signals, catalog, configProvider.get());
+            refuseUnknownServiceScope(ctx, signals, catalog, config());
             return;
         }
         if (resolved.protocol() == WireProtocol.RPCV2_JSON) {
             LOG.warnv("Received rpc-v2-json request for service {0} operation {1} — protocol not implemented",
                     resolved.service() != null ? resolved.service().externalKey() : "unknown",
                     resolved.operation());
-            if (configProvider.get().protocols().strictClaiming()) {
+            if (config().protocols().strictClaiming()) {
                 ctx.abortWith(unknownOperationResponse(400,
                         "The rpc-v2-json protocol is not supported"));
             }

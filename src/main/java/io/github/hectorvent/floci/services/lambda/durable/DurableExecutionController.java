@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -132,7 +133,7 @@ public class DurableExecutionController {
         }
         DurableExecution execution = service.stop(ownedArn(headers, arn), error);
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("StopTimestamp", execution.getEndTimestamp() / 1000.0);
+        response.put("StopTimestamp", EpochSeconds.fromMillis(execution.getEndTimestamp()));
         return Response.ok(response).build();
     }
 

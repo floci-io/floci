@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessingConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Processor;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessorParameter;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
@@ -28,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * Runs a flushed batch through the stream's Lambda transform before it is
@@ -93,8 +95,18 @@ public class FirehoseLambdaTransformer {
 
     public Outcome transform(DeliveryStreamDescription stream, String bucket, List<byte[]> records,
                              Instant deliveryTime) {
+        return transform(stream, bucket, records, deliveryTime, errorKey -> { });
+    }
+
+    /**
+     * Same as the four argument form, with {@code errorOutputGuard} called with the key of the error object just
+     * before it is written. A guard that throws keeps the object from being written, so a caller can refuse a write
+     * its delivery role is not allowed to make.
+     */
+    public Outcome transform(DeliveryStreamDescription stream, String bucket, List<byte[]> records,
+                             Instant deliveryTime, Consumer<String> errorOutputGuard) {
         S3Destination s3 = stream.s3Destination();
-        Processor processor = lambdaProcessor(s3);
+        Processor processor = lambdaProcessor(stream);
         if (processor == null) {
             return new Outcome(records, 0, 0, null);
         }
@@ -125,7 +137,7 @@ public class FirehoseLambdaTransformer {
 
         String errorKey = failures.isEmpty() ? null
                 : writeErrorOutput(stream, s3, bucket, failures, deliveryTime, functionArn,
-                        invocation.attemptsMade());
+                        invocation.attemptsMade(), errorOutputGuard);
         return new Outcome(delivered, dropped, failures.size(), errorKey);
     }
 
@@ -136,11 +148,15 @@ public class FirehoseLambdaTransformer {
      * stream has none: the other processor types AWS models are stored and echoed but not
      * applied. The validator has already made "at most one" true.
      */
-    private static Processor lambdaProcessor(S3Destination s3) {
-        if (s3 == null || !s3.isProcessingEnabled() || s3.getProcessingConfiguration().getProcessors() == null) {
+    private static Processor lambdaProcessor(DeliveryStreamDescription stream) {
+        if (stream == null || !stream.isProcessingEnabled()) {
             return null;
         }
-        for (Processor processor : s3.getProcessingConfiguration().getProcessors()) {
+        ProcessingConfiguration processing = stream.processingConfiguration();
+        if (processing.getProcessors() == null) {
+            return null;
+        }
+        for (Processor processor : processing.getProcessors()) {
             if (processor != null && "Lambda".equals(processor.getType())
                     && parameterValue(processor, "LambdaArn") != null) {
                 return processor;
@@ -361,9 +377,10 @@ public class FirehoseLambdaTransformer {
      */
     private String writeErrorOutput(DeliveryStreamDescription stream, S3Destination s3, String bucket,
                                     List<FailedRecord> failures, Instant deliveryTime,
-                                    String functionArn, int attemptsMade) {
+                                    String functionArn, int attemptsMade, Consumer<String> errorOutputGuard) {
         String errorKey = S3ObjectKeyResolver.resolveErrorKey(s3, stream.getDeliveryStreamName(),
                 stream.getVersionId(), deliveryTime, ERROR_OUTPUT_TYPE);
+        errorOutputGuard.accept(errorKey);
         ByteArrayOutputStream body = new ByteArrayOutputStream();
         for (FailedRecord failure : failures) {
             Map<String, Object> line = new LinkedHashMap<>();

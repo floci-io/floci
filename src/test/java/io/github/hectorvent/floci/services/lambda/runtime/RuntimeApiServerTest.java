@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda.runtime;
 
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
+import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.RoutingContext;
@@ -11,6 +12,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.net.BindException;
@@ -34,6 +37,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -337,7 +341,52 @@ class RuntimeApiServerTest {
         assertErrorEndpointReportsUnhandled("req-plain-header", "ValueError");
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {8192, 1024 * 1024 - 1})
+    @Timeout(15)
+    void errorEndpoint_acceptsGoRuntimeXrayCauseHeaders(int headerBytes) throws Exception {
+        String cause = "{\"message\":\"" + "x".repeat(headerBytes - 14) + "\"}";
+        assertEquals(headerBytes, cause.length());
+        assertErrorEndpointReportsUnhandled("req-xray-header", "Runtime.UserException", cause);
+    }
+
+    @Test
+    @Timeout(15)
+    void errorEndpoint_rejectsHeadersBeyondItsBudgetWithoutConsumingInvocation() throws Exception {
+        String requestId = "req-oversized-header";
+        String payload = "{\"errorMessage\":\"original failure\",\"errorType\":\"X\"}";
+        CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
+        server.enqueue(new PendingInvocation(requestId, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test", resultFuture));
+        HttpResponse<String> next = httpClient.send(HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, next.statusCode());
+        URI error = URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/" + requestId + "/error");
+
+        HttpResponse<String> rejected = httpClient.send(HttpRequest.newBuilder(error)
+                .header("Lambda-Runtime-Function-Xray-Error-Cause", "x".repeat(1024 * 1024 + 16 * 1024 + 1))
+                .POST(HttpRequest.BodyPublishers.ofString(payload)).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(431, rejected.statusCode());
+        assertFalse(resultFuture.isDone());
+
+        // The decoder closes the rejected connection; retry independently of when its EOF arrives.
+        try (HttpClient retryClient = HttpClient.newHttpClient()) {
+            HttpResponse<String> retry = retryClient.send(HttpRequest.newBuilder(error)
+                    .POST(HttpRequest.BodyPublishers.ofString(payload)).build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(202, retry.statusCode());
+        }
+        InvokeResult result = resultFuture.get(2, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertEquals(payload, new String(result.getPayload()));
+    }
+
     private void assertErrorEndpointReportsUnhandled(String requestId, String errorTypeHeader) throws Exception {
+        assertErrorEndpointReportsUnhandled(requestId, errorTypeHeader, null);
+    }
+
+    private void assertErrorEndpointReportsUnhandled(String requestId, String errorTypeHeader,
+                                                     String xrayCause) throws Exception {
         CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
         PendingInvocation invocation = new PendingInvocation(
                 requestId, "{}".getBytes(), System.currentTimeMillis() + 60_000,
@@ -355,11 +404,16 @@ class RuntimeApiServerTest {
         if (errorTypeHeader != null) {
             errorRequest.header("Lambda-Runtime-Function-Error-Type", errorTypeHeader);
         }
-        httpClient.send(errorRequest.build(), HttpResponse.BodyHandlers.ofString());
+        if (xrayCause != null) {
+            errorRequest.header("Lambda-Runtime-Function-Xray-Error-Cause", xrayCause);
+        }
+        HttpResponse<String> ack = httpClient.send(errorRequest.build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(202, ack.statusCode());
+        assertEquals("OK", new JsonObject(ack.body()).getString("status"));
 
         InvokeResult result = resultFuture.get(2, TimeUnit.SECONDS);
         assertEquals("Unhandled", result.getFunctionError());
-        assertTrue(new String(result.getPayload()).contains("boom"));
+        assertEquals("{\"errorMessage\":\"boom\",\"errorType\":\"X\"}", new String(result.getPayload()));
     }
 
     /**
@@ -754,13 +808,17 @@ class RuntimeApiServerTest {
         // interleaving by ending the ctx from afterEnqueueDispatchLockReleased.
         AtomicInteger sendInvocationCalls =
                 new AtomicInteger();
+        CompletableFuture<Context> dispatchObserved = new CompletableFuture<>();
         installGatedServerWithDispatchObservation(
                 waitingCtx -> {
                     if (!waitingCtx.response().ended()) {
                         waitingCtx.response().setStatusCode(500).end();
                     }
                 },
-                requestId -> sendInvocationCalls.incrementAndGet());
+                requestId -> {
+                    sendInvocationCalls.incrementAndGet();
+                    dispatchObserved.complete(Vertx.currentContext());
+                });
 
         HttpRequest parkedRequest = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
@@ -774,8 +832,12 @@ class RuntimeApiServerTest {
                 new CompletableFuture<>());
         server.enqueue(invocation);
 
-        // Wait for the runOnContext-scheduled dispatch to have fired.
-        Thread.sleep(500);
+        Context dispatchContext = dispatchObserved.get(5, TimeUnit.SECONDS);
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(10))
+                .until(() -> server.pendingQueueSize() == 1 && server.inFlightSize() == 0);
+        CompletableFuture<Void> dispatchReturned = new CompletableFuture<>();
+        dispatchContext.runOnContext(ignored -> dispatchReturned.complete(null));
+        dispatchReturned.get(5, TimeUnit.SECONDS);
 
         assertEquals(1, sendInvocationCalls.get(),
                 "sendInvocation must run exactly once — a zero count means the "
@@ -818,8 +880,8 @@ class RuntimeApiServerTest {
                 new CompletableFuture<>());
         server.enqueue(invocation);
 
-        // Wait for the runOnContext-scheduled dispatch (and its failed write) to fire.
-        Thread.sleep(500);
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(10))
+                .until(() -> server.pendingQueueSize() == 1 && server.inFlightSize() == 0);
 
         assertEquals(1, server.pendingQueueSize(),
                 "invocation must be requeued after write failure — zero means stranded.");
@@ -1988,54 +2050,53 @@ class RuntimeApiServerTest {
             // a shared client's connection pool could otherwise hand back a stale pooled
             // connection to that iteration's now-closed server.
             HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-            int freshPort = findFreePort();
-            RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
-            freshServer.start().get(5, TimeUnit.SECONDS);
-            try {
-                String extensionId = registerExtensionOn(client, freshPort, "lambda-adapter", "SHUTDOWN");
+            try (AutoCloseable clientCleanup = () -> {
+                client.shutdownNow();
+                assertTrue(client.awaitTermination(Duration.ofSeconds(5)), "HTTP client did not terminate");
+            }) {
+                int freshPort = findFreePort();
+                RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
+                try (AutoCloseable serverCleanup = () -> freshServer.stop().get(5, TimeUnit.SECONDS)) {
+                    freshServer.start().get(5, TimeUnit.SECONDS);
+                    String extensionId = registerExtensionOn(client, freshPort, "lambda-adapter", "SHUTDOWN");
 
-                CompletableFuture<HttpResponse<String>> asyncNext = client.sendAsync(
-                        HttpRequest.newBuilder()
-                                .uri(URI.create("http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
-                                .header("Lambda-Extension-Identifier", extensionId)
-                                .GET().build(),
-                        HttpResponse.BodyHandlers.ofString());
-
-                // Wait for the poll to actually park before racing stop() against it. A fixed
-                // sleep only *assumes* it parked: on a loaded machine the sleep expires first,
-                // stop() closes the listening socket while the request is still in flight, and
-                // the client sees the connection die (EOFException) rather than the SHUTDOWN
-                // this test is about. Same reasoning as
-                // extensionRegister_racedAgainstStop_eventuallyDeliversShutdown.
-                assertTrue(awaitExtensionParked(freshServer, extensionId, 5000),
-                        "extension never parked on /event/next; the stop() race was never set up");
-                freshServer.stop();
-
-                HttpResponse<String> response = asyncNext.get(5, TimeUnit.SECONDS);
-                boolean deliveredHere = response.statusCode() == 200
-                        && "SHUTDOWN".equals(new JsonObject(response.body()).getString("eventType"));
-                if (deliveredHere) {
-                    totalDelivered.incrementAndGet();
-                } else {
-                    // Didn't land in this specific request — a subsequent poll with the same
-                    // identifier must still find the SHUTDOWN queued (never orphaned).
-                    HttpResponse<String> retry = client.send(HttpRequest.newBuilder()
-                                    .uri(URI.create(
-                                            "http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
+                    CompletableFuture<HttpResponse<String>> asyncNext = client.sendAsync(
+                            HttpRequest.newBuilder()
+                                    .uri(URI.create("http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
                                     .header("Lambda-Extension-Identifier", extensionId)
                                     .GET().build(),
                             HttpResponse.BodyHandlers.ofString());
-                    if (retry.statusCode() == 200
-                            && "SHUTDOWN".equals(new JsonObject(retry.body()).getString("eventType"))) {
+
+                    // Wait for the poll to actually park before racing stop() against it. A fixed
+                    // sleep only *assumes* it parked: on a loaded machine the sleep expires first,
+                    // stop() closes the listening socket while the request is still in flight, and
+                    // the client sees the connection die (EOFException) rather than the SHUTDOWN
+                    // this test is about. Same reasoning as
+                    // extensionRegister_racedAgainstStop_eventuallyDeliversShutdown.
+                    assertTrue(awaitExtensionParked(freshServer, extensionId, 5000),
+                            "extension never parked on /event/next; the stop() race was never set up");
+                    freshServer.stop();
+
+                    HttpResponse<String> response = asyncNext.get(5, TimeUnit.SECONDS);
+                    boolean deliveredHere = response.statusCode() == 200
+                            && "SHUTDOWN".equals(new JsonObject(response.body()).getString("eventType"));
+                    if (deliveredHere) {
                         totalDelivered.incrementAndGet();
+                    } else {
+                        // Didn't land in this specific request — a subsequent poll with the same
+                        // identifier must still find the SHUTDOWN queued (never orphaned).
+                        HttpResponse<String> retry = client.send(HttpRequest.newBuilder()
+                                        .uri(URI.create(
+                                                "http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
+                                        .header("Lambda-Extension-Identifier", extensionId)
+                                        .GET().build(),
+                                HttpResponse.BodyHandlers.ofString());
+                        if (retry.statusCode() == 200
+                                && "SHUTDOWN".equals(new JsonObject(retry.body()).getString("eventType"))) {
+                            totalDelivered.incrementAndGet();
+                        }
                     }
                 }
-            } finally {
-                freshServer.stop().get(5, TimeUnit.SECONDS);
-                // Each HttpClient owns a selector thread and connection pool; leaking one per
-                // iteration across hundreds of iterations starves the JVM and makes even an
-                // unrelated server's bind time out.
-                client.close();
             }
         }
 

@@ -305,23 +305,28 @@ class GuardedMessageQueueTest {
     // --- DLQ ---
 
     @Test
-    void dlqCandidatesReturnedButNotRemovedFromSource() {
+    void aDeadLetterCandidateLeavesTheSourceInTheClaimThatSelectsIt() {
         queue.addMessage(new Message("msg"));
+        queue.claimVisibleMessages(1, 0, false, -1, null);
 
-        // Claim and release (visibility=0) to bump receiveCount
-        ClaimResult r1 = queue.claimVisibleMessages(1, 0, false, -1, null);
-        assertEquals(1, r1.claimed().get(0).getReceiveCount());
+        ClaimResult result = queue.claimVisibleMessages(1, 0, false, 1, "arn:aws:sqs:us-east-1:000000000000:dlq");
 
-        // Claim again — now receiveCount = 2, maxReceiveCount = 1 → DLQ candidate
-        ClaimResult r2 = queue.claimVisibleMessages(1, 0, false, 1, "arn:aws:sqs:us-east-1:000000000000:dlq");
-        assertTrue(r2.claimed().isEmpty());
-        assertEquals(1, r2.dlqCandidates().size());
-
-        // Message stays in source until explicitly removed
-        assertFalse(queue.isEmpty());
-
-        queue.removeMessages(r2.dlqCandidates());
+        assertTrue(result.claimed().isEmpty());
+        assertEquals(1, result.dlqCandidates().size());
         assertTrue(queue.isEmpty());
+    }
+
+    @Test
+    void aSecondReceiveDoesNotSelectADeadLetterCandidateAgain() {
+        queue.addMessage(new Message("msg"));
+        queue.claimVisibleMessages(1, 0, false, -1, null);
+        String deadLetterTarget = "arn:aws:sqs:us-east-1:000000000000:dlq";
+
+        ClaimResult first = queue.claimVisibleMessages(1, 0, false, 1, deadLetterTarget);
+        ClaimResult second = queue.claimVisibleMessages(1, 0, false, 1, deadLetterTarget);
+
+        assertEquals(1, first.dlqCandidates().size());
+        assertTrue(second.dlqCandidates().isEmpty());
     }
 
     // --- Concurrency: the core bug fix ---
@@ -576,7 +581,7 @@ class GuardedMessageQueueTest {
         assertEquals(1, store.get(KEY).orElseThrow().size());
     }
 
-    enum ListMutation { REMOVE, EXPIRE, PURGE, DRAIN, DRAIN_FIRST, RESTORE_FIRST }
+    enum ListMutation { EXPIRE, PURGE, DRAIN, DRAIN_FIRST, RESTORE_FIRST }
 
     @ParameterizedTest
     @EnumSource(ListMutation.class)
@@ -588,7 +593,6 @@ class GuardedMessageQueueTest {
 
         assertThrows(IllegalStateException.class, () -> {
             switch (mutation) {
-                case REMOVE -> queue.removeMessages(List.of(original));
                 case EXPIRE -> queue.removeExpired(Instant.now().plusSeconds(60));
                 case PURGE -> queue.purge();
                 case DRAIN -> queue.drainAll();

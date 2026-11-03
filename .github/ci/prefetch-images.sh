@@ -83,8 +83,8 @@ starts ContainerCaBundleDockerIntegrationTest && [ -n "$CORRETTO_8_IMAGE" ] && p
 # The Firelens test names the log router image itself rather than taking it from config.
 FLUENT_BIT_IMAGE="$(test_image FLUENT_BIT)"
 starts EcsContainerManagerFirelensDockerIntegrationTest && [ -n "$FLUENT_BIT_IMAGE" ] && pull "$FLUENT_BIT_IMAGE"
-# ECR Public images, in queue order: the Lambda runtimes by size. They are the only images left
-# on ECR Public; everything Docker Hub also carries is pulled from there (see TestImages).
+# ECR Public images, in queue order: the Lambda runtimes by size, then EMR's. They are the only images
+# left on ECR Public; everything Docker Hub also carries is pulled from there (see TestImages).
 # Lambda runtimes, measured from a full four-shard run by pairing each ImageCacheService
 # "Pulling image" / "Image already present locally" line with the class that logged it.
 # nodejs:20 is the runtime the API Gateway, ELBv2 and Lambda integration tests resolve and every
@@ -94,6 +94,9 @@ grep -qE '/apigateway/|/apigatewayv2/|/lambda/' "$SHARD_FILE" && ecr public.ecr.
 grep -qE '/lambdaweb/' "$SHARD_FILE" && ecr public.ecr.aws/lambda/nodejs:24
 starts SwfLambdaIntegrationTest && ecr public.ecr.aws/lambda/python:3.12
 starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/python:3.14
+# EmrDockerRunnerDockerIntegrationTest runs EMR steps and EMR Serverless job runs in the emr-7.5.0 image the runner's
+# default template names (EmrServerlessSparkRunner), 3.5 GB, so it is queued last, behind the Lambda runtimes.
+starts EmrDockerRunnerDockerIntegrationTest && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)
@@ -112,7 +115,7 @@ GRAPHQL_IMAGE="$(grep -oE 'graphql-image: *"[^"]+"' src/main/resources/applicati
 grep -qE '/appsync/|AppSyncCfnIntegrationTest' "$SHARD_FILE" && [ -n "$GRAPHQL_IMAGE" ] && pull "$GRAPHQL_IMAGE"
 # The Node sidecar that evaluates APPSYNC_JS resolver code; the pin lives in application.yml too.
 # Matched on the one class that starts it rather than on /appsync/, since every other test in that
-# package is a unit test: a path match would have all four shards pull an image one of them uses.
+# package is a unit test: a path match would have every shard pull an image one of them uses.
 JS_RUNTIME_IMAGE="$(grep -oE 'image: *"node:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 grep -q 'AppSyncJsResolverDockerIntegrationTest' "$SHARD_FILE" && [ -n "$JS_RUNTIME_IMAGE" ] && pull "$JS_RUNTIME_IMAGE"
 # RdsAwsIntegrationTest is the one class that starts SQL Server (about 1.5 GB); the pin lives in
@@ -121,7 +124,7 @@ SQLSERVER_IMAGE="$(grep -oE 'default-sql-server-image: *"[^"]+"' src/main/resour
 grep -q 'RdsAwsIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_IMAGE" ] && pull "$SQLSERVER_IMAGE"
 # Postgres is the most-pulled image in CI: Redshift pins it in application.yml, RDS adapts
 # postgres:<version>-alpine to the engine version its tests request (16.3), and the CloudFormation
-# provisioner tests reach it through Redshift. It was pulled inline in all four shards.
+# provisioner tests reach it through Redshift. It was pulled inline in every shard.
 REDSHIFT_PG_IMAGE="$(grep -oE 'image-version: *postgres:[^ ]+' src/main/resources/application.yml | awk '{print $2}')"
 grep -qE '/redshift/|/cloudformation/' "$SHARD_FILE" && [ -n "$REDSHIFT_PG_IMAGE" ] && pull "$REDSHIFT_PG_IMAGE"
 grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine

@@ -108,6 +108,41 @@ class SesReceiptRuleCfnProvisionerTest {
     }
 
     @Test
+    void legacyRuleRepositionsOnceThenTracksAfterForContentUpdates() {
+        addRule("anchor", null);
+        ObjectNode props = properties("first", "store").put("After", "anchor");
+        StackResource resource = resource();
+        provisioner.provision(resource, props, context(null));
+        resource.getAttributes().remove("__FlociSesReceiptRuleAfter");
+        addRule("between", "anchor");
+        ObjectNode updated = props.deepCopy();
+        updated.withObject("/Rule").put("Enabled", true);
+
+        provisioner.provision(resource, updated, context("store"));
+
+        assertEquals(List.of("anchor", "store", "between"), names());
+        assertTrue(rules.describeReceiptRule("first", "store", REGION).isEnabled());
+        provisioner.clearUpdate(resource);
+        addRule("later", "anchor");
+        updated.withObject("/Rule").put("Enabled", false);
+
+        provisioner.provision(resource, updated, context("store"));
+
+        assertEquals(List.of("anchor", "later", "store", "between"), names());
+        assertFalse(rules.describeReceiptRule("first", "store", REGION).isEnabled());
+    }
+
+    private void addRule(String name, String after) {
+        ReceiptRule rule = new ReceiptRule();
+        rule.setName(name);
+        rules.createReceiptRule("first", rule, after, REGION, sender -> false);
+    }
+
+    private List<String> names() {
+        return rules.describeReceiptRuleSet("first", REGION).getRules().stream().map(ReceiptRule::getName).toList();
+    }
+
+    @Test
     void failedStubMigrationRemovesOnlyTheNewlyCreatedRule() {
         StackResource resource = resource();
         resource.setPhysicalId("Receipt-1234abcd");

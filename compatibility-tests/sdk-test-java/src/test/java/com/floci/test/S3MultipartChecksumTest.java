@@ -26,6 +26,8 @@ import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ObjectAttributes;
 import software.amazon.awssdk.services.s3.model.ObjectPart;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.model.UploadPartCopyRequest;
+import software.amazon.awssdk.services.s3.model.UploadPartCopyResponse;
 import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 import software.amazon.awssdk.transfer.s3.S3TransferManager;
@@ -59,7 +61,7 @@ class S3MultipartChecksumTest {
     private static final byte[] PART_1 = payload(5 * MIB, 1);
     private static final byte[] PART_2 = payload(1 * MIB, 2);
     private static final List<String> KEYS = List.of("sha256.bin", "crc32-full-object.bin", "sha256-copy.bin",
-            "tm-sha256.bin", "tm-default.bin");
+            "tm-sha256.bin", "tm-default.bin", "sha256-part-copy.bin");
 
     private static S3Client s3;
 
@@ -277,6 +279,36 @@ class S3MultipartChecksumTest {
         }
         System.out.printf("transfer manager default: CRC32=%s CRC64NVME=%s type=%s%n",
                 head.checksumCRC32(), head.checksumCRC64NVME(), head.checksumType());
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("UploadPartCopy returns the SHA256 part checksum for completion")
+    void uploadPartCopyReturnsPartChecksum() throws NoSuchAlgorithmException {
+        String key = KEYS.get(5);
+        byte[] whole = concat(PART_1, PART_2);
+        CreateMultipartUploadResponse created = s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
+                .bucket(BUCKET).key(key).checksumAlgorithm(ChecksumAlgorithm.SHA256).build());
+        boolean completed = false;
+        try {
+            UploadPartCopyResponse copied = s3.uploadPartCopy(UploadPartCopyRequest.builder()
+                    .sourceBucket(BUCKET).sourceKey(KEYS.get(0)).destinationBucket(BUCKET).destinationKey(key)
+                    .uploadId(created.uploadId()).partNumber(1).build());
+            assertThat(copied.copyPartResult().checksumSHA256()).isEqualTo(base64(sha256(whole)));
+
+            CompleteMultipartUploadResponse done = s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                    .bucket(BUCKET).key(key).uploadId(created.uploadId())
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(CompletedPart.builder()
+                            .partNumber(1).eTag(copied.copyPartResult().eTag())
+                            .checksumSHA256(copied.copyPartResult().checksumSHA256()).build()).build())
+                    .build());
+            completed = true;
+            assertThat(done.checksumSHA256()).isEqualTo(compositeSha256(whole));
+        } finally {
+            if (!completed) {
+                s3.abortMultipartUpload(b -> b.bucket(BUCKET).key(key).uploadId(created.uploadId()));
+            }
+        }
     }
 
     private static void transferManagerUpload(String key, byte[] data, ChecksumAlgorithm algorithm) {

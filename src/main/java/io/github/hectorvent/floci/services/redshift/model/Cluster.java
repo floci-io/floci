@@ -90,6 +90,8 @@ public class Cluster {
     private Integer snapshotCopyRetentionPeriod;
     private Integer snapshotCopyManualRetentionPeriod;
     private String snapshotCopyGrantName;
+    // Only snapshots taken after this instant are copied, as AWS copies from the moment copy is enabled.
+    private Instant snapshotCopyEnabledAt;
     private String snapshotScheduleIdentifier;
     private Instant automatedSnapshotAnchor;
     private String snapshotRegion;
@@ -114,6 +116,8 @@ public class Cluster {
     public void setSnapshotCopyRetentionPeriod(Integer snapshotCopyRetentionPeriod) { this.snapshotCopyRetentionPeriod = snapshotCopyRetentionPeriod; }
     public Integer getSnapshotCopyManualRetentionPeriod() { return snapshotCopyManualRetentionPeriod; }
     public void setSnapshotCopyManualRetentionPeriod(Integer snapshotCopyManualRetentionPeriod) { this.snapshotCopyManualRetentionPeriod = snapshotCopyManualRetentionPeriod; }
+    public Instant getSnapshotCopyEnabledAt() { return snapshotCopyEnabledAt; }
+    public void setSnapshotCopyEnabledAt(Instant snapshotCopyEnabledAt) { this.snapshotCopyEnabledAt = snapshotCopyEnabledAt; }
     public String getSnapshotCopyGrantName() { return snapshotCopyGrantName; }
     public void setSnapshotCopyGrantName(String snapshotCopyGrantName) { this.snapshotCopyGrantName = snapshotCopyGrantName; }
     public String getSnapshotScheduleIdentifier() { return snapshotScheduleIdentifier; }
@@ -145,4 +149,10 @@ public class Cluster {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    /** The resource policy {@code PutResourcePolicy} set, kept with the cluster so it goes with it. */
+    private String resourcePolicy;
+
+    public String getResourcePolicy() { return resourcePolicy; }
+    public void setResourcePolicy(String resourcePolicy) { this.resourcePolicy = resourcePolicy; }
 }

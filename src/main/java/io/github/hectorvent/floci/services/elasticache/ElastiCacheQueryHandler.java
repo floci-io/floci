@@ -113,13 +113,11 @@ public class ElastiCacheQueryHandler {
                     "ReplicationGroupId is required.", AwsNamespaces.EC, 400);
         }
 
-        String transitEncryption = params.getFirst("TransitEncryptionEnabled");
         AuthMode authMode;
         if (authToken != null && !authToken.isBlank()) {
             authMode = AuthMode.PASSWORD;
-        } else if ("true".equalsIgnoreCase(transitEncryption)) {
-            authMode = AuthMode.IAM;
         } else {
+            // Bug #4502: Do not conflate TransitEncryptionEnabled=true with IAM auth mode
             authMode = AuthMode.NO_AUTH;
         }
 
@@ -162,7 +160,8 @@ public class ElastiCacheQueryHandler {
                 atRest == null ? null : !"false".equalsIgnoreCase(atRest.trim()),
                 params.getFirst("KmsKeyId"),
                 optionalInt(params.getFirst("SnapshotRetentionLimit")),
-                params.getFirst("SnapshotWindow"), params.getFirst("TransitEncryptionMode"));
+                params.getFirst("SnapshotWindow"), params.getFirst("TransitEncryptionMode"),
+                boolParam(params, "TransitEncryptionEnabled"));
     }
 
     private static Integer optionalInt(String value) {
@@ -454,7 +453,9 @@ public class ElastiCacheQueryHandler {
                             params.getFirst("IpDiscovery"),
                             boolParam(params, "AtRestEncryptionEnabled"),
                             region,
-                            parseTags(params));
+                            parseTags(params),
+                            boolParam(params, "AutoMinorVersionUpgrade"),
+                            boolParam(params, "TransitEncryptionEnabled"));
             CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
                     ? memcachedService.createCacheCluster(request)
                     : service.createCacheCluster(request);
@@ -471,9 +472,7 @@ public class ElastiCacheQueryHandler {
         if (authToken != null && !authToken.isBlank()) {
             return AuthMode.PASSWORD;
         }
-        if ("true".equalsIgnoreCase(params.getFirst("TransitEncryptionEnabled"))) {
-            return AuthMode.IAM;
-        }
+        // Bug #4502: Open-access TLS clusters remain NO_AUTH
         return AuthMode.NO_AUTH;
     }
 
@@ -1039,7 +1038,8 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("CacheClusterId", c.getCacheClusterId())
                   .elem("CacheClusterStatus", c.getCacheClusterStatus().wireName())
                   .elem("Engine", c.getEngine())
-                  .elem("EngineVersion", c.getEngineVersion());
+                  .elem("EngineVersion", c.getEngineVersion())
+                  .elem("AutoMinorVersionUpgrade", c.isAutoMinorVersionUpgrade());
         boolean memcached = "memcached".equals(c.getEngine());
         int numCacheNodes = c.getNumCacheNodes();
         if (memcached) {
@@ -1055,9 +1055,8 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             xml.elem("NumCacheNodes", (long) numCacheNodes);
         } else {
             xml.elem("NumCacheNodes", (long) numCacheNodes)
-               .elem("AutoMinorVersionUpgrade", true)
                .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
-               .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH)
+               .elem("TransitEncryptionEnabled", c.isEncryptedInTransit())
                .elem("AtRestEncryptionEnabled", c.isAtRestEncryptionEnabled())
                .elem("SnapshotRetentionLimit", (long) c.getSnapshotRetentionLimit())
                .elem("SnapshotWindow", c.getSnapshotWindow() != null

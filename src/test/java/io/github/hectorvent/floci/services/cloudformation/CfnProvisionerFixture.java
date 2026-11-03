@@ -45,6 +45,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatc
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchCompositeAlarmCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CloudWatchDashboardCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoIdentityProviderCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoResourceServerCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoUserPoolGroupCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CognitoUserPoolUserCfnProvisioner;
@@ -55,6 +56,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.DsqlCfnPr
 import io.github.hectorvent.floci.services.cloudformation.provisioners.DynamoDbCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2FlowLogCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2InstanceCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2KeyPairCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2LaunchTemplateCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkAclCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.Ec2NetworkCfnProvisioner;
@@ -354,6 +356,7 @@ final class CfnProvisionerFixture {
             }
             if (cognitoService != null) {
                 discovered.add(new CognitoCfnProvisioner(cognitoService));
+                discovered.add(new CognitoIdentityProviderCfnProvisioner(cognitoService));
                 discovered.add(new CognitoResourceServerCfnProvisioner(cognitoService));
                 discovered.add(new CognitoUserPoolGroupCfnProvisioner(cognitoService));
                 discovered.add(new CognitoUserPoolUserCfnProvisioner(cognitoService));
@@ -496,6 +499,9 @@ final class CfnProvisionerFixture {
                 discovered.add(new Ec2InstanceCfnProvisioner(ec2Service));
                 discovered.add(new Ec2LaunchTemplateCfnProvisioner(ec2Service));
                 discovered.add(new Ec2NetworkCfnProvisioner(ec2Service));
+            }
+            if (ec2Service != null && ssmService != null) {
+                discovered.add(new Ec2KeyPairCfnProvisioner(ec2Service, ssmService));
             }
             if (route53Service != null) {
                 discovered.add(new Route53CfnProvisioner(route53Service));

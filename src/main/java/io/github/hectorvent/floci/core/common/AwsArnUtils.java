@@ -176,6 +176,20 @@ public final class AwsArnUtils {
     }
 
     /**
+     * The parsed ARN when {@code value} is an ARN naming {@code service} in {@code region} and that
+     * region's partition, e.g. a stored key belonging to the region a list call was made in; empty
+     * otherwise.
+     */
+    public static Optional<Arn> parseIfArnIn(String value, String service, String region) {
+        if (!isArnFor(value, service)) {
+            return Optional.empty();
+        }
+        Arn arn = parse(value);
+        return arn.region().equals(region) && arn.partition().equals(AwsRegions.partitionFor(region))
+                ? Optional.of(arn) : Optional.empty();
+    }
+
+    /**
      * True when the ARN names a partition other than {@code localPartition}, the one the current
      * request belongs to ({@link RegionResolver#getPartition()}). An empty partition field is
      * not foreign: callers that omit it are naming a local resource. Mirrors

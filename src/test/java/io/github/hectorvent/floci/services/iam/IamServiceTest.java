@@ -93,6 +93,30 @@ class IamServiceTest {
     }
 
     @Test
+    void roleChainingRequiresALiveTokenMatchedRoleSession() {
+        MutableClock clock = new MutableClock();
+        IamService service = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("cn-north-1", "000000000000"), false, clock);
+        IamRole role = service.createRole("ChainRole", "/teams/chain/", "{}", null, 7200, null);
+        service.registerSession("ASIACHAIN", "secret", "token", role.getArn(), clock.instant().plusSeconds(60),
+                null, "000000000000");
+        service.registerSession("ASIAUSER", "secret", "user-token", null, clock.instant().plusSeconds(60),
+                null, "000000000000");
+        service.registerSession("ASIAFEDERATED", "secret", "federated-token",
+                "arn:aws-cn:sts::000000000000:federated-user/example", clock.instant().plusSeconds(60),
+                null, "000000000000");
+        assertTrue(service.isRoleSession("ASIACHAIN", "token"));
+        assertFalse(service.isRoleSession("ASIACHAIN", "wrong"));
+        assertFalse(service.isRoleSession("ASIACHAIN", null));
+        assertFalse(service.isRoleSession("ASIAUSER", "user-token"));
+        assertFalse(service.isRoleSession("ASIAFEDERATED", "federated-token"));
+        assertFalse(service.isRoleSession("ASIAUNKNOWN", "token"));
+        clock.advance(Duration.ofSeconds(60));
+        assertFalse(service.isRoleSession("ASIACHAIN", "token"));
+    }
+
+    @Test
     void aPrincipalArnNamesTheRootOrTheRoleOrUserIamHoldsAtItsOwnPath() {
         iamService.createRole("reader", "/team/", "{}", null, 3600, null);
         iamService.createUser("writer", "/team/");
@@ -1217,7 +1241,7 @@ class IamServiceTest {
         AwsException missing = assertThrows(AwsException.class,
                 () -> iamService.changePassword("alice", null, "An0ther$ecret!"));
         assertEquals("ValidationError", missing.getErrorCode());
-        assertTrue(missing.getMessage().contains("Value null at 'oldPassword'"), missing.getMessage());
+        assertTrue(missing.getMessage().contains("Value at 'oldPassword'"), missing.getMessage());
 
         // An empty member is a value that fails the pattern rather than a member never supplied,
         // and the message names the one that failed, there being two password members here.
@@ -2158,39 +2182,6 @@ class IamServiceTest {
     }
 
     @Test
-    void anAccessKeyStatusIsReadBeforeTheKeyIsFound() {
-        // The key does not exist either, and the status is what answers: AWS reads a request's
-        // shape before it resolves anything, so the lookup's NoSuchEntity does not get there first.
-        iamService.createUser("alice", "/");
-
-        AwsException error = assertThrows(AwsException.class,
-                () -> iamService.updateAccessKey("alice", "AKIANOSUCHKEY00000", "Disabled"));
-
-        assertEquals("ValidationError", error.getErrorCode());
-        // The rendering the three sibling operations already answer with, taken from a recording
-        // of UpdateServiceSpecificCredential: AWS names neither the value nor the permitted set.
-        assertEquals("1 validation error detected: Value at 'status' failed to satisfy "
-                + "constraint: Member must satisfy enum value set", error.getMessage());
-    }
-
-    @Test
-    void anAbsentAccessKeyStatusIsAnsweredLikeAnInvalidOne() {
-        // The shared helper reads a null as a value outside the enum, which is how the other three
-        // statusType operations answer one. Changing that would change all four, so it stays.
-        iamService.createUser("alice", "/");
-        AccessKey key = iamService.createAccessKey("alice");
-
-        AwsException error = assertThrows(AwsException.class,
-                () -> iamService.updateAccessKey("alice", key.getAccessKeyId(), null));
-
-        assertEquals("ValidationError", error.getErrorCode());
-        assertEquals("1 validation error detected: Value at 'status' failed to satisfy "
-                + "constraint: Member must satisfy enum value set", error.getMessage());
-        // And the key is as it was: the status is read before the lookup, so nothing is written.
-        assertEquals("Active", iamService.listAccessKeys("alice").getFirst().getStatus());
-    }
-
-    @Test
     void aSessionWithNoRoleAndNoRecordedIssuerIsNoCredential() {
         // How GetSessionToken stored its sessions before it recorded the key that minted them. Such
         // a session used to bypass enforcement altogether.
@@ -2587,6 +2578,30 @@ class IamServiceTest {
 
         assertTrue(sessions.getForAccount("222233334444", "ASIALAMBDAORPHAN").isEmpty());
         assertTrue(sessions.getForAccount("000000000000", "ASIASTSSESSION").isPresent());
+    }
+
+    @Test
+    void spectrumScratchResourceRegistrationAndClear() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIASPECTRUM";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerSessionForAccount(
+                accountId, accessKeyId, "secret", "token",
+                "arn:aws:iam::222233334444:role/R", Instant.now().plusSeconds(900), null);
+
+        assertTrue(service.spectrumScratchResourceArn(accessKeyId).isEmpty());
+
+        String scratchArn = "arn:aws:s3:::floci-internal-redshift-spectrum-scratch/spectrum-1234.csv";
+        service.registerSpectrumScratchResource(accessKeyId, scratchArn);
+
+        assertEquals(Optional.of(scratchArn), service.spectrumScratchResourceArn(accessKeyId));
+
+        service.clearSpectrumScratchResource(accessKeyId);
+
+        assertTrue(service.spectrumScratchResourceArn(accessKeyId).isEmpty());
     }
 
     // =========================================================================

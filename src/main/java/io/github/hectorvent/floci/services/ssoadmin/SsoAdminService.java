@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -307,7 +308,7 @@ public class SsoAdminService implements Resettable {
     }
 
     public double regionAddedDateEpochSeconds(RegionMetadata region) {
-        return Instant.parse(region.addedDate()).toEpochMilli() / 1000.0d;
+        return EpochSeconds.fromInstant(Instant.parse(region.addedDate()));
     }
 
     public synchronized TrustedTokenIssuer createTrustedTokenIssuer(JsonNode request, String callerAccountId) {
@@ -2480,11 +2481,9 @@ public class SsoAdminService implements Resettable {
     }
 
     private static String instanceArnForPermissionSet(String permissionSetArn) {
-        int serviceIndex = permissionSetArn.indexOf(":sso::");
-        int instanceStart = permissionSetArn.indexOf("permissionSet/") + "permissionSet/".length();
-        int instanceEnd = permissionSetArn.indexOf('/', instanceStart);
-        return permissionSetArn.substring(0, serviceIndex) + ":sso:::instance/"
-                + permissionSetArn.substring(instanceStart, instanceEnd);
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(permissionSetArn);
+        String instanceId = arn.resource().split("/", 3)[1];
+        return AwsArnUtils.Arn.global(arn.partition(), "sso", "", "instance/" + instanceId).toString();
     }
 
     static String applicationAccessScopeKey(String applicationArn, String scope) {

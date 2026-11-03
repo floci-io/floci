@@ -9,9 +9,12 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbApiStreamReader;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess;
+import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
@@ -26,6 +29,8 @@ import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotSchedule;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
+import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -337,6 +342,23 @@ class RedshiftServiceTest {
         assertEquals("InvalidClusterState", assertThrows(AwsException.class,
                 () -> service.modifyCluster("warehouse", null, null, "Changed123", null, null)).getErrorCode());
         verifyNoInteractions(cm);
+    }
+
+    @Test
+    void aClusterIsFoundOnlyByItsOwnArnAndKeepsTheResourcePolicySetOnIt() {
+        Cluster cluster = lifecycleCluster("available");
+        String arn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
+
+        assertTrue(service.findClusterByArn(arn).isPresent());
+        for (String other : List.of("arn:aws:redshift:us-east-1:222222222222:cluster:warehouse",
+                "arn:aws:redshift:eu-west-1:111111111111:cluster:warehouse",
+                "arn:aws:redshift:us-east-1:111111111111:snapshot:warehouse/nightly")) {
+            assertTrue(service.findClusterByArn(other).isEmpty(), other);
+        }
+
+        service.setClusterResourcePolicy(arn, "{\"Version\":\"2012-10-17\"}");
+        assertEquals("{\"Version\":\"2012-10-17\"}", cluster.getResourcePolicy());
+        verify(clusterBackend).put("warehouse", cluster);
     }
 
     private Cluster lifecycleCluster(String status) {
@@ -851,6 +873,7 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
     private AccountAwareStorageBackend<SnapshotCopyGrant> snapshotCopyGrantBackend;
+    private AccountAwareStorageBackend<Snapshot> snapshotCopyBackend;
     private AccountAwareStorageBackend<SnapshotSchedule> snapshotScheduleBackend;
     private AccountAwareStorageBackend<Integration> integrationBackend;
     private RedshiftContainerManager cm;
@@ -862,6 +885,8 @@ class RedshiftServiceTest {
     private RedshiftEventService events;
     private final Set<String> existingStreams = new HashSet<>();
     private RedshiftIntegrationEventPublisher integrationEvents;
+    private DynamoDbTableAccess zeroEtlTables;
+    private RedshiftServerlessService zeroEtlServerless;
     private RedshiftService service;
 
     @BeforeEach
@@ -874,6 +899,7 @@ class RedshiftServiceTest {
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
         snapshotCopyGrantBackend = mock(AccountAwareStorageBackend.class);
+        snapshotCopyBackend = mock(AccountAwareStorageBackend.class);
         snapshotScheduleBackend = mock(AccountAwareStorageBackend.class);
         integrationBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
@@ -905,9 +931,11 @@ class RedshiftServiceTest {
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
         when(sf.<ClusterSubnetGroup>create(eq("redshift"), eq("redshift-subnet-groups.json"), any())).thenReturn(subnetGroupBackend);
         when(sf.<SnapshotCopyGrant>create(eq("redshift"), eq("redshift-snapshot-copy-grants.json"), any())).thenReturn(snapshotCopyGrantBackend);
+        when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshot-copies.json"), any())).thenReturn(snapshotCopyBackend);
         when(sf.<Integration>create(eq("redshift"), eq("redshift-integrations.json"), any())).thenReturn(integrationBackend);
         when(sf.<SnapshotSchedule>create(eq("redshift"), eq("redshift-snapshot-schedules.json"), any())).thenReturn(snapshotScheduleBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");
+        when(integrationBackend.accountId()).thenReturn("111111111111");
 
         regionResolver = new RegionResolver("us-east-1", "111111111111");
 
@@ -926,9 +954,121 @@ class RedshiftServiceTest {
         };
 
         integrationEvents = mock(RedshiftIntegrationEventPublisher.class);
+        DynamoDbFacade zeroEtlDynamoDb = mock(DynamoDbFacade.class);
+        zeroEtlTables = mock(DynamoDbTableAccess.class);
+        when(zeroEtlDynamoDb.tables()).thenReturn(zeroEtlTables);
+        zeroEtlServerless = mock(RedshiftServerlessService.class);
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, mapper,
-                new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS), null, events, integrationEvents);
+                new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS), null, events, integrationEvents,
+                new RedshiftZeroEtlEndpoints(zeroEtlDynamoDb, zeroEtlServerless));
+    }
+
+    private static final String ORDERS_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111111111111:table/orders";
+    private static final String NAMESPACE_ARN = "arn:aws:redshift-serverless:us-east-1:111111111111:namespace/"
+            + "8f3e0b52-6c1a-4f0e-9d7b-2a4c5e6f7a8b";
+
+    @Test
+    void createsAnIntegrationFromATableToAServerlessNamespaceAsAwsTakesThem() {
+        TableDefinition table = new TableDefinition();
+        table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
+        table.setStreamArn(ORDERS_TABLE_ARN + "/stream/2026-09-18T00:00:00.000");
+        when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
+        when(zeroEtlServerless.findNamespaceByArn(NAMESPACE_ARN, "us-east-1")).thenReturn(Optional.of(new Namespace()));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("orders-to-warehouse", ORDERS_TABLE_ARN, NAMESPACE_ARN,
+                null, null, Map.of(), Map.of(), "us-east-1");
+
+        assertEquals(ORDERS_TABLE_ARN, integration.getSourceArn());
+        assertEquals(NAMESPACE_ARN, integration.getTargetArn());
+        assertEquals(table.getStreamArn(), integration.getSourceStreamArn());
+        assertNull(integration.getTargetClusterIdentifier());
+        assertEquals("syncing", integration.getStatus());
+        verify(integrationBackend).put(any(), eq(integration));
+    }
+
+    @Test
+    void aTableThatNeverHadAStreamIsAcceptedAsTheSource() {
+        TableDefinition table = new TableDefinition();
+        table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
+        when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
+        when(zeroEtlServerless.findNamespaceByArn(NAMESPACE_ARN, "us-east-1")).thenReturn(Optional.of(new Namespace()));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("orders-to-warehouse", ORDERS_TABLE_ARN, NAMESPACE_ARN,
+                null, null, Map.of(), Map.of(), "us-east-1");
+
+        assertNull(integration.getSourceStreamArn());
+    }
+
+    @Test
+    void aTableArnOfAnotherAccountOrWithASuffixIsNotTheCallersSameNamedTable() {
+        TableDefinition table = new TableDefinition();
+        table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
+        when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
+
+        for (String sourceArn : List.of("arn:aws:dynamodb:us-east-1:222222222222:table/orders",
+                ORDERS_TABLE_ARN + "/bogus")) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(
+                    "orders-to-warehouse", sourceArn, NAMESPACE_ARN, null, null, Map.of(), Map.of(), "us-east-1"));
+
+            assertEquals("IntegrationSourceNotFoundFault", error.getErrorCode(), sourceArn);
+            assertEquals(404, error.getHttpStatus());
+        }
+        verify(integrationBackend, never()).put(any(), any());
+    }
+
+    @Test
+    void aMissingSourceTableIsIntegrationSourceNotFound() {
+        when(zeroEtlTables.describeTable(any(), eq("orders"))).thenThrow(
+                new AwsException("ResourceNotFoundException", "Requested resource not found", 400));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(
+                "orders-to-warehouse", ORDERS_TABLE_ARN, NAMESPACE_ARN, null, null, Map.of(), Map.of(), "us-east-1"));
+
+        assertEquals("IntegrationSourceNotFoundFault", error.getErrorCode());
+        assertEquals("The specified integration source can't be found.", error.getMessage());
+        assertEquals(404, error.getHttpStatus());
+        verify(integrationBackend, never()).put(any(), any());
+    }
+
+    @Test
+    void aMissingTargetNamespaceIsIntegrationTargetNotFound() {
+        TableDefinition table = new TableDefinition();
+        table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
+        when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
+        when(zeroEtlServerless.findNamespaceByArn(NAMESPACE_ARN, "us-east-1")).thenReturn(Optional.empty());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(
+                "orders-to-warehouse", ORDERS_TABLE_ARN, NAMESPACE_ARN, null, null, Map.of(), Map.of(), "us-east-1"));
+
+        assertEquals("IntegrationTargetNotFoundFault", error.getErrorCode());
+        assertEquals("The specified integration target can't be found.", error.getMessage());
+        assertEquals(404, error.getHttpStatus());
+        verify(integrationBackend, never()).put(any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "arn:aws:redshift-serverless:us-east-1:111111111111:workgroup/8f3e0b52-6c1a-4f0e-9d7b-2a4c5e6f7a8b",
+            "arn:aws:s3:::warehouse-bucket"})
+    void aTargetThatIsNeitherANamespaceNorAClusterIsRefused(String targetArn) {
+        TableDefinition table = new TableDefinition();
+        table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
+        when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(
+                "orders-to-warehouse", ORDERS_TABLE_ARN, targetArn, null, null, Map.of(), Map.of(), "us-east-1"));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals("TargetArn must identify a Redshift Serverless namespace or a provisioned Redshift cluster.",
+                error.getMessage());
     }
 
     @Test

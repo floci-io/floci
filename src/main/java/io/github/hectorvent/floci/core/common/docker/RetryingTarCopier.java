@@ -189,17 +189,23 @@ public final class RetryingTarCopier {
         try {
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             try (TarArchiveOutputStream tar = newTarStream(out)) {
-                TarArchiveEntry entry = new TarArchiveEntry(entryName);
-                entry.setSize(content.length);
-                entry.setMode(mode);
-                tar.putArchiveEntry(entry);
-                tar.write(content);
-                tar.closeArchiveEntry();
+                putEntry(tar, entryName, content, mode);
             }
             return out.toByteArray();
         } catch (IOException e) {
             throw new IllegalStateException("Could not build in-memory tar for " + entryName, e);
         }
+    }
+
+    /** Writes {@code content} as the file {@code entryName}, with {@code mode}, such as 0755 for a script. */
+    public static void putEntry(TarArchiveOutputStream tar, String entryName, byte[] content, int mode)
+            throws IOException {
+        TarArchiveEntry entry = new TarArchiveEntry(entryName);
+        entry.setSize(content.length);
+        entry.setMode(mode);
+        tar.putArchiveEntry(entry);
+        tar.write(content);
+        tar.closeArchiveEntry();
     }
 
     /** GNU long names + star big numbers so any path length and file size survive the archive. */

@@ -19,6 +19,7 @@ import java.security.SecureRandom;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * Owns the PostgreSQL container and the auth proxy behind a workgroup endpoint.
@@ -35,6 +36,9 @@ public class RedshiftServerlessRuntime {
     private static final String PASSWORD_ALPHABET =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static final int GENERATED_PASSWORD_LENGTH = 32;
+    private static final Pattern HAS_UPPERCASE = Pattern.compile("[A-Z]");
+    private static final Pattern HAS_LOWERCASE = Pattern.compile("[a-z]");
+    private static final Pattern HAS_DIGIT = Pattern.compile("[0-9]");
 
     /** The namespace admin pair as it stands now; read on every login so a password change applies at once. */
     public record AdminCredentials(String username, String password) {
@@ -199,11 +203,30 @@ public class RedshiftServerlessRuntime {
     }
 
     public String generatePassword() {
-        StringBuilder password = new StringBuilder(GENERATED_PASSWORD_LENGTH);
+        return generatePassword(this::randomPasswordCandidate);
+    }
+
+    String generatePassword(Supplier<String> candidateSupplier) {
+        String password;
+        do {
+            password = candidateSupplier.get();
+        } while (!isValidPassword(password));
+        return password;
+    }
+
+    private String randomPasswordCandidate() {
+        StringBuilder sb = new StringBuilder(GENERATED_PASSWORD_LENGTH);
         for (int i = 0; i < GENERATED_PASSWORD_LENGTH; i++) {
-            password.append(PASSWORD_ALPHABET.charAt(random.nextInt(PASSWORD_ALPHABET.length())));
+            sb.append(PASSWORD_ALPHABET.charAt(random.nextInt(PASSWORD_ALPHABET.length())));
         }
-        return password.toString();
+        return sb.toString();
+    }
+
+    static boolean isValidPassword(String password) {
+        return password != null
+                && HAS_UPPERCASE.matcher(password).find()
+                && HAS_LOWERCASE.matcher(password).find()
+                && HAS_DIGIT.matcher(password).find();
     }
 
     private void rollback(String accountId, String backendId) {

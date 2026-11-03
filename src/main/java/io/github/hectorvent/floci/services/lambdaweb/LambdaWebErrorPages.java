@@ -20,6 +20,8 @@ final class LambdaWebErrorPages {
     static final Page INVALID_ENDPOINT = new Page(404, "Not Found", "Platform.InvalidEndpoint",
             "The requested endpoint could not be found.");
     static final Page ENDPOINT_NOT_ACTIVE = new Page(409, "Conflict", "Platform.EndpointNotActive", APPLICATION_ERROR);
+    /** Not recorded against AWS. It follows the EndpointNotActive page. */
+    static final Page REVISION_NOT_ACTIVE = new Page(409, "Conflict", "Platform.RevisionNotActive", APPLICATION_ERROR);
     static final Page ENDPOINT_DISABLED = new Page(503, "Service Unavailable", "Platform.EndpointDisabled",
             "The service is temporarily unable to handle your request. Please try again later.");
     static final Page REQUEST_TIMEOUT = new Page(504, "Gateway Timeout", "Runtime.RequestTimeout",
@@ -54,6 +56,9 @@ final class LambdaWebErrorPages {
     /** The edge writes a two-digit year in its Date header. */
     private static final DateTimeFormatter EDGE_DATE =
             DateTimeFormatter.ofPattern("EEE, dd MMM yy HH:mm:ss 'GMT'", Locale.ROOT).withZone(ZoneOffset.UTC);
+    /** The platform writes a two-digit day, which RFC_1123_DATE_TIME leaves out. */
+    private static final DateTimeFormatter PLATFORM_DATE =
+            DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.ROOT).withZone(ZoneOffset.UTC);
 
     private LambdaWebErrorPages() {
     }
@@ -67,5 +72,9 @@ final class LambdaWebErrorPages {
 
     static String edgeDate(Instant now) {
         return EDGE_DATE.format(now);
+    }
+
+    static String platformDate(Instant now) {
+        return PLATFORM_DATE.format(now);
     }
 }

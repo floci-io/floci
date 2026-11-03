@@ -42,15 +42,20 @@ final class ExpressionEvaluator {
         GT,    // >
         GE,    // >=
         // Punctuation
-        LPAREN, RPAREN, COMMA, DOT,
-        LIST_INDEX,      // [n] — list element access
+        LPAREN, RPAREN, COMMA, DOT, LBRACKET, RBRACKET,
+        NUMBER,          // list index digits
         // Functions
         FUNCTION,        // attribute_exists, attribute_not_exists, begins_with, contains, size
+        UNKNOWN,         // any other character
         // End
         EOF
     }
 
-    record Token(TokenType type, String value, int pos) {}
+    record Token(TokenType type, String value, int pos) {
+        int end() {
+            return pos + value.length();
+        }
+    }
 
     // ── Tokenizer ──
 
@@ -62,8 +67,8 @@ final class ExpressionEvaluator {
         while (i < len) {
             char c = expression.charAt(i);
 
-            // Skip whitespace
-            if (Character.isWhitespace(c)) {
+            // Skip whitespace. DynamoDB skips only these characters.
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
                 i++;
                 continue;
             }
@@ -73,19 +78,15 @@ final class ExpressionEvaluator {
             if (c == ')') { tokens.add(new Token(TokenType.RPAREN, ")", i)); i++; continue; }
             if (c == ',') { tokens.add(new Token(TokenType.COMMA, ",", i)); i++; continue; }
             if (c == '.') { tokens.add(new Token(TokenType.DOT, ".", i)); i++; continue; }
+            if (c == '[') { tokens.add(new Token(TokenType.LBRACKET, "[", i)); i++; continue; }
+            if (c == ']') { tokens.add(new Token(TokenType.RBRACKET, "]", i)); i++; continue; }
 
-            // List index [n]
-            if (c == '[') {
+            if (isDigit(c)) {
                 int start = i;
-                i++; // skip '['
-                while (i < len && Character.isDigit(expression.charAt(i))) i++;
-                if (i < len && expression.charAt(i) == ']') {
-                    i++; // skip ']'
-                    tokens.add(new Token(TokenType.LIST_INDEX, expression.substring(start, i), start));
-                } else {
-                    throw new IllegalArgumentException(
-                            "Expected ']' after list index at position " + i + " in: " + expression);
+                while (i < len && isDigit(expression.charAt(i))) {
+                    i++;
                 }
+                tokens.add(new Token(TokenType.NUMBER, expression.substring(start, i), start));
                 continue;
             }
 
@@ -111,7 +112,7 @@ final class ExpressionEvaluator {
             if (c == '=') { tokens.add(new Token(TokenType.EQ, "=", i)); i++; continue; }
 
             // Value reference :name
-            if (c == ':') {
+            if (c == ':' && i + 1 < len && isNameChar(expression.charAt(i + 1))) {
                 int start = i;
                 i++; // skip ':'
                 while (i < len && isNameChar(expression.charAt(i))) i++;
@@ -120,7 +121,7 @@ final class ExpressionEvaluator {
             }
 
             // Name reference #name
-            if (c == '#') {
+            if (c == '#' && i + 1 < len && isNameChar(expression.charAt(i + 1))) {
                 int start = i;
                 i++; // skip '#'
                 while (i < len && isNameChar(expression.charAt(i))) i++;
@@ -154,13 +155,9 @@ final class ExpressionEvaluator {
                 continue;
             }
 
-            int nearStart = Math.max(0, i - 15);
-            int nearEnd = Math.min(expression.length(), i + 15);
-            
-            String near = expression.substring(nearStart, nearEnd);
-
-            throw new IllegalArgumentException(
-                    "token: \"%c\", near: \"%s\"".formatted(c, near));
+            String unknown = Character.toString(expression.codePointAt(i));
+            tokens.add(new Token(TokenType.UNKNOWN, unknown, i));
+            i += unknown.length();
         }
 
         tokens.add(new Token(TokenType.EOF, "", len));
@@ -168,11 +165,15 @@ final class ExpressionEvaluator {
     }
 
     private static boolean isNameStartChar(char c) {
-        return Character.isLetter(c) || c == '_';
+        return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z');
     }
 
     private static boolean isNameChar(char c) {
-        return Character.isLetterOrDigit(c) || c == '_';
+        return isNameStartChar(c) || isDigit(c) || c == '_';
+    }
+
+    private static boolean isDigit(char c) {
+        return '0' <= c && c <= '9';
     }
 
     // ── AST nodes ──
@@ -195,10 +196,12 @@ final class ExpressionEvaluator {
     // ── Parser ──
 
     static final class Parser {
+        private final String expression;
         private final List<Token> tokens;
         private int pos;
 
-        Parser(List<Token> tokens) {
+        Parser(String expression, List<Token> tokens) {
+            this.expression = expression;
             this.tokens = tokens;
             this.pos = 0;
         }
@@ -207,12 +210,20 @@ final class ExpressionEvaluator {
         private Token advance() { return tokens.get(pos++); }
 
         private Token expect(TokenType type) {
-            Token t = advance();
-            if (t.type() != type) {
-                throw new IllegalArgumentException(
-                        "Expected %s but got %s ('%s') at position %d".formatted(type, t.type(), t.value(), t.pos()));
+            if (peek().type() != type) {
+                throw syntaxError();
             }
-            return t;
+            return advance();
+        }
+
+        // DynamoDB quotes the text from the token before the failing one through the token after it.
+        private IllegalArgumentException syntaxError() {
+            Token token = peek();
+            int from = pos > 0 ? tokens.get(pos - 1).pos() : 0;
+            int to = pos + 1 < tokens.size() ? tokens.get(pos + 1).end() : expression.length();
+            String text = token.type() == TokenType.EOF ? "<EOF>" : token.value();
+            return new IllegalArgumentException(
+                    "token: \"%s\", near: \"%s\"".formatted(text, expression.substring(from, to)));
         }
 
         Expr parseExpression() {
@@ -301,9 +312,7 @@ final class ExpressionEvaluator {
                 return new CompareExpr(left, op, right);
             }
 
-            throw new IllegalArgumentException(
-                    "Expected comparator, IN, or BETWEEN after operand, but got %s ('%s') at position %d"
-                            .formatted(next.type(), next.value(), next.pos()));
+            throw syntaxError();
         }
 
         private Operand parseOperand() {
@@ -328,8 +337,8 @@ final class ExpressionEvaluator {
                 ArrayList<String> segments = new ArrayList<>();
                 segments.add(advance().value());
                 // Consume any immediately-following list indices (no dot needed before [n])
-                while (peek().type() == TokenType.LIST_INDEX) {
-                    segments.add(advance().value());
+                while (peek().type() == TokenType.LBRACKET) {
+                    segments.add(parseListIndex());
                 }
                 // Consume .name and .name[n] sequences
                 while (peek().type() == TokenType.DOT) {
@@ -337,20 +346,24 @@ final class ExpressionEvaluator {
                     Token seg = peek();
                     if (seg.type() == TokenType.IDENTIFIER || seg.type() == TokenType.NAME_REF) {
                         segments.add(advance().value());
-                        while (peek().type() == TokenType.LIST_INDEX) {
-                            segments.add(advance().value());
+                        while (peek().type() == TokenType.LBRACKET) {
+                            segments.add(parseListIndex());
                         }
                     } else {
-                        throw new IllegalArgumentException(
-                                "Expected identifier after '.' at position %d".formatted(seg.pos()));
+                        throw syntaxError();
                     }
                 }
                 return new PathOperand(segments);
             }
 
-            throw new IllegalArgumentException(
-                    "Expected operand but got %s ('%s') at position %d"
-                            .formatted(current.type(), current.value(), current.pos()));
+            throw syntaxError();
+        }
+
+        private String parseListIndex() {
+            advance(); // consume [
+            String index = expect(TokenType.NUMBER).value();
+            expect(TokenType.RBRACKET);
+            return "[" + index + "]";
         }
 
         private List<Operand> parseOperandList() {
@@ -374,13 +387,14 @@ final class ExpressionEvaluator {
 
     static Expr parse(String expression) {
         if (expression == null || expression.isBlank()) return null;
-        List<Token> tokens = tokenize(expression.trim());
-        Parser parser = new Parser(tokens);
+        return parse(expression, tokenize(expression));
+    }
+
+    private static Expr parse(String expression, List<Token> tokens) {
+        Parser parser = new Parser(expression, tokens);
         Expr expr = parser.parseExpression();
         if (parser.peek().type() != TokenType.EOF) {
-            throw new IllegalArgumentException(
-                    "Unexpected token '%s' at position %d after parsing complete expression"
-                            .formatted(parser.peek().value(), parser.peek().pos()));
+            throw parser.syntaxError();
         }
         return expr;
     }
@@ -410,23 +424,16 @@ final class ExpressionEvaluator {
      * but an undefined placeholder before a semantic error like {@code contains(x, x)}.
      */
     static void validateSyntax(String expression, String exprType) {
-        if (expression == null || expression.isBlank()) {
+        if (expression == null || expression.isEmpty()) {
             return;
         }
         try {
-            List<Token> tokens = tokenize(expression.trim());
+            List<Token> tokens = tokenize(expression);
             checkRedundantParentheses(tokens, exprType);
-            parse(expression);
+            parse(expression, tokens);
         } catch (IllegalArgumentException e) {
-            String detail = e.getMessage();
-
-            if (detail.startsWith("token:")) {
-                throw new AwsException("ValidationException",
-                    "Invalid " + exprType + ": Syntax error; " + detail, 400);
-            } else {
-                throw new AwsException("ValidationException",
-                    "Invalid " + exprType + ": Syntax error", 400);
-            }
+            throw new AwsException("ValidationException",
+                "Invalid " + exprType + ": Syntax error; " + e.getMessage(), 400);
         }
     }
 
@@ -1033,7 +1040,8 @@ final class ExpressionEvaluator {
         if (a == null || b == null) return a == b;
         for (String type : new String[]{"S", "B", "BOOL", "NULL"}) {
             if (a.has(type) && b.has(type)) {
-                return a.get(type).asText().equals(b.get(type).asText());
+                // A NULL flag can be written as a string in any case, and it is always true.
+                return "NULL".equals(type) || a.get(type).asText().equals(b.get(type).asText());
             }
             if (a.has(type) || b.has(type)) return false;
         }

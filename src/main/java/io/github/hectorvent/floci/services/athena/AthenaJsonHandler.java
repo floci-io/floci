@@ -124,10 +124,8 @@ public class AthenaJsonHandler {
                 }
                 yield Response.ok(response).build();
             }
-            case "GetDataCatalog" -> {
-                String name = request.has("Name") ? request.get("Name").asText() : AthenaService.DEFAULT_CATALOG;
-                yield Response.ok(Map.of("DataCatalog", athenaService.getDataCatalog(region, name))).build();
-            }
+            case "GetDataCatalog" -> Response.ok(
+                    Map.of("DataCatalog", athenaService.getDataCatalog(region, text(request, "Name")))).build();
             case "CreateDataCatalog" -> {
                 Map<String, Object> catalog = athenaService.createDataCatalog(region,
                         text(request, "Name"),
@@ -156,16 +154,16 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of()).build();
             }
             case "ListDatabases" -> {
-                String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
+                String catalog = catalogName(request);
                 yield Response.ok(Map.of("DatabaseList", athenaService.listDatabases(catalog))).build();
             }
             case "ListTableMetadata" -> {
-                String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
+                String catalog = catalogName(request);
                 String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
                 yield Response.ok(Map.of("TableMetadataList", athenaService.listTableMetadata(catalog, database))).build();
             }
             case "GetTableMetadata" -> {
-                String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
+                String catalog = catalogName(request);
                 String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();
@@ -192,6 +190,11 @@ public class AthenaJsonHandler {
     private static String text(JsonNode request, String field) {
         JsonNode node = request.get(field);
         return node == null || node.isNull() ? null : node.asText();
+    }
+
+    private static String catalogName(JsonNode request) {
+        String named = text(request, "CatalogName");
+        return named != null ? named : AthenaService.DEFAULT_CATALOG;
     }
 
     private static Map<String, String> parameters(JsonNode request) {

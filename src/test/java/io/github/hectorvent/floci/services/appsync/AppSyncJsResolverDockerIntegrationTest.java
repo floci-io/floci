@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync;
 
+import com.fasterxml.jackson.core.io.JsonStringEncoder;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -52,7 +53,27 @@ class AppSyncJsResolverDockerIntegrationTest {
               asyncResolver: String
               importsNode: String
               loops: String
+              withStatement: String
+              misplacedAwait: String
+              misplacedYield: String
+              malformedSyntax: String
               keywordsInText: String
+              regexLiteral: String
+              regexKeyword: String
+              regexClassThenUnsupported: String
+              regexDivision: String
+              forOfIdentifierDivision: String
+              regexAfterCaseBlock(n: Int): String
+              regexAfterLabelBlock: String
+              commentCr: String
+              commentLineSeparator: String
+              commentParagraphSeparator: String
+              divisionAfterFunction: String
+              divisionAfterObject: String
+              taggedRawInvalidEscape: String
+              taggedRawInvalidEscapeHole: String
+              untaggedInvalidEscape: String
+              normalizeString: String
             }
             """;
 
@@ -158,6 +179,35 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
+    private static final String WITH_RESOLVER = """
+            export function request(ctx) {
+              with (ctx) { return { payload: { value: "nope" } }; }
+            }
+            """;
+
+    private static final String AWAIT_RESOLVER = """
+            export function request(ctx) {
+              await 1;
+              return { payload: { value: "nope" } };
+            }
+            """;
+
+    private static final String YIELD_RESOLVER = """
+            export function request(ctx) {
+              yield 1;
+              return { payload: { value: "nope" } };
+            }
+            """;
+
+    private static final String MALFORMED_RESOLVER = """
+            export function request(ctx) {
+              // with await yield
+              const text = "with";
+              const value = ;
+              return { payload: { value } };
+            }
+            """;
+
     /** The same keywords, but only inside a string, a comment and a template: still valid. */
     private static final String KEYWORDS_IN_TEXT_RESOLVER = """
             export function request(ctx) {
@@ -170,8 +220,138 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
+    private static final String REGEX_KEYWORD_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: /while/.test("while") } };
+            }
+            export function response(ctx) {
+              return String(ctx.result.value);
+            }
+            """;
+
+    private static final String REGEX_LITERAL_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: /foo/.test("foo") } };
+            }
+            """;
+
+    private static final String REGEX_CLASS_UNSUPPORTED_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: /[//]/.test("/") && this.value } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String REGEX_DIVISION_RESOLVER = """
+            export function request(ctx) {
+              const sum = (value) => value;
+              return { payload: { value: `${sum(6) / 2}% vs ${sum(8) / 2}%` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String FOR_OF_IDENTIFIER_DIVISION_RESOLVER = """
+            export function request(ctx) {
+              const of = 8;
+              for (const value of [of / 2 / 2]) {
+                return { payload: { value: String(value) } };
+              }
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String REGEX_AFTER_CASE_BLOCK_RESOLVER = """
+            export function request(ctx) {
+              switch (ctx.args.n) { case 1: {} /foo/.test("foo"); }
+              return { payload: { value: "unreachable" } };
+            }
+            """;
+
+    private static final String REGEX_AFTER_LABEL_BLOCK_RESOLVER = """
+            export function request(ctx) {
+              label: {} /foo/.test("foo");
+              return { payload: { value: "unreachable" } };
+            }
+            """;
+
+    static final String COMMENT_CR_RESOLVER = """
+            export function request(ctx) {
+              // comment\rwhile(false) {}
+              return { payload: { value: "unreachable" } };
+            }
+            """;
+
+    private static final String COMMENT_LINE_SEPARATOR_RESOLVER =
+            "export function request(ctx) { // comment" + Character.toString(0x2028)
+                + "const pattern = /foo/; return { payload: { value: pattern.test('foo') } }; }";
+
+    private static final String COMMENT_PARAGRAPH_SEPARATOR_RESOLVER =
+            "export function request(ctx) { // comment" + Character.toString(0x2029)
+                + "return { payload: { value: this } }; }";
+
+    private static final String DIVISION_AFTER_FUNCTION_RESOLVER = """
+            export function request(ctx) {
+              const value = function() {} / 2;
+              while (false) {}
+              return { payload: { value } };
+            }
+            """;
+
+    private static final String DIVISION_AFTER_OBJECT_RESOLVER = """
+            export function request(ctx) {
+              const value = true ? { x: 1 } / this : 2;
+              return { payload: { value } };
+            }
+            """;
+
+    private static final String TAGGED_RAW_INVALID_ESCAPE_RESOLVER = """
+            export function request(ctx) {
+              const raw = (parts) => parts.raw[0];
+              return { payload: { value: raw`\\x while` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String TAGGED_RAW_INVALID_ESCAPE_HOLE_RESOLVER = """
+            export function request(ctx) {
+              const raw = (parts, value) => value;
+              return { payload: { value: raw`\\x while ${(() => { while (false) {} return 1; })()}` } };
+            }
+            """;
+
+    private static final String UNTAGGED_INVALID_ESCAPE_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: `\\x while` } };
+            }
+            """;
+
     private String apiId;
     private String apiKey;
+    private static final String NORMALIZE_STRING_RESOLVER = """
+        import { util } from "@aws-appsync/utils";
+        export function request(ctx) {
+          const value = "\\u00E9";
+          return { payload: {
+            defaultForm: util.str.normalize(value),
+            nfc: util.str.normalize(value, "NFC"),
+            nfd: util.str.normalize(value, "NFD"),
+            nfkc: util.str.normalize(value, "NFKC"),
+            nfkd: util.str.normalize(value, "NFKD"),
+            lowercaseNfkd: util.str.normalize(value, "nfkd")
+          } };
+        }
+        export function response(ctx) {
+          return JSON.stringify(ctx.result);
+        }
+        """;
 
     @BeforeAll
     static void configure() {
@@ -196,7 +376,35 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "asyncResolver", "local", ASYNC_RESOLVER);
         createUnitResolver(apiId, "Query", "importsNode", "local", NODE_IMPORT_RESOLVER);
         createUnitResolver(apiId, "Query", "loops", "local", WHILE_RESOLVER);
+        createUnitResolver(apiId, "Query", "withStatement", "local", WITH_RESOLVER);
+        createUnitResolver(apiId, "Query", "misplacedAwait", "local", AWAIT_RESOLVER);
+        createUnitResolver(apiId, "Query", "misplacedYield", "local", YIELD_RESOLVER);
+        createUnitResolver(apiId, "Query", "malformedSyntax", "local", MALFORMED_RESOLVER);
         createUnitResolver(apiId, "Query", "keywordsInText", "local", KEYWORDS_IN_TEXT_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexLiteral", "local", REGEX_LITERAL_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexKeyword", "local", REGEX_KEYWORD_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexClassThenUnsupported", "local",
+                REGEX_CLASS_UNSUPPORTED_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexDivision", "local", REGEX_DIVISION_RESOLVER);
+        createUnitResolver(apiId, "Query", "forOfIdentifierDivision", "local",
+                FOR_OF_IDENTIFIER_DIVISION_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexAfterCaseBlock", "local", REGEX_AFTER_CASE_BLOCK_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexAfterLabelBlock", "local", REGEX_AFTER_LABEL_BLOCK_RESOLVER);
+        createUnitResolver(apiId, "Query", "commentCr", "local", COMMENT_CR_RESOLVER);
+        createUnitResolver(apiId, "Query", "commentLineSeparator", "local", COMMENT_LINE_SEPARATOR_RESOLVER);
+        createUnitResolver(apiId, "Query", "commentParagraphSeparator", "local",
+                COMMENT_PARAGRAPH_SEPARATOR_RESOLVER);
+        createUnitResolver(apiId, "Query", "divisionAfterFunction", "local",
+                DIVISION_AFTER_FUNCTION_RESOLVER);
+        createUnitResolver(apiId, "Query", "divisionAfterObject", "local",
+                DIVISION_AFTER_OBJECT_RESOLVER);
+        createUnitResolver(apiId, "Query", "taggedRawInvalidEscape", "local",
+                TAGGED_RAW_INVALID_ESCAPE_RESOLVER);
+        createUnitResolver(apiId, "Query", "taggedRawInvalidEscapeHole", "local",
+                TAGGED_RAW_INVALID_ESCAPE_HOLE_RESOLVER);
+        createUnitResolver(apiId, "Query", "untaggedInvalidEscape", "local",
+                UNTAGGED_INVALID_ESCAPE_RESOLVER);
+        createUnitResolver(apiId, "Query", "normalizeString", "local", NORMALIZE_STRING_RESOLVER);
     }
 
     @Test
@@ -262,6 +470,17 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.ping", equalTo("pong"));
+    }
+
+    @Test
+    void utilStrNormalizeRespectsTheRequestedFormAndDefaultsToNfc() {
+        query("{ normalizeString }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.normalizeString", equalTo(
+                "{\"defaultForm\":\"é\",\"nfc\":\"é\",\"nfd\":\"é\","
+                    + "\"nfkc\":\"é\",\"nfkd\":\"é\",\"lowercaseNfkd\":\"é\"}"
+            ));
     }
 
     @Test
@@ -346,6 +565,29 @@ class AppSyncJsResolverDockerIntegrationTest {
     }
 
     @Test
+    void strictModeFailuresKeepTheirUnsupportedFeatureDiagnostics() {
+        query("{ withStatement }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("with statements"));
+        query("{ misplacedAwait }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("await"));
+        query("{ misplacedYield }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("generators"));
+    }
+
+    @Test
+    void malformedCodeWithBannedWordsOnlyInLiteralsRemainsSyntaxError() {
+        query("{ malformedSyntax }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("SyntaxError"));
+    }
+
+    @Test
     void theSameKeywordsInStringsAndCommentsAreNotRefused() {
         // The check would be worse than useless if it rejected valid resolvers, so the scan blanks
         // comments, strings and template text before looking for constructs.
@@ -353,6 +595,119 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.keywordsInText", equalTo("try catch class while ok"));
+    }
+
+    @Test
+    void aRegexLiteralIsReportedAsUnsupported() {
+        query("{ regexLiteral }")
+            .statusCode(200)
+            .body("data.regexLiteral", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+    }
+
+    @Test
+    void aKeywordInsideARegexLiteralIsReportedAsUnsupportedRegex() {
+        query("{ regexKeyword }")
+            .statusCode(200)
+            .body("data.regexKeyword", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+    }
+
+    @Test
+    void slashesInsideARegexCharacterClassCannotHideUnsupportedCode() {
+        query("{ regexClassThenUnsupported }")
+            .statusCode(200)
+            .body("data.regexClassThenUnsupported", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
+    }
+
+    @Test
+    void divisionInsideTwoTemplateInterpolationsIsNotReadAsRegex() {
+        query("{ regexDivision }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.regexDivision", equalTo("3% vs 4%"));
+    }
+
+    @Test
+    void anIdentifierNamedOfInsideAForOfIterableKeepsDivisionOperators() {
+        query("{ forOfIdentifierDivision }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.forOfIdentifierDivision", equalTo("2"));
+    }
+
+    @Test
+    void regexAfterCaseAndLabelBlocksIsRefused() {
+        query("{ regexAfterCaseBlock(n: 1) }")
+            .statusCode(200)
+            .body("data.regexAfterCaseBlock", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+        query("{ regexAfterLabelBlock }")
+            .statusCode(200)
+            .body("data.regexAfterLabelBlock", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+    }
+
+    @Test
+    void everyJavaScriptLineTerminatorEndsALineComment() {
+        query("{ commentCr }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while loops"));
+        query("{ commentLineSeparator }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+        query("{ commentParagraphSeparator }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
+    }
+
+    @Test
+    void divisionAfterFunctionExpressionDoesNotHideLaterUnsupportedCode() {
+        query("{ divisionAfterFunction }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while loops"));
+    }
+
+    @Test
+    void divisionAfterTernaryObjectDoesNotHideLaterUnsupportedCode() {
+        query("{ divisionAfterObject }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
+    }
+
+    @Test
+    void invalidEscapeInTaggedRawTemplateDoesNotExposeKeywordsToSubsetScan() {
+        query("{ taggedRawInvalidEscape }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.taggedRawInvalidEscape", equalTo("\\x while"));
+    }
+
+    @Test
+    void invalidEscapeInUntaggedTemplateRemainsSyntaxError() {
+        query("{ untaggedInvalidEscape }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("SyntaxError"))
+            .body("errors[0].message", containsString("escape sequence"));
+    }
+
+    @Test
+    void invalidEscapeInTaggedRawTemplateStillScansExpressions() {
+        query("{ taggedRawInvalidEscapeHole }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while loops"));
     }
 
     @Test
@@ -479,7 +834,7 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200);
     }
 
-    private static String escape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+    static String escape(String value) {
+        return new String(JsonStringEncoder.getInstance().quoteAsString(value));
     }
 }

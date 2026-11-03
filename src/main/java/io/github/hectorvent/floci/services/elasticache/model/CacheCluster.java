@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elasticache.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -15,6 +16,8 @@ public class CacheCluster {
     private CacheClusterStatus cacheClusterStatus;
     private String engine;
     private String engineVersion;
+    // null on records persisted before the field existed; AWS defaults it to true
+    private Boolean autoMinorVersionUpgrade;
     private Endpoint configurationEndpoint;
     private Instant cacheClusterCreateTime;
     private String cacheNodeType;
@@ -35,6 +38,7 @@ public class CacheCluster {
     private boolean atRestEncryptionEnabled;
     private List<String> securityGroupIds = new ArrayList<>();
     private Map<String, String> tags = new LinkedHashMap<>();
+    private Boolean transitEncryptionEnabled;
     private String serverlessCacheName;
     private String ownerAccountId;
     private String userGroupId;
@@ -68,6 +72,9 @@ public class CacheCluster {
 
     public String getEngineVersion() { return engineVersion; }
     public void setEngineVersion(String engineVersion) { this.engineVersion = engineVersion; }
+
+    public boolean isAutoMinorVersionUpgrade() { return autoMinorVersionUpgrade == null || autoMinorVersionUpgrade; }
+    public void setAutoMinorVersionUpgrade(Boolean autoMinorVersionUpgrade) { this.autoMinorVersionUpgrade = autoMinorVersionUpgrade; }
 
     public Endpoint getConfigurationEndpoint() { return configurationEndpoint; }
     public void setConfigurationEndpoint(Endpoint configurationEndpoint) { this.configurationEndpoint = configurationEndpoint; }
@@ -143,4 +150,12 @@ public class CacheCluster {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public Boolean getTransitEncryptionEnabled() { return transitEncryptionEnabled; }
+    public void setTransitEncryptionEnabled(Boolean transitEncryptionEnabled) { this.transitEncryptionEnabled = transitEncryptionEnabled; }
+
+    @JsonIgnore
+    public boolean isEncryptedInTransit() {
+        return transitEncryptionEnabled != null ? transitEncryptionEnabled : (authMode != null && authMode != AuthMode.NO_AUTH);
+    }
 }

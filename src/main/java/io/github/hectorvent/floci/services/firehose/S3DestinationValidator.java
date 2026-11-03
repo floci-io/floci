@@ -118,7 +118,7 @@ public final class S3DestinationValidator {
         collectOpenXMappingViolations(config, shapeName, violations);
         collectSchemaViolations(config, shapeName, violations);
         collectLoggingViolations(config, shapeName, violations);
-        collectProcessingViolations(config, shapeName, violations);
+        collectProcessingViolations(config.getProcessingConfiguration(), shapeName, violations);
         if (!violations.isEmpty()) {
             throw constraintViolations(violations);
         }
@@ -418,9 +418,8 @@ public final class S3DestinationValidator {
     }
 
     /** Members are numbered from 1 in these paths, as the probed messages show. */
-    private static void collectProcessingViolations(S3Destination config, String shapeName,
-                                                    List<String> violations) {
-        ProcessingConfiguration processing = config.getProcessingConfiguration();
+    static void collectProcessingViolations(ProcessingConfiguration processing, String shapeName,
+                                            List<String> violations) {
         if (processing == null || processing.getProcessors() == null) {
             return;
         }

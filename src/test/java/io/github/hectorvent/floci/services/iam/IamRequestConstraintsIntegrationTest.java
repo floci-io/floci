@@ -65,7 +65,7 @@ class IamRequestConstraintsIntegrationTest {
     void aRequiredMemberLeftOutIsReportedAsNull() {
         iam("DeletePolicy").when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, equalTo("1 validation error detected: Value null at 'policyArn' failed"
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'policyArn' failed"
                     + " to satisfy constraint: Member must not be null"));
     }
 
@@ -339,7 +339,7 @@ class IamRequestConstraintsIntegrationTest {
         // A map the request names nowhere is the required member reading as null.
         iam("PutAccountProperties")
         .when().post("/").then().statusCode(400)
-            .body(MESSAGE, equalTo("1 validation error detected: Value null at 'properties' failed"
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'properties' failed"
                     + " to satisfy constraint: Member must not be null"));
     }
 
@@ -357,7 +357,7 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("ReplacementValues.entry.1.key", "Department")
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, equalTo("1 validation error detected: Value null at"
+            .body(MESSAGE, equalTo("1 validation error detected: Value at"
                     + " 'replacementValues.Department.values' failed to satisfy constraint: Member"
                     + " must not be null"));
     }

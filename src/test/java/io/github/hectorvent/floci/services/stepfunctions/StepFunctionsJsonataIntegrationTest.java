@@ -2078,6 +2078,106 @@ class StepFunctionsJsonataIntegrationTest {
         assertEquals(3, results.size(), "one of four items may fail at 25 percent: " + output);
     }
 
+    /** AWS models the percentage as a number, so a definition may spell 100 as 100.0. */
+    @Test
+    void distributedMapToleratedFailurePercentage_acceptsADecimalPercentage() throws Exception {
+        String definition = toleratedPercentageMap("[{\"n\": 1}, {\"n\": 2}, {\"n\": 3}, {\"n\": -1}]", "100.0");
+
+        String smArn = createStateMachine("map-tolerated-percentage-decimal", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode results = new ObjectMapper().readTree(output);
+
+        assertEquals(3, results.size(), "every item may fail at 100.0 percent: " + output);
+    }
+
+    /** 50.5 percent of four items absorbs two failures: the threshold is the floor of 2.02. */
+    @Test
+    void distributedMapToleratedFailurePercentage_absorbsFailuresUpToAFractionalThreshold() throws Exception {
+        String definition = toleratedPercentageMap("[{\"n\": 1}, {\"n\": 2}, {\"n\": -1}, {\"n\": -2}]", "50.5");
+
+        String smArn = createStateMachine("map-tolerated-percentage-fraction-within", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        JsonNode results = new ObjectMapper().readTree(output);
+
+        assertEquals(2, results.size(), "two of four items may fail at 50.5 percent: " + output);
+    }
+
+    /** 49.5 percent of four items absorbs one failure, so a second fails the Map. */
+    @Test
+    void distributedMapToleratedFailurePercentage_failsPastAFractionalThreshold() throws Exception {
+        String definition = toleratedPercentageMap("[{\"n\": 1}, {\"n\": 2}, {\"n\": -1}, {\"n\": -2}]", "49.5");
+
+        String smArn = createStateMachine("map-tolerated-percentage-fraction-exceeded", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.ExceedToleratedFailureThreshold", failure.jsonPath().getString("error"));
+    }
+
+    /** Only a literal may be a decimal: a JSONata expression must evaluate to an integer, as the guide says. */
+    @Test
+    void distributedMapToleratedFailurePercentage_refusesADecimalJsonataExpression() throws Exception {
+        String definition = toleratedPercentageMap("[{\"n\": 1}, {\"n\": -1}]", "\"{% 50.5 %}\"");
+
+        String smArn = createStateMachine("map-tolerated-percentage-jsonata-decimal", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.QueryEvaluationError", failure.jsonPath().getString("error"));
+    }
+
+    /** A Distributed Map over {@code items} in which every negative {@code n} fails its item. */
+    private static String toleratedPercentageMap(String items, String percentage) {
+        return """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Fan",
+                    "States": {
+                        "Fan": {
+                            "Type": "Map",
+                            "Items": ITEMS,
+                            "ToleratedFailurePercentage": PERCENTAGE,
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "Check",
+                                "States": {
+                                    "Check": {
+                                        "Type": "Choice",
+                                        "Choices": [
+                                            {
+                                                "Condition": "{% $states.input.n < 0 %}",
+                                                "Next": "Boom"
+                                            }
+                                        ],
+                                        "Default": "Keep"
+                                    },
+                                    "Boom": {
+                                        "Type": "Fail",
+                                        "Error": "ItemFailed",
+                                        "Cause": "the item asked to fail"
+                                    },
+                                    "Keep": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """
+                .replace("ITEMS", items)
+                .replace("PERCENTAGE", percentage);
+    }
+
     @Test
     void distributedMapWithoutAToleratedFailure_stillFailsWithTheItemsOwnError() throws Exception {
         String definition = """

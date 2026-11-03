@@ -455,6 +455,31 @@ class LambdaWebIntegrationTest {
                 .body("message", equalTo("The specified S3 object does not exist: s3://" + BUCKET
                         + "/missing.zip. Verify the object exists in the bucket."));
 
+        s3Service.putObject(BUCKET, "deleted.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        String marker = s3Service.deleteObject(BUCKET, "deleted.zip").getVersionId();
+        given().contentType("application/json")
+                .body("""
+                        {"buildConfig": {"codeConfig": {"s3Object": {"bucket": "%s", "key": "deleted.zip"}},
+                                         "runtimeConfig": {"runtime": "nodejs24.x"}},
+                         "serviceConfig": {"executionRoleArn": "%s"}}
+                        """.formatted(BUCKET, ROLE))
+                .when().post(revisions)
+                .then().statusCode(400)
+                .header("X-Amzn-Errortype", "ValidationException")
+                .body("message", equalTo("The latest version of the S3 object is a delete marker. Upload a new object"
+                        + " version or pass an explicit S3ObjectVersion."));
+        given().contentType("application/json")
+                .body("""
+                        {"buildConfig": {"codeConfig": {"s3Object": {"bucket": "%s", "key": "deleted.zip",
+                                                                     "versionId": "%s"}},
+                                         "runtimeConfig": {"runtime": "nodejs24.x"}},
+                         "serviceConfig": {"executionRoleArn": "%s"}}
+                        """.formatted(BUCKET, marker, ROLE))
+                .when().post(revisions)
+                .then().statusCode(500)
+                .header("X-Amzn-Errortype", "InternalServerException")
+                .body(equalTo("{}"));
+
         given().contentType("application/json")
                 .body("""
                         {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s",

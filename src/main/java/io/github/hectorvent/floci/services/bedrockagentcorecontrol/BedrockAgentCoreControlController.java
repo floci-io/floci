@@ -72,12 +72,9 @@ public class BedrockAgentCoreControlController {
                     stringMap(req.get("environmentVariables")),
                     obj(req, "authorizerConfiguration"),
                     obj(req, "protocolConfiguration"),
+                    stringMap(req.get("tags")),
                     text(req, "clientToken"),
                     region);
-            Map<String, String> tags = stringMap(req.get("tags"));
-            if (tags != null) {
-                runtime.getTags().putAll(tags);
-            }
             String version = String.valueOf(runtime.getLatestVersion());
 
             ObjectNode out = objectMapper.createObjectNode();

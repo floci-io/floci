@@ -46,10 +46,13 @@ public class DbCluster {
     private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private String engineMode;
     private boolean storageEncrypted;
+    private String kmsKeyId;
 
     private String dockerVolumeName;
     private String volumeId;
     private String containerStorageResourceId;
+    private boolean backendCleanupRequired;
+    private boolean managedSecretCleanupRequired;
 
     // Aurora Serverless v2 scaling (ACUs). Null when the cluster is not Serverless v2.
     private Double serverlessV2MinCapacity;
@@ -199,6 +202,9 @@ public class DbCluster {
     public boolean isStorageEncrypted() { return storageEncrypted; }
     public void setStorageEncrypted(boolean storageEncrypted) { this.storageEncrypted = storageEncrypted; }
 
+    public String getKmsKeyId() { return kmsKeyId; }
+    public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }
+
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }
 
@@ -208,6 +214,16 @@ public class DbCluster {
     public String getContainerStorageResourceId() { return containerStorageResourceId; }
     public void setContainerStorageResourceId(String containerStorageResourceId) {
         this.containerStorageResourceId = containerStorageResourceId;
+    }
+
+    public boolean isBackendCleanupRequired() { return backendCleanupRequired; }
+    public void setBackendCleanupRequired(boolean backendCleanupRequired) {
+        this.backendCleanupRequired = backendCleanupRequired;
+    }
+
+    public boolean isManagedSecretCleanupRequired() { return managedSecretCleanupRequired; }
+    public void setManagedSecretCleanupRequired(boolean managedSecretCleanupRequired) {
+        this.managedSecretCleanupRequired = managedSecretCleanupRequired;
     }
 
     public String getContainerId() { return containerId; }

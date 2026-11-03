@@ -44,6 +44,15 @@ public class Deployment {
     private String state; // BAKING, VALIDATING, DEPLOYING, COMPLETE, ROLLING_BACK, ROLLED_BACK
     @JsonProperty("Description")
     private String description;
+    @JsonProperty("StartedAt")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String startedAt;
+    @JsonProperty("CompletedAt")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String completedAt;
+    @JsonProperty("PercentageComplete")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Float percentageComplete;
 
     public Deployment() {}
 
@@ -88,4 +97,13 @@ public class Deployment {
 
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
+
+    public String getStartedAt() { return startedAt; }
+    public void setStartedAt(String startedAt) { this.startedAt = startedAt; }
+
+    public String getCompletedAt() { return completedAt; }
+    public void setCompletedAt(String completedAt) { this.completedAt = completedAt; }
+
+    public Float getPercentageComplete() { return percentageComplete; }
+    public void setPercentageComplete(Float percentageComplete) { this.percentageComplete = percentageComplete; }
 }

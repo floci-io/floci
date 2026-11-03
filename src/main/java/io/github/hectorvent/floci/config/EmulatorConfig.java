@@ -366,6 +366,7 @@ public interface EmulatorConfig {
         CloudWatchLogsStorageConfig cloudwatchlogs();
         CloudWatchMetricsStorageConfig cloudwatchmetrics();
         SecretsManagerStorageConfig secretsmanager();
+        PaymentCryptographyStorageConfig paymentcryptography();
         AcmStorageConfig acm();
         OpenSearchStorageConfig opensearch();
         AppConfigStorageConfig appconfig();
@@ -482,6 +483,13 @@ public interface EmulatorConfig {
     }
 
     interface SecretsManagerStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface PaymentCryptographyStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
@@ -763,6 +771,7 @@ public interface EmulatorConfig {
         RedshiftDataServiceConfig redshiftData();
         RedshiftServerlessServiceConfig redshiftServerless();
         EventBridgeServiceConfig eventbridge();
+        EventBridgeV2ServiceConfig eventbridgev2();
         CloudMapServiceConfig cloudmap();
         EmrServiceConfig emr();
         WafV2ServiceConfig wafv2();
@@ -770,6 +779,7 @@ public interface EmulatorConfig {
         CloudWatchLogsServiceConfig cloudwatchlogs();
         CloudWatchMetricsServiceConfig cloudwatchmetrics();
         SecretsManagerServiceConfig secretsmanager();
+        PaymentCryptographyServiceConfig paymentcryptography();
         ApiGatewayV2ServiceConfig apigatewayv2();
         KinesisServiceConfig kinesis();
         FirehoseServiceConfig firehose();
@@ -1240,17 +1250,13 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("ns-1.awsdns-01.org")
-        String defaultNameserver1();
+        Optional<String> defaultNameserver1();
 
-        @WithDefault("ns-2.awsdns-02.net")
-        String defaultNameserver2();
+        Optional<String> defaultNameserver2();
 
-        @WithDefault("ns-3.awsdns-03.com")
-        String defaultNameserver3();
+        Optional<String> defaultNameserver3();
 
-        @WithDefault("ns-4.awsdns-04.co.uk")
-        String defaultNameserver4();
+        Optional<String> defaultNameserver4();
 
         /**
          * Optional control-plane processing window for VPC association mutations. A positive
@@ -1736,6 +1742,16 @@ public interface EmulatorConfig {
         boolean cloudwatchMetricsEnabled();
         @WithDefault("60")
         long snapshotSweepIntervalSeconds();
+
+        /**
+         * Copy snapshots of clusters with snapshot copy enabled into the destination Region.
+         * Env: FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_ENABLED
+         */
+        @WithDefault("true")
+        boolean snapshotCopyEnabled();
+
+        @WithDefault("60")
+        long snapshotCopySweepIntervalSeconds();
         @WithDefault("true")
         boolean enabled();
         @WithDefault("5439")
@@ -1799,6 +1815,13 @@ public interface EmulatorConfig {
 
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();
+
+        /**
+         * S3 bucket a snapshot export stages each table's rows and Parquet in, before the finished
+         * Parquet is written to the export's own bucket. Created on first use if it doesn't exist.
+         */
+        @WithDefault("floci-rds-export-staging")
+        String exportStagingBucket();
 
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultMysqlImage();
@@ -1979,6 +2002,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface EventBridgeV2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface CloudMapServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -2092,6 +2120,11 @@ public interface EmulatorConfig {
     }
 
     interface CloudWatchMetricsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface PaymentCryptographyServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

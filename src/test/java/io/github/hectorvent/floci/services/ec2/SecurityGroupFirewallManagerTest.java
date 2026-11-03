@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Info;
@@ -36,14 +37,18 @@ class SecurityGroupFirewallManagerTest {
     void helperCarriesTheResolverAndHostsItsWorkloadsUse() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.network().securityGroupEnforcement().enabled()).thenReturn(true);
-        when(config.network().securityGroupEnforcement().helperImage()).thenReturn("floci/network-helper:local");
+        when(config.network().securityGroupEnforcement().helperImage()).thenReturn("example/network-helper:test");
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
         when(config.docker().imageRegistryBase()).thenReturn(Optional.empty());
         DockerClient dockerClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
         Info linux = mock(Info.class);
         when(linux.getOsType()).thenReturn("linux");
+        when(linux.getArchitecture()).thenReturn("amd64");
         when(dockerClient.infoCmd().exec()).thenReturn(linux);
-        when(dockerClient.inspectImageCmd(anyString()).exec()).thenReturn(null);
+        InspectImageResponse image = mock(InspectImageResponse.class);
+        when(image.getOs()).thenReturn("linux");
+        when(image.getArch()).thenReturn("amd64");
+        when(dockerClient.inspectImageCmd(anyString()).exec()).thenReturn(image);
         DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.isLinuxHost()).thenReturn(true);
         EmbeddedDnsServer embeddedDnsServer = mock(EmbeddedDnsServer.class);

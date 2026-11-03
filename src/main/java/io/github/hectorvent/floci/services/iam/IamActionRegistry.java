@@ -9,7 +9,6 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser;
 import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
-import io.vertx.core.http.impl.HttpUtils;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ResourceInfo;
@@ -20,6 +19,8 @@ import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
 import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -276,6 +277,9 @@ public class IamActionRegistry {
         rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),
         rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
 
+        // ── Amazon Inspector ───────────────────────────────────────────────────
+        rule("inspector2", "POST", "^/disable/?$", "inspector2:Disable"),
+
         // ── API Gateway ────────────────────────────────────────────────────────
         // The management API, v1 and v2, is authorized by HTTP method on the resource path:
         // apigateway:GET, POST, PUT, PATCH or DELETE. Two operations have an action of their own. The
@@ -420,6 +424,16 @@ public class IamActionRegistry {
         rule("eks", "POST",   "^/tags(/.+)?$",                                           "eks:TagResource"),
         rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
 
+        // ── Control Tower ──────────────────────────────────────────────────────
+        rule("controltower", "GET",    "^/tags(/.+)?$", "controltower:ListTagsForResource"),
+        rule("controltower", "POST",   "^/tags(/.+)?$", "controltower:TagResource"),
+        rule("controltower", "DELETE", "^/tags(/.+)?$", "controltower:UntagResource"),
+
+        // ── Bedrock ────────────────────────────────────────────────────────────
+        rule("bedrock", "POST",   "^/resource-policy$",   "bedrock:PutResourcePolicy"),
+        rule("bedrock", "GET",    "^/resource-policy/.+", "bedrock:GetResourcePolicy"),
+        rule("bedrock", "DELETE", "^/resource-policy/.+", "bedrock:DeleteResourcePolicy"),
+
         // ── SES v2 ─────────────────────────────────────────────────────────────
         // SES v1 is a Query API and resolves from its Action like any other; v2 is REST-JSON under
         // /v2/email, so every operation needs its own rule. One rule per operation in the SES v2
@@ -548,6 +562,15 @@ public class IamActionRegistry {
         rule("ses", "POST",  "^/v2/email/update-configuration-sets/?$",                              "ses:UpdateConfigurationSet"),
         rule("ses", "POST",  "^/v2/email/vdm/recommendations/?$",                                    "ses:ListRecommendations"),
 
+        // ── OpenSearch Service VPC endpoints ───────────────────────────────────
+        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/?$",          "es:CreateVpcEndpoint"),
+        rule("es", "GET",    "^/2021-01-01/opensearch/vpcEndpoints/?$",          "es:ListVpcEndpoints"),
+        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/describe/?$", "es:DescribeVpcEndpoints"),
+        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/update/?$",   "es:UpdateVpcEndpoint"),
+        rule("es", "DELETE", "^/2021-01-01/opensearch/vpcEndpoints/[^/]+/?$",    "es:DeleteVpcEndpoint"),
+        rule("es", "GET",    "^/2021-01-01/opensearch/domain/[^/]+/vpcEndpoints/?$",
+                "es:ListVpcEndpointsForDomain"),
+
         // ── Resource Groups ─────────────────────────────────────────────────────
         rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
         rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),
@@ -588,7 +611,7 @@ public class IamActionRegistry {
             return false;
         }
         String method = ctx.getMethod().toUpperCase();
-        String path = rawPath(ctx.getUriInfo());
+        String path = sentPath(ctx.getUriInfo());
         for (ActionRule rule : RULES) {
             if (rule.beforeS3QueryOverrides() && rule.matches(credentialScope, method, path, ctx)) {
                 return true;
@@ -647,7 +670,7 @@ public class IamActionRegistry {
         return IamAuthorizedActions.actionFor(credentialScope, operationName);
     }
 
-    /** The serving method identifies the Route 53 delegation actions. */
+    /** The serving method identifies these actions even when path encoding or matrix parameters vary. */
     public String resolveMatchedRoute(String credentialScope, ResourceInfo resourceInfo) {
         if ("route53".equals(credentialScope) && resourceInfo != null
                 && Route53Controller.class.equals(resourceInfo.getResourceClass())
@@ -661,9 +684,10 @@ public class IamActionRegistry {
      * The action of a REST request, from its method and path alone. A REST request is the operation
      * whose route it reached, so neither an {@code X-Amz-Target} header nor a Query {@code Action}
      * field may name another one: a caller could attach either to have the call checked as an
-     * action they hold. The framework's matching path preserves the same encoding and matrix-parameter
-     * handling the serving route used. Fully decoding the URI separately could turn an encoded
-     * {@code /} inside a parameter into another segment and miss the route's rule.
+     * action they hold. The path is matched as sent, still percent-encoded, which is the form the
+     * router matched: decoded, an encoded {@code /} inside a parameter splits it into two segments,
+     * so the route's rule would not match and the call would pass as an unknown action. It is read
+     * from the request URI because RESTEasy Reactive does not serve {@code UriInfo.getPath(false)}.
      *
      * <p>Returns {@code null} when no rule matches (caller treats this as ALLOW).
      */
@@ -671,7 +695,7 @@ public class IamActionRegistry {
         String method = ctx.getMethod().toUpperCase();
         // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
         // bucket's one trailing slash, so an S3 path is matched as sent.
-        String path = "s3".equals(credentialScope) ? rawPath(ctx.getUriInfo()) : routedPath(ctx);
+        String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
 
         if ("s3".equals(credentialScope)) {
             // An S3 Control route is matched before the query overrides below, which would read the
@@ -704,28 +728,51 @@ public class IamActionRegistry {
     }
 
     /**
+     * The path the router matched, relative to the application root. A request no filter rewrote is matched
+     * on its normalized path, still percent-encoded but with encoded unreserved characters such as {@code %2E}
+     * decoded and dot segments removed, so {@code /functions/x/%2E%2E/fn} is {@code /functions/fn}; a request
+     * a filter rewrote is matched on its new path, decoded. {@link #sentPath} for a synthetic context.
+     */
+    static String rawPath(ContainerRequestContext ctx) {
+        ResteasyReactiveRequestContext request = routingContext(ctx);
+        return request == null ? sentPath(ctx.getUriInfo()) : rooted(request.getPathWithoutPrefix());
+    }
+
+    /**
      * The request path relative to the application root, as {@link UriInfo#getPath()} gives it, but
      * still percent-encoded.
      */
-    static String rawPath(UriInfo uriInfo) {
+    static String sentPath(UriInfo uriInfo) {
         String path = uriInfo.getRequestUri().getRawPath();
         String base = uriInfo.getBaseUri().getRawPath();
         if (base != null && base.length() > 1 && path.startsWith(base)) {
             path = path.substring(base.length() - 1);
         }
-        return path.startsWith("/") ? path : "/" + path;
+        return rooted(path);
     }
 
     /**
-     * The path RESTEasy matched, including its matrix-parameter handling. Synthetic contexts use
-     * Vert.x's normalization, which decodes unreserved characters and resolves dot segments without
-     * splitting encoded slashes. S3 keeps its raw key spelling instead.
+     * {@link #rawPath} decoded: the path {@link UriInfo#getPath()} would give for the route the router
+     * matched. {@link UriInfo#getPath()} itself for a synthetic context.
      */
-    private static String routedPath(ContainerRequestContext ctx) {
-        String path = ctx instanceof ResteasyReactiveContainerRequestContext reactive
-                && reactive.getServerRequestContext() instanceof ResteasyReactiveRequestContext server
-                ? server.getPathWithoutPrefix() : HttpUtils.normalizePath(rawPath(ctx.getUriInfo()));
-        return withoutTrailingSlash(path);
+    public static String decodedPath(ContainerRequestContext ctx) {
+        ResteasyReactiveRequestContext request = routingContext(ctx);
+        if (request == null) {
+            return ctx.getUriInfo().getPath();
+        }
+        String path = request.getPathWithoutPrefix();
+        boolean rewritten = !request.getPath().equals(request.serverRequest().getRequestNormalisedPath());
+        return rooted(rewritten ? path : URLDecoder.decode(path.replace("+", "%2B"), StandardCharsets.UTF_8));
+    }
+
+    private static ResteasyReactiveRequestContext routingContext(ContainerRequestContext ctx) {
+        return ctx instanceof ResteasyReactiveContainerRequestContext container
+                && container.getServerRequestContext() instanceof ResteasyReactiveRequestContext request
+                ? request : null;
+    }
+
+    private static String rooted(String path) {
+        return path.startsWith("/") ? path : "/" + path;
     }
 
     /**
@@ -733,11 +780,8 @@ public class IamActionRegistry {
      * so a rule ending at the route's last segment has to match it too, or the request would pass as an
      * unknown action.
      */
-    static String routedPath(UriInfo uriInfo) {
-        return withoutTrailingSlash(rawPath(uriInfo));
-    }
-
-    private static String withoutTrailingSlash(String path) {
+    static String routedPath(ContainerRequestContext ctx) {
+        String path = rawPath(ctx);
         while (path.length() > 1 && path.endsWith("/")) {
             path = path.substring(0, path.length() - 1);
         }

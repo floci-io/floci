@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -778,7 +779,7 @@ public class DmsService implements Resettable {
     }
 
     private static double now() {
-        return Instant.now().toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(Instant.now());
     }
 
     /** DMS-generated ARN suffixes are 26 characters of the base32 alphabet. */

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.services.glue.model.*;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.Registry;
@@ -113,7 +114,7 @@ public class GlueJsonHandler {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("Name").asText();
                 Table table = glueService.getTable(dbName, tableName);
-                yield Response.ok(Map.of("Table", table)).build();
+                yield Response.ok(Map.of("Table", GlueService.withReadDefaults(table))).build();
             }
             case "CreatePartitionIndex" -> {
                 String dbName = request.get("DatabaseName").asText();
@@ -141,7 +142,8 @@ public class GlueJsonHandler {
             }
             case "GetTables" -> {
                 String dbName = request.get("DatabaseName").asText();
-                yield Response.ok(Map.of("TableList", glueService.getTables(dbName))).build();
+                List<Table> tables = glueService.getTables(dbName).stream().map(GlueService::withReadDefaults).toList();
+                yield Response.ok(Map.of("TableList", tables)).build();
             }
             case "UpdateTable" -> {
                 String dbName = request.get("DatabaseName").asText();
@@ -204,7 +206,10 @@ public class GlueJsonHandler {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
                 String expression = request.path("Expression").asText(null);
-                yield Response.ok(Map.of("Partitions", glueService.getPartitions(dbName, tableName, expression))).build();
+                GlueService.Segment segment = request.hasNonNull("Segment") ? segment(request.get("Segment")) : null;
+                List<Partition> partitions = glueService.getPartitions(dbName, tableName, expression, segment).stream()
+                        .map(GlueService::withReadDefaults).toList();
+                yield Response.ok(Map.of("Partitions", partitions)).build();
             }
             case "DeletePartition" -> handleDeletePartition(request);
             case "BatchDeletePartition" -> handleBatchDeletePartition(request);
@@ -700,13 +705,37 @@ public class GlueJsonHandler {
         return Response.ok(Map.of("Errors", glueService.batchUpdatePartitions(dbName, tableName, entries))).build();
     }
 
+    /**
+     * A Segment that is not a structure of integers is a malformed request, refused with SerializationException
+     * before its constraints are checked, as the awsJson1_1 protocol refuses a member of the wrong type; the
+     * message is Floci's.
+     */
+    private static GlueService.Segment segment(JsonNode segment) {
+        if (!segment.isObject()) {
+            throw new AwsException("SerializationException", "Segment must be a structure", 400);
+        }
+        return new GlueService.Segment(
+                integerMember(segment, "SegmentNumber"), integerMember(segment, "TotalSegments"));
+    }
+
+    private static Integer integerMember(JsonNode segment, String member) {
+        JsonNode value = segment.get(member);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new AwsException("SerializationException", "Segment." + member + " must be an integer", 400);
+        }
+        return value.intValue();
+    }
+
     private Response handleGetPartition(JsonNode request) {
         String dbName = request.get("DatabaseName").asText();
         String tableName = request.get("TableName").asText();
         List<String> partitionValues = mapper.convertValue(request.get("PartitionValues"), STRING_LIST);
         return Response.ok(Map.of(
                 "Partition",
-                glueService.getPartition(dbName, tableName, partitionValues)))
+                GlueService.withReadDefaults(glueService.getPartition(dbName, tableName, partitionValues))))
                 .build();
     }
 
@@ -717,8 +746,10 @@ public class GlueJsonHandler {
         List<List<String>> partitionValues = partitionsToGet.stream()
                 .map(partition -> mapper.convertValue(partition.get("Values"), STRING_LIST))
                 .toList();
+        List<Partition> partitions = glueService.batchGetPartitions(dbName, tableName, partitionValues).stream()
+                .map(GlueService::withReadDefaults).toList();
         return Response.ok(Map.of(
-                "Partitions", glueService.batchGetPartitions(dbName, tableName, partitionValues),
+                "Partitions", partitions,
                 "UnprocessedKeys", List.of()))
                 .build();
     }
@@ -745,7 +776,8 @@ public class GlueJsonHandler {
         GlueService.Page<Table> page = glueService.searchTables(
                 request.path("SearchText").asText(null), filters, sortCriteria,
                 readMaxResults(request), readNextToken(request));
-        return Response.ok(pageResponse("TableList", page.items(), page.nextToken())).build();
+        List<Table> tables = page.items().stream().map(GlueService::withReadDefaults).toList();
+        return Response.ok(pageResponse("TableList", tables, page.nextToken())).build();
     }
 
     private Response handleDeletePartition(JsonNode request) {
@@ -1171,15 +1203,11 @@ public class GlueJsonHandler {
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("Name", ruleset.getName());
         putIfNotNull(item, "Description", ruleset.getDescription());
-        item.put("CreatedOn", epochSeconds(ruleset.getCreatedOn()));
-        item.put("LastModifiedOn", epochSeconds(ruleset.getLastModifiedOn()));
+        item.put("CreatedOn", EpochSeconds.fromInstant(ruleset.getCreatedOn()));
+        item.put("LastModifiedOn", EpochSeconds.fromInstant(ruleset.getLastModifiedOn()));
         putIfNotNull(item, "TargetTable", ruleset.getTargetTable());
         putIfNotNull(item, "RuleCount", GlueService.dataQualityRuleCount(ruleset.getRuleset()));
         return item;
-    }
-
-    private static double epochSeconds(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
     }
 
     private static String iso(Instant instant) {

@@ -1,0 +1,359 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_payment_cryptography_shapes.py",
+    "botocore": "botocore 1.43.113 (installed package)"
+  },
+  "operations": {
+    "CreateKey": "CreateKeyInput",
+    "GetKey": "GetKeyInput",
+    "ListKeys": "ListKeysInput",
+    "DeleteKey": "DeleteKeyInput",
+    "CreateAlias": "CreateAliasInput",
+    "GetAlias": "GetAliasInput",
+    "ListAliases": "ListAliasesInput",
+    "UpdateAlias": "UpdateAliasInput",
+    "DeleteAlias": "DeleteAliasInput",
+    "TagResource": "TagResourceInput",
+    "UntagResource": "UntagResourceInput",
+    "ListTagsForResource": "ListTagsForResourceInput"
+  },
+  "shapes": {
+    "AliasName": {
+      "type": "string",
+      "min": 7,
+      "max": 256,
+      "pattern": "alias/[a-zA-Z0-9/_-]+"
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "CreateAliasInput": {
+      "type": "structure",
+      "required": [
+        "AliasName"
+      ],
+      "members": {
+        "AliasName": "AliasName",
+        "KeyArn": "KeyArn"
+      }
+    },
+    "CreateKeyInput": {
+      "type": "structure",
+      "required": [
+        "KeyAttributes",
+        "Exportable"
+      ],
+      "members": {
+        "KeyAttributes": "KeyAttributes",
+        "KeyCheckValueAlgorithm": "KeyCheckValueAlgorithm",
+        "Exportable": "Boolean",
+        "Enabled": "Boolean",
+        "Tags": "Tags",
+        "DeriveKeyUsage": "DeriveKeyUsage",
+        "ReplicationRegions": "Regions"
+      }
+    },
+    "DeleteAliasInput": {
+      "type": "structure",
+      "required": [
+        "AliasName"
+      ],
+      "members": {
+        "AliasName": "AliasName"
+      }
+    },
+    "DeleteKeyInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType",
+        "DeleteKeyInDays": "DeleteKeyInputDeleteKeyInDaysInteger"
+      }
+    },
+    "DeleteKeyInputDeleteKeyInDaysInteger": {
+      "type": "integer",
+      "min": 3,
+      "max": 180
+    },
+    "DeriveKeyUsage": {
+      "type": "string",
+      "enum": [
+        "TR31_B0_BASE_DERIVATION_KEY",
+        "TR31_C0_CARD_VERIFICATION_KEY",
+        "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+        "TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS",
+        "TR31_E1_EMV_MKEY_CONFIDENTIALITY",
+        "TR31_E2_EMV_MKEY_INTEGRITY",
+        "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS",
+        "TR31_E5_EMV_MKEY_CARD_PERSONALIZATION",
+        "TR31_E6_EMV_MKEY_OTHER",
+        "TR31_K0_KEY_ENCRYPTION_KEY",
+        "TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+        "TR31_M3_ISO_9797_3_MAC_KEY",
+        "TR31_M1_ISO_9797_1_MAC_KEY",
+        "TR31_M6_ISO_9797_5_CMAC_KEY",
+        "TR31_M7_HMAC_KEY",
+        "TR31_P0_PIN_ENCRYPTION_KEY",
+        "TR31_P1_PIN_GENERATION_KEY",
+        "TR31_V1_IBM3624_PIN_VERIFICATION_KEY",
+        "TR31_V2_VISA_PIN_VERIFICATION_KEY"
+      ]
+    },
+    "GetAliasInput": {
+      "type": "structure",
+      "required": [
+        "AliasName"
+      ],
+      "members": {
+        "AliasName": "AliasName"
+      }
+    },
+    "GetKeyInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType"
+      }
+    },
+    "KeyAlgorithm": {
+      "type": "string",
+      "enum": [
+        "TDES_2KEY",
+        "TDES_3KEY",
+        "AES_128",
+        "AES_192",
+        "AES_256",
+        "HMAC_SHA256",
+        "HMAC_SHA384",
+        "HMAC_SHA512",
+        "HMAC_SHA224",
+        "RSA_2048",
+        "RSA_3072",
+        "RSA_4096",
+        "ECC_NIST_P256",
+        "ECC_NIST_P384",
+        "ECC_NIST_P521"
+      ]
+    },
+    "KeyArn": {
+      "type": "string",
+      "min": 70,
+      "max": 150,
+      "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2}-[a-z]{1,16}-[0-9]+:[0-9]{12}:key/[0-9a-zA-Z]{16,64}"
+    },
+    "KeyArnOrKeyAliasType": {
+      "type": "string",
+      "min": 7,
+      "max": 322,
+      "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2}-[a-z]{1,16}-[0-9]+:[0-9]{12}:(key/[0-9a-zA-Z]{16,64}|alias/[a-zA-Z0-9/_-]+)$|^alias/[a-zA-Z0-9/_-]+"
+    },
+    "KeyAttributes": {
+      "type": "structure",
+      "required": [
+        "KeyUsage",
+        "KeyClass",
+        "KeyAlgorithm",
+        "KeyModesOfUse"
+      ],
+      "members": {
+        "KeyUsage": "KeyUsage",
+        "KeyClass": "KeyClass",
+        "KeyAlgorithm": "KeyAlgorithm",
+        "KeyModesOfUse": "KeyModesOfUse"
+      }
+    },
+    "KeyCheckValueAlgorithm": {
+      "type": "string",
+      "enum": [
+        "CMAC",
+        "ANSI_X9_24",
+        "HMAC",
+        "SHA_1"
+      ]
+    },
+    "KeyClass": {
+      "type": "string",
+      "enum": [
+        "SYMMETRIC_KEY",
+        "ASYMMETRIC_KEY_PAIR",
+        "PRIVATE_KEY",
+        "PUBLIC_KEY"
+      ]
+    },
+    "KeyModesOfUse": {
+      "type": "structure",
+      "members": {
+        "Encrypt": "PrimitiveBoolean",
+        "Decrypt": "PrimitiveBoolean",
+        "Wrap": "PrimitiveBoolean",
+        "Unwrap": "PrimitiveBoolean",
+        "Generate": "PrimitiveBoolean",
+        "Sign": "PrimitiveBoolean",
+        "Verify": "PrimitiveBoolean",
+        "DeriveKey": "PrimitiveBoolean",
+        "NoRestrictions": "PrimitiveBoolean"
+      }
+    },
+    "KeyState": {
+      "type": "string",
+      "enum": [
+        "CREATE_IN_PROGRESS",
+        "CREATE_COMPLETE",
+        "DELETE_PENDING",
+        "DELETE_COMPLETE"
+      ]
+    },
+    "KeyUsage": {
+      "type": "string",
+      "enum": [
+        "TR31_B0_BASE_DERIVATION_KEY",
+        "TR31_C0_CARD_VERIFICATION_KEY",
+        "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+        "TR31_D1_ASYMMETRIC_KEY_FOR_DATA_ENCRYPTION",
+        "TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS",
+        "TR31_E1_EMV_MKEY_CONFIDENTIALITY",
+        "TR31_E2_EMV_MKEY_INTEGRITY",
+        "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS",
+        "TR31_E5_EMV_MKEY_CARD_PERSONALIZATION",
+        "TR31_E6_EMV_MKEY_OTHER",
+        "TR31_K0_KEY_ENCRYPTION_KEY",
+        "TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+        "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT",
+        "TR31_M0_ISO_16609_MAC_KEY",
+        "TR31_M3_ISO_9797_3_MAC_KEY",
+        "TR31_M1_ISO_9797_1_MAC_KEY",
+        "TR31_M6_ISO_9797_5_CMAC_KEY",
+        "TR31_M7_HMAC_KEY",
+        "TR31_P0_PIN_ENCRYPTION_KEY",
+        "TR31_P1_PIN_GENERATION_KEY",
+        "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
+        "TR31_V1_IBM3624_PIN_VERIFICATION_KEY",
+        "TR31_V2_VISA_PIN_VERIFICATION_KEY",
+        "TR31_K2_TR34_ASYMMETRIC_KEY"
+      ]
+    },
+    "ListAliasesInput": {
+      "type": "structure",
+      "members": {
+        "KeyArn": "KeyArn",
+        "NextToken": "NextToken",
+        "MaxResults": "MaxResults"
+      }
+    },
+    "ListKeysInput": {
+      "type": "structure",
+      "members": {
+        "KeyState": "KeyState",
+        "NextToken": "NextToken",
+        "MaxResults": "MaxResults"
+      }
+    },
+    "ListTagsForResourceInput": {
+      "type": "structure",
+      "required": [
+        "ResourceArn"
+      ],
+      "members": {
+        "ResourceArn": "ResourceArn",
+        "NextToken": "NextToken",
+        "MaxResults": "MaxResults"
+      }
+    },
+    "MaxResults": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "NextToken": {
+      "type": "string",
+      "min": 1,
+      "max": 8192
+    },
+    "PrimitiveBoolean": {
+      "type": "boolean"
+    },
+    "Region": {
+      "type": "string",
+      "pattern": "[a-z]{2}-[a-z]{1,16}-[0-9]+"
+    },
+    "Regions": {
+      "type": "list",
+      "member": "Region"
+    },
+    "ResourceArn": {
+      "type": "string",
+      "min": 70,
+      "max": 150,
+      "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2}-[a-z]{1,16}-[0-9]+:[0-9]{12}:key/[0-9a-zA-Z]{16,64}"
+    },
+    "Tag": {
+      "type": "structure",
+      "required": [
+        "Key",
+        "Value"
+      ],
+      "members": {
+        "Key": "TagKey",
+        "Value": "TagValue"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128
+    },
+    "TagKeys": {
+      "type": "list",
+      "min": 0,
+      "max": 200,
+      "member": "TagKey"
+    },
+    "TagResourceInput": {
+      "type": "structure",
+      "required": [
+        "ResourceArn",
+        "Tags"
+      ],
+      "members": {
+        "ResourceArn": "ResourceArn",
+        "Tags": "Tags"
+      }
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "Tags": {
+      "type": "list",
+      "min": 0,
+      "max": 200,
+      "member": "Tag"
+    },
+    "UntagResourceInput": {
+      "type": "structure",
+      "required": [
+        "ResourceArn",
+        "TagKeys"
+      ],
+      "members": {
+        "ResourceArn": "ResourceArn",
+        "TagKeys": "TagKeys"
+      }
+    },
+    "UpdateAliasInput": {
+      "type": "structure",
+      "required": [
+        "AliasName"
+      ],
+      "members": {
+        "AliasName": "AliasName",
+        "KeyArn": "KeyArn"
+      }
+    }
+  }
+}

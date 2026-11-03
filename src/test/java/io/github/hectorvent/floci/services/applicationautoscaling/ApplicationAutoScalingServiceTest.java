@@ -21,6 +21,7 @@ import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -617,6 +618,20 @@ class ApplicationAutoScalingServiceTest {
         register();
         assertEquals(1, service.describeScalableTargets(NAMESPACE, null, null, REGION).size());
         assertEquals(0, service.describeScalableTargets(NAMESPACE, null, null, "eu-west-1").size());
+    }
+
+    /** IAM finds a target's ARN, which ends in the id it was registered with, by the three members naming it. */
+    @Test
+    void aTargetIsFoundByItsNamespaceResourceAndDimension() {
+        String arn = register().getScalableTargetArn();
+        assertEquals("application-autoscaling", service.namespace());
+        assertEquals(Optional.of(arn), service.find("ScalableTarget", List.of(NAMESPACE, RESOURCE_ID, DIMENSION), REGION));
+        assertEquals(Optional.empty(), service.find("ScalableTarget",
+                List.of(NAMESPACE, RESOURCE_ID, "ecs:service:Other"), REGION));
+        assertEquals(Optional.empty(), service.find("ScalableTarget", List.of(NAMESPACE, RESOURCE_ID, DIMENSION),
+                "eu-west-1"));
+        assertEquals(Optional.empty(), service.find("ScalableTarget", List.of(RESOURCE_ID), REGION));
+        assertEquals(Optional.empty(), service.find("other", List.of(NAMESPACE, RESOURCE_ID, DIMENSION), REGION));
     }
 
     private TargetTrackingConfiguration withCooldowns(TargetTrackingConfiguration config) {

@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
@@ -115,16 +117,99 @@ class LambdaDataSourceInvokerTest {
         assertEquals(List.of(Map.of("id", "1"), Map.of("id", "2")), result);
     }
 
+    private void failsWith(String functionError, byte[] payload) {
+        when(lambda.invokeArn(eq(FN_ARN), any(), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, functionError, payload, null, "req-1"));
+    }
+
+    private AwsException functionFailure(Map<String, Object> request) {
+        return assertThrows(AwsException.class, () -> invoker.invoke(dataSource(), request, "eu-west-1"));
+    }
+
     @Test
     void aFunctionErrorFailsTheFieldRatherThanResolvingToTheErrorObject() {
-        when(lambda.invokeArn(eq(FN_ARN), any(), eq(InvocationType.RequestResponse)))
-                .thenReturn(new InvokeResult(200, "Unhandled",
-                        "{\"errorMessage\": \"boom\"}".getBytes(StandardCharsets.UTF_8), null, "req-1"));
+        failsWith("Unhandled", ("{\"errorType\":\"Error\",\"errorMessage\":\"I always fail.\","
+                + "\"trace\":[\"Error: I always fail.\"]}").getBytes(StandardCharsets.UTF_8));
 
-        AwsException e = assertThrows(AwsException.class, () -> invoker.invoke(dataSource(),
-                Map.of("payload", Map.of()), "eu-west-1"));
+        AwsException e = functionFailure(Map.of("payload", Map.of()));
 
-        assertTrue(e.getMessage().contains("boom"), e.getMessage());
+        assertEquals("Lambda:Unhandled", e.getErrorCode());
+        assertEquals("I always fail.", e.getMessage());
+    }
+
+    @Test
+    void theErrorTypeIsTheFunctionErrorTheInvokeReported() {
+        failsWith("Handled", "{\"errorMessage\":\"boom\"}".getBytes(StandardCharsets.UTF_8));
+
+        AwsException e = functionFailure(Map.of("payload", Map.of()));
+
+        assertEquals("Lambda:Handled", e.getErrorCode());
+        assertEquals("boom", e.getMessage());
+    }
+
+    @Test
+    void aVtlInvokeReportsTheFunctionErrorTheSameWay() {
+        failsWith("Unhandled", "{\"errorMessage\":\"boom\"}".getBytes(StandardCharsets.UTF_8));
+
+        AwsException e = assertThrows(AwsException.class, () -> invoker.invokeVtl(dataSource(),
+                Map.of("version", "2018-05-29", "operation", "Invoke", "payload", Map.of()), "eu-west-1"));
+
+        assertEquals("Lambda:Unhandled", e.getErrorCode());
+        assertEquals("boom", e.getMessage());
+    }
+
+    @Test
+    void aBatchInvokeReportsTheFunctionErrorTheSameWay() {
+        failsWith("Unhandled", "{\"errorMessage\":\"boom\"}".getBytes(StandardCharsets.UTF_8));
+
+        AwsException e = functionFailure(Map.of("operation", "BatchInvoke",
+                "payload", List.of(Map.of("id", "1"))));
+
+        assertEquals("Lambda:Unhandled", e.getErrorCode());
+        assertEquals("boom", e.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"errorType\":\"Error\"}",
+            "{\"errorMessage\":{\"nested\":true}}",
+            "{\"errorMessage\":42}",
+            "{\"errorMessage\":null}",
+            "[\"errorMessage\"]",
+            "\"errorMessage\"",
+            "not json {",
+            "{\"errorMessage\":\"boom\"} trailing garbage",
+            "{\"errorMessage\":\"first\"}{\"errorMessage\":\"second\"}",
+            "   ",
+            ""
+    })
+    void aPayloadWithoutATextualErrorMessageIsTheMessageAsIs(String payload) {
+        failsWith("Unhandled", payload.getBytes(StandardCharsets.UTF_8));
+
+        AwsException e = functionFailure(Map.of("payload", Map.of()));
+
+        assertEquals("Lambda:Unhandled", e.getErrorCode());
+        assertEquals(payload, e.getMessage());
+    }
+
+    @Test
+    void whitespaceAfterTheErrorPayloadStillYieldsTheErrorMessage() {
+        failsWith("Unhandled", "{\"errorMessage\":\"boom\"}\n".getBytes(StandardCharsets.UTF_8));
+
+        AwsException e = functionFailure(Map.of("payload", Map.of()));
+
+        assertEquals("Lambda:Unhandled", e.getErrorCode());
+        assertEquals("boom", e.getMessage());
+    }
+
+    @Test
+    void aNullErrorPayloadStillFailsWithTheFunctionErrorType() {
+        failsWith("Unhandled", null);
+
+        AwsException e = functionFailure(Map.of("payload", Map.of()));
+
+        assertEquals("Lambda:Unhandled", e.getErrorCode());
+        assertEquals("", e.getMessage());
     }
 
     @Test

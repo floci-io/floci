@@ -86,6 +86,14 @@ public abstract class AbstractRedisAuthProxy {
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
     }
 
+    protected final String backendHost() {
+        return backendHost;
+    }
+
+    protected final int backendPort() {
+        return backendPort;
+    }
+
     /** Whether the {@code AUTH} command is required before bridging to the backend. */
     protected abstract boolean authRequired();
 

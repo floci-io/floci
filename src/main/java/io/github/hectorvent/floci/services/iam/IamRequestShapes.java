@@ -33,7 +33,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
  * outside its shape's rules carries the whole set the shape declares. {@code docs/services/iam.md}
  * records what moved with them and what did not.
  */
-final class IamRequestShapes {
+public final class IamRequestShapes {
 
     private static final QueryConstraintCheck CHECK = QueryConstraintCheck.load(
             "aws/iam-request-shapes.json", "IAM request shapes", IamValidationErrors.MESSAGES);
@@ -42,7 +42,7 @@ final class IamRequestShapes {
     }
 
     /** Throws {@code ValidationError} when the request breaks a constraint the model declares. */
-    static void check(String action, MultivaluedMap<String, String> params) {
+    public static void check(String action, MultivaluedMap<String, String> params) {
         CHECK.check(action, params);
     }
 }

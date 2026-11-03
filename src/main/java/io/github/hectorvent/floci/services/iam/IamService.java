@@ -176,11 +176,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private final Object tagLock = new Object();
 
+    /**
+     * Guards the read-modify-write of a customer managed policy's AttachmentCount. Attaching or
+     * detaching one policy on several principals at once would otherwise lose updates, leaving a
+     * fully detached policy that DeletePolicy still refuses as attached.
+     */
+    private final Object policyAttachmentCountLock = new Object();
+
     /** CSPRNG for long-term secret access keys; ordinary resource IDs keep using {@link ThreadLocalRandom}. */
     private final SecureRandom secureRandom = new SecureRandom();
 
-    /** AWSServiceName as AWS constrains it: 1-128 characters of {@code [\w+=,.@-]}. */
-    private static final Pattern SERVICE_PRINCIPAL_PATTERN = Pattern.compile("[\\w+=,.@-]{1,128}");
     /** CustomSuffix as AWS constrains it: 1-64 characters of {@code [\w+=,.@-]}. */
     private static final Pattern CUSTOM_SUFFIX_PATTERN = Pattern.compile("[\\w+=,.@-]{1,64}");
     private static final int ROLE_DESCRIPTION_MAX_LENGTH = 1000;
@@ -277,16 +282,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private static final Set<String> SSH_PUBLIC_KEY_ENCODINGS = Set.of("SSH", "PEM");
     /** certificateIdType is 24 to 128 of [\w]+, so a 32-character id sits inside that. */
     private static final int SIGNING_CERTIFICATE_ID_LENGTH = 32;
+    /** Two of {@code statusType}'s values, which this service writes itself where the model reads the set. */
     private static final String CREDENTIAL_STATUS_ACTIVE = "Active";
     private static final String CREDENTIAL_STATUS_EXPIRED = "Expired";
-    /**
-     * statusType's values, shared by access keys, signing certificates, SSH public keys and
-     * service-specific credentials: Active, Inactive and Expired. Each operation's prose explains
-     * only the first two, so the third is easy to reject by mistake, while the API Reference lists
-     * all three as valid on each of them.
-     */
-    private static final Set<String> CREDENTIAL_STATUSES =
-            Set.of(CREDENTIAL_STATUS_ACTIVE, "Inactive", CREDENTIAL_STATUS_EXPIRED);
     /** {@code certificateBodyType} and {@code privateKeyType} are both 1 to 16384 characters. */
     private static final int MAX_CERTIFICATE_BODY_LENGTH = 16384;
     /** {@code certificateChainType} is far larger, at 1 to 2097152. */
@@ -1267,9 +1265,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * five entities and passes everything else through, which would make the {@code Role} this
      * action and {@code GetRole} answer unparsable.
      *
-     * <p>The rendering names neither the offending value nor the set, the way
-     * {@link #requireStatusFromEnum} does, which is the one IAM constraint rendering a recording
-     * covers. It also keeps the refused description out of the error body, where a control
+     * <p>The rendering names the member and not the offending value, which is IAM's form
+     * throughout. It also keeps the refused description out of the error body, where a control
      * character would break the answer it is being refused for.
      */
     private static void validateRoleDescription(String description) {
@@ -1303,7 +1300,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             return;
         }
         if (roleName == null) {
-            throw SmithyValidationErrors.validationError(SmithyValidationErrors.notNull("roleName"));
+            throw IamValidationErrors.notNull("roleName");
         }
         throw IamValidationErrors.validationError("roleName", roleName, constraint);
     }
@@ -1418,10 +1415,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * {@code _}, and that attribute forces replacement, so a name without one never converges.
      */
     public IamRole createServiceLinkedRole(String awsServiceName, String customSuffix, String description) {
-        if (awsServiceName == null || !SERVICE_PRINCIPAL_PATTERN.matcher(awsServiceName).matches()) {
-            throw new AwsException("InvalidInput",
-                    "AWSServiceName must be 1-128 characters matching [\\w+=,.@-], for example es.amazonaws.com.", 400); // partition-literal: AWS's own message text
-        }
         if (customSuffix != null && !customSuffix.isEmpty()
                 && !CUSTOM_SUFFIX_PATTERN.matcher(customSuffix).matches()) {
             throw new AwsException("InvalidInput",
@@ -1531,20 +1524,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * request carrying both is refused whole, before the description is written.
      */
     public IamRole updateRole(String roleName, String description, int maxSessionDuration) {
+        return updateRole(roleName, description, maxSessionDuration, null);
+    }
+
+    /** Applies an update only to the verified role, even if another role has since taken its name. */
+    public IamRole updateRole(String roleName, String description, int maxSessionDuration, String expectedRoleId) {
         validateRoleName(roleName);
         validateRoleDescription(description);
-        IamRole role = getRole(roleName);
-        if (maxSessionDuration > 0) {
-            requireNotServiceLinked(role, roleName);
+        synchronized (resourceNameLock) {
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            if (maxSessionDuration > 0) {
+                requireNotServiceLinked(role, roleName);
+            }
+            if (description != null) {
+                role.setDescription(description);
+            }
+            if (maxSessionDuration > 0) {
+                role.setMaxSessionDuration(maxSessionDuration);
+            }
+            roles.put(roleName, role);
+            return role;
         }
-        if (description != null) {
-            role.setDescription(description);
-        }
-        if (maxSessionDuration > 0) {
-            role.setMaxSessionDuration(maxSessionDuration);
-        }
-        roles.put(roleName, role);
-        return role;
     }
 
     /**
@@ -1708,21 +1709,23 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private void incrementCustomerManagedPolicyAttachmentCount(IamPolicy policy) {
-        if (AwsManagedPolicies.isManagedPolicyArn(policy.getArn())) {
-            return;
-        }
-        policy.setAttachmentCount(policy.getAttachmentCount() + 1);
-        policies.put(policy.getArn(), policy);
+        adjustCustomerManagedPolicyAttachmentCount(policy.getArn(), 1);
     }
 
     private void decrementCustomerManagedPolicyAttachmentCount(String policyArn) {
+        adjustCustomerManagedPolicyAttachmentCount(policyArn, -1);
+    }
+
+    private void adjustCustomerManagedPolicyAttachmentCount(String policyArn, int delta) {
         if (AwsManagedPolicies.isManagedPolicyArn(policyArn)) {
             return;
         }
-        policies.get(policyArn).ifPresent(policy -> {
-            policy.setAttachmentCount(Math.max(0, policy.getAttachmentCount() - 1));
-            policies.put(policyArn, policy);
-        });
+        synchronized (policyAttachmentCountLock) {
+            policies.get(policyArn).ifPresent(policy -> {
+                policy.setAttachmentCount(Math.max(0, policy.getAttachmentCount() + delta));
+                policies.put(policyArn, policy);
+            });
+        }
     }
 
     private void rejectIfAwsManaged(String policyArn) {
@@ -2427,12 +2430,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
-     * Sets an access key's status, validated before the key is looked up the way the other three
-     * {@code statusType} operations validate theirs: a status outside the enum is answered for the
-     * status whether or not the key exists.
+     * Sets an access key's status. The status is held to {@code statusType} ahead of this, by the
+     * model the Query front door reads, so a value outside the set and an omitted one are both
+     * answered before any key is looked up. The CloudFormation provisioner validates the status it
+     * resolves from a template before it calls here, that path having no front door of its own.
      */
     public void updateAccessKey(String userName, String accessKeyId, String status) {
-        requireStatusFromEnum(status);
         synchronized (accessKeyLock) {
             AccessKey key = userAccessKey(userName, accessKeyId);
             key.setStatus(status);
@@ -2901,8 +2904,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private static void validatePassword(String password, String member) {
         if (password == null) {
-            throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notNull(member));
+            throw IamValidationErrors.notNull(member);
         }
         if (!LOGIN_PROFILE_PASSWORD_PATTERN.matcher(password).matches()) {
             throw SmithyValidationErrors.validationError(
@@ -2944,8 +2946,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     private void validateIamResourceName(String value, String paramName) {
         if (value == null) {
-            throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notNull(memberPath(paramName)));
+            throw IamValidationErrors.notNull(memberPath(paramName));
         }
         if (!IAM_RESOURCE_NAME_PATTERN.matcher(value).matches()) {
             throw IamValidationErrors.validationError(memberPath(paramName), value,
@@ -2994,8 +2995,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      */
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
-            throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notNull("properties"));
+            throw IamValidationErrors.notNull("properties");
         }
         String namespace = null;
         for (Map.Entry<String, String> entry : properties.entrySet()) {
@@ -3439,24 +3439,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return getServerCertificate(name).getTags();
     }
 
-    // Credential status, shared by the four operations that take statusType
-    // =========================================================================
-
-    /**
-     * {@code statusType}, shared by UpdateAccessKey, UpdateSigningCertificate, UpdateSSHPublicKey
-     * and UpdateServiceSpecificCredential. One rendering serves all four because one front end
-     * validates one shape: the recording is of UpdateServiceSpecificCredential, and AWS names
-     * neither the offending value nor the permitted set, unlike this message elsewhere in the
-     * tree. Matched rather than made uniform.
-     */
-    private void requireStatusFromEnum(String status) {
-        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
-            throw SmithyValidationErrors.validationError(
-                    "Value at 'status' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set");
-        }
-    }
-
     // Signing certificates
     // =========================================================================
 
@@ -3512,7 +3494,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateSigningCertificate(String userName, String certificateId, String status) {
-        requireStatusFromEnum(status);
         synchronized (signingCertificateLock) {
             SigningCertificate certificate = userSigningCertificate(userName, certificateId);
             certificate.setStatus(status);
@@ -3676,7 +3657,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public void updateSshPublicKey(String userName, String keyId, String status) {
-        requireStatusFromEnum(status);
         synchronized (sshPublicKeyLock) {
             SshPublicKey stored = userSshPublicKey(userName, keyId);
             stored.setStatus(status);
@@ -3950,7 +3930,6 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void updateServiceSpecificCredential(String userName, String credentialId,
                                                 String status) {
         requireCredentialIdFormat(credentialId);
-        requireStatusFromEnum(status);
         synchronized (serviceCredentialLock) {
             ServiceSpecificCredential credential = userServiceCredential(userName, credentialId);
             credential.setStatus(status);
@@ -4480,6 +4459,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .isPresent();
     }
 
+    /** Role chaining requires a live role credential with this request's matching issued token. */
+    public boolean isRoleSession(String accessKeyId, String sessionToken) {
+        return currentSession(accessKeyId)
+                .filter(session -> hasMatchingSessionToken(session, sessionToken))
+                .map(SessionCredential::getRoleArn)
+                .filter(AwsArnUtils::isArn)
+                .map(AwsArnUtils::parse)
+                .filter(arn -> "iam".equals(arn.service()) && arn.resource().startsWith("role/"))
+                .isPresent();
+    }
+
     /**
      * The session token issued alongside a temporary credential, for callers that must tell a
      * missing token apart from one that does not match.
@@ -4807,6 +4797,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         && session.getPresignedResourceArn() != null)
                 .map(session -> new PresignedScope(
                         session.getPresignedAction(), session.getPresignedResourceArn()));
+    }
+
+    /** Binds a Redshift Spectrum scratch object ARN to an active transfer role session. */
+    public void registerSpectrumScratchResource(String accessKeyId, String resourceArn) {
+        currentSession(accessKeyId).ifPresent(session -> {
+            session.setSpectrumScratchResourceArn(resourceArn);
+            String accountId = session.getOriginAccountId() != null ? session.getOriginAccountId() : "000000000000";
+            putSessionForAccount(accountId, accessKeyId, session);
+        });
+    }
+
+    /** Clears the Spectrum scratch object permission from the session when the transfer completes. */
+    public void clearSpectrumScratchResource(String accessKeyId) {
+        currentSession(accessKeyId).ifPresent(session -> {
+            session.setSpectrumScratchResourceArn(null);
+            String accountId = session.getOriginAccountId() != null ? session.getOriginAccountId() : "000000000000";
+            putSessionForAccount(accountId, accessKeyId, session);
+        });
+    }
+
+    /** The exact scratch object ARN permitted for this session, if it is a Spectrum transfer session. */
+    public Optional<String> spectrumScratchResourceArn(String accessKeyId) {
+        return currentSession(accessKeyId)
+                .map(SessionCredential::getSpectrumScratchResourceArn)
+                .filter(arn -> arn != null && !arn.isBlank());
     }
 
     /**

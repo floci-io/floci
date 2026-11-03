@@ -62,6 +62,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiPredicate;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -87,6 +88,8 @@ public class Ec2ContainerManager {
     private static final int LAUNCH_CORE_THREADS = 4;
     private static final int LAUNCH_MAX_THREADS = 8;
     private static final int LAUNCH_QUEUE_CAPACITY = 64;
+    // ponytail: a fixed cap on concurrent post-start IMDS setups; a start beyond it skips the setup.
+    private static final int METADATA_SETUP_CONCURRENCY = 16;
     private static final long USER_DATA_EXECUTION_TIMEOUT_MINUTES = 30;
     // Wait for capacity so accepted launches are not dropped, but never run launch work on callers.
     static final RejectedExecutionHandler BLOCKING_BACKPRESSURE = (runnable, executor) -> {
@@ -154,6 +157,7 @@ public class Ec2ContainerManager {
     private final Ec2InstanceTypeCatalog instanceTypeCatalog;
     private SecurityGroupFirewallManager firewallManager;
     private final ExecutorService executor;
+    private final Semaphore metadataSetupSlots = new Semaphore(METADATA_SETUP_CONCURRENCY);
     private final Map<String, CompletableFuture<Void>> lifecycleOperations = new ConcurrentHashMap<>();
     private final Duration userDataExecutionTimeout;
     private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
@@ -1003,6 +1007,7 @@ public class Ec2ContainerManager {
         InstanceState pending = InstanceState.pending();
         instance.setState(pending);
         submitLifecycleOperation(containerId, () -> {
+            boolean setUpMetadataEndpoint = false;
             try {
                 dockerClient.startContainerCmd(containerId).exec();
                 boolean running = false;
@@ -1036,6 +1041,11 @@ public class Ec2ContainerManager {
                     metadataServer.registerContainer(containerIp, instanceId, instance);
                     refreshImdsSourceRegistration(instance, containerId, containerIp);
                     refreshMetadataAddresses(instance, containerId);
+                    // A restarted container has a new network namespace: the link-local IMDS
+                    // address launch configured is gone, and without it the guest cannot reach
+                    // 169.254.169.254 (instance credentials, user data, EC2 Instance Connect keys).
+                    // A protected instance's helper kept its namespace, and the address with it.
+                    setUpMetadataEndpoint = namespace == null;
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -1046,7 +1056,8 @@ public class Ec2ContainerManager {
                 instance.compareAndSetState(pending, InstanceState.stopped());
                 return;
             }
-            if (!instance.compareAndSetState(pending, InstanceState.running())) {
+            InstanceState running = InstanceState.running();
+            if (!instance.compareAndSetState(pending, running)) {
                 return;
             }
             if (postStart != null) {
@@ -1057,7 +1068,46 @@ public class Ec2ContainerManager {
                             instance.getInstanceId(), e.getMessage());
                 }
             }
+            if (setUpMetadataEndpoint) {
+                setUpMetadataEndpointWhileRunning(instance, containerId, running);
+            }
         });
+    }
+
+    /**
+     * Best effort with its own bounded commands, as at launch, and off the container's lifecycle
+     * queue: a slow setup holds neither the instance pending nor a stop queued behind this start.
+     * It goes ahead only while {@code running} is still the instance's state, so a stop, terminate
+     * or later start makes it stand down; an exec against a container already stopped just fails.
+     *
+     * <p>Not on {@link #executor}: the start runs on one of its workers, and its backpressure
+     * blocks a submitter while the queue is full, so with every worker submitting nothing would
+     * drain it. A setup that finds no free slot is skipped and logged rather than waited for.
+     */
+    private void setUpMetadataEndpointWhileRunning(Instance instance, String containerId, InstanceState running) {
+        String instanceId = instance.getInstanceId();
+        if (!metadataSetupSlots.tryAcquire()) {
+            LOG.warnv("Skipped link-local IMDS setup for EC2 instance {0}: {1} setups already running",
+                    instanceId, METADATA_SETUP_CONCURRENCY);
+            return;
+        }
+        BooleanSupplier stillRunning = () -> instance.getState() == running;
+        try {
+            Thread.ofVirtual().name("ec2-imds-setup-" + instanceId).start(() -> {
+                try {
+                    configureLinkLocalMetadataEndpoint(containerId, instanceId, dockerHostResolver.resolve(),
+                            config.services().ec2().imdsPort(), stillRunning);
+                } catch (RuntimeException e) {
+                    LOG.warnv("Could not configure link-local IMDS endpoint for EC2 instance {0}: {1}",
+                            instanceId, e.getMessage());
+                } finally {
+                    metadataSetupSlots.release();
+                }
+            });
+        } catch (RuntimeException e) {
+            metadataSetupSlots.release();
+            LOG.warnv("Could not schedule link-local IMDS setup for EC2 instance {0}: {1}", instanceId, e.getMessage());
+        }
     }
 
     boolean isContainerRunning(String containerId) {
@@ -1701,11 +1751,22 @@ public class Ec2ContainerManager {
     }
 
     private void configureLinkLocalMetadataEndpoint(String containerId, String instanceId, String flociHost, int imdsPort) {
+        configureLinkLocalMetadataEndpoint(containerId, instanceId, flociHost, imdsPort, () -> true);
+    }
+
+    private void configureLinkLocalMetadataEndpoint(String containerId, String instanceId, String flociHost, int imdsPort,
+                                                    BooleanSupplier stillWanted) {
         try {
+            if (!stillWanted.getAsBoolean()) {
+                return;
+            }
             ContainerExec.Result install = execInContainerForResult(containerId, metadataProxyInstallCommand(), 180);
             if (install.exitCode() != 0) {
                 LOG.warnv("Could not install IMDS proxy dependencies for EC2 instance {0}: {1}",
                         instanceId, install.summary());
+                return;
+            }
+            if (!stillWanted.getAsBoolean()) {
                 return;
             }
 

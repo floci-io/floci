@@ -93,7 +93,14 @@ public final class Ec2MetadataProxy {
                 "set -eu",
                 CLEAR_APPLICATION_PATHS,
                 "ip addr show dev lo | grep -q '" + bindIp + "/32' || ip addr add " + bindIp + "/32 dev lo",
-                "if [ -f " + pidFile + " ] && kill -0 \"$(cat " + pidFile + ")\" 2>/dev/null; then",
+                // The pid file is on the container's writable layer, so it outlives a restart while
+                // the PID namespace does not: only a pid that is still this socat listener counts.
+                // The command name matters as well as the arguments: the shell running this script
+                // carries the listener string in its own command line.
+                "if [ -f " + pidFile + " ] && pid=\"$(cat " + pidFile + ")\""
+                        + " && [ \"$(cat \"/proc/$pid/comm\" 2>/dev/null)\" = socat ]"
+                        + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$pid/cmdline\""
+                        + " | grep -q 'TCP-LISTEN:" + bindPort + ",bind=" + bindIp + ",'; then",
                 "  exit 0",
                 "fi",
                 "nohup socat TCP-LISTEN:" + bindPort + ",bind=" + bindIp + ",fork,reuseaddr TCP:"

@@ -46,7 +46,7 @@ class DynamoDbPartiQLHandler {
     // --- SELECT ---
 
     private Result executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
-        TableDefinition table = service.describeTable(stmt.table(), region);
+        TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
         // A vector index is reachable through SearchVectors alone, and PartiQL says so
         // rather than reporting the index as missing.
         if (table.findVectorIndex(stmt.index()).isPresent()) {
@@ -544,16 +544,17 @@ class DynamoDbPartiQLHandler {
     // --- INSERT ---
 
     private Result executeInsert(Stmt.Insert stmt, String region) {
-        TableDefinition table = service.describeTable(stmt.table(), region);
+        TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
         String pkName = table.getPartitionKeyName();
 
         ObjectNode item = mapper.createObjectNode();
         stmt.item().forEach((k, v) -> item.set(k, toTypedNode(v)));
 
+        ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+        String keyIsNew = "attribute_not_exists(" + ean.alias(pkName) + ")";
         JsonNode previousItem;
         try {
-            previousItem = service.putItem(stmt.table(), item, "attribute_not_exists(" + pkName + ")",
-                    null, null, region, "NONE");
+            previousItem = service.putItem(stmt.table(), item, keyIsNew, ean.toNode(mapper), null, region, "NONE");
         } catch (ConditionalCheckFailedException e) {
             throw new AwsException("DuplicateItemException", "Duplicate primary key exists in table", 400);
         }
@@ -564,7 +565,7 @@ class DynamoDbPartiQLHandler {
 
     private Result executeUpdate(Stmt.Update stmt, String returnValuesOnConditionCheckFailure, String region) {
         requireNoIndexQualifier(stmt.index());
-        TableDefinition table = service.describeTable(stmt.table(), region);
+        TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
         requireOneValuePerKey(table, stmt.where());
         ObjectNode key = buildKey(table, stmt.where());
 
@@ -619,7 +620,7 @@ class DynamoDbPartiQLHandler {
 
     private Result executeDelete(Stmt.Delete stmt, String returnValuesOnConditionCheckFailure, String region) {
         requireNoIndexQualifier(stmt.index());
-        TableDefinition table = service.describeTable(stmt.table(), region);
+        TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
         requireOneValuePerKey(table, stmt.where());
         ObjectNode key = buildKey(table, stmt.where());
 
@@ -652,7 +653,7 @@ class DynamoDbPartiQLHandler {
             case Stmt.Delete del -> del.index();
             default -> null;
         });
-        Optional<TableDefinition> found = service.findTable(stmt.table(), region);
+        Optional<TableDefinition> found = service.findTableForItemCall(stmt.table(), region);
         if (found.isEmpty()) {
             return TransactMember.TABLE_NOT_FOUND;
         }
@@ -674,7 +675,9 @@ class DynamoDbPartiQLHandler {
                 ObjectNode put = mapper.createObjectNode();
                 put.put("TableName", ins.table());
                 put.set("Item", item);
-                put.put("ConditionExpression", "attribute_not_exists(" + pkName + ")");
+                ExprAttrNameBuilder ean = new ExprAttrNameBuilder();
+                put.put("ConditionExpression", "attribute_not_exists(" + ean.alias(pkName) + ")");
+                put.set("ExpressionAttributeNames", ean.toNode(mapper));
                 txItem.set("Put", put);
             }
             case Stmt.Update upd -> {
@@ -767,7 +770,7 @@ class DynamoDbPartiQLHandler {
     }
 
     TransactMember toTransactGetItem(Stmt.Select stmt, String region) {
-        Optional<TableDefinition> found = service.findTable(stmt.table(), region);
+        Optional<TableDefinition> found = service.findTableForItemCall(stmt.table(), region);
         if (found.isEmpty()) {
             return TransactMember.TABLE_NOT_FOUND;
         }

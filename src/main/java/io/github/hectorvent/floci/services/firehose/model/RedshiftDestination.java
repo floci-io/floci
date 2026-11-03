@@ -80,6 +80,15 @@ public class RedshiftDestination {
         this.cloudWatchLoggingOptions = cloudWatchLoggingOptions;
     }
 
+    /**
+     * Fills the defaults AWS describes a Lambda processor with, as the destination is written: the role comes from
+     * this destination's own {@code RoleARN}. Applied as an S3 destination's ProcessingConfiguration is, since both
+     * carry the same shape; AWS has not been probed for a Redshift destination specifically.
+     */
+    public void canonicalizeProcessors() {
+        S3Destination.canonicalizeProcessors(processingConfiguration, roleArn);
+    }
+
     /** Shallow copy without the password, for responses. Nested objects are shared and must not be mutated. */
     public RedshiftDestination copyWithoutPassword() {
         RedshiftDestination copy = new RedshiftDestination();

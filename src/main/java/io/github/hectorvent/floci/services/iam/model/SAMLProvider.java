@@ -13,6 +13,8 @@ public class SAMLProvider {
     private String arn;
     private String entityId;
     private String certificate;
+    /** The SAMLMetadataDocument exactly as uploaded; null for providers stored before it was kept. */
+    private String metadataDocument;
     private Instant createDate = Instant.now();
     private Map<String, String> tags = new ConcurrentHashMap<>();
 
@@ -24,6 +26,8 @@ public class SAMLProvider {
     public void setEntityId(String entityId) { this.entityId = entityId; }
     public String getCertificate() { return certificate; }
     public void setCertificate(String certificate) { this.certificate = certificate; }
+    public String getMetadataDocument() { return metadataDocument; }
+    public void setMetadataDocument(String metadataDocument) { this.metadataDocument = metadataDocument; }
     public Instant getCreateDate() { return createDate; }
     public void setCreateDate(Instant createDate) { this.createDate = createDate; }
     public Map<String, String> getTags() { return tags; }

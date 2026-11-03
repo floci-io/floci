@@ -543,6 +543,7 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals("env", created.get("targetAction").get("createSnapshot").get("tags").get(0).get("key").textValue());
         assertEquals("nightly", created.get("scheduledActionDescription").textValue());
         assertEquals(1, created.get("nextInvocations").size());
+        assertTrue(created.get("nextInvocations").get(0).isNumber());
         assertTrue(created.get("scheduledActionUuid").textValue().length() > 8);
 
         assertEquals("ConflictException", errorType("CreateScheduledAction", "{\"scheduledActionName\":\"nightly-snap\","
@@ -562,6 +563,7 @@ class RedshiftServerlessAdministrationHandlerTest {
         assertEquals("DISABLED", oneOff.get("state").textValue());
         assertEquals(0, oneOff.get("nextInvocations").size());
         assertEquals(future, oneOff.get("schedule").get("at").longValue());
+        assertTrue(oneOff.get("schedule").get("at").isNumber());
         assertEquals("sched-ns", oneOff.get("namespaceName").textValue());
 
         JsonNode activeOneOff = ok("UpdateScheduledAction", "{\"scheduledActionName\":\"nightly-snap\","
@@ -576,6 +578,8 @@ class RedshiftServerlessAdministrationHandlerTest {
         JsonNode beforeStart = ok("UpdateScheduledAction", "{\"scheduledActionName\":\"nightly-snap\","
                 + "\"endTime\":" + (future + 1000) + ",\"startTime\":" + (future + 100) + "}").get("scheduledAction");
         assertEquals(0, beforeStart.get("nextInvocations").size());
+        assertEquals(future + 1000, beforeStart.get("endTime").longValue());
+        assertEquals(future + 100, beforeStart.get("startTime").longValue());
 
         JsonNode inWindow = ok("UpdateScheduledAction", "{\"scheduledActionName\":\"nightly-snap\","
                 + "\"startTime\":" + (future - 100) + "}").get("scheduledAction");

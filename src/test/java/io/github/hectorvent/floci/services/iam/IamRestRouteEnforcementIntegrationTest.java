@@ -264,6 +264,30 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
+    void controlTowerTaggingIsChecked() {
+        // Control Tower requests name their resources in the path, which RequestResources does not read yet,
+        // so its tagging is checked on *.
+        String user = user("route-controltower-tags");
+        String landingZone = "arn:aws:controltower:us-east-1:" + ACCOUNT + ":landingzone/ROUTE" + suffix();
+
+        refused(as(user, "controltower").get("/tags/" + landingZone).then(), "controltower:ListTagsForResource");
+        refused(as(user, "controltower").body("{\"tags\":{\"team\":\"a\"}}").post("/tags/" + landingZone).then(),
+                "controltower:TagResource");
+        refused(as(user, "controltower").queryParam("tagKeys", "team").delete("/tags/" + landingZone).then(),
+                "controltower:UntagResource");
+        // The shared controller also serves the bare /tags path, naming the ARN in the query or the body.
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).get("/tags").then(),
+                "controltower:ListTagsForResource");
+        refused(as(user, "controltower").body("{\"resourceArn\":\"" + landingZone + "\",\"tags\":{\"team\":\"a\"}}")
+                .post("/tags").then(), "controltower:TagResource");
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).queryParam("tagKeys", "team")
+                .delete("/tags").then(), "controltower:UntagResource");
+
+        policy(user, allow("controltower:ListTagsForResource", "*"));
+        as(user, "controltower").get("/tags/" + landingZone).then().statusCode(not(403));
+    }
+
+    @Test
     void aTrailingSlashDoesNotLetARouteThroughUnchecked() {
         // The router matches /clusters/ as /clusters, so the request is checked as the route it reaches.
         String user = user("route-trailing-slash");
@@ -456,18 +480,16 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void aMicrovmImageTaggedThroughATargetWithoutTheArnPrefixIsCheckedAsTheImage() {
-        // Lambda tags the image any target holding :microvm-image: names, read by its fourth field and
-        // its last, so a Deny on the image applies however the target is spelled.
+    void aMicrovmImageTagTargetWithoutTheArnPrefixIsRefusedAndTagsNothing() {
+        // TagResource takes only an ARN, so a target without arn: names no image, whatever it holds.
         String user = user("route-image-tags");
         String image = microvmImage("route-tagged-image-" + suffix());
         String target = "/2017-03-31/tags/x:y:z:us-east-1:microvm-image:" + image.substring(image.lastIndexOf(':') + 1);
-        String body = "{\"Tags\":{\"team\":\"a\"}}";
 
-        policy(user, allow("lambda:TagResource", "*") + "," + deny("lambda:TagResource", image));
-        refused(as(user, "lambda").body(body).post(target).then(), "lambda:TagResource");
         policy(user, allow("lambda:TagResource", "*"));
-        as(user, "lambda").body(body).post(target).then().statusCode(204);
+        as(user, "lambda").body("{\"Tags\":{\"team\":\"a\"}}").post(target).then()
+                .statusCode(400).body(containsString("InvalidParameterValueException"));
+        admin().get("/2017-03-31/tags/" + image).then().statusCode(200).body("Tags.size()", equalTo(0));
     }
 
     /** Creates a MicroVM image as the account's admin, removed afterwards, and returns its ARN. */

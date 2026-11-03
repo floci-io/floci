@@ -678,9 +678,9 @@ public class BackupService {
         }
     }
 
-    public void deleteBackupPlan(String planId) {
+    public BackupPlan deleteBackupPlan(String planId) {
         synchronized (lockFor(planLockKey(planId))) {
-            getBackupPlan(planId);
+            BackupPlan plan = getBackupPlan(planId);
             long selectionCount = selectionStore.scan(k -> true).stream()
                     .filter(s -> planId.equals(s.getBackupPlanId()))
                     .count();
@@ -689,6 +689,8 @@ public class BackupService {
                         "Backup plan has active selections and cannot be deleted", 400);
             }
             planStore.delete(planId);
+            plan.setDeletionDate(Instant.now().getEpochSecond());
+            return plan;
         }
     }
 

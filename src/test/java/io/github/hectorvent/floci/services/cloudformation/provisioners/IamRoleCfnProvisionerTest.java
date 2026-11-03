@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.testutil.IamServiceTestHelper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -17,6 +19,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -24,11 +27,14 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -94,6 +100,131 @@ class IamRoleCfnProvisionerTest {
         when(iam.createRole(eq(roleName), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
                 .thenReturn(role);
         return role;
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "3599", "43201", "7200.5", "\"\"", "\"invalid\""})
+    void invalidSessionDurationIsRejectedBeforeTouchingIam(String duration) {
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(),
+                props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":" + duration + "}"), ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verifyNoInteractions(iam);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {3599, 43201})
+    void durationRangeUsesTheIamQueryValidationMessage(int duration) {
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(),
+                props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":" + duration + "}"), ctx()));
+
+        String bound = duration < 3600 ? "greater than or equal to 3600" : "less than or equal to 43200";
+        assertEquals("1 validation error detected: Value at 'maxSessionDuration' failed to satisfy constraint: "
+                + "Member must have value " + bound, failure.getMessage());
+        verifyNoInteractions(iam);
+    }
+
+    @Test
+    void durationUpdateCannotChangeAnotherRoleThatTookTheSameName() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRole original = realIam.createRole("app-role", "/", EMPTY_TRUST, null, 7200, Map.of());
+        realIam.deleteRole("app-role");
+        IamRole replacement = realIam.createRole("app-role", "/", EMPTY_TRUST, "new owner", 21600, Map.of());
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> realIam.updateRole("app-role", "old owner", 43200, original.getRoleId()));
+
+        assertEquals("EntityAlreadyExists", failure.getErrorCode());
+        assertNotEquals(original.getRoleId(), replacement.getRoleId());
+        assertEquals(21600, realIam.getRole("app-role").getMaxSessionDuration());
+        assertEquals("new owner", realIam.getRole("app-role").getDescription());
+    }
+
+    @Test
+    void rollbackDoesNotChangeAReplacementRoleWithTheSameName() {
+        IamService realIam = spy(IamServiceTestHelper.iamServiceWithUserPolicy(
+                "test", "secret", "user", EMPTY_TRUST));
+        IamRoleCfnProvisioner realProvisioner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        realProvisioner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        String originalId = realIam.getRole("app-role").getRoleId();
+        String policyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/missing";
+        doAnswer(invocation -> {
+            realIam.deleteRole("app-role");
+            realIam.createRole("app-role", "/", EMPTY_TRUST, "new owner", 21600, Map.of());
+            throw new AwsException("NoSuchEntity", "policy missing", 404);
+        }).when(realIam).attachRolePolicy("app-role", policyArn);
+
+        AwsException failure = assertThrows(AwsException.class, () -> realProvisioner.provision(r,
+                props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400,"
+                        + "\"ManagedPolicyArns\":[\"" + policyArn + "\"]}"), ctx()));
+
+        assertEquals("NoSuchEntity", failure.getErrorCode());
+        assertTrue(failure.getSuppressed().length > 0, "Refused rollback must remain visible");
+        assertNotEquals(originalId, realIam.getRole("app-role").getRoleId());
+        assertEquals(21600, realIam.getRole("app-role").getMaxSessionDuration());
+        assertEquals("new owner", realIam.getRole("app-role").getDescription());
+    }
+
+    @Test
+    void stackRollbackRestoresDurationFromSerializedResource() throws Exception {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        Map<String, String> originalAttributes = new HashMap<>(r.getAttributes());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        assertEquals(14400, realIam.getRole("app-role").getMaxSessionDuration());
+        ObjectMapper storageMapper = new ObjectMapper().findAndRegisterModules();
+        StackResource restored = storageMapper.readValue(storageMapper.writeValueAsString(r), StackResource.class);
+        assertTrue(owner.rollbackUpdate(restored));
+        assertEquals(7200, realIam.getRole("app-role").getMaxSessionDuration());
+        assertEquals(originalAttributes, restored.getAttributes());
+        assertFalse(owner.requiresUpdateRecovery(restored));
+        assertFalse(owner.rollbackUpdate(restored));
+    }
+
+    @Test
+    void stackRollbackRejectsReplacementAndKeepsRecoverySnapshot() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        realIam.deleteRole("app-role");
+        realIam.createRole("app-role", "/", EMPTY_TRUST, null, 21600, Map.of());
+        assertThrows(AwsException.class, () -> owner.rollbackUpdate(r));
+        assertEquals(21600, realIam.getRole("app-role").getMaxSessionDuration());
+        assertTrue(owner.requiresUpdateRecovery(r));
+    }
+
+    @Test
+    void successfulCommitDiscardsOnlyTheCompletedDurationSnapshot() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        owner.completeUpdate(r);
+        assertFalse(owner.requiresUpdateRecovery(r));
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":21600}"), ctx());
+        assertTrue(owner.rollbackUpdate(r));
+        assertEquals(14400, realIam.getRole("app-role").getMaxSessionDuration());
+    }
+
+    @Test
+    void durationRestoreDoesNotClaimOtherPolicyChangesWereRolledBack() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        realIam.putRolePolicy("app-role", "later", EMPTY_TRUST);
+        assertFalse(owner.rollbackUpdate(r));
+        assertEquals(7200, realIam.getRole("app-role").getMaxSessionDuration());
+        assertTrue(owner.requiresUpdateRecovery(r));
+        realIam.deleteRolePolicy("app-role", "later");
+        assertTrue(owner.rollbackUpdate(r));
     }
 
     @Test
@@ -213,8 +344,8 @@ class IamRoleCfnProvisionerTest {
         // stay on the role while the stack still reported UPDATE_COMPLETE.
         IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
                 "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
-        existing.getInlinePolicies().put("keep", EMPTY_TRUST);
-        existing.getInlinePolicies().put("drop", EMPTY_TRUST);
+        existing.getInlinePolicies().put("keep,policy", EMPTY_TRUST);
+        existing.getInlinePolicies().put("drop,policy", EMPTY_TRUST);
         existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Keep");
         existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Drop");
         when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
@@ -224,7 +355,7 @@ class IamRoleCfnProvisionerTest {
         StackResource r = resource();
         r.setPhysicalId("app-role");
         r.getAttributes().put("RoleId", "AROAapp-role");
-        r.getAttributes().put("__FlociInlinePolicyNames", "keep\ndrop");
+        r.getAttributes().put("__FlociInlinePolicyNames", "keep,policy\ndrop,policy");
         r.getAttributes().put("__FlociManagedPolicyArns",
                 "arn:aws:iam::aws:policy/Keep\narn:aws:iam::aws:policy/Drop");
 
@@ -233,16 +364,16 @@ class IamRoleCfnProvisionerTest {
                   "RoleName": "app-role",
                   "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Keep"],
                   "Policies": [
-                    {"PolicyName": "keep", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                    {"PolicyName": "keep,policy", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
                   ]
                 }
                 """), ctx());
 
-        verify(iam).deleteRolePolicy("app-role", "drop");
+        verify(iam).deleteRolePolicy("app-role", "drop,policy");
         verify(iam).detachRolePolicy("app-role", "arn:aws:iam::aws:policy/Drop");
-        verify(iam, never()).deleteRolePolicy("app-role", "keep");
+        verify(iam, never()).deleteRolePolicy("app-role", "keep,policy");
         verify(iam, never()).detachRolePolicy("app-role", "arn:aws:iam::aws:policy/Keep");
-        assertEquals("keep", r.getAttributes().get("__FlociInlinePolicyNames"));
+        assertEquals("keep,policy", r.getAttributes().get("__FlociInlinePolicyNames"));
     }
 
     @Test

@@ -150,13 +150,15 @@ class AccountPropertiesIntegrationTest {
     void anAbsentPropertiesMapIsRejected() {
         iam("PutAccountProperties").when().post("/").then().statusCode(400)
             .body(containsString("ValidationError"))
-            // Recorded against AWS on SNS's own map member, down to the phrasing:
-            // "1 validation error detected: Value null at 'attributes' failed to satisfy
-            // constraint: Member must not be null".
+            // IAM's own form, captured from a real account on 2026-10-31 against the Status the
+            // four credential operations share: "1 validation error detected: Value at 'status'
+            // failed to satisfy constraint: Member must not be null". Nothing captured covers this
+            // member, so leaving the word out here is that reading carried over. SNS, which quotes
+            // its values, carries a null where the value would go.
             .body(containsString("1 validation error detected"))
             // The apostrophes around the member name come back XML-escaped, so the assertion
             // stops at the parts that survive escaping.
-            .body(containsString("Value null at "))
+            .body(containsString("Value at "))
             .body(containsString("properties"))
             .body(containsString("Member must not be null"));
     }

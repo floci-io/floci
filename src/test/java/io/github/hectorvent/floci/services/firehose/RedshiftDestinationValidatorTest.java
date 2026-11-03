@@ -80,6 +80,14 @@ class RedshiftDestinationValidatorTest {
     }
 
     @Test
+    void intermediateRoleMustBeAnIamRoleArn() throws Exception {
+        RedshiftDestination dest = valid();
+        dest.getS3().setRoleArn("not-an-arn");
+
+        assertTrue(messageOf(dest).contains("s3Configuration.roleARN"));
+    }
+
+    @Test
     void secretsManagerRoleMustBeAnIamRoleArn() throws Exception {
         RedshiftDestination dest = valid();
         RedshiftDestination.SecretsManagerConfiguration secrets = new RedshiftDestination.SecretsManagerConfiguration();
@@ -142,6 +150,19 @@ class RedshiftDestinationValidatorTest {
         dest.setSecretsManagerConfiguration(secrets);
 
         assertTrue(messageOf(dest).contains("secretsManagerConfiguration.secretARN"));
+    }
+
+    @Test
+    void secretArnAcceptsEveryCharacterTheModelAllows() throws Exception {
+        RedshiftDestination dest = valid();
+        dest.setUsername(null);
+        dest.setPassword(null);
+        RedshiftDestination.SecretsManagerConfiguration secrets = new RedshiftDestination.SecretsManagerConfiguration();
+        secrets.setEnabled(true);
+        secrets.setSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:team/db!creds-AbCdEf");
+        dest.setSecretsManagerConfiguration(secrets);
+
+        assertDoesNotThrow(() -> RedshiftDestinationValidator.validateConfiguration(dest, SHAPE));
     }
 
     @Test

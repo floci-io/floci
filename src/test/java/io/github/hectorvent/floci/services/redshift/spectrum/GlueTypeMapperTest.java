@@ -39,6 +39,12 @@ class GlueTypeMapperTest {
     }
 
     @Test
+    void projectsAMissingColumnAsTheNullMarkerUnderItsQuotedName() {
+        assertThat(GlueTypeMapper.nullProjection("we\"ird"),
+                equalTo("COALESCE(CAST(NULL AS VARCHAR), '\\N') AS \"we\"\"ird\""));
+    }
+
+    @Test
     void nullsSizedStringValuesWiderThanTheColumnInBytes() {
         String expected = "COALESCE(CAST(CASE WHEN strlen(CAST(\"name\" AS VARCHAR)) > %d THEN NULL ELSE \"name\" END"
                 + " AS VARCHAR), '\\N') AS \"name\"";

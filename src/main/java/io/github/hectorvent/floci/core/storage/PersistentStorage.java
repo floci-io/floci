@@ -114,6 +114,11 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
+    public boolean isEmpty() {
+        return store.isEmpty();
+    }
+
+    @Override
     public void flush() {
         persistToDisk();
     }

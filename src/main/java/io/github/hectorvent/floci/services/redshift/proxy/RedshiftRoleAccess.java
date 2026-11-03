@@ -11,9 +11,12 @@ import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,7 +55,12 @@ public final class RedshiftRoleAccess {
     private RedshiftRoleAccess() {
     }
 
-    public record RoleSession(String accessKeyId, String sessionToken) {
+    public record RoleSession(String accessKeyId, String secretAccessKey, String sessionToken) {
+        // Do not print secret and token to logs via the default toString
+        @Override
+        public String toString() {
+            return "RoleSession[accessKeyId=" + accessKeyId + "]";
+        }
     }
 
     /**
@@ -109,14 +117,79 @@ public final class RedshiftRoleAccess {
         // null token on either side as a non-match, so a tokenless session can never be recognised
         // as a known access key and every signed authorization call would fail closed.
         String sessionToken = randomString(SECRET_CHARACTERS, 200);
+        String secretAccessKey = randomString(SECRET_CHARACTERS, 40);
         iamService.registerSessionForAccount(parsed.accountId(), accessKeyId,
-                randomString(SECRET_CHARACTERS, 40), sessionToken, iamRoleArn,
+                secretAccessKey, sessionToken, iamRoleArn,
                 Instant.now().plus(sessionTtl), null);
-        return new RoleSession(accessKeyId, sessionToken);
+        return new RoleSession(accessKeyId, secretAccessKey, sessionToken);
+    }
+
+    /**
+     * Accepts the keys a {@code COPY} names only when IAM knows them: the secret must match and a
+     * temporary key must come with its issued token, so an expired or invented key fails here
+     * instead of reading S3 anonymously. The session is not registered, so there is nothing to release.
+     */
+    public static RoleSession resolveKeySession(CopyStatementParser.AccessKeys keys, IamService iamService) {
+        Optional<String> secret = iamService.findSecretKey(keys.accessKeyId(), keys.sessionToken());
+        if (secret.isEmpty()) {
+            throw new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
+                    "S3ServiceException: The AWS Access Key Id you provided does not exist in our records, "
+                            + "or the session has expired", null);
+        }
+        boolean secretMatches = MessageDigest.isEqual(
+                secret.get().getBytes(StandardCharsets.UTF_8), keys.secretAccessKey().getBytes(StandardCharsets.UTF_8));
+        if (!secretMatches) {
+            throw new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL,
+                    "S3ServiceException: The request signature we calculated does not match the signature "
+                            + "you provided", null);
+        }
+        return new RoleSession(keys.accessKeyId(), keys.secretAccessKey(), keys.sessionToken());
+    }
+
+    /**
+     * Evaluates the identity policy of whoever {@code session} belongs to: the role when COPY named
+     * one, otherwise the principal behind the access key.
+     */
+    public static void authorizeSessionAction(S3Service s3, IamService iamService, RoleSession session,
+                                              String roleArn, String action, String resourceArn) {
+        authorizeSessionAction(s3, iamService, session, roleArn, action, resourceArn, Map.of());
+    }
+
+    /**
+     * @param conditionContext the condition keys the request itself offers, such as {@code s3:prefix}; for an
+     *                         access key the keys that say who is calling are added, so a policy that matches
+     *                         on {@code aws:PrincipalArn} sees the same principal as on a signed request
+     */
+    public static void authorizeSessionAction(S3Service s3, IamService iamService, RoleSession session,
+                                              String roleArn, String action, String resourceArn,
+                                              Map<String, List<String>> conditionContext) {
+        if (roleArn != null) {
+            authorizeRoleAction(s3, iamService, roleArn, action, resourceArn, conditionContext);
+            return;
+        }
+        if (!s3.isAuthEnforced()) {
+            return;
+        }
+        CallerContext caller = iamService.resolveCallerContext(session.accessKeyId());
+        if (caller == null) {
+            throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for access key '" + session.accessKeyId() + "': " + action + " on "
+                            + resourceArn, null);
+        }
+        Map<String, List<String>> context = new HashMap<>(conditionContext);
+        iamService.resolveCallerArns(session.accessKeyId())
+                .ifPresent(callerArns -> callerArns.putPrincipalKeys(context));
+        IamPolicyEvaluator.SimulationDecision decision =
+                ROLE_POLICY_EVALUATOR.simulatePrincipalPolicy(caller, action, resourceArn, context);
+        if (decision != IamPolicyEvaluator.SimulationDecision.ALLOWED) {
+            throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                    "S3 access denied for access key '" + session.accessKeyId() + "': " + action + " on "
+                            + resourceArn, null);
+        }
     }
 
     public static void releaseRoleSession(RoleSession roleSession, String iamRoleArn, IamService iamService) {
-        if (roleSession == null) {
+        if (roleSession == null || iamRoleArn == null) {
             return;
         }
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(iamRoleArn);
@@ -163,7 +236,7 @@ public final class RedshiftRoleAccess {
         authorizeRoleAction(s3, iamService, roleArn, "s3:ListBucket", bucketArn(roleArn, bucket),
                 Map.of("s3:prefix", List.of(prefix == null ? "" : prefix)));
         try {
-            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), bucket);
+            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), bucket, prefix);
         } catch (AwsException e) {
             throw signedAccessFailure(e, "s3://" + bucket);
         }

@@ -689,7 +689,10 @@ public class IamQueryHandler {
     private Response handleGetSAMLProvider(MultivaluedMap<String, String> params, String authorization) {
         String accountId = accountResolver.resolve(authorization);
         SAMLProvider provider = samlProviderService.getForAccount(accountId, getParam(params, "SAMLProviderArn"));
-        String metadata = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\""
+        // AWS returns the document as uploaded. Providers stored before it was kept fall back to
+        // a minimal document rebuilt from the entity ID and certificate.
+        String metadata = provider.getMetadataDocument() != null ? provider.getMetadataDocument()
+                : "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\""
                 + provider.getEntityId() + "\"><md:KeyDescriptor use=\"signing\"><ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data><ds:X509Certificate>"
                 + provider.getCertificate() + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:EntityDescriptor>";
         return Response.ok(AwsQueryResponse.envelope("GetSAMLProvider", AwsNamespaces.IAM,
@@ -1409,8 +1412,7 @@ public class IamQueryHandler {
         // empty Description is a value that clears the description, not an absent member.
         String description = params.getFirst("Description");
         if (description == null) {
-            throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notNull("description"));
+            throw IamValidationErrors.notNull("description");
         }
         IamRole role = iamService.updateRoleDescription(getParam(params, "RoleName"), description);
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
@@ -3616,8 +3618,7 @@ public class IamQueryHandler {
     private String requireParam(MultivaluedMap<String, String> params, String name) {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
-            throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notNull(memberPath(name)));
+            throw IamValidationErrors.notNull(memberPath(name));
         }
         return value;
     }

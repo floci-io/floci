@@ -53,50 +53,54 @@ class EcsEphemeralVolumeTest {
         if (emptyHost) {
             volume.host(HostVolumeProperties.builder().build());
         }
-        try (EcsClient ecs = TestFixtures.ecsClient(); Ec2Client ec2 = TestFixtures.ec2Client()) {
-            String subnet = ec2.describeSubnets().subnets().get(0).subnetId();
+        try (EcsClient ecs = TestFixtures.ecsClient(); Ec2Client ec2 = TestFixtures.ec2Client();
+             Ec2TestNetwork ownedNetwork = Ec2TestNetwork.create(ec2)) {
+            String subnet = ownedNetwork.subnetId();
             ecs.createCluster(request -> request.clusterName(name));
-            TaskDefinition definition = ecs.registerTaskDefinition(request -> request.family(name)
-                    .networkMode(NetworkMode.AWSVPC).requiresCompatibilities(Compatibility.FARGATE)
-                    .cpu("256").memory("512").volumes(volume.build())
-                    .containerDefinitions(
-                            container("writer", false, "echo shared > /data/marker"),
-                            container("reader", true, """
-                                    for attempt in 1 2 3 4 5; do
-                                        if [ "$(cat /data/marker 2>/dev/null)" = shared ]; then exit 0; fi
-                                        sleep 1
-                                    done
-                                    exit 42
-                                    """))).taskDefinition();
             try {
-                assertThat(definition.volumes()).hasSize(1);
-                assertThat(definition.volumes().get(0).name()).isEqualTo("shared");
-                assertThat(definition.volumes().get(0).host() != null).isEqualTo(emptyHost);
-                RunTaskResponse started = ecs.runTask(request -> request.cluster(name)
-                        .taskDefinition(definition.taskDefinitionArn()).launchType(LaunchType.FARGATE)
-                        .networkConfiguration(network -> network.awsvpcConfiguration(vpc -> vpc.subnets(subnet))));
-                assertThat(started.failures()).isEmpty();
-                assertThat(started.tasks()).hasSize(1);
-                Task task = started.tasks().get(0);
+                TaskDefinition definition = ecs.registerTaskDefinition(request -> request.family(name)
+                        .networkMode(NetworkMode.AWSVPC).requiresCompatibilities(Compatibility.FARGATE)
+                        .cpu("256").memory("512").volumes(volume.build())
+                        .containerDefinitions(
+                                container("writer", false, "echo shared > /data/marker"),
+                                container("reader", true, """
+                                        for attempt in 1 2 3 4 5; do
+                                            if [ "$(cat /data/marker 2>/dev/null)" = shared ]; then exit 0; fi
+                                            sleep 1
+                                        done
+                                        exit 42
+                                        """))).taskDefinition();
                 try {
-                    assertThat(task.containers()).hasSize(2);
-                    assumeTrue(task.containers().stream().allMatch(container -> container.runtimeId() != null),
-                            "ECS Docker mode is required to check files shared by running containers");
-                    DescribeTasksRequest describe = DescribeTasksRequest.builder()
-                            .cluster(name).tasks(task.taskArn()).build();
-                    assertThat(ecs.waiter().waitUntilTasksStopped(describe,
-                            TestFixtures.waiterOverride(Duration.ofSeconds(30)))
-                            .matched().response()).isPresent();
-                    Task stopped = ecs.describeTasks(describe).tasks().get(0);
-                    assertThat(stopped.containers()).hasSize(2).allSatisfy(container -> {
-                        assertThat(container.lastStatus()).isEqualTo("STOPPED");
-                        assertThat(container.exitCode()).isZero();
-                    });
+                    assertThat(definition.volumes()).hasSize(1);
+                    assertThat(definition.volumes().get(0).name()).isEqualTo("shared");
+                    assertThat(definition.volumes().get(0).host() != null).isEqualTo(emptyHost);
+                    RunTaskResponse started = ecs.runTask(request -> request.cluster(name)
+                            .taskDefinition(definition.taskDefinitionArn()).launchType(LaunchType.FARGATE)
+                            .networkConfiguration(network -> network.awsvpcConfiguration(vpc -> vpc.subnets(subnet))));
+                    assertThat(started.failures()).isEmpty();
+                    assertThat(started.tasks()).hasSize(1);
+                    Task task = started.tasks().get(0);
+                    try {
+                        assertThat(task.containers()).hasSize(2);
+                        assumeTrue(task.containers().stream().allMatch(container -> container.runtimeId() != null),
+                                "ECS Docker mode is required to check files shared by running containers");
+                        DescribeTasksRequest describe = DescribeTasksRequest.builder()
+                                .cluster(name).tasks(task.taskArn()).build();
+                        assertThat(ecs.waiter().waitUntilTasksStopped(describe,
+                                TestFixtures.waiterOverride(Duration.ofSeconds(30)))
+                                .matched().response()).isPresent();
+                        Task stopped = ecs.describeTasks(describe).tasks().get(0);
+                        assertThat(stopped.containers()).hasSize(2).allSatisfy(container -> {
+                            assertThat(container.lastStatus()).isEqualTo("STOPPED");
+                            assertThat(container.exitCode()).isZero();
+                        });
+                    } finally {
+                        ecs.stopTask(request -> request.cluster(name).task(task.taskArn()));
+                    }
                 } finally {
-                    ecs.stopTask(request -> request.cluster(name).task(task.taskArn()));
+                    ecs.deregisterTaskDefinition(request -> request.taskDefinition(definition.taskDefinitionArn()));
                 }
             } finally {
-                ecs.deregisterTaskDefinition(request -> request.taskDefinition(definition.taskDefinitionArn()));
                 ecs.deleteCluster(request -> request.cluster(name));
             }
         }

@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
+import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefreshReplacement;
 import io.github.hectorvent.floci.services.autoscaling.model.ScalingActivity;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -14,15 +16,18 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import io.restassured.path.xml.XmlPath;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -34,6 +39,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
@@ -128,6 +135,125 @@ class AutoScalingStandbyTest {
                     ec2States.put(id, InstanceState.running());
                     return reservation(List.of(instance(id, InstanceState.running())));
                 });
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void standbyPreservesSettledRefreshCompletion(boolean decrement) {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");
+
+        assertEquals(200, enterStandby(decrement, "i-a").getStatus());
+
+        assertEquals("EnteringStandby", group().getInstances().getFirst().getLifecycleState());
+        assertEquals("Complete", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("Successful", refresh.getStatus());
+        assertEquals(0, refresh.getInstancesToUpdate());
+        assertEquals(100, refresh.getPercentageComplete());
+        assertNotNull(refresh.getEndTime());
+        assertEquals(decrement ? 1 : 2, group().getDesiredCapacity());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void emptyStandbyDoesNotSettleRefresh(boolean decrement) {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");
+
+        assertEquals(200, enterStandby(decrement).getStatus());
+
+        assertEquals("Warming", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertNull(refresh.getEndTime());
+        assertEquals(2, group().getDesiredCapacity());
+        assertEquals("InService", group().getInstances().getFirst().getLifecycleState());
+        assertTrue(service.describeScalingActivities(REGION, GROUP).isEmpty());
+    }
+
+    @Test
+    void rejectedLifecycleStandbyDoesNotSettleRefresh() {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-b");
+        group().getInstances().getFirst().setLifecycleState("Standby");
+
+        assertEquals(400, enterStandby(true, "i-a").getStatus());
+
+        assertEquals("Warming", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertNull(refresh.getEndTime());
+        assertEquals("Standby", group().getInstances().getFirst().getLifecycleState());
+        assertEquals(2, group().getDesiredCapacity());
+        assertTrue(service.describeScalingActivities(REGION, GROUP).isEmpty());
+    }
+
+    @Test
+    void standbySettlesOnlyReadyRefreshMembers() {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");
+        InstanceRefreshReplacement pending = new InstanceRefreshReplacement();
+        pending.setOriginalInstanceId("i-old-b");
+        pending.setReplacementInstanceId("i-b");
+        pending.setPhase("Warming");
+        refresh.setReplacements(List.of(refresh.getReplacements().getFirst(), pending));
+        group().getInstances().get(1).setLifecycleState("Pending");
+
+        assertEquals(200, enterStandby(true, "i-a").getStatus());
+
+        assertEquals("Complete", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("Warming", pending.getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertEquals(1, refresh.getInstancesToUpdate());
+        assertNull(refresh.getEndTime());
+        assertEquals("Pending", group().getInstances().get(1).getLifecycleState());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void rejectedStandbyDoesNotSettleRefresh(boolean capacityFailure) {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");
+        if (capacityFailure) {
+            group().setMinSize(2);
+        }
+
+        Response response = capacityFailure ? enterStandby(true, "i-a")
+                : enterStandby(true, "i-a", "i-foreign");
+
+        assertEquals(400, response.getStatus());
+        assertEquals("Warming", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertNull(refresh.getEndTime());
+        assertEquals("InService", group().getInstances().getFirst().getLifecycleState());
+        assertNull(group().getInstances().getFirst().getStandbyActivityId());
+        assertEquals(2, group().getDesiredCapacity());
+    }
+
+    @Test
+    void standbyDoesNotSettleOtherGroupOrRegionRefreshes() {
+        InstanceRefresh own = warmingRefresh(REGION, GROUP, "i-a");
+        InstanceRefresh foreignGroup = warmingRefresh(REGION, "other-group", "i-a");
+        InstanceRefresh foreignRegion = warmingRefresh("us-west-2", GROUP, "i-a");
+
+        assertEquals(200, enterStandby(true, "i-a").getStatus());
+
+        assertEquals("Successful", own.getStatus());
+        for (InstanceRefresh untouched : List.of(foreignGroup, foreignRegion)) {
+            assertEquals("InProgress", untouched.getStatus());
+            assertEquals("Warming", untouched.getReplacements().getFirst().getPhase());
+            assertNull(untouched.getEndTime());
+        }
+    }
+
+    private InstanceRefresh warmingRefresh(String region, String groupName, String replacementId) {
+        InstanceRefresh refresh = new InstanceRefresh();
+        refresh.setRegion(region);
+        refresh.setAutoScalingGroupName(groupName);
+        refresh.setInstanceRefreshId("refresh-" + region + "-" + groupName);
+        refresh.setStatus("InProgress");
+        refresh.setStartTime(Instant.now());
+        refresh.setInstancesToUpdate(1);
+        InstanceRefreshReplacement replacement = new InstanceRefreshReplacement();
+        replacement.setOriginalInstanceId("i-old");
+        replacement.setReplacementInstanceId(replacementId);
+        replacement.setPhase("Warming");
+        refresh.setReplacements(List.of(replacement));
+        service.saveInstanceRefresh(refresh);
+        return refresh;
     }
 
     @Test
@@ -587,6 +713,149 @@ class AutoScalingStandbyTest {
         service.deleteAutoScalingGroup(REGION, GROUP, true);
 
         assertEquals("Cancelled", activity(describeScalingActivities(), activityId, "StatusCode"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"EnterStandby", "ExitStandby"})
+    void sparseUnknownMemberRejectsTheWholeStandbyRequest(String action) {
+        if ("ExitStandby".equals(action)) {
+            group().getInstances().forEach(instance -> instance.setLifecycleState("Standby"));
+            group().setDesiredCapacity(0);
+        }
+        String before = lifecycle("i-a");
+        int capacity = group().getDesiredCapacity();
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", GROUP);
+        params.add("ShouldDecrementDesiredCapacity", "true");
+        params.add("InstanceIds.member.1", "i-a");
+        params.add("InstanceIds.member.3", "i-unknown");
+
+        Response response = handler.handle(action, params, REGION);
+
+        assertEquals(400, response.getStatus());
+        assertEquals(before, lifecycle("i-a"));
+        assertEquals(capacity, group().getDesiredCapacity());
+        assertTrue(service.describeScalingActivities(REGION, GROUP).isEmpty());
+        verifyNoInteractions(elbV2, elbClassic);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"EnterStandby", "ExitStandby"})
+    void sparseStandbyMembersUseNumericOrderAndIgnoreUnrelatedKeys(String action) {
+        if ("ExitStandby".equals(action)) {
+            group().getInstances().forEach(instance -> instance.setLifecycleState("Standby"));
+            group().setDesiredCapacity(0);
+        }
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", GROUP);
+        params.add("ShouldDecrementDesiredCapacity", "true");
+        params.add("InstanceIds.member.999999999999999999999999", "i-b");
+        params.add("InstanceIds.member.2", "i-a");
+        for (String key : List.of("InstanceIds.member.0", "InstanceIds.member.-1", "InstanceIds.member.01",
+                "InstanceIds.member.3.Other", "Other.member.3")) {
+            params.add(key, "i-unknown");
+        }
+
+        XmlPath response = ok(handler.handle(action, params, REGION));
+
+        List<String> descriptions = response.getList(("EnterStandby".equals(action) ? ENTERED : EXITED)
+                + ".Description");
+        assertEquals(2, descriptions.size());
+        assertTrue(descriptions.get(0).contains("i-a"));
+        assertTrue(descriptions.get(1).contains("i-b"));
+        assertEquals("EnterStandby".equals(action) ? 0 : 2, group().getDesiredCapacity());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void returningInstanceRetriesFailedRegistrationBeforeCompletingActivity(boolean classicFailure,
+                                                                          boolean awsFailure) {
+        ok(enterStandby(true, "i-a"));
+        reconciler.reconcile(group());
+        String activityId = ok(exitStandby("i-a")).getString(EXITED + ".ActivityId");
+        RuntimeException failure = awsFailure
+                ? new AwsException("InternalFailure", "retry registration", 500)
+                : new IllegalStateException("retry registration");
+        if (classicFailure) {
+            when(elbClassic.registerInstances(REGION, CLASSIC, List.of("i-a")))
+                    .thenThrow(failure).thenReturn(List.of());
+        } else {
+            doThrow(failure).doNothing().when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        }
+
+        List<LogRecord> records = LogCapture.capture(AutoScalingReconciler.class,
+                () -> reconciler.reconcile(group()));
+
+        List<LogRecord> warnings = records.stream()
+                .filter(record -> record.getLevel().intValue() == Level.WARNING.intValue()).toList();
+        assertEquals(1, warnings.size());
+        LogRecord warning = warnings.getFirst();
+        assertArrayEquals(new Object[]{GROUP, "i-a", classicFailure ? CLASSIC : TARGET_GROUP,
+                failure.getMessage()}, warning.getParameters());
+        assertSame(failure, warning.getThrown());
+        assertEquals("Pending", lifecycle("i-a"));
+        AsgInstance returning = group().getInstances().stream()
+                .filter(instance -> "i-a".equals(instance.getInstanceId())).findFirst().orElseThrow();
+        assertEquals(activityId, returning.getStandbyActivityId());
+        XmlPath pending = describeScalingActivities();
+        assertEquals("PreInService", activity(pending, activityId, "StatusCode"));
+        assertTrue(activity(pending, activityId, "EndTime").isEmpty());
+        assertEquals(2, group().getDesiredCapacity());
+
+        reconciler.reconcile(group());
+
+        assertEquals("InService", lifecycle("i-a"));
+        assertNull(returning.getStandbyActivityId());
+        assertEquals("Successful", activity(describeScalingActivities(), activityId, "StatusCode"));
+        verify(elbV2, atLeastOnce()).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        verify(elbClassic, times(classicFailure ? 2 : 1)).registerInstances(REGION, CLASSIC, List.of("i-a"));
+        assertNoLaunch();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void returningInstanceToleratesADeletedLoadBalancer(boolean classicDeleted) {
+        ok(enterStandby(true, "i-a"));
+        reconciler.reconcile(group());
+        String activityId = ok(exitStandby("i-a")).getString(EXITED + ".ActivityId");
+        if (classicDeleted) {
+            when(elbClassic.registerInstances(REGION, CLASSIC, List.of("i-a")))
+                    .thenThrow(new AwsException("LoadBalancerNotFound", "deleted", 400));
+        } else {
+            doThrow(new AwsException("TargetGroupNotFound", "deleted", 400))
+                    .when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        }
+
+        reconciler.reconcile(group());
+
+        assertEquals("InService", lifecycle("i-a"));
+        assertEquals("Successful", activity(describeScalingActivities(), activityId, "StatusCode"));
+        verify(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        verify(elbClassic).registerInstances(REGION, CLASSIC, List.of("i-a"));
+        assertNoLaunch();
+    }
+
+    @Test
+    void launchRegistrationPrecedesInServiceWithoutAStandbyActivity() {
+        AsgInstance launching = group().getInstances().stream()
+                .filter(instance -> "i-a".equals(instance.getInstanceId())).findFirst().orElseThrow();
+        launching.setLifecycleState("Pending");
+        assertNull(launching.getStandbyActivityId());
+        doAnswer(invocation -> {
+            assertEquals("Pending", launching.getLifecycleState());
+            return null;
+        }).when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        when(elbClassic.registerInstances(REGION, CLASSIC, List.of("i-a"))).thenAnswer(invocation -> {
+            assertEquals("Pending", launching.getLifecycleState());
+            return List.of();
+        });
+
+        reconciler.reconcile(group());
+
+        assertEquals("InService", launching.getLifecycleState());
+        verify(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        verify(elbClassic).registerInstances(REGION, CLASSIC, List.of("i-a"));
+        assertNoLaunch();
     }
 
     private Response enterStandby(boolean decrement, String... instanceIds) {

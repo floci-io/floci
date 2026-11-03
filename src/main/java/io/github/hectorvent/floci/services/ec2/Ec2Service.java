@@ -2715,7 +2715,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             putTags(region, attachmentId, new ArrayList<>(attachmentTags));
         }
         transitGatewayVpcAttachments.put(key(region, attachmentId), attachment);
+        String propagationTableId = gateway.getOptions().getPropagationDefaultRouteTableId();
+        if ("enable".equals(gateway.getOptions().getDefaultRouteTablePropagation()) && propagationTableId != null) {
+            storePropagation(region, propagationTableId, attachmentId, vpcId);
+        }
         return attachment;
+    }
+
+    private TransitGatewayRouteTablePropagation storePropagation(
+            String region, String routeTableId, String attachmentId, String vpcId) {
+        TransitGatewayRouteTablePropagation propagation = new TransitGatewayRouteTablePropagation();
+        propagation.setTransitGatewayRouteTableId(routeTableId);
+        propagation.setTransitGatewayAttachmentId(attachmentId);
+        propagation.setResourceId(vpcId);
+        propagation.setResourceType("vpc");
+        // Verified live: propagation reports the settled state at once, where association
+        // reports associating first.
+        propagation.setState("enabled");
+        propagation.setRegion(region);
+        transitGatewayPropagations.put(propagationKey(region, routeTableId, attachmentId), propagation);
+        return propagation;
     }
 
     /**
@@ -3301,17 +3320,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 throw new AwsException("TransitGatewayRouteTablePropagation.Duplicate", "Propagation "
                         + attachmentId + " already exists in Transit Gateway Route Table " + routeTableId + ".", 400);
             }
-            TransitGatewayRouteTablePropagation propagation = new TransitGatewayRouteTablePropagation();
-            propagation.setTransitGatewayRouteTableId(routeTableId);
-            propagation.setTransitGatewayAttachmentId(attachmentId);
-            propagation.setResourceId(attachment.getVpcId());
-            propagation.setResourceType("vpc");
-            // Verified live: propagation reports the settled state at once, where association
-            // reports associating first.
-            propagation.setState("enabled");
-            propagation.setRegion(region);
-            transitGatewayPropagations.put(propagationKey(region, routeTableId, attachmentId), propagation);
-            return propagation;
+            return storePropagation(region, routeTableId, attachmentId, attachment.getVpcId());
         }
     }
 
@@ -6398,7 +6407,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    private void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters) {
+    static void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters) {
         filterNames.stream()
                 .filter(name -> !supportedFilters.contains(name)
                         && !(supportedFilters.contains("tag-key") && name.startsWith("tag:")))
@@ -7780,6 +7789,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(sg -> vpcId.equals(sg.getVpcId()))
                 .filter(sg -> matchesFilters(sg, filters, region))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * The VPC's {@code default} security group, the one EC2 creates with the VPC. A VPC holds at most
+     * one, since a second group of the same name is rejected as a duplicate. Empty if it was deleted;
+     * an unknown VPC fails the way {@link #getSecurityGroupsForVpc} does.
+     */
+    public Optional<SecurityGroup> defaultSecurityGroupOf(String region, String vpcId) {
+        return getSecurityGroupsForVpc(region, vpcId, List.of()).stream()
+                .filter(sg -> "default".equals(sg.getGroupName()))
+                .findFirst();
     }
 
     public void deleteSecurityGroup(String region, String groupId) {
@@ -9245,10 +9265,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * {@code available} immediately, consistent with what CreateImage and RegisterImage already
      * report. A caller that waits for {@code available} therefore returns on its first poll.
      *
+     * <p>Tags: "Default: Your user-defined AMI tags are not copied." With {@code copyImageTags}
+     * the copy gets the caller's tags on the source, less the {@code aws:} system tags, which AWS
+     * does not copy either. Floci keeps each account's tags apart and does not model shared
+     * ({@code ec2:SharedTag/}) tags, so no other account's tag is visible to the caller or copied.
+     * {@code requestedImageTags} are the image tags the request's TagSpecification will add after
+     * the copy; with the copied ones they must stay within the per-resource limit, which is
+     * checked before anything is created so a refused copy leaves no AMI or snapshot behind.
+     *
      * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopyImage.html">CopyImage</a>
      */
     public Image copyImage(String destinationRegion, String sourceRegion, String sourceImageId,
-                           String name, String description) {
+                           String name, String description, boolean copyImageTags,
+                           List<Tag> requestedImageTags) {
         if (sourceImageId == null || sourceImageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter SourceImageId", 400);
         }
@@ -9281,11 +9310,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         "The image id '[" + sourceImageId + "]' does not exist in region " + sourceRegion, 400);
             }
 
+            List<Tag> copiedTags = copyImageTags ? copiedImageTags(sourceRegion, source) : List.of();
+            if (!copiedTags.isEmpty() && requestedImageTags != null && !requestedImageTags.isEmpty()) {
+                Set<String> userKeys = userTagKeys(copiedTags);
+                userKeys.addAll(userTagKeys(requestedImageTags));
+                requireWithinTagLimit(userKeys);
+            }
             // Fresh snapshot ids: two AMIs sharing one snapshot would make deleting either appear
             // to take the other's backing with it, and the copy's snapshots live in the
             // destination region anyway.
             Image copy = registerImage(destinationRegion, name, description, source.getArchitecture(),
                     source.getRootDeviceName(), sourceImageMappings(source));
+            if (!copiedTags.isEmpty()) {
+                copy.setTags(new ArrayList<>(copiedTags));
+                putTags(destinationRegion, copy.getImageId(), new ArrayList<>(copiedTags));
+            }
             copy.setVirtualizationType(source.getVirtualizationType());
             copy.setRootDeviceType(source.getRootDeviceType());
             copy.setPlatform(source.getPlatform());
@@ -9306,6 +9345,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             registeredImages.put(key(destinationRegion, copy.getImageId()), copy);
             return copy;
         }
+    }
+
+    /**
+     * The caller's tags on the source in its own region, as CreateTags and DeleteTags keep them,
+     * less the system tags. Looked up by the source's own id: tags that CreateTags filed under a
+     * catalog alias stay with the alias.
+     */
+    private List<Tag> copiedImageTags(String sourceRegion, Image source) {
+        List<Tag> sourceTags = tagsOf(sourceRegion, source.getImageId())
+                .orElseGet(() -> source.getTags() == null ? List.of() : source.getTags());
+        return sourceTags.stream()
+                .filter(tag -> !isAwsTagKey(tag.getKey()))
+                .map(tag -> new Tag(tag.getKey(), tag.getValue()))
+                .toList();
     }
 
     /** Rejects an AMI id that has been deregistered; unknown ids fall through to the resolver. */
@@ -9987,8 +10040,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return matchesTagFilter(image.getTags(), name, values, Ec2Service::matchesFilterValue);
     }
 
-    private boolean matchesTagFilter(List<Tag> resourceTags, String filterName, List<String> values,
-                                     BiPredicate<List<String>, String> valueMatcher) {
+    static boolean matchesTagFilter(List<Tag> resourceTags, String filterName, List<String> values,
+                                    BiPredicate<List<String>, String> valueMatcher) {
         List<Tag> tags = resourceTags == null ? List.of() : resourceTags;
         if (filterName.startsWith("tag:")) {
             String key = filterName.substring("tag:".length());
@@ -10047,7 +10100,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         };
     }
 
-    private static boolean matchesFilterValue(List<String> patterns, String value) {
+    static boolean matchesFilterValue(List<String> patterns, String value) {
         if (patterns == null || patterns.isEmpty()) {
             return true;
         }
@@ -14496,13 +14549,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
             }
         } else {
-            SecurityGroup defaultSg = securityGroups.scan(k -> k.startsWith(region + "::")).stream()
-                    .filter(group -> subnet.getVpcId().equals(group.getVpcId())
-                            && "default".equals(group.getGroupName()))
-                    .findFirst().orElse(null);
-            if (defaultSg != null) {
-                sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
-            }
+            defaultSecurityGroupOf(region, subnet.getVpcId()).ifPresent(defaultSg ->
+                    sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName())));
         }
 
         // An explicit address is checked the way RunInstances checks its PrivateIpAddress: it must be

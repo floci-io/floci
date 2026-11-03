@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.guardduty.model.Detector;
 import io.github.hectorvent.floci.services.guardduty.model.DetectorFeature;
@@ -336,7 +337,7 @@ public class GuardDutyController {
         }
         response.put("arn", plan.getArn());
         // The model types createdAt as a timestamp, which restJson1 carries as epoch seconds.
-        response.put("createdAt", Instant.parse(plan.getCreatedAt()).toEpochMilli() / 1000.0);
+        response.put("createdAt", EpochSeconds.fromInstant(Instant.parse(plan.getCreatedAt())));
         ObjectNode bucket = response.putObject("protectedResource").putObject("s3Bucket");
         bucket.put("bucketName", plan.getBucketName());
         if (plan.getObjectPrefixes() != null) {

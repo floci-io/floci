@@ -328,6 +328,8 @@ class S3MultipartIntegrationTest {
     @Order(13)
     void uploadPartCopy() {
         String source = "ABCDEFGHIJ" + "a".repeat(5 * 1024 * 1024);
+        String copiedPart2 = source.substring(2, 5 * 1024 * 1024 + 2);
+        String copiedPart3 = "CDEF";
         // Put a source object
         given()
             .body(source)
@@ -338,6 +340,7 @@ class S3MultipartIntegrationTest {
 
         // Initiate multipart upload for destination
         String copyUploadId = given()
+            .header("x-amz-checksum-algorithm", "SHA256")
             .when()
                 .post("/" + BUCKET + "/copy-dest.bin?uploads")
             .then()
@@ -353,6 +356,7 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
             .body(containsString("<ETag>"))
+            .body("CopyPartResult.ChecksumSHA256", equalTo(sha256Base64(source)))
             .extract().xmlPath().getString("CopyPartResult.ETag");
 
         // Copy a 5 MiB range so this non-final part meets the multipart minimum.
@@ -365,6 +369,7 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
             .body(containsString("<ETag>"))
+            .body("CopyPartResult.ChecksumSHA256", equalTo(sha256Base64(copiedPart2)))
             .extract().xmlPath().getString("CopyPartResult.ETag");
 
         // Percent-encoded bucket/key separator: the AWS SDK for .NET encodes the whole
@@ -378,15 +383,17 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
             .body(containsString("<ETag>"))
+            .body("CopyPartResult.ChecksumSHA256", equalTo(sha256Base64(copiedPart3)))
             .extract().xmlPath().getString("CopyPartResult.ETag");
 
         // Complete the upload
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
-                    <Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part>
-                    <Part><PartNumber>3</PartNumber><ETag>%s</ETag></Part>
-                </CompleteMultipartUpload>""".formatted(copyPart1ETag, copyPart2ETag, copyPart3ETag);
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
+                    <Part><PartNumber>2</PartNumber><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
+                    <Part><PartNumber>3</PartNumber><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
+                </CompleteMultipartUpload>""".formatted(copyPart1ETag, sha256Base64(source),
+                copyPart2ETag, sha256Base64(copiedPart2), copyPart3ETag, sha256Base64(copiedPart3));
         given()
             .contentType("application/xml")
             .body(completeXml)
@@ -403,7 +410,7 @@ class S3MultipartIntegrationTest {
             .get("/" + BUCKET + "/copy-dest.bin")
         .then()
             .statusCode(200)
-            .body(equalTo(source + source.substring(2, 5 * 1024 * 1024 + 2) + "CDEF"));
+            .body(equalTo(source + copiedPart2 + copiedPart3));
     }
 
     @Test
@@ -1377,6 +1384,7 @@ class S3MultipartIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
+            .body(not(containsString("<Checksum")))
             .header("x-amz-server-side-encryption", equalTo("aws:kms"))
             .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
 

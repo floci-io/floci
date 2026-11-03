@@ -222,7 +222,7 @@ class EventBridgeRedshiftDataTargetTest {
         EventBridgeInvoker scopedInvoker = new EventBridgeInvoker(
                 mock(LambdaService.class), mock(SqsService.class), mock(SnsService.class),
                 null, null, null, null, null, null,
-                redshiftDataService, serviceRegistry, resolver, new ObjectMapper(), config);
+                redshiftDataService, null, serviceRegistry, resolver, new ObjectMapper(), config);
 
         Target target = target(CLUSTER_ARN);
         RedshiftDataParameters parameters = parameters("dev");

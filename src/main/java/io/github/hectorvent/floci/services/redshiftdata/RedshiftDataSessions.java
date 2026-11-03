@@ -19,6 +19,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -78,17 +79,26 @@ class RedshiftDataSessions implements AutoCloseable {
     }
 
     Session find(Scope owner, String id) {
+        return open(owner, id).orElseThrow(RedshiftDataSessions::missing);
+    }
+
+    /** The ARN of the cluster or workgroup the owner's open session of that id runs on; empty when it has none. */
+    Optional<String> targetArn(Scope owner, String id) {
+        return open(owner, id).map(session -> session.target.arn());
+    }
+
+    private Optional<Session> open(Scope owner, String id) {
         Session session = sessions.get(id);
         if (session == null || !session.owner.equals(owner)) {
-            throw missing();
+            return Optional.empty();
         }
         synchronized (session) {
             if (!session.closed && !expired(session)) {
-                return session;
+                return Optional.of(session);
             }
         }
         retire(session);
-        throw missing();
+        return Optional.empty();
     }
 
     Reservation reserve(Scope owner, JsonNode request, RedshiftDataResourceResolver.DatabaseTarget target) {

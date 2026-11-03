@@ -1477,6 +1477,55 @@ class CodeArtifactServiceTest {
                 "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", null);
 
         assertEquals(described.getRevision(), asset.packageVersionRevision());
+        InOrder order = inOrder(verdaccioClient);
+        order.verify(verdaccioClient).beginUse(repoId);
+        order.verify(verdaccioClient).packageVersionExists(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(verdaccioClient).endUse(repoId);
+        order.verify(verdaccioClient).beginUse(repoId);
+        order.verify(verdaccioClient).fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "my-pkg-1.0.0.tgz");
+        order.verify(verdaccioClient).endUse(repoId);
+    }
+
+    @Test
+    void describePackageBracketsVerdaccioExistenceCheckWithUse() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.packageExists(repoId, "dom", "repo", null, "my-pkg")).thenReturn(true);
+
+        service.describePackage(REGION, "dom", null, "repo", "npm", null, "my-pkg");
+
+        InOrder order = inOrder(verdaccioClient);
+        order.verify(verdaccioClient).beginUse(repoId);
+        order.verify(verdaccioClient).packageExists(repoId, "dom", "repo", null, "my-pkg");
+        order.verify(verdaccioClient).endUse(repoId);
+    }
+
+    @Test
+    void resolveAndBeginUseOnlyRegistersTheCurrentRepositoryId() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository first = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = first.getSidecarContainerIds().get("npm");
+
+        assertEquals(oldId, service.resolveContainerIdAndBeginUse("npm", REGION, "dom", null, "repo",
+                verdaccioClient));
+        InOrder order = inOrder(verdaccioClient);
+        order.verify(verdaccioClient).registerRepository(oldId);
+        order.verify(verdaccioClient).beginUse(oldId);
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        assertThrows(AwsException.class, () -> service.resolveContainerIdAndBeginUse("npm", REGION, "dom", null,
+                "repo", verdaccioClient));
+        verify(verdaccioClient, times(1)).registerRepository(oldId);
+
+        CodeArtifactRepository second = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String newId = second.getSidecarContainerIds().get("npm");
+        assertNotEquals(oldId, newId);
+        assertEquals(newId, service.resolveContainerIdAndBeginUse("npm", REGION, "dom", null, "repo",
+                verdaccioClient));
+        order.verify(verdaccioClient).registerRepository(newId);
+        order.verify(verdaccioClient).beginUse(newId);
     }
 
     @Test
@@ -3964,7 +4013,8 @@ class CodeArtifactServiceTest {
     @Test
     void getPackageVersionAssetReturns404WhenTheSidecarHasNoSuchAssetForAContainerBackedFormat() {
         service.createDomain(REGION, "dom", null, Map.of());
-        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("pypi");
         when(pypiserverClient.fetchPackageVersionAsset(anyString(), eq("dom"), eq("repo"), isNull(),
                 eq("my-pkg"), eq("1.0.0"), eq("missing.whl"))).thenReturn(Optional.empty());
 
@@ -3973,6 +4023,11 @@ class CodeArtifactServiceTest {
         assertEquals("ResourceNotFoundException", e.getErrorCode());
         assertEquals("missing.whl", e.getExtendedData().get("resourceId"));
         assertEquals("asset", e.getExtendedData().get("resourceType"));
+        InOrder order = inOrder(pypiserverClient);
+        order.verify(pypiserverClient).beginUse(repoId);
+        order.verify(pypiserverClient).fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "missing.whl");
+        order.verify(pypiserverClient).endUse(repoId);
     }
 
     @Test
@@ -4361,7 +4416,33 @@ class CodeArtifactServiceTest {
         InOrder order = inOrder(pypiserverClient);
         order.verify(pypiserverClient).beginUse(repoId);
         order.verify(pypiserverClient).listPackageVersions(repoId, "dom", "repo", null, "my-pkg");
+        order.verify(pypiserverClient).preferredDisplayVersion(repoId, "dom", "repo", null, "my-pkg");
         order.verify(pypiserverClient).endUse(repoId);
+    }
+
+    @Test
+    void listPackageVersionAssetsKeepsUseThroughFetchingThePage() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        when(verdaccioClient.packageVersionExists(repoId, "dom", "repo", null, "my-pkg", "1.0.0"))
+                .thenReturn(true);
+        when(verdaccioClient.listPackageVersionAssetNames(repoId, "dom", "repo", null, "my-pkg", "1.0.0"))
+                .thenReturn(List.of("my-pkg-1.0.0.tgz"));
+        when(verdaccioClient.fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "my-pkg-1.0.0.tgz")).thenReturn(Optional.of(new byte[] {1, 2, 3}));
+
+        CodeArtifactService.PackageVersionAssetsListResult result = service.listPackageVersionAssets(REGION, "dom",
+                null, "repo", "npm", null, "my-pkg", "1.0.0", null, null);
+
+        assertEquals(1, result.assets().size());
+        InOrder order = inOrder(verdaccioClient);
+        order.verify(verdaccioClient).beginUse(repoId);
+        order.verify(verdaccioClient).packageVersionExists(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(verdaccioClient).listPackageVersionAssetNames(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(verdaccioClient).fetchPackageVersionAsset(repoId, "dom", "repo", null, "my-pkg", "1.0.0",
+                "my-pkg-1.0.0.tgz");
+        order.verify(verdaccioClient).endUse(repoId);
     }
 
     @Test
@@ -4482,6 +4563,44 @@ class CodeArtifactServiceTest {
                 "repo", "npm", null, "my-pkg", null, null, null, null, null);
 
         assertEquals("1.0.0", result.defaultDisplayVersion());
+    }
+
+    /**
+     * Raised by Greptile's review of npm's own external-connection work: Verdaccio always points
+     * {@code dist-tags.latest} at whichever version was retained most recently, with no way for a
+     * retention write to suppress that default, so {@code preferredDisplayVersion} can name a
+     * version that was never a deliberate local choice at all. Unlike {@link
+     * #listPackageVersionsDefaultDisplayVersionPrefersNpmDistTagLatestOverMostRecentlyPublished},
+     * where the preferred version has no retained-origin claim and so is correctly honored even
+     * though it is not the most recently published, this version's claim (confirmed real via
+     * {@link CodeArtifactService#claimRetainedVersionOrigin}, the same mechanism a genuine {@code
+     * public:npmjs} retention uses) means it must be ignored here instead, falling back to
+     * whichever version really was published most recently.
+     */
+    @Test
+    void listPackageVersionsDefaultDisplayVersionIgnoresDistTagLatestWhenItPointsAtAnExternallyRetainedVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("npm");
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", null, "my-pkg");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome outcome = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "npm", null, "my-pkg", "1.0.0", "public:npmjs", fence);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "npm", null, "my-pkg", "1.0.0",
+                outcome.episodeId(), true);
+        when(verdaccioClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000)),
+                        new RepositorySidecarManager.PackageVersionTimestamp("2.0.0", Instant.ofEpochSecond(2000))));
+        // Simulates Verdaccio's own forced default: real retention writes can never suppress it,
+        // confirmed live against the pinned image, so this is exactly what a genuine retention of
+        // 1.0.0 would have left behind regardless of 2.0.0 being the real, more recent version.
+        when(verdaccioClient.preferredDisplayVersion(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"))).thenReturn(Optional.of("1.0.0"));
+
+        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                "repo", "npm", null, "my-pkg", null, null, null, null, null);
+
+        assertEquals("2.0.0", result.defaultDisplayVersion());
     }
 
     @Test
@@ -5297,6 +5416,40 @@ class CodeArtifactServiceTest {
         assertEquals("Deleted", result.successfulVersions().get("1.00").status());
         verify(bagetterClient).deletePackageVersionAsset(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg"),
                 eq("1.00"), eq("my-pkg.1.00.nupkg"));
+    }
+
+    /**
+     * Raised by Greptile's review: this method's own claimed-origin cleanup removed the record
+     * keyed by the caller's raw version, but {@link CodeArtifactService#retainedVersionOriginConnection}'s
+     * own claim is keyed by its normalized spelling. Deleting a retained nuget version under an
+     * equivalent-but-different spelling (AWS's own worked example, {@code 1.00} against {@code
+     * 1.0.0}) removed the real asset but left the claim behind, so a later direct push of the
+     * same real version would still read back as {@code EXTERNAL} under the stale connection.
+     */
+    @Test
+    void deletePackageVersionsClearsARetainedClaimEvenUnderAnEquivalentNuGetVersionSpelling() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "my-pkg");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome outcome = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0", "public:nuget-org", fence);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0",
+                outcome.episodeId(), true);
+        assertEquals("public:nuget-org", service.retainedVersionOriginConnection(REGION, "dom", null, "repo",
+                "nuget", null, "my-pkg", "1.0.0").orElseThrow());
+
+        when(bagetterClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.00",
+                        Instant.ofEpochSecond(1000))));
+        when(bagetterClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.00"))).thenReturn(List.of("my-pkg.1.00.nupkg"));
+
+        service.deletePackageVersions(REGION, "dom", null, "repo", "nuget", null, "my-pkg", List.of("1.00"), null);
+
+        assertTrue(service.retainedVersionOriginConnection(REGION, "dom", null, "repo", "nuget", null, "my-pkg",
+                "1.0.0").isEmpty());
     }
 
     @Test
@@ -6387,11 +6540,30 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "old text");
 
-        service.forgetContainerBackedPackage(REGION, "dom", null, "repo", "npm", null, "my-pkg");
+        String repoId = service.ensureFormatContainerId("npm", REGION, "dom", null, "repo");
+        service.forgetContainerBackedPackage(REGION, "dom", null, "repo", repoId, "npm", null, "my-pkg");
 
         AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
                 "repo", "npm", null, "my-pkg", "1.0.0"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void oldNpmUnpublishCannotEraseARecreatedRepositorysReadme() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String oldId = original.getSidecarContainerIds().get("npm");
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        assertFalse(oldId.equals(replacement.getSidecarContainerIds().get("npm")));
+        recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "replacement text");
+
+        service.forgetContainerBackedPackage(REGION, "dom", null, "repo", oldId, "npm", null, "my-pkg");
+
+        assertEquals("replacement text", service.getPackageVersionReadme(REGION, "dom", null, "repo", "npm",
+                null, "my-pkg", "1.0.0").readme());
     }
 
     /**
