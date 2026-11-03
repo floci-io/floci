@@ -8,6 +8,8 @@ import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.PreMatching;
 import jakarta.ws.rs.ext.Provider;
 
+import java.util.Set;
+
 /**
  * Rewrites the data plane's two-segment paths to an internal prefix before JAX-RS route
  * matching. Registered directly, {@code /mac/generate} and the rest would outrank S3's
@@ -27,9 +29,10 @@ public class PaymentCryptographyDataPlaneRouteFilter implements ContainerRequest
     public PaymentCryptographyDataPlaneRouteFilter(ResolvedServiceCatalog catalog) {
         // Both planes of the service are signed for the same scope, so the
         // path says which plane a request is for, and the control plane never
-        // uses these paths. The scope names the control plane, whose key is
-        // the one a request signed for it carries.
-        this.route = new SignedServiceRoute(catalog, "paymentcryptography", INTERNAL_PREFIX,
+        // uses these paths. A client that signs for the data plane's own scope
+        // is served as well, so that either scope reaches the data plane.
+        this.route = new SignedServiceRoute(catalog,
+                Set.of("paymentcryptography", "payment-cryptography-data"), INTERNAL_PREFIX,
                 SignedServiceRoute.under("/mac")
                         .or(SignedServiceRoute.under("/pindata"))
                         .or(SignedServiceRoute.under("/cardvalidationdata"))

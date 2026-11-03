@@ -32,6 +32,8 @@ class PaymentCryptographyCryptoTest {
     void theCmacIsTheOneOfTheStandard() {
         assertEquals("bb1d6929e95937287fa37d129b756746", mac(""));
         assertEquals("070a16b46b4d4144f79bdd9dd04a287c", mac(M1));
+        assertEquals("ce0cbf1738f4df6428b1d93bf12081c9", mac(M1 + M2));
+        assertEquals("dfa66747de9ae63030ca32611497c827", mac(M1 + M2 + M3.substring(0, 16)));
         assertEquals("c47c4d9d64588f67fb9de6fe745d7fbf", mac(M1 + M2 + M3));
         assertEquals("51f0bebf7e3b9d92fc49741779363cfe", mac(M1 + M2 + M3 + M4));
     }
