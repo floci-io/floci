@@ -2048,8 +2048,8 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
-     * An object's metadata and an open stream over the body that matches it. {@code bytes} is the whole
-     * body when it is already in memory, else null.
+     * An object's metadata and an open stream over the body that matches it. In memory mode the
+     * object also holds the whole body.
      */
     public record ObjectRead(S3Object object, InputStream body) implements Closeable {
         @Override
