@@ -1,12 +1,10 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
-import io.quarkus.test.common.http.TestHTTPResource;
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
@@ -22,7 +20,6 @@ import software.amazon.awssdk.services.dynamodb.model.StreamViewType;
 import software.amazon.awssdk.services.dynamodb.model.TransactWriteItem;
 import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -36,9 +33,6 @@ class DynamoDbStreamsUpdateItemEventNameIntegrationTest {
     private static final String SET_NAME = "SET #name = :name";
     private static final Map<String, String> NAME = Map.of("#name", "name");
 
-    @TestHTTPResource
-    URI endpoint;
-
     private DynamoDbClient ddb;
     private DynamoDbStreamsClient streams;
     private String tableName;
@@ -46,12 +40,8 @@ class DynamoDbStreamsUpdateItemEventNameIntegrationTest {
 
     @BeforeEach
     void createTableWithStream() {
-        StaticCredentialsProvider credentials =
-                StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
-        ddb = DynamoDbClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(credentials).build();
-        streams = DynamoDbStreamsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(credentials).build();
+        ddb = AwsTestClients.create(DynamoDbClient.builder(), "test", Region.US_EAST_1);
+        streams = AwsTestClients.create(DynamoDbStreamsClient.builder(), "test", Region.US_EAST_1);
         tableName = "StreamEventName-" + UUID.randomUUID();
         streamArn = ddb.createTable(b -> b.tableName(tableName)
                         .keySchema(KeySchemaElement.builder().attributeName("pk").keyType(KeyType.HASH).build())
@@ -64,10 +54,16 @@ class DynamoDbStreamsUpdateItemEventNameIntegrationTest {
     }
 
     @AfterEach
-    void deleteTable() {
-        ddb.deleteTable(b -> b.tableName(tableName));
-        ddb.close();
-        streams.close();
+    void deleteTableAndCloseClients() {
+        try {
+            ddb.deleteTable(b -> b.tableName(tableName));
+        } finally {
+            try {
+                ddb.close();
+            } finally {
+                streams.close();
+            }
+        }
     }
 
     @Test
