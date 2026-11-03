@@ -94,6 +94,11 @@ class CloudWatchLogsDeliveryIntegrationTest {
                 + "\", \"tags\": {\"env\": \"local\"}}").then().statusCode(200);
         logs("ListTagsForResource", "{\"resourceArn\": \"" + PREFIX + "delivery-source:orders-" + suffix + "\"}")
                 .then().body("tags.team", equalTo("data")).body("tags.env", equalTo("local"));
+        // The same name in another partition is not the caller's source.
+        logs("TagResource", "{\"resourceArn\": \"" + PREFIX.replace("arn:aws:", "arn:aws-cn:")
+                + "delivery-source:orders-" + suffix + "\", \"tags\": {\"env\": \"foreign\"}}").then().statusCode(400);
+        logs("ListTagsForResource", "{\"resourceArn\": \"" + PREFIX + "delivery-source:orders-" + suffix + "\"}")
+                .then().body("tags.env", equalTo("local"));
 
         // In use: neither end can go while the delivery pairs them, and a second delivery is refused.
         logs("CreateDelivery", """

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.Delivery;
@@ -31,7 +32,7 @@ import java.util.regex.Pattern;
  * not send the source's logs anywhere.
  */
 @ApplicationScoped
-public class CloudWatchLogsDeliveryService {
+public class CloudWatchLogsDeliveryService implements StoredResourceArns {
 
     /** What a delivery, source or destination ARN's resource starts with, in AWS's form. */
     static final String SOURCE_RESOURCE = "delivery-source:";
@@ -328,6 +329,33 @@ public class CloudWatchLogsDeliveryService {
         }
     }
 
+    // ── IAM ──
+
+    @Override
+    public String namespace() {
+        return "logs";
+    }
+
+    /** Logs resources are built by hand, not from the request-resources table, so there is nothing to find. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The source ({@code deliverySource}) or destination ({@code deliveryDestination}) ARN of the delivery
+     * whose id is {@code value}: what UpdateDeliveryConfiguration is also authorized on.
+     */
+    @Override
+    public Optional<String> through(String member, String value, String region) {
+        Optional<Delivery> delivery = value == null ? Optional.empty() : deliveries.get(key(region, value));
+        return switch (member) {
+            case "deliverySource" -> delivery.map(d -> arn(region, SOURCE_RESOURCE + d.getDeliverySourceName()));
+            case "deliveryDestination" -> delivery.map(Delivery::getDeliveryDestinationArn);
+            default -> Optional.empty();
+        };
+    }
+
     // ── Helpers ──
 
     private enum Kind { SOURCE, DESTINATION, DELIVERY }
@@ -354,8 +382,11 @@ public class CloudWatchLogsDeliveryService {
             return null;
         }
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        // The partition too: an ARN of another partition is not the caller's resource, even with the same
+        // Region, account and name.
         if (!"logs".equals(parsed.service()) || !region.equals(parsed.region())
-                || !regionResolver.getAccountId().equals(parsed.accountId())) {
+                || !regionResolver.getAccountId().equals(parsed.accountId())
+                || !regionResolver.partitionForRegion(region).equals(parsed.partition())) {
             return null;
         }
         String resource = parsed.resource();

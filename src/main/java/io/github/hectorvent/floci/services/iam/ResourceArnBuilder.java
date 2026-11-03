@@ -276,6 +276,10 @@ public class ResourceArnBuilder {
     /** Uses the serving operation and the same raw names as the handler. */
     public List<String> buildLogResources(String action, ContainerRequestContext ctx,
                                           String region, String accountId, String partition) {
+        List<String> delivery = deliveryResources(action, ctx, region, accountId, partition);
+        if (delivery != null) {
+            return delivery;
+        }
         boolean stream = "logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action);
         boolean group = switch (action) {
             case "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:PutRetentionPolicy",
@@ -301,6 +305,60 @@ public class ResourceArnBuilder {
         String resource = "log-group:" + name + (stream
                 ? ":log-stream:" + body.path("logStreamName").asText() : ":*");
         return List.of(new AwsArnUtils.Arn(partition, "logs", region, accountId, resource).toString());
+    }
+
+    /**
+     * The resources a vended-log delivery action is authorized on, as the Service Authorization Reference
+     * lists them: its source, destination or delivery by the name or id the request gives. CreateDelivery
+     * names a delivery that has no id yet ({@code delivery:*}), and UpdateDeliveryConfiguration's source and
+     * destination are the stored delivery's. The reference gives DeleteDeliverySource the delivery-destination
+     * type; the source it deletes is used instead. Null for any other action.
+     */
+    private List<String> deliveryResources(String action, ContainerRequestContext ctx, String region,
+                                           String accountId, String partition) {
+        String type = switch (action) {
+            case "logs:PutDeliverySource", "logs:GetDeliverySource", "logs:DeleteDeliverySource" -> "delivery-source";
+            case "logs:PutDeliveryDestination", "logs:GetDeliveryDestination", "logs:DeleteDeliveryDestination" ->
+                    "delivery-destination";
+            case "logs:GetDelivery", "logs:DeleteDelivery", "logs:UpdateDeliveryConfiguration", "logs:CreateDelivery" ->
+                    "delivery";
+            default -> null;
+        };
+        if (type == null) {
+            return null;
+        }
+        JsonNode body = readJsonBody(ctx);
+        if (body == null) {
+            return List.of("*");
+        }
+        if ("logs:CreateDelivery".equals(action)) {
+            List<String> resources = new ArrayList<>();
+            resources.add(logsArn(partition, region, accountId, "delivery:*"));
+            String destination = body.path("deliveryDestinationArn").asText("");
+            if (!destination.isEmpty()) {
+                resources.add(destination);
+            }
+            resources.add(logsArn(partition, region, accountId,
+                    "delivery-source:" + body.path("deliverySourceName").asText()));
+            return resources;
+        }
+        if (!"delivery".equals(type)) {
+            return List.of(logsArn(partition, region, accountId, type + ":" + body.path("name").asText()));
+        }
+        String id = body.path("id").asText();
+        List<String> resources = new ArrayList<>(List.of(logsArn(partition, region, accountId, "delivery:" + id)));
+        if ("logs:UpdateDeliveryConfiguration".equals(action)) {
+            StoredResourceArns stored = storedResourceArns("logs");
+            if (stored != null) {
+                stored.through("deliverySource", id, region).ifPresent(resources::add);
+                stored.through("deliveryDestination", id, region).ifPresent(resources::add);
+            }
+        }
+        return resources;
+    }
+
+    private static String logsArn(String partition, String region, String accountId, String resource) {
+        return new AwsArnUtils.Arn(partition, "logs", region, accountId, resource).toString();
     }
 
     // ── IAM ─────────────────────────────────────────────────────────────────────
