@@ -69,6 +69,14 @@ class ApiGatewayApiKeySourceIntegrationTest {
 
         patch("QUERY").statusCode(400).body("message", equalTo("API key source must be HEADER or AUTHORIZER."));
         given().get("/restapis/" + apiId).then().body("apiKeySource", equalTo("AUTHORIZER"));
+        // A refused source leaves the operations before it in the same request unapplied too.
+        given().contentType(ContentType.JSON)
+                .body(Map.of("patchOperations", List.of(
+                        Map.of("op", "replace", "path", "/name", "value", "renamed"),
+                        Map.of("op", "replace", "path", "/apiKeySource", "value", "QUERY"))))
+                .patch("/restapis/" + apiId).then().statusCode(400);
+        given().get("/restapis/" + apiId).then()
+                .body("name", equalTo("key-source"), "apiKeySource", equalTo("AUTHORIZER"));
 
         given().contentType(ContentType.JSON).body(Map.of("name", "key-source-bad", "apiKeySource", "header"))
                 .post("/restapis").then().statusCode(400);

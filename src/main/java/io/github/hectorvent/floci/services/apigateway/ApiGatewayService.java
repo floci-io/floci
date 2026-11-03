@@ -3176,19 +3176,31 @@ public class ApiGatewayService implements ResourceProvider {
         RestApi api = getRestApi(region, apiId);
         if (patchOperations != null) {
             // Worked out before anything is set: the store hands back the live API, and a rejected
-            // endpoint change must leave it as it was.
+            // endpoint change or API key source must leave it as it was.
             EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations, region);
             for (Map<String, String> op : patchOperations) {
-                if (!"replace" .equals(op.get("op"))) continue;
+                if ("replace".equals(op.get("op")) && "/apiKeySource".equals(op.get("path"))) {
+                    apiKeySource(op.get("value"));
+                }
+            }
+            for (Map<String, String> op : patchOperations) {
+                if (!"replace" .equals(op.get("op"))) {
+                    continue;
+                }
                 String path = op.getOrDefault("path", "");
                 String value = op.get("value");
-                if ("/name" .equals(path)) api.setName(value);
-                else if ("/description" .equals(path)) api.setDescription(value);
-                // aws_api_gateway_rest_api_policy writes the policy this way, and clears it by
-                // replacing it with an empty string.
-                else if ("/policy" .equals(path)) api.setPolicy(value == null || value.isEmpty() ? null : value);
-                // aws_api_gateway_rest_api sends this for a changed api_key_source.
-                else if ("/apiKeySource" .equals(path)) api.setApiKeySource(apiKeySource(value));
+                if ("/name" .equals(path)) {
+                    api.setName(value);
+                } else if ("/description" .equals(path)) {
+                    api.setDescription(value);
+                } else if ("/policy" .equals(path)) {
+                    // aws_api_gateway_rest_api_policy writes the policy this way, and clears it by
+                    // replacing it with an empty string.
+                    api.setPolicy(value == null || value.isEmpty() ? null : value);
+                } else if ("/apiKeySource" .equals(path)) {
+                    // aws_api_gateway_rest_api sends this for a changed api_key_source.
+                    api.setApiKeySource(apiKeySource(value));
+                }
             }
             if (endpointConfiguration != null) {
                 api.setEndpointConfiguration(endpointConfiguration);
