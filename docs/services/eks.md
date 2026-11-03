@@ -693,11 +693,15 @@ Requirements and limits:
   when Floci's container publishes `4566` on another one (see [ECR](ecr.md#docker-compose-port-mapping)).
 - Repository URIs using a non-default `registryId` (account) are not covered.
 - The mirror set is snapshotted when the cluster is created. Clusters created before this
-  feature can be fixed manually because the k3s container filesystem survives a restart:
+  feature can be fixed manually because the k3s container filesystem survives a restart. A surviving
+  container keeps the name it was created with, so those clusters are still `floci-eks-<cluster>`
+  while newer ones are `floci-aws-eks-<cluster>`, and a non-default account adds `<account>.` before
+  the cluster name. Look the name up first:
 
   ```bash
-  docker cp registries.yaml floci-aws-eks-<cluster>:/etc/rancher/k3s/registries.yaml
-  docker restart floci-aws-eks-<cluster>
+  docker ps --filter name=<cluster> --format '{{.Names}}'
+  docker cp registries.yaml <container>:/etc/rancher/k3s/registries.yaml
+  docker restart <container>
   ```
 
 ### DNS resolution and Route 53 private hosted zones
