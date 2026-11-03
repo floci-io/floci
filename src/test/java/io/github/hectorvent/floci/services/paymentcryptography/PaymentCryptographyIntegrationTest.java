@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
@@ -410,5 +411,36 @@ class PaymentCryptographyIntegrationTest {
         call("ListKeys", "{\"MaxResults\":1,\"NextToken\":\"" + first + "\"}")
                 .then().statusCode(200)
                     .body("Keys", hasSize(1));
+    }
+
+    @Test
+    void theDataPlaneMakesAPinBlock() {
+        String pek = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_P0_PIN_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        String pvk = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_P1_PIN_GENERATION_KEY\","
+                + "\"KeyModesOfUse\":{\"Generate\":true,\"Verify\":true}},\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        String body = "{\"EncryptionKeyIdentifier\":\"" + pek + "\","
+                + "\"GenerationKeyIdentifier\":\"" + pvk + "\","
+                + "\"PinBlockFormat\":\"ISO_FORMAT_0\","
+                + "\"PrimaryAccountNumber\":\"5081470082639564\","
+                + "\"GenerationAttributes\":{\"VisaPin\":{\"PinVerificationKeyIndex\":1}}}";
+
+        // The data plane is rest-json, so its body is plain JSON.
+        given().contentType("application/json")
+                .filter(AwsRequestSigner.signedAs("test", "test", "payment-cryptography-data"))
+                .body(body)
+            // The data plane's routes live under the internal prefix, and only a request
+            // signed for the data plane is moved onto them.
+            .when().post("/pindata/generate")
+            .then().statusCode(200)
+                .body("EncryptedPinBlock", matchesPattern("[0-9A-F]{16}"))
+                .body("PinData.VerificationValue", matchesPattern("[0-9]{4,12}"));
     }
 }

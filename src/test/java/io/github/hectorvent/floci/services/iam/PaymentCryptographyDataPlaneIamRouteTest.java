@@ -67,6 +67,16 @@ class PaymentCryptographyDataPlaneIamRouteTest {
     }
 
     @Test
+    void thePinOperationsResolveToTheirActions() {
+        assertEquals("payment-cryptography:GeneratePinData",
+                resolve("/_paymentcryptography/pindata/generate"));
+        assertEquals("payment-cryptography:VerifyPinData",
+                resolve("/_paymentcryptography/pindata/verify"));
+        assertEquals("payment-cryptography:TranslatePinData",
+                resolve("/_paymentcryptography/pindata/translate"));
+    }
+
+    @Test
     void theOtherOperationsResolveToTheirActions() {
         assertEquals("payment-cryptography:GenerateMac", resolve("/_paymentcryptography/mac/generate"));
         assertEquals("payment-cryptography:VerifyMac", resolve("/_paymentcryptography/mac/verify"));

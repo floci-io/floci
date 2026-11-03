@@ -66,6 +66,7 @@ import io.github.hectorvent.floci.services.oam.OamController;
 import io.github.hectorvent.floci.services.opensearch.ElasticsearchController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
 import io.github.hectorvent.floci.services.paymentcryptography.PaymentCryptographyCryptoController;
+import io.github.hectorvent.floci.services.paymentcryptography.PaymentCryptographyPinController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.ram.RamController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
@@ -310,7 +311,8 @@ public class ResolvedServiceCatalog {
                         ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("payment-cryptography-data"), Set.of(),
-                        Set.of(PaymentCryptographyCryptoController.class)),
+                        Set.of(PaymentCryptographyCryptoController.class,
+                                PaymentCryptographyPinController.class)),
                 descriptor("secretsmanager", "secretsmanager", config.services().secretsmanager().enabled(), true,
                         "secretsmanager", storageMode(config.storage().services().secretsmanager().mode(), config.storage().mode()),
                         config.storage().services().secretsmanager().flushIntervalMs(), null, ServiceProtocol.JSON,
