@@ -42,14 +42,29 @@ class ApiGatewayApiKeySourceIntegrationTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private String apiId;
+    private String keyId;
+    private String planId;
 
     @BeforeEach
     void reset() {
         apiId = null;
+        keyId = null;
+        planId = null;
     }
 
+    /**
+     * Deletes whatever the test got as far as creating, even when an assertion failed first: an API
+     * key and a usage plan outlive the REST API they were set up for. Deleting the key also
+     * detaches it from the plan.
+     */
     @AfterEach
-    void deleteApi() {
+    void deleteFixtures() {
+        if (keyId != null) {
+            given().delete("/apikeys/" + keyId).then().statusCode(202);
+        }
+        if (planId != null) {
+            given().delete("/usageplans/" + planId).then().statusCode(202);
+        }
         if (apiId != null) {
             given().delete("/restapis/" + apiId).then().statusCode(202);
         }
@@ -126,10 +141,10 @@ class ApiGatewayApiKeySourceIntegrationTest {
         given().contentType(ContentType.JSON).body(Map.of("stageName", "prod"))
                 .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
 
-        String keyId = given().contentType(ContentType.JSON).body(Map.of("name", "tenant-key", "enabled", true))
+        keyId = given().contentType(ContentType.JSON).body(Map.of("name", "tenant-key", "enabled", true))
                 .post("/apikeys").then().statusCode(201).extract().path("id");
         String keyValue = given().get("/apikeys/" + keyId + "?includeValue=true").then().extract().path("value");
-        String planId = given().contentType(ContentType.JSON)
+        planId = given().contentType(ContentType.JSON)
                 .body(Map.of("name", "tenant-plan", "apiStages", List.of(Map.of("apiId", apiId, "stage", "prod"))))
                 .post("/usageplans").then().statusCode(201).extract().path("id");
         given().contentType(ContentType.JSON).body(Map.of("keyId", keyId, "keyType", "API_KEY"))
@@ -162,10 +177,6 @@ class ApiGatewayApiKeySourceIntegrationTest {
         given().header("Authorization", "none").header("x-api-key", keyValue).get(orders).then().statusCode(403)
                 .header("x-amzn-ErrorType", equalTo("ForbiddenException"));
         given().header("Authorization", "not-a-key").get(orders).then().statusCode(403);
-
-        given().delete("/usageplans/" + planId + "/keys/" + keyId).then().statusCode(202);
-        given().delete("/usageplans/" + planId).then().statusCode(202);
-        given().delete("/apikeys/" + keyId).then().statusCode(202);
     }
 
     private ValidatableResponse patch(String source) {
