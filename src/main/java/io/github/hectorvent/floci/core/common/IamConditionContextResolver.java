@@ -265,10 +265,16 @@ public class IamConditionContextResolver {
     public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
                                                         String resourceArn, String region,
                                                         String accountId, String resourceOwnerAccountId) {
+        return withGlobalContext(serviceContext, resourceArn, region, accountId, resourceOwnerAccountId, null);
+    }
+
+    public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
+                                                        String resourceArn, String region,
+                                                        String accountId, String resourceOwnerAccountId, String action) {
         Map<String, List<String>> conditions = serviceContext == null
                 ? new LinkedHashMap<>()
                 : new LinkedHashMap<>(serviceContext);
-        putResourceAccount(conditions, resourceArn, resourceOwnerAccountId);
+        putResourceAccount(conditions, resourceArn, resourceOwnerAccountId, action);
         putIfPresent(conditions, "aws:PrincipalAccount", accountId);
         putIfPresent(conditions, "aws:RequestedRegion", region);
         conditions.putIfAbsent("aws:ViaAWSService", List.of("false"));
@@ -278,7 +284,7 @@ public class IamConditionContextResolver {
     }
 
     private static void putResourceAccount(Map<String, List<String>> conditions, String resourceArn,
-                                           String resourceOwnerAccountId) {
+                                           String resourceOwnerAccountId, String action) {
         // S3 ARNs omit the owner account. Both condition keys must use the stored bucket owner,
         // never the caller; leave them absent when neither the ARN nor service state knows it.
         String account = AwsArnUtils.accountOrDefault(resourceArn, null);
@@ -286,7 +292,7 @@ public class IamConditionContextResolver {
             account = resourceOwnerAccountId;
         }
         putIfPresent(conditions, "aws:ResourceAccount", account);
-        if (AwsArnUtils.isArnFor(resourceArn, "s3")) {
+        if (S3ControlTagConditionKeys.takes(action, "s3:ResourceAccount")) {
             putIfPresent(conditions, "s3:ResourceAccount", account);
         }
     }
@@ -306,6 +312,12 @@ public class IamConditionContextResolver {
     public static Map<String, List<String>> serviceCallContext(String servicePrincipal, String resourceArn,
                                                                String resourceOwnerAccountId,
                                                                String sourceArn, String sourceAccount) {
+        return serviceCallContext(servicePrincipal, resourceArn, resourceOwnerAccountId, sourceArn, sourceAccount, null);
+    }
+
+    public static Map<String, List<String>> serviceCallContext(String servicePrincipal, String resourceArn,
+                                                               String resourceOwnerAccountId,
+                                                               String sourceArn, String sourceAccount, String action) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
         conditions.put("aws:PrincipalIsAWSService", List.of("true"));
         conditions.put("aws:ViaAWSService", List.of("false"));
@@ -317,7 +329,7 @@ public class IamConditionContextResolver {
                 && AwsArnUtils.isArnFor(resourceArn, "sns")) {
             putIfPresent(conditions, "aws:SourceOwner", sourceAccount);
         }
-        putResourceAccount(conditions, resourceArn, resourceOwnerAccountId);
+        putResourceAccount(conditions, resourceArn, resourceOwnerAccountId, action);
         putIfPresent(conditions, "aws:RequestedRegion", AwsArnUtils.regionOrDefault(resourceArn, null));
         return conditions;
     }

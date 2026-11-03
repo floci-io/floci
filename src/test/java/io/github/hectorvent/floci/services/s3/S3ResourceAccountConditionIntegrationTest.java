@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.EnforcementFixtures.UserCredentials;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
@@ -58,11 +59,8 @@ class S3ResourceAccountConditionIntegrationTest {
         cleanup.register(() -> EnforcementFixtures.removeRole(endpoint.getPort(), auth(CALLER, "iam"), role));
         cleanup.register(() -> EnforcementFixtures.removeBucket(endpoint.getPort(),
                 S3RequestSigner.signedAs(ownerKeys.accessKeyId(), ownerKeys.secretAccessKey()), bucket));
-        StaticCredentialsProvider admin = StaticCredentialsProvider.create(AwsBasicCredentials.create(CALLER, "test"));
-        try (IamClient iam = IamClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                     .credentialsProvider(admin).build();
-             StsClient sts = StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                     .credentialsProvider(admin).build();
+        try (IamClient iam = AwsTestClients.create(IamClient.builder(), CALLER, Region.US_EAST_1);
+             StsClient sts = AwsTestClients.create(StsClient.builder(), CALLER, Region.US_EAST_1);
              S3Client owner = client(AwsBasicCredentials.create(ownerKeys.accessKeyId(), ownerKeys.secretAccessKey()))) {
             String roleArn = iam.createRole(request -> request.roleName(role).assumeRolePolicyDocument("""
                     {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",

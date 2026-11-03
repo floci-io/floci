@@ -106,7 +106,7 @@ public class ServiceRoleAuthorizer {
         String resourceAccount = resource != null ? resource.accountId() : accountId;
         Map<String, List<String>> context = IamConditionContextResolver.withGlobalContext(
                 Map.of("aws:PrincipalArn", List.of(roleArn)),
-                permission.resourceArn(), region, accountId, resourceAccount);
+                permission.resourceArn(), region, accountId, resourceAccount, permission.action());
         return evaluator.evaluate(caller, List.of(), permission.action(), permission.resourceArn(), context);
     }
 }

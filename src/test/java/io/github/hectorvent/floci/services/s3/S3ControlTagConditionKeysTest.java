@@ -8,7 +8,9 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class S3ControlTagConditionKeysTest {
 
@@ -16,6 +18,16 @@ class S3ControlTagConditionKeysTest {
             + "<Tag><Key>Owner</Key><Value>team</Value></Tag>"
             + "<Tag><Key>Env</Key><Value>dev</Value></Tag>"
             + "</Tags></TagResourceRequest>";
+
+    @Test
+    void resourceAccountCoverageComesFromTheActionTable() {
+        assertTrue(S3ControlTagConditionKeys.takes("s3:GetObject", "s3:ResourceAccount"));
+        assertTrue(S3ControlTagConditionKeys.takes("s3:PutObject", "s3:ResourceAccount"));
+        assertTrue(S3ControlTagConditionKeys.takes("s3:ListBucket", "s3:ResourceAccount"));
+        assertFalse(S3ControlTagConditionKeys.takes("s3:PutAccessPointPublicAccessBlock", "s3:ResourceAccount"));
+        assertFalse(S3ControlTagConditionKeys.takes("s3:AllowVendedLogDeliveryForResource", "s3:ResourceAccount"));
+        assertFalse(S3ControlTagConditionKeys.takes(null, "s3:ResourceAccount"));
+    }
 
     @Test
     void tagResourceTakesEachTagOfItsBodyAndTheirKeys() {

@@ -12,7 +12,8 @@ when its action takes them. The table comes from two sources, each answering wha
 - botocore's `s3control` model (Apache-2.0, https://github.com/boto/botocore, the pinned release),
   which gives each request's members but not which of them AWS checks.
 
-`actions` holds every `s3` action that takes either key. `members` holds, for every S3 Control
+`actions` holds every `s3` action that takes either tag key or `s3:ResourceAccount`.
+The latter is populated from the resolved resource owner, not a request member. `members` holds, for every S3 Control
 operation, as `s3:<Operation>`, the request members that feed each key: a top-level body member
 holding tags, found as `regen_iam_tag_on_create.py` finds them (a list of key and value structures,
 named by its list element, or a map of strings), feeds both keys, and a top-level query string list
@@ -60,11 +61,11 @@ BODY_LOCATIONS = (None, "")
 
 
 def action_keys(reference: dict) -> dict[str, list[str]]:
-    """Every action of the namespace that takes a request tag key, with the ones it takes."""
+    """Every action that takes a request tag or resource-account key, with the keys it takes."""
     resource_keys = _resource_keys([reference])
     found = {}
     for action in sorted(reference["Actions"], key=lambda entry: entry["Name"]):
-        keys = REQUEST_TAG_KEYS & _condition_keys(NAMESPACE, action, resource_keys)
+        keys = (REQUEST_TAG_KEYS | {"s3:ResourceAccount"}) & _condition_keys(NAMESPACE, action, resource_keys)
         if keys:
             found[f"{NAMESPACE}:{action['Name']}"] = sorted(keys)
     return found

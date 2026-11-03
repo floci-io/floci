@@ -1157,7 +1157,7 @@ class IamConditionContextResolverTest {
         // look like the caller's own.
         Map<String, List<String>> conditions = IamConditionContextResolver.withGlobalContext(
                 null, resourceArn, "eu-west-2",
-                "000000000000", "111111111111");
+                "000000000000", "111111111111", "s3:GetObject");
 
         assertEquals(List.of("111111111111"), conditions.get("aws:ResourceAccount"));
         assertEquals(List.of("111111111111"), conditions.get("s3:ResourceAccount"));
@@ -1210,12 +1210,25 @@ class IamConditionContextResolverTest {
     @Test
     void aServiceCallWithNoSourceLeavesTheSourceKeysOut() {
         Map<String, List<String>> conditions = IamConditionContextResolver.serviceCallContext(
-                "ses.amazonaws.com", "arn:aws:s3:::bucket", "111122223333", null, null);
+                "ses.amazonaws.com", "arn:aws:s3:::bucket", "111122223333", null, null, "s3:PutObject");
 
         assertFalse(conditions.containsKey("aws:SourceArn"));
         assertFalse(conditions.containsKey("aws:SourceAccount"));
         assertEquals(List.of("111122223333"), conditions.get("aws:ResourceAccount"));
         assertEquals(List.of("111122223333"), conditions.get("s3:ResourceAccount"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"s3:AllowVendedLogDeliveryForResource", "s3:PutAccessPointPublicAccessBlock", "s3:UnknownAction", "sns:Publish"})
+    void resourceAccountKeyIsAbsentForActionsNotListingIt(String action) {
+        Map<String, List<String>> signed = IamConditionContextResolver.withGlobalContext(
+                null, "arn:aws:s3:::bucket", "us-east-1", "222233334444", "111122223333", action);
+        Map<String, List<String>> service = IamConditionContextResolver.serviceCallContext(
+                "ses.amazonaws.com", "arn:aws:s3:::bucket", "111122223333", null, null, action);
+        for (Map<String, List<String>> context : List.of(signed, service)) {
+            assertEquals(List.of("111122223333"), context.get("aws:ResourceAccount"));
+            assertFalse(context.containsKey("s3:ResourceAccount"));
+        }
     }
 
     private Decision decisionForEveryTarget(String policy, String action, ContainerRequestContext request) {
