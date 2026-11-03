@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -240,8 +241,10 @@ public final class RedshiftRoleAccess {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "IAM Role '" + roleArn + "' could not be assumed: " + e.getMessage(), e);
         }
+        Map<String, List<String>> context = new HashMap<>(conditionContext);
+        new CallerArns(roleArn, roleArn).putPrincipalKeys(context);
         if (!allowedUnderOrganizationPolicies(iamService, caller, AwsArnUtils.parse(roleArn).accountId(), action,
-                resourceArn, conditionContext)) {
+                resourceArn, context)) {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "S3 access denied for IAM Role '" + roleArn + "': " + action + " on " + resourceArn, null);
         }

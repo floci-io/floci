@@ -252,4 +252,42 @@ class RedshiftRoleAccessTest {
         // No exception, and resolvePrincipalContext is never consulted when enforcement is off.
         verifyNoInteractions(iamService);
     }
+
+    @Test
+    void authorizeRoleActionSuppliesPrincipalArnToOrganizationPolicies() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        IamService iamService = mock(IamService.class);
+        when(iamService.resolvePrincipalContext(ROLE_ARN)).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}""")));
+        when(iamService.effectiveScpLevels(ACCOUNT)).thenReturn(List.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                 {"Effect":"Allow","Action":"*","Resource":"*"},
+                 {"Effect":"Deny","Action":"s3:GetObject","Resource":"*",
+                  "Condition":{"ArnNotLike":{"aws:PrincipalArn":"%s"}}}]}""".formatted(ROLE_ARN))));
+
+        RedshiftRoleAccess.authorizeRoleAction(s3, iamService, ROLE_ARN, "s3:GetObject", "arn:aws:s3:::bucket/key");
+    }
+
+    @Test
+    void authorizeRoleActionDeniesWhenPrincipalArnDoesNotMatchApprovedRoleInOrganizationPolicy() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        IamService iamService = mock(IamService.class);
+        String otherRole = "arn:aws:iam::111111111111:role/other-role";
+        when(iamService.resolvePrincipalContext(otherRole)).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}""")));
+        when(iamService.effectiveScpLevels(ACCOUNT)).thenReturn(List.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                 {"Effect":"Allow","Action":"*","Resource":"*"},
+                 {"Effect":"Deny","Action":"s3:GetObject","Resource":"*",
+                  "Condition":{"ArnNotLike":{"aws:PrincipalArn":"%s"}}}]}""".formatted(ROLE_ARN))));
+
+        S3CopySimulator.S3TransferException exception = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> RedshiftRoleAccess.authorizeRoleAction(s3, iamService, otherRole, "s3:GetObject",
+                        "arn:aws:s3:::bucket/key"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+        assertThat(exception.getMessage(), containsString("S3 access denied"));
+    }
 }
