@@ -17,6 +17,7 @@ import java.util.List;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -223,11 +224,7 @@ class CognitoIdentityProviderCfnIntegrationTest {
     }
 
     private void cloudFormation(String action, ObjectNode template) {
-        RequestSpecification request = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", action)
-                .formParam("StackName", stack);
+        RequestSpecification request = cfn(action, stack).header("Authorization", CFN_AUTH);
         if (template != null) {
             request.formParam("TemplateBody", template.toString());
         }
@@ -235,11 +232,7 @@ class CognitoIdentityProviderCfnIntegrationTest {
     }
 
     private String output(String key) {
-        String xml = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stack)
+        String xml = cfn("DescribeStacks", stack).header("Authorization", CFN_AUTH)
                 .when().post("/").then().statusCode(200).extract().asString();
         return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);
     }
