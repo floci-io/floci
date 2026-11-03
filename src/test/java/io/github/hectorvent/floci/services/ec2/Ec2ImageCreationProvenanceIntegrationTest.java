@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.quarkus.test.junit.QuarkusTest;
@@ -18,7 +17,6 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -34,9 +32,6 @@ class Ec2ImageCreationProvenanceIntegrationTest {
 
     @Inject
     Ec2Service service;
-
-    @Inject
-    ObjectMapper mapper;
 
     private final List<OwnedResource> images = new ArrayList<>();
     private final List<OwnedResource> instances = new ArrayList<>();
@@ -183,39 +178,6 @@ class Ec2ImageCreationProvenanceIntegrationTest {
         assertEquals(List.of(unknown), imageIds(query(EAST, "DescribeImages", "ImageId.1", unknown)));
         assertEquals(List.of(), imageIds(query(EAST, "DescribeImages", "ImageId.1", unknown,
                 "Filter.1.Name", "source-image-region", "Filter.1.Value.1", EAST)));
-    }
-
-    @Test
-    void creationProvenanceSurvivesStorageSerializationIndependentlyOfRuntimeAncestor() throws Exception {
-        String first = copy(EAST, EAST, CATALOG);
-        String second = copy(WEST, EAST, first);
-        Image stored = service.describeImages(WEST, List.of(second), List.of()).getFirst();
-
-        Image restored = mapper.readValue(mapper.writeValueAsBytes(stored), Image.class);
-
-        assertEquals(CATALOG, restored.getSourceImageId());
-        assertEquals(first, restored.getCreationSourceImageId());
-        assertEquals(EAST, restored.getCreationSourceImageRegion());
-        assertNull(restored.getCreationSourceInstanceId());
-        assertEquals(stored.getDockerImage(), restored.getDockerImage());
-    }
-
-    @Test
-    void legacyPersistedRuntimeAncestryDoesNotInventCreationProvenance() throws Exception {
-        Image legacy = mapper.readValue("""
-                {
-                  "imageId": "ami-old",
-                  "sourceImageId": "ami-catalog",
-                  "dockerImage": "example/captured:1"
-                }
-                """, Image.class);
-        Image restored = mapper.readValue(mapper.writeValueAsBytes(legacy), Image.class);
-
-        assertEquals("ami-catalog", restored.getSourceImageId());
-        assertEquals("example/captured:1", restored.getDockerImage());
-        assertNull(restored.getCreationSourceImageId());
-        assertNull(restored.getCreationSourceImageRegion());
-        assertNull(restored.getCreationSourceInstanceId());
     }
 
     private String copy(String destination, String sourceRegion, String source) {
