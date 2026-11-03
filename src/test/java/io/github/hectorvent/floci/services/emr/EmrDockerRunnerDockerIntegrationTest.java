@@ -6,18 +6,20 @@ import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.ContainerDataPlaneProfile;
 import io.github.hectorvent.floci.testing.DockerAvailability;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
@@ -35,6 +37,7 @@ import static io.github.hectorvent.floci.testing.EmrRequests.awaitStep;
 import static io.github.hectorvent.floci.testing.EmrRequests.emr;
 import static io.github.hectorvent.floci.testing.EmrServerlessRequests.awaitJobRun;
 import static io.github.hectorvent.floci.testing.EmrServerlessRequests.createSparkApplication;
+import static io.github.hectorvent.floci.testing.EmrServerlessRequests.deleteApplication;
 import static io.github.hectorvent.floci.testing.EmrServerlessRequests.startJobRun;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -42,8 +45,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 /**
  * EMR steps and EMR Serverless job runs through Floci's Docker runner for real: a cluster in the {@code docker}
  * runner mode runs each step, and an application each job run, in a container of the release's EMR Serverless image,
- * which reaches Floci's S3 from there. The cached {@code emr-7.5.0} image keeps a local run from pulling; CI pulls it
- * (3.5 GB) the first time.
+ * which reaches Floci's S3 and Glue from there. The cached {@code emr-7.5.0} image keeps a local run from pulling;
+ * CI pulls it (3.5 GB) the first time.
  */
 @QuarkusTest
 @TestProfile(ContainerDataPlaneProfile.class)
@@ -69,6 +72,9 @@ class EmrDockerRunnerDockerIntegrationTest {
                 print(word + "\\t" + str(counts[word]))
             """;
 
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
     private S3Client s3;
     private String bucket;
     private String clusterId;
@@ -82,21 +88,13 @@ class EmrDockerRunnerDockerIntegrationTest {
     void putInputs() throws InterruptedException {
         assumeTrue(DockerAvailability.isAvailable(), "Docker daemon must be available for EMR's Docker runner tests");
         s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), "000000000000", Region.US_EAST_1);
+        cleanup.register(s3::close);
         bucket = "emr-docker-" + UUID.randomUUID().toString().substring(0, 8);
         s3.createBucket(request -> request.bucket(bucket));
+        cleanup.register(this::deleteBucket);
         put("in/words.txt", WORDS);
         put("side/mapper.py", MAPPER);
         put("side/reducer.py", REDUCER);
-    }
-
-    @AfterEach
-    void terminateCluster() {
-        if (clusterId != null) {
-            emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}").then().statusCode(200);
-        }
-        if (s3 != null) {
-            s3.close();
-        }
     }
 
     @Test
@@ -151,6 +149,41 @@ class EmrDockerRunnerDockerIntegrationTest {
     }
 
     @Test
+    void aSparkStepOnTheGlueCatalogWritesAndReadsBackAPartitionedTableInFlocisGlue() {
+        String database = bucket.replace('-', '_');
+        put("side/glue.py", """
+                import sys
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.enableHiveSupport().getOrCreate()
+                database, warehouse, out = sys.argv[1:4]
+                spark.sql(f"create database {database} location '{warehouse}'")
+                spark.sql(f"create table {database}.words (word string, n int, d string) using parquet"
+                          f" partitioned by (d) location '{warehouse}words/'")
+                spark.sql(f"insert into {database}.words values ('a', 1, 'one'), ('b', 2, 'two'), ('c', 3, 'two')")
+                rows = spark.sql(f"select d, count(*) from {database}.words group by d order by d").collect()
+                spark.createDataFrame([(" ".join(f"{d}={n}" for d, n in rows),)], ["value"]) \\
+                    .coalesce(1).write.text(out)
+                """);
+        GlueClient glue = AwsTestClients.create(GlueClient.builder(), "000000000000", Region.US_EAST_1);
+        cleanup.register(glue::close);
+        cleanup.register(() -> glue.deleteDatabase(request -> request.name(database)));
+        // The Management Guide's setting for a cluster's Spark on the Glue Data Catalog.
+        startCluster("""
+                [{"Classification": "spark-hive-site", "Properties": {"hive.metastore.client.factory.class":
+                  "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"}}]
+                """);
+
+        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit",
+                s3Uri("side/glue.py"), database, s3Uri("warehouse/"), s3Uri("glue-out/")));
+        // Each row once, though the Glue client reads a table's partitions in five segments.
+        assertEquals("one=1 two=2\n", partFiles("glue-out/"));
+        // Floci's Glue holds the partitions, so the step's Spark used the Glue catalog, not a metastore of its own.
+        assertEquals(List.of("one", "two"),
+                glue.getPartitions(request -> request.databaseName(database).tableName("words")).partitions().stream()
+                        .map(partition -> partition.values().get(0)).sorted().toList());
+    }
+
+    @Test
     void anEmrServerlessRunsPythonIsTheOneInTheArchiveItsSparkArchivesUnpack() throws IOException {
         put("side/job.py", """
                 import os, sys
@@ -164,6 +197,7 @@ class EmrDockerRunnerDockerIntegrationTest {
         s3.putObject(request -> request.bucket(bucket).key("envs/pyspark_venv.tar.gz"),
                 RequestBody.fromBytes(environmentArchive()));
         String applicationId = createSparkApplication(REGION, "emr-7.5.0");
+        cleanup.register(() -> deleteApplication(REGION, applicationId));
         // The user guide's recipe for a virtual environment: the archive, and the driver's and executors' Python in it.
         String python = "./environment/bin/python";
         ObjectNode run = JSON.createObjectNode().put("clientToken", UUID.randomUUID().toString())
@@ -209,6 +243,8 @@ class EmrDockerRunnerDockerIntegrationTest {
                 + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceGroups\":[{\"Name\":\"primary\","
                 + "\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
                 .then().statusCode(200).extract().jsonPath().getString("JobFlowId");
+        cleanup.register(() -> emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
+                .then().statusCode(200));
     }
 
     /** Adds one step to the cluster and returns the state it ended in. */
@@ -220,6 +256,13 @@ class EmrDockerRunnerDockerIntegrationTest {
         String stepId = emr("AddJobFlowSteps", request.toString())
                 .then().statusCode(200).extract().jsonPath().getString("StepIds[0]");
         return awaitStep(clusterId, stepId).jsonPath().getString("Step.Status.State");
+    }
+
+    /** Empties the test's bucket and deletes it. */
+    private void deleteBucket() {
+        s3.listObjectsV2Paginator(request -> request.bucket(bucket)).contents()
+                .forEach(object -> s3.deleteObject(request -> request.bucket(bucket).key(object.key())));
+        s3.deleteBucket(request -> request.bucket(bucket));
     }
 
     private void put(String key, String text) {

@@ -45,6 +45,12 @@ public final class EmrServerlessRequests {
                 .then().statusCode(200).extract().path("jobRunId");
     }
 
+    /** Stops the application, which DeleteApplication requires, and deletes it. */
+    public static void deleteApplication(String region, String applicationId) {
+        emrServerless(region).when().post("/applications/" + applicationId + "/stop").then().statusCode(200);
+        emrServerless(region).when().delete("/applications/" + applicationId).then().statusCode(200);
+    }
+
     /**
      * Polls GetJobRun until the run is SUCCESS, FAILED or CANCELLED and returns that response, whatever the state:
      * asserting which one is the caller's business. A GetJobRun that fails ends the wait there. A run in the
