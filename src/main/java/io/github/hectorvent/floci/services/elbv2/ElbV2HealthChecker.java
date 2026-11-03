@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.vertx.core.Vertx;
+import io.vertx.core.WorkerExecutor;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -34,6 +36,7 @@ public class ElbV2HealthChecker implements Resettable {
     private static final int MAX_CONCURRENT_PROBES = 32;
 
     private final Vertx vertx;
+    private final WorkerExecutor probeWorkers;
     private final EmulatorConfig config;
     private final Ec2Service ec2Service;
     private final SSLSocketFactory backendTls = backendTls();
@@ -49,6 +52,7 @@ public class ElbV2HealthChecker implements Resettable {
         this.vertx = vertx;
         this.config = config;
         this.ec2Service = ec2Service;
+        this.probeWorkers = vertx.createSharedWorkerExecutor("floci-elbv2-health-probes", MAX_CONCURRENT_PROBES);
     }
 
     public static int effectivePort(TargetDescription target, TargetGroup tg) {
@@ -88,6 +92,12 @@ public class ElbV2HealthChecker implements Resettable {
         timers.values().forEach(vertx::cancelTimer);
         timers.clear();
         states.clear();
+    }
+
+    @PreDestroy
+    void destroy() {
+        clear();
+        probeWorkers.close();
     }
 
     public void addTargets(String tgArn, List<TargetDescription> targets, TargetGroup tg) {
@@ -173,7 +183,7 @@ public class ElbV2HealthChecker implements Resettable {
                 state.inFlight = true;
             }
             try {
-                vertx.<Integer>executeBlocking(() -> {
+                probeWorkers.<Integer>executeBlocking(() -> {
                     synchronized (state) {
                         if (states.get(tgArn) != tgStates || tgStates.get(key) != state
                                 || !probeSlots.tryAcquire()) {

@@ -9,7 +9,10 @@ import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.HttpServerResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -44,6 +47,48 @@ class ElbV2HealthCheckerTest {
     @AfterEach
     void closeVertx() {
         vertx.close().toCompletionStage().toCompletableFuture().join();
+    }
+
+    @Test
+    void slowProbeDoesNotOccupyTheSharedVertxWorker() throws Exception {
+        Vertx isolated = Vertx.vertx(new VertxOptions().setWorkerPoolSize(1));
+        HttpServer server = null;
+        ElbV2HealthChecker checker = null;
+        CompletableFuture<HttpServerResponse> response = new CompletableFuture<>();
+        try {
+            server = isolated.createHttpServer().requestHandler(request -> response.complete(request.response()))
+                    .listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+            when(config.services().elbv2().mock()).thenReturn(false);
+            checker = new ElbV2HealthChecker(isolated, config, mock(Ec2Service.class));
+            TargetGroup group = targetGroup(server.actualPort(), "200", 1, 1);
+            group.setHealthCheckTimeoutSeconds(10);
+            TargetDescription target = target("127.0.0.1", server.actualPort());
+            checker.addTargets(group.getTargetGroupArn(), List.of(target), group);
+            HttpServerResponse pendingResponse = response.get(2, TimeUnit.SECONDS);
+
+            assertEquals("unrelated", assertDoesNotThrow(() -> isolated.executeBlocking(() -> "unrelated", false)
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS)),
+                    "A probe awaiting its response must not occupy the shared worker");
+            pendingResponse.end().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            ElbV2HealthChecker observed = checker;
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals("healthy",
+                    observed.getState(group.getTargetGroupArn(), target.getId(), target.getPort())));
+        } finally {
+            try {
+                if (checker != null) {
+                    checker.destroy();
+                }
+                if (response.isDone() && !response.join().ended()) {
+                    response.join().end();
+                }
+                if (server != null) {
+                    server.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+                }
+            } finally {
+                isolated.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            }
+        }
     }
 
     @Test
@@ -330,7 +375,9 @@ class ElbV2HealthCheckerTest {
     @SuppressWarnings("unchecked")
     void initialAdmissionRespectsTargetGroupKind(String protocol, int requiredSuccesses) {
         Vertx immediate = mock(Vertx.class);
-        when(immediate.executeBlocking(any(Callable.class), eq(false))).thenReturn(Future.succeededFuture(200));
+        WorkerExecutor workers = mock(WorkerExecutor.class);
+        when(immediate.createSharedWorkerExecutor("floci-elbv2-health-probes", 32)).thenReturn(workers);
+        when(workers.executeBlocking(any(Callable.class), eq(false))).thenReturn(Future.succeededFuture(200));
         doAnswer(invocation -> {
             Handler<Long> callback = invocation.getArgument(1);
             callback.handle(1L);
@@ -364,7 +411,9 @@ class ElbV2HealthCheckerTest {
     @SuppressWarnings("unchecked")
     void periodicProbeRetainsIntervalAndNetworkAdmissionThreshold() {
         Vertx scheduled = mock(Vertx.class);
-        when(scheduled.executeBlocking(any(Callable.class), eq(false))).thenReturn(Future.succeededFuture(200));
+        WorkerExecutor workers = mock(WorkerExecutor.class);
+        when(scheduled.createSharedWorkerExecutor("floci-elbv2-health-probes", 32)).thenReturn(workers);
+        when(workers.executeBlocking(any(Callable.class), eq(false))).thenReturn(Future.succeededFuture(200));
         AtomicReference<Handler<Long>> periodic = new AtomicReference<>();
         doAnswer(invocation -> {
             Handler<Long> callback = invocation.getArgument(1);
@@ -403,9 +452,11 @@ class ElbV2HealthCheckerTest {
         HttpServer server = startServer(200);
         try {
             Vertx queued = mock(Vertx.class);
+            WorkerExecutor workers = mock(WorkerExecutor.class);
+            when(queued.createSharedWorkerExecutor("floci-elbv2-health-probes", 32)).thenReturn(workers);
             AtomicReference<Callable<Integer>> work = new AtomicReference<>();
             Promise<Integer> result = Promise.promise();
-            when(queued.executeBlocking(any(Callable.class), eq(false))).thenAnswer(invocation -> {
+            when(workers.executeBlocking(any(Callable.class), eq(false))).thenAnswer(invocation -> {
                 work.set(invocation.getArgument(0));
                 return result.future();
             });
