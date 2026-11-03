@@ -3,14 +3,18 @@ package io.github.hectorvent.floci.services.ec2;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.testing.AwsTestClients;
+import io.github.hectorvent.floci.testing.Ec2Requests;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.GetConsoleOutputResponse;
 
 import java.nio.charset.StandardCharsets;
@@ -20,10 +24,10 @@ import java.util.UUID;
 
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.REGION;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ec2;
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.never;
@@ -124,8 +128,7 @@ class Ec2GetConsoleOutputIntegrationTest {
     void anInstanceInAnotherRegionIsNotFound() {
         Instance instance = storedInstance(null, InstanceState.running());
         try {
-            given().header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20261020/us-west-2/ec2/aws4_request")
-                    .formParam("Action", "GetConsoleOutput")
+            Ec2Requests.ec2("GetConsoleOutput", "test", "us-west-2")
                     .formParam("InstanceId", instance.getInstanceId())
                     .when().post("/")
                     .then().statusCode(400)
@@ -133,6 +136,18 @@ class Ec2GetConsoleOutputIntegrationTest {
         } finally {
             service.terminateInstances(REGION, List.of(instance.getInstanceId()));
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "not-an-instance-id", "i-0123456789abcdef0"})
+    void aDryRunIsAnsweredBeforeTheInstanceIsLookedUp(String instanceId) {
+        try (Ec2Client client = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
+            Ec2Exception error = assertThrows(Ec2Exception.class,
+                    () -> client.getConsoleOutput(r -> r.instanceId(instanceId).dryRun(true)));
+
+            assertEquals("DryRunOperation", error.awsErrorDetails().errorCode());
+        }
+        verify(containerManager, never()).readSshHostKeys(anyString());
     }
 
     @Test

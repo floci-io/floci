@@ -1560,6 +1560,8 @@ public class Ec2QueryHandler {
     }
 
     private Response handleGetConsoleOutput(MultivaluedMap<String, String> p, String region) {
+        // AWS answers a dry run before it looks at the instance, even for an empty or malformed id.
+        checkDryRun(p);
         String instanceId = p.getFirst("InstanceId");
         if (instanceId == null || instanceId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
