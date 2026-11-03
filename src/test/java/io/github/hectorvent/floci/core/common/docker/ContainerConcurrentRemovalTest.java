@@ -13,11 +13,17 @@ import com.github.dockerjava.api.model.WaitContainerCondition;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.Closeable;
 import java.time.Duration;
+import java.util.EnumSet;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -90,9 +96,13 @@ class ContainerConcurrentRemovalTest {
         if ("unknown".equals(outcome)) {
             when(inspect.exec()).thenThrow(new DockerException("inspection unavailable", 500));
         }
+        AtomicReference<WaitContainerResultCallback> pending = new AtomicReference<>();
+        CountDownLatch registered = new CountDownLatch(1);
         when(wait.exec(any(WaitContainerResultCallback.class))).thenAnswer(call -> {
             WaitContainerResultCallback callback = call.getArgument(0);
             callback.onStart(waitStream);
+            pending.set(callback);
+            registered.countDown();
             if ("interrupted".equals(outcome)) {
                 Thread.currentThread().interrupt();
             } else if (!"timeout".equals(outcome)) {
@@ -102,14 +112,37 @@ class ContainerConcurrentRemovalTest {
         });
 
         try {
-            IllegalStateException failure = assertTimeout(Duration.ofSeconds(10), () ->
-                    assertThrows(IllegalStateException.class, () -> manager.stopAndRemoveStrict("runtime", logs)));
+            IllegalStateException failure = "timeout".equals(outcome)
+                    ? completeTimedWait(pending, registered)
+                    : assertThrows(IllegalStateException.class, () -> manager.stopAndRemoveStrict("runtime", logs));
             assertSame(conflict, failure.getCause());
             assertEquals("interrupted".equals(outcome), Thread.currentThread().isInterrupted());
             verify(logs, never()).close();
             verify(waitStream, atLeastOnce()).close();
         } finally {
             Thread.interrupted();
+        }
+    }
+
+    private IllegalStateException completeTimedWait(AtomicReference<WaitContainerResultCallback> pending,
+                                                   CountDownLatch registered) throws Exception {
+        FutureTask<IllegalStateException> task = new FutureTask<>(() ->
+                assertThrows(IllegalStateException.class, () -> manager.stopAndRemoveStrict("runtime", logs)));
+        Thread teardown = Thread.ofPlatform().start(task);
+        try {
+            assertTrue(registered.await(5, TimeUnit.SECONDS), "removal callback registered");
+            ThreadStates.awaitState(teardown, EnumSet.of(Thread.State.TIMED_WAITING),
+                    Duration.ofSeconds(5), "bounded removal wait");
+            pending.get().onComplete();
+            return task.get(5, TimeUnit.SECONDS);
+        } finally {
+            WaitContainerResultCallback callback = pending.get();
+            if (callback != null) {
+                callback.onComplete();
+            }
+            teardown.interrupt();
+            teardown.join(Duration.ofSeconds(5));
+            assertFalse(teardown.isAlive(), "teardown worker stopped");
         }
     }
 }
