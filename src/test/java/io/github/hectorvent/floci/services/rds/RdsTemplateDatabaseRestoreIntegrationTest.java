@@ -53,55 +53,64 @@ class RdsTemplateDatabaseRestoreIntegrationTest {
         String snapshotId = "postgis-snap-" + suffix;
         String restoreId = "postgis-restore-" + suffix;
 
-        given()
-            .header("Authorization", RDS_AUTH)
-            .formParam("Action", "CreateDBInstance")
-            .formParam("DBInstanceIdentifier", dbId)
-            .formParam("Engine", "postgres")
-            .formParam("MasterUsername", "admin")
-            .formParam("MasterUserPassword", "secret123")
-            .formParam("AllocatedStorage", "5")
-            .formParam("DBInstanceClass", "db.t3.micro")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
-        assertEquals("available", waitForDb(dbId));
-
-        given()
-            .header("Authorization", RDS_AUTH)
-            .formParam("Action", "CreateDBSnapshot")
-            .formParam("DBInstanceIdentifier", dbId)
-            .formParam("DBSnapshotIdentifier", snapshotId)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString(snapshotId));
-
-        given()
-            .header("Authorization", RDS_AUTH)
-            .formParam("Action", "RestoreDBInstanceFromDBSnapshot")
-            .formParam("DBInstanceIdentifier", restoreId)
-            .formParam("DBSnapshotIdentifier", snapshotId)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString(restoreId));
-        assertEquals("available", waitForDb(restoreId));
-
-        for (String id : new String[] {restoreId, dbId}) {
+        try {
             given()
                 .header("Authorization", RDS_AUTH)
-                .formParam("Action", "DeleteDBInstance")
-                .formParam("DBInstanceIdentifier", id)
-                .formParam("SkipFinalSnapshot", "true")
+                .formParam("Action", "CreateDBInstance")
+                .formParam("DBInstanceIdentifier", dbId)
+                .formParam("Engine", "postgres")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "secret123")
+                .formParam("AllocatedStorage", "5")
+                .formParam("DBInstanceClass", "db.t3.micro")
             .when()
                 .post("/")
             .then()
                 .statusCode(200);
+            assertEquals("available", waitForDb(dbId));
+
+            given()
+                .header("Authorization", RDS_AUTH)
+                .formParam("Action", "CreateDBSnapshot")
+                .formParam("DBInstanceIdentifier", dbId)
+                .formParam("DBSnapshotIdentifier", snapshotId)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString(snapshotId));
+
+            given()
+                .header("Authorization", RDS_AUTH)
+                .formParam("Action", "RestoreDBInstanceFromDBSnapshot")
+                .formParam("DBInstanceIdentifier", restoreId)
+                .formParam("DBSnapshotIdentifier", snapshotId)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString(restoreId));
+            assertEquals("available", waitForDb(restoreId));
+        } finally {
+            deleteInstance(restoreId);
+            deleteInstance(dbId);
+            given()
+                .header("Authorization", RDS_AUTH)
+                .formParam("Action", "DeleteDBSnapshot")
+                .formParam("DBSnapshotIdentifier", snapshotId)
+            .when()
+                .post("/");
         }
+    }
+
+    private void deleteInstance(String id) {
+        given()
+            .header("Authorization", RDS_AUTH)
+            .formParam("Action", "DeleteDBInstance")
+            .formParam("DBInstanceIdentifier", id)
+            .formParam("SkipFinalSnapshot", "true")
+        .when()
+            .post("/");
     }
 
     private String waitForDb(String dbId) throws Exception {
