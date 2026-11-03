@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
@@ -31,7 +32,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -106,7 +106,7 @@ class CloudFormationDeleteDuringCreateIntegrationTest {
 
         assertTrue(deleteReceived.await(10, TimeUnit.SECONDS),
                 "the custom resource the create built was never deleted: " + requests);
-        awaitStackStatus(stackId, "DELETE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "DELETE_COMPLETE");
         assertEquals(List.of("Create", "Delete"), requests);
         assertFalse(topicExists(topicName), "the resource after the custom resource was created");
         assertFalse(cfn(Map.of("Action", "ListExports")).contains(exportName), "the export was registered");
@@ -115,7 +115,7 @@ class CloudFormationDeleteDuringCreateIntegrationTest {
         cfn(Map.of("Action", "CreateStack", "StackName", otherStack,
                 "TemplateBody", exportingTemplate(exportName)));
         try {
-            awaitStackStatus(stackId(otherStack), "CREATE_COMPLETE");
+            CfnStackWaits.awaitStatus(stackId(otherStack), "CREATE_COMPLETE");
         } finally {
             cfn(Map.of("Action", "DeleteStack", "StackName", otherStack));
         }
@@ -140,7 +140,7 @@ class CloudFormationDeleteDuringCreateIntegrationTest {
 
         try {
             assertThrows(ExecutionException.class, () -> delete.get(10, TimeUnit.SECONDS));
-            awaitStackStatus(stackId, "DELETE_FAILED");
+            CfnStackWaits.awaitStatus(stackId, "DELETE_FAILED");
         } finally {
             given().when().delete("/" + bucketName + "/object.txt");
             cfn(Map.of("Action", "DeleteStack", "StackName", stackName));
@@ -214,19 +214,6 @@ class CloudFormationDeleteDuringCreateIntegrationTest {
 
     private static String stackId(String stackName) {
         return XmlParser.extractFirst(cfn(Map.of("Action", "DescribeStacks", "StackName", stackName)), "StackId", null);
-    }
-
-    private static void awaitStackStatus(String stackId, String status) throws InterruptedException {
-        String xml = "";
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
-            xml = cfn(Map.of("Action", "DescribeStacks", "StackName", stackId));
-            if (xml.contains("<StackStatus>" + status + "</StackStatus>")) {
-                return;
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stackId + " never reached " + status + ": " + xml);
     }
 
     private static String cfn(Map<String, String> params) {
