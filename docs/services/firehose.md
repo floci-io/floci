@@ -177,7 +177,7 @@ holding the load back or re-staging the batch, so that batch then has no backup 
 With [IAM enforcement](iam.md) on, a batch is staged and loaded only if the roles involved are allowed to. The role of the
 intermediate `S3Configuration` must trust `firehose.amazonaws.com` (a trust policy condition on `aws:SourceArn` is matched
 against the delivery stream ARN) and allow `s3:PutObject` on the staged object, and the destination `RoleARN` must trust
-the same principal and allow `s3:GetObject` on it. Identity policies, permissions boundaries and SCPs all count, and a
+the same principal and allow `s3:GetObject` on it and `s3:ListBucket` on the intermediate bucket. Identity policies, permissions boundaries and SCPs all count, and a
 role of another account is refused. A refused staging write keeps the records buffered and tries again at the next
 flush, exactly like a failed S3 write. A refused load follows the usual retry path against the object already staged,
 so the batch is not staged twice, and once the `RetryOptions` window is over the batch is given up and its staged object
