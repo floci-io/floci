@@ -30,7 +30,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -720,8 +723,13 @@ public class ExternalTableMaterializer {
     private void readWithDuckDb(String accountId, RedshiftRoleAccess.RoleSession roleSession,
                                 Table table, List<ReadSource> sources, long maxRows,
                                 String scratchKey) {
-        List<String> selects = sources.stream().filter(source -> source.partition() == null || !source.objects().isEmpty())
-                .map(this::readSelect).toList();
+        Map<String, Set<String>> columnsByObject = parquetColumnsByObject(accountId, roleSession, sources);
+        List<String> selects = new ArrayList<>();
+        for (ReadSource source : sources) {
+            if (source.partition() == null || !source.objects().isEmpty()) {
+                selects.add(readSelect(source, fileColumns(source, columnsByObject)));
+            }
+        }
         if (selects.isEmpty() && GlueTableResolver.isIcebergTable(table)) {
             GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
             selects = List.of("SELECT " + projection(plan.columns()) + " FROM " + fromClause(plan, table));
@@ -749,17 +757,22 @@ public class ExternalTableMaterializer {
 
     private List<Map<String, Object>> duckQuery(String accountId, RedshiftRoleAccess.RoleSession roleSession,
                                                 String sql) {
+        return duckQuery(accountId, roleSession, sql, ICEBERG_SETUP);
+    }
+
+    private List<Map<String, Object>> duckQuery(String accountId, RedshiftRoleAccess.RoleSession roleSession,
+                                                String sql, String setup) {
         try {
             if (!s3Service.isAuthEnforced()) {
-                return duckClient.query(sql, ICEBERG_SETUP, accountId);
+                return duckClient.query(sql, setup, accountId);
             }
             requireSignedSession(roleSession);
-            return duckClient.query(sql, ICEBERG_SETUP,
+            return duckClient.query(sql, setup,
                     roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
         } catch (RuntimeException exception) {
             if (isAccessDenied(exception)) {
                 throw new SpectrumReadException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                        "Access denied during Iceberg metadata scan", exception);
+                        "Access denied during external table metadata scan", exception);
             }
             throw exception;
         }
@@ -842,17 +855,77 @@ public class ExternalTableMaterializer {
         }
     }
 
-    private String readSelect(ReadSource source) {
-        List<String> objectUris = source.objects().stream()
+    /**
+     * The field names, lower-cased, that each Parquet object of the read carries, from one query over all of
+     * them. A Parquet file written before a column was added to the table lacks it, and Spectrum reads that
+     * column as NULL, where naming it in the SELECT would fail the whole query. Nested field names are
+     * listed too, so a nested field that shares the name of a missing column leaves the column to be read,
+     * and fail, as before. Empty when no source is Parquet or the files cannot be described, which leaves
+     * every declared column to be read as declared.
+     */
+    private Map<String, Set<String>> parquetColumnsByObject(String accountId,
+                                                            RedshiftRoleAccess.RoleSession roleSession,
+                                                            List<ReadSource> sources) {
+        List<String> objectUris = new ArrayList<>();
+        for (ReadSource source : sources) {
+            if (GlueTableResolver.readsParquet(source.table())) {
+                objectUris.addAll(objectUris(source));
+            }
+        }
+        if (objectUris.isEmpty()) {
+            return Map.of();
+        }
+        List<Map<String, Object>> rows;
+        try {
+            rows = duckQuery(accountId, roleSession, GlueTableResolver.parquetSchemaSql(objectUris), null);
+        } catch (SpectrumSqlException | SpectrumReadException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            // the read that follows names the same files, so a file that is really unreadable still fails there
+            LOG.warnv(exception, "Unable to describe the Parquet files of a read of {0} objects, "
+                    + "reading every declared column", objectUris.size());
+            return Map.of();
+        }
+        Map<String, Set<String>> columnsByObject = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            if (row.get("file_name") instanceof String file && row.get("name") instanceof String name) {
+                columnsByObject.computeIfAbsent(file, ignored -> new HashSet<>()).add(name.toLowerCase(Locale.ROOT));
+            }
+        }
+        return columnsByObject;
+    }
+
+    /** The columns the objects of one source carry; null when they are unknown, so every column is read. */
+    private static Set<String> fileColumns(ReadSource source, Map<String, Set<String>> columnsByObject) {
+        if (!GlueTableResolver.readsParquet(source.table())) {
+            return null;
+        }
+        Set<String> columns = new HashSet<>();
+        for (String uri : objectUris(source)) {
+            Set<String> described = columnsByObject.get(uri);
+            if (described == null) {
+                return null;
+            }
+            columns.addAll(described);
+        }
+        return columns.isEmpty() ? null : columns;
+    }
+
+    private static List<String> objectUris(ReadSource source) {
+        return source.objects().stream()
                 .map(object -> "s3://" + source.location().bucket() + "/" + object.getKey()).toList();
-        GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(source.table(), objectUris);
+    }
+
+    private String readSelect(ReadSource source, Set<String> fileColumns) {
+        GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(source.table(), objectUris(source));
         String projection;
         if (source.partition() == null) {
-            projection = projection(plan.columns());
+            projection = plan.columns().stream().map(column -> dataProjection(column, fileColumns))
+                    .collect(Collectors.joining(", "));
         } else {
             List<Column> dataColumns = source.table().getStorageDescriptor().getColumns();
             List<String> parts = new ArrayList<>(dataColumns.stream()
-                    .map(column -> GlueTypeMapper.duckProjection(column.getName(), column.getType())).toList());
+                    .map(column -> dataProjection(column, fileColumns)).toList());
             List<Column> partitionKeys = source.table().getPartitionKeys();
             List<String> values = source.partition().getValues();
             for (int index = 0; index < partitionKeys.size(); index++) {
@@ -881,6 +954,13 @@ public class ExternalTableMaterializer {
             return plan.fromClause();
         }
         return "iceberg_scan(" + sqlPathLiteral(GlueTableResolver.icebergMetadataLocation(table)) + ")";
+    }
+
+    private static String dataProjection(Column column, Set<String> fileColumns) {
+        if (fileColumns != null && !fileColumns.contains(column.getName().toLowerCase(Locale.ROOT))) {
+            return GlueTypeMapper.nullProjection(column.getName());
+        }
+        return GlueTypeMapper.duckProjection(column.getName(), column.getType());
     }
 
     private static String projection(List<Column> columns) {

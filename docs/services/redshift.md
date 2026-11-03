@@ -682,8 +682,13 @@ GROUP BY c.country ORDER BY total DESC;
 
 This path needs Docker for PostgreSQL and the existing floci-duck runtime used to read external
 data. Use the `floci.duck` configuration described under [Athena](athena.md) to supply a reachable
-runtime when container management is unsuitable. This iteration validates CSV relational reads;
-it does not add new file formats or partition pruning.
+runtime when container management is unsuitable.
+
+Tables declared `STORED AS PARQUET` (or with a Parquet input format or SerDe in Glue) are read the same
+way. Columns are matched to the Parquet files by name, ignoring case. A declared column that a partition's
+files do not carry, as when the column was added to the table after those files were written, reads as
+`NULL`. A value that cannot be converted to the declared type fails the query. Partition pruning is not
+supported: every registered partition is listed, authorized and loaded.
 
 Materialized relations are cached in the cluster database. Each new query checks the associated
 role, trust policy and S3 access before using cached data, following the existing S3 enforcement

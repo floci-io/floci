@@ -62,6 +62,7 @@ import static org.mockito.Mockito.when;
 
 class ExternalTableMaterializerTest {
     private static final String ACCOUNT = "000000000000";
+    private static final String EVENTS_FILE = "s3://bucket/events/p1.parquet";
     private static final ExternalSchemaBinding BINDING = new ExternalSchemaBinding(ACCOUNT, ACCOUNT + ":c",
             "dev", "analytics", "lake", "arn:aws:iam::000000000000:role/R");
     private static final String TRUST_POLICY = """
@@ -967,6 +968,174 @@ class ExternalTableMaterializerTest {
                 release.countDown();
             }
         }
+    }
+
+    @Test
+    void readsAParquetColumnMissingFromThePartitionFilesAsNull() {
+        Table table = parquetPartitionedTable();
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        Partition partition = parquetPartition(table);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+        when(duck.query(argThat(sql -> sql.startsWith("SELECT file_name, name FROM parquet_schema")), isNull(), eq(ACCOUNT)))
+                .thenReturn(List.of(schemaRow(EVENTS_FILE, "id")));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).query(argThat(sql -> sql.equals(
+                "SELECT file_name, name FROM parquet_schema(['s3://bucket/events/p1.parquet'])")),
+                isNull(), eq(ACCOUNT));
+        verify(duck).execute(argThat(sql -> sql.contains("COALESCE(CAST(NULL AS VARCHAR), '\\N') AS \"name\"")
+                && !sql.contains("CAST(\"name\"")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void matchesParquetColumnsToTheDeclaredNamesIgnoringCase() {
+        Table table = parquetPartitionedTable();
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        Partition partition = parquetPartition(table);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+        when(duck.query(argThat(sql -> sql.startsWith("SELECT file_name, name FROM parquet_schema")), isNull(), eq(ACCOUNT)))
+                .thenReturn(List.of(schemaRow(EVENTS_FILE, "ID"), schemaRow(EVENTS_FILE, "Name")));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).execute(argThat(sql -> sql.contains("CAST(\"id\" AS VARCHAR)")
+                && sql.contains("CAST(\"name\" AS VARCHAR)")
+                && !sql.contains("CAST(NULL AS VARCHAR)")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void describesAndProjectsEachParquetPartitionOnItsOwn() {
+        Table table = parquetPartitionedTable();
+        Column amt = new Column();
+        amt.setName("amt");
+        amt.setType("int");
+        List<Column> columns = new ArrayList<>(table.getStorageDescriptor().getColumns());
+        columns.add(amt);
+        table.getStorageDescriptor().setColumns(columns);
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        Partition current = parquetPartitionAt(table, "s3://bucket/current/", "2026-01-02");
+        Partition older = parquetPartitionAt(table, "s3://bucket/older/", "2026-01-01");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(older, current));
+        when(duck.query(argThat(sql -> sql != null && sql.startsWith("SELECT file_name, name FROM parquet_schema")),
+                isNull(), eq(ACCOUNT)))
+                .thenReturn(List.of(schemaRow("s3://bucket/current/part-1.parquet", "id"),
+                        schemaRow("s3://bucket/current/part-1.parquet", "name"),
+                        schemaRow("s3://bucket/current/part-1.parquet", "amt"),
+                        schemaRow("s3://bucket/older/part-1.parquet", "id"),
+                        schemaRow("s3://bucket/older/part-1.parquet", "name")));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).query(argThat(sql -> sql.startsWith("SELECT file_name, name FROM parquet_schema")
+                && sql.contains("s3://bucket/current/part-1.parquet") && sql.contains("s3://bucket/older/part-1.parquet")),
+                isNull(), eq(ACCOUNT));
+        verify(duck).execute(argThat(sql -> sql.contains("CAST(\"amt\" AS VARCHAR)")
+                && sql.contains("COALESCE(CAST(NULL AS VARCHAR), '\\N') AS \"amt\"")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void describesParquetFilesAsTheRoleSessionWhenS3AuthIsEnforced() {
+        Table table = parquetPartitionedTable();
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        Partition partition = parquetPartition(table);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"}
+                ]}""")));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).query(argThat(sql -> sql.startsWith("SELECT file_name, name FROM parquet_schema")), isNull(),
+                startsWith("ASIA"), anyString(), notNull());
+        verify(duck, never()).query(anyString(), any(), eq(ACCOUNT));
+    }
+
+    @Test
+    void readsEveryDeclaredColumnWhenDescribingTheParquetFilesFails() {
+        Table table = parquetPartitionedTable();
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        Partition partition = parquetPartition(table);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+        when(duck.query(argThat(sql -> sql.startsWith("SELECT file_name, name FROM parquet_schema")), isNull(), eq(ACCOUNT)))
+                .thenThrow(new IllegalStateException("sidecar rejected the statement"));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).execute(argThat(sql -> sql.contains("CAST(\"name\" AS VARCHAR)")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void deniesTheLoadWhenDescribingTheParquetFilesIsDenied() {
+        Table table = parquetPartitionedTable();
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        Partition partition = parquetPartition(table);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+        when(duck.query(argThat(sql -> sql.startsWith("SELECT file_name, name FROM parquet_schema")), isNull(), eq(ACCOUNT)))
+                .thenThrow(new IllegalStateException("HTTP 403 Forbidden"));
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void readsEveryDeclaredColumnWhenTheParquetFilesCannotBeDescribed() {
+        Table table = parquetPartitionedTable();
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        Partition partition = parquetPartition(table);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(partition));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck).execute(argThat(sql -> sql.contains("CAST(\"id\" AS VARCHAR)")
+                && sql.contains("CAST(\"name\" AS VARCHAR)")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void doesNotDescribeTheFilesOfATextTable() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        verify(duck, never()).query(argThat(sql -> sql.startsWith("SELECT file_name, name FROM parquet_schema")), any(), anyString());
+        verify(duck, never()).query(anyString(), any(), anyString(), anyString(), any());
+    }
+
+    private static Map<String, Object> schemaRow(String file, String name) {
+        return Map.of("file_name", file, "name", name);
+    }
+
+    private Partition parquetPartitionAt(Table table, String location, String day) {
+        Partition partition = partitionAt("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat", table);
+        partition.getStorageDescriptor().setLocation(location);
+        partition.setValues(List.of(day));
+        String prefix = location.substring("s3://bucket/".length());
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq(prefix), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(new S3Object("bucket", prefix + "part-1.parquet", new byte[]{1},
+                                "application/octet-stream", "etag-" + day)), List.of(), false, null));
+        return partition;
+    }
+
+    private Table parquetPartitionedTable() {
+        Table table = csvTable();
+        table.getStorageDescriptor().setInputFormat("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat");
+        table.setPartitionKeys(List.of(new Column("day", "string")));
+        return table;
+    }
+
+    private Partition parquetPartition(Table table) {
+        Partition partition = partitionAt("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat", table);
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("events/"), eq(""), eq(1000), any(), any()))
+                .thenReturn(new S3Service.ListObjectsResult(
+                        List.of(new S3Object("bucket", "events/p1.parquet", new byte[]{1}, "application/octet-stream", "etag1")),
+                        List.of(), false, null));
+        return partition;
     }
 
     private Partition partitionAt(String inputFormat, Table table) {
