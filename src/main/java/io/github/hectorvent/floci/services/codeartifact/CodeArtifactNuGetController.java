@@ -218,6 +218,18 @@ public class CodeArtifactNuGetController {
         String packageName = nuspec.id().toLowerCase(Locale.ROOT);
         String version = NuGetVersions.normalize(nuspec.version());
 
+        // A package whose origin configuration sets publish:BLOCK refuses every dotnet nuget push,
+        // the same way PublishPackageVersion refuses it for the generic format, ahead of the
+        // byte-identical shortcut below: a retry of bytes already stored is still a publish. Also
+        // the default for a package first retained from nuget.org (see
+        // CodeArtifactService#ensureRetainedPackageOriginDefault).
+        try {
+            service.requireContainerBackedPackagePublishAllowed(handle.region(), domain, handle.owner(), repository,
+                    "nuget", null, packageName);
+        } catch (AwsException e) {
+            return Response.status(409).entity(e.getMessage()).build();
+        }
+
         // Raised by hectorvent's review: a real dotnet nuget push to a coordinate
         // updatePackageVersionsStatus/disposePackageVersions left Archived or Disposed must be
         // refused outright, the same way PublishPackageVersion already refuses it for the generic

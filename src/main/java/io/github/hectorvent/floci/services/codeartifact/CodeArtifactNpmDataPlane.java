@@ -742,9 +742,11 @@ public class CodeArtifactNpmDataPlane {
      * twine sends no {@code description} field, so a published version without a readme is never
      * mistaken for one that was never published at all.
      *
-     * <p>{@code blockedMessage} is non-null exactly when some version in the envelope is Archived
-     * or Disposed (see {@link CodeArtifactService#requireContainerBackedVersionNotArchivedOrDisposed}),
-     * found while this check already has every version in hand; the caller refuses the whole
+     * <p>{@code blockedMessage} is non-null exactly when the package's origin configuration blocks
+     * direct publish (see {@link CodeArtifactService#requireContainerBackedPackagePublishAllowed}),
+     * or some version in the envelope is Archived or Disposed (see {@link
+     * CodeArtifactService#requireContainerBackedVersionNotArchivedOrDisposed}), found while this
+     * check already has every version in hand; the caller refuses the whole
      * publish on it rather than reaching {@code confirmed} or forwarding anything, since the User
      * Guide blocks both statuses unconditionally, byte-identical content included.
      *
@@ -762,6 +764,17 @@ public class CodeArtifactNpmDataPlane {
     private RepublishCheck checkRepublish(String backendBaseUrl, NpmRequest npmRequest, String spoolPath,
             AuthorizationTokenScope scope) {
         PackageIdentity identity = packageIdentityFromPath(npmRequest.rest());
+        // A package whose origin configuration sets publish:BLOCK refuses every npm publish, the
+        // same way PublishPackageVersion refuses it for the generic format. The restriction is per
+        // package, so it needs nothing from the envelope and runs ahead of every branch below:
+        // the confirmed byte-identical republish, and an envelope too malformed to scan, which is
+        // otherwise forwarded unchanged.
+        try {
+            service.requireContainerBackedPackagePublishAllowed(scope.region(), npmRequest.domain(), scope.owner(),
+                    npmRequest.repository(), "npm", identity.namespace(), identity.packageName());
+        } catch (AwsException e) {
+            return new RepublishCheck(false, 0L, identity, Map.of(), e.getMessage(), Map.of());
+        }
         NpmPublishEnvelopeScanner.Envelope envelope;
         try (InputStream in = new BufferedInputStream(Files.newInputStream(Path.of(spoolPath)))) {
             envelope = NpmPublishEnvelopeScanner.scan(in);

@@ -18,7 +18,9 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 
 /**
@@ -68,6 +70,18 @@ public class CodeArtifactMavenController {
         }
         MavenRequestScope scope = requireScope(headers, domain, repository);
         Optional<String[]> coordinate = parseNamespaceAndPackageName(gav);
+        // A package whose origin configuration sets publish:BLOCK refuses every mvn deploy, the
+        // same way PublishPackageVersion refuses it for the generic format. The restriction is
+        // per package, so a bare maven-metadata.xml PUT (no version) is refused too, and it runs
+        // ahead of every check below, Reposilite's own byte-identical republish included.
+        try {
+            for (String[] checked : publishCheckedPackages(gav)) {
+                service.requireContainerBackedPackagePublishAllowed(scope.region(), domain, scope.owner(),
+                        repository, "maven", checked[0], checked[1]);
+            }
+        } catch (AwsException e) {
+            return Response.status(409).entity(e.getMessage()).build();
+        }
         // Raised by hectorvent's review: a real mvn deploy to a coordinate
         // updatePackageVersionsStatus/disposePackageVersions left Archived or Disposed must be
         // refused outright, the same way PublishPackageVersion already refuses it for the generic
@@ -143,26 +157,53 @@ public class CodeArtifactMavenController {
      * {@link #isMavenMetadataFile}. Once that is known, the artifactId is always the segment
      * directly before it, no version segment in between, so this takes one fewer trailing segment
      * than the ordinary rule does, and the returned version is {@code null} rather than guessed.
-     * A versioned snapshot's own {@code .../<version>/maven-metadata.xml} is the one real path
-     * this still gets slightly wrong for the namespace/packageName pair, reading the version
-     * string itself as the package name instead of skipping over it; accepted rather than chased
-     * further, since that pair is only ever used for a byte count summed at the domain level
-     * (never read back by package), and this one rare case still adds its real byte count to the
-     * right total under a harmless, if misnamed, bucket nothing else will ever look up by that
-     * name. The version element has no such approximation to make: it is {@code null} exactly
-     * when there genuinely is no version in the path.
+     * The one exception is a snapshot's own version-level {@code
+     * .../<artifactId>/<version>-SNAPSHOT/maven-metadata.xml}, the only version directory a
+     * real {@code mvn deploy} writes metadata into: the {@code -SNAPSHOT} segment is the version,
+     * not the artifactId, so it resolves exactly like a versioned GAV. Raised by Greptile and
+     * pgermosen's review: the publish:BLOCK check reads this pair back by package, so reading
+     * the version as the package name would let a blocked snapshot's metadata through.
      */
     static Optional<String[]> parseNamespaceAndPackageName(String gav) {
         String[] segments = gav.split("/");
         boolean metadataFile = isMavenMetadataFile(segments[segments.length - 1]);
-        int packageNameIndex = metadataFile ? segments.length - 2 : segments.length - 3;
+        boolean versionLevelMetadata = metadataFile && segments.length >= 4
+                && segments[segments.length - 2].endsWith("-SNAPSHOT");
+        boolean bareMetadata = metadataFile && !versionLevelMetadata;
+        int packageNameIndex = bareMetadata ? segments.length - 2 : segments.length - 3;
         if (packageNameIndex < 1) {
             return Optional.empty();
         }
         String packageName = segments[packageNameIndex];
         String namespace = String.join(".", Arrays.asList(segments).subList(0, packageNameIndex));
-        String version = metadataFile ? null : segments[packageNameIndex + 1];
+        String version = bareMetadata ? null : segments[packageNameIndex + 1];
         return Optional.of(new String[] {namespace, packageName, version});
+    }
+
+    /**
+     * The (namespace, packageName) pairs the publish:BLOCK check runs against for {@code gav}:
+     * {@link #parseNamespaceAndPackageName}'s own pair, plus, for a {@code maven-metadata.xml}
+     * whose parent segment ends in {@code -SNAPSHOT}, the artifact-level reading as well. The
+     * layout alone cannot tell {@code com/example/widget/1.0-SNAPSHOT/maven-metadata.xml}, a
+     * snapshot's version metadata, from {@code com/example/widget-SNAPSHOT/maven-metadata.xml},
+     * the bare metadata of an artifact named {@code widget-SNAPSHOT}, so a block on either reading
+     * refuses it (Greptile and pgermosen's review).
+     */
+    static List<String[]> publishCheckedPackages(String gav) {
+        Optional<String[]> coordinate = parseNamespaceAndPackageName(gav);
+        if (coordinate.isEmpty()) {
+            return List.of();
+        }
+        List<String[]> packages = new ArrayList<>();
+        packages.add(new String[] {coordinate.get()[0], coordinate.get()[1]});
+        String[] segments = gav.split("/");
+        int artifactIndex = segments.length - 2;
+        if (isMavenMetadataFile(segments[segments.length - 1]) && artifactIndex >= 2
+                && segments[artifactIndex].endsWith("-SNAPSHOT")) {
+            packages.add(new String[] {String.join(".", Arrays.asList(segments).subList(0, artifactIndex)),
+                    segments[artifactIndex]});
+        }
+        return packages;
     }
 
     private static boolean isMavenMetadataFile(String filename) {
