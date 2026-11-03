@@ -1,11 +1,9 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
-import io.quarkus.test.common.http.TestHTTPResource;
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.autoscaling.model.AutoScalingException;
@@ -14,7 +12,6 @@ import software.amazon.awssdk.services.autoscaling.model.CapacityReservationSpec
 import software.amazon.awssdk.services.autoscaling.model.CapacityReservationTarget;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 
-import java.net.URI;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -23,9 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class AutoScalingCapacityTargetIntegrationTest {
-    @TestHTTPResource
-    URI endpoint;
-
     @ParameterizedTest
     @CsvSource({
             "ids, capacity-reservations-first",
@@ -41,8 +35,6 @@ class AutoScalingCapacityTargetIntegrationTest {
     })
     void sdkReceivesAwsTargetErrorsWithoutCreatingOrUpdatingAGroup(String kind, String preference) {
         String name = "capacity-target-" + UUID.randomUUID();
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create("454545454545", "test"));
         CapacityReservationTarget target = switch (kind) {
             case "ids" -> CapacityReservationTarget.builder()
                     .capacityReservationIds("cr-0123456789abcdef0", "cr-11111111111111111").build();
@@ -66,10 +58,9 @@ class AutoScalingCapacityTargetIntegrationTest {
                         + "Remove either CapacityReservationIds or CapacityReservationResourceGroupArns."
                 : "Specifying more than one target CapacityReservationIds or CapacityReservationResoureGroupArns "
                         + "is not supported.";
-        try (AutoScalingClient client = AutoScalingClient.builder().endpointOverride(endpoint)
-                .region(Region.US_EAST_1).credentialsProvider(credentials).build();
-             Ec2Client ec2 = Ec2Client.builder().endpointOverride(endpoint)
-                     .region(Region.US_EAST_1).credentialsProvider(credentials).build()) {
+        try (AutoScalingClient client = AwsTestClients.create(
+                AutoScalingClient.builder(), "454545454545", Region.US_EAST_1);
+             Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "454545454545", Region.US_EAST_1)) {
             ec2.createLaunchTemplate(r -> r.launchTemplateName(name)
                     .launchTemplateData(t -> t.imageId("ami-amazonlinux2023").instanceType("t3.micro")));
             try {
