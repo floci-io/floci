@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.paymentcryptography;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.paymentcryptography.crypto.DukptCrypto;
+import io.github.hectorvent.floci.services.paymentcryptography.crypto.Hex;
 import io.github.hectorvent.floci.services.paymentcryptography.crypto.IsoMac;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -32,14 +33,30 @@ public class PaymentCryptographyDataPlaneHandler {
     /** The shortest MAC the service computes, in bytes. */
     private static final int SHORTEST_MAC = 4;
 
-    /** The longest MAC the service computes, in bytes. */
+    /** The longest MAC the ISO 9797 algorithms give, in bytes. */
     private static final int LONGEST_MAC = 8;
+
+    /** The longest MAC the CMAC gives, in bytes: a whole AES block. */
+    private static final int LONGEST_CMAC = 16;
 
     /** The shortest plaintext the service encrypts, in bytes. */
     private static final int SHORTEST_PLAINTEXT = 8;
 
     /** The longest plaintext the service encrypts, in bytes. */
     private static final int LONGEST_PLAINTEXT = 2032;
+
+    /**
+     * The longest ciphertext the service reads, in bytes.
+     *
+     * <p>A ciphertext is the initialization vector and the encrypted bytes, and the
+     * encrypted bytes carry the padding, so a ciphertext is longer than the plaintext it came
+     * from. The limit is the plaintext's own limit plus that overhead, or a plaintext near the
+     * limit would produce a ciphertext this service then refuses to read.
+     */
+    private static final int LONGEST_CIPHERTEXT = LONGEST_PLAINTEXT + 16 + 16;
+
+    /** The shortest ciphertext the service reads, in bytes: the vector and one block. */
+    private static final int SHORTEST_CIPHERTEXT = 16 + 16;
 
     private final PaymentCryptographyService service;
     private final PaymentCryptographyPinOperations pinOperations;
@@ -69,8 +86,10 @@ public class PaymentCryptographyDataPlaneHandler {
     public Map<String, Object> encryptData(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
         requireMode(key, "Encrypt", "encrypt");
+        Encryption encryption = encryptionAttributes(request.get("EncryptionAttributes"));
         byte[] plaintext = blob(request, "PlainText", SHORTEST_PLAINTEXT, LONGEST_PLAINTEXT);
-        byte[] ciphertext = PaymentCryptographyCrypto.encryptCbc(material(key), plaintext, random);
+        byte[] ciphertext = PaymentCryptographyCrypto.encryptCbc(material(key), plaintext,
+                encryption.initializationVector, random);
         return answer(key, Map.of("CipherText", encode(ciphertext)));
     }
 
@@ -80,7 +99,8 @@ public class PaymentCryptographyDataPlaneHandler {
     public Map<String, Object> decryptData(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
         requireMode(key, "Decrypt", "decrypt");
-        byte[] ciphertext = blob(request, "CipherText", SHORTEST_PLAINTEXT, LONGEST_PLAINTEXT);
+        encryptionAttributes(request.get("DecryptionAttributes"));
+        byte[] ciphertext = blob(request, "CipherText", SHORTEST_CIPHERTEXT, LONGEST_CIPHERTEXT);
         byte[] plaintext;
         try {
             plaintext = PaymentCryptographyCrypto.decryptCbc(material(key), ciphertext);
@@ -98,14 +118,18 @@ public class PaymentCryptographyDataPlaneHandler {
         requireMode(incoming, "Decrypt", "decrypt");
         PaymentCryptographyKey outgoing = requiredKey(request, region, "OutgoingKeyIdentifier");
         requireMode(outgoing, "Encrypt", "encrypt");
-        byte[] ciphertext = blob(request, "CipherText", SHORTEST_PLAINTEXT, LONGEST_PLAINTEXT);
+        encryptionAttributes(request.get("IncomingEncryptionAttributes"));
+        Encryption outgoingEncryption =
+                encryptionAttributes(request.get("OutgoingEncryptionAttributes"));
+        byte[] ciphertext = blob(request, "CipherText", SHORTEST_CIPHERTEXT, LONGEST_CIPHERTEXT);
         byte[] plaintext;
         try {
             plaintext = PaymentCryptographyCrypto.decryptCbc(material(incoming), ciphertext);
         } catch (IllegalArgumentException e) {
             throw new AwsException("DecryptFailureException", e.getMessage(), 400);
         }
-        byte[] reEncrypted = PaymentCryptographyCrypto.encryptCbc(material(outgoing), plaintext, random);
+        byte[] reEncrypted = PaymentCryptographyCrypto.encryptCbc(material(outgoing), plaintext,
+                outgoingEncryption.initializationVector, random);
         return answer(outgoing, Map.of("CipherText", encode(reEncrypted)));
     }
 
@@ -118,7 +142,7 @@ public class PaymentCryptographyDataPlaneHandler {
         MacLeg leg = resolveMacLeg(request.get("GenerationAttributes"), key, region, "Generate",
                 "generating a MAC with");
         byte[] message = blob(request, "MessageData", 1, 2048);
-        int length = macLength(request);
+        int length = macLength(request, leg);
         byte[] mac = leg.mac.apply(leg.keyBytes, message);
         byte[] answer = new byte[length];
         System.arraycopy(mac, 0, answer, 0, length);
@@ -133,11 +157,11 @@ public class PaymentCryptographyDataPlaneHandler {
         MacLeg leg = resolveMacLeg(request.get("VerificationAttributes"), key, region, "Verify",
                 "verifying a MAC with");
         byte[] message = blob(request, "MessageData", 1, 2048);
-        byte[] mac = blob(request, "Mac", 4, 8);
+        byte[] mac = blob(request, "Mac", SHORTEST_MAC, LONGEST_CMAC);
         int length = request.has("MacLength") ? request.path("MacLength").asInt(mac.length) : mac.length;
-        if (!isMacLength(length)) {
+        if (length < SHORTEST_MAC || length > leg.longest) {
             throw new AwsException("ValidationException",
-                    "MacLength must be between " + SHORTEST_MAC + " and " + LONGEST_MAC, 400);
+                    "MacLength must be between " + SHORTEST_MAC + " and " + leg.longest, 400);
         }
         byte[] expected = leg.mac.apply(leg.keyBytes, message);
         byte[] cut = new byte[length];
@@ -212,6 +236,60 @@ public class PaymentCryptographyDataPlaneHandler {
         return out;
     }
 
+    /**
+     * The cipher the request asks for.
+     *
+     * <p>The attributes name the mode and, for a symmetric cipher, the initialization vector.
+     * The service encrypts in CBC mode, so a request that names another mode is refused
+     * rather than answered with a cipher it did not ask for.
+     *
+     * @param attributes the attributes of the request, which may be absent
+     * @return the cipher the request asks for
+     */
+    private static Encryption encryptionAttributes(JsonNode attributes) {
+        if (attributes == null || attributes.isNull()) {
+            throw new AwsException("ValidationException",
+                    "the encryption attributes are required", 400);
+        }
+        String variant = soleVariant(attributes);
+        if (variant == null) {
+            throw new AwsException("ValidationException",
+                    "the encryption attributes must specify exactly one variant", 400);
+        }
+        if (!"Symmetric".equals(variant)) {
+            throw new AwsException("ValidationException",
+                    "the encryption variant '" + variant + "' is not supported by this service "
+                            + "(Symmetric)", 400);
+        }
+        JsonNode symmetric = attributes.get(variant);
+        String mode = symmetric == null ? "" : symmetric.path("Mode").asText();
+        if (!"CBC".equals(mode)) {
+            throw new AwsException("ValidationException",
+                    "the encryption mode '" + (mode.isEmpty() ? "(missing)" : mode)
+                            + "' is not supported by this service (CBC)", 400);
+        }
+        if (symmetric != null && symmetric.hasNonNull("PaddingType")) {
+            throw new AwsException("ValidationException",
+                    "PaddingType applies to RSA only; the symmetric cipher does not pad", 400);
+        }
+        byte[] iv = null;
+        if (symmetric != null && symmetric.hasNonNull("InitializationVector")) {
+            String hex = symmetric.path("InitializationVector").asText();
+            if (!hex.isEmpty() && !isHex(hex)) {
+                throw new AwsException("ValidationException",
+                        "the initialization vector must be a hexadecimal string", 400);
+            }
+            if (!hex.isEmpty()) {
+                iv = Hex.decode(hex);
+            }
+        }
+        return new Encryption(iv);
+    }
+
+    /** The cipher a request asks for. */
+    private record Encryption(byte[] initializationVector) {
+    }
+
     /** The key the request names, in the member the operation names it in. */
     private PaymentCryptographyKey requiredKey(JsonNode request, String region, String member) {
         String identifier = request.path(member).asText();
@@ -222,7 +300,23 @@ public class PaymentCryptographyDataPlaneHandler {
         if (key == null) {
             throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 400);
         }
+        requireEnabled(key);
         return key;
+    }
+
+    /**
+     * A key that is disabled does no work.
+     *
+     * <p>The service reads a disabled key and tells the caller about it, but it does not
+     * encrypt with it, decrypt with it, or make a MAC under it.
+     *
+     * @param key the key the request names
+     */
+    private static void requireEnabled(PaymentCryptographyKey key) {
+        if (!key.isEnabled()) {
+            throw new AwsException("InvalidKeyUsageException",
+                    "the key " + key.getArn() + " is disabled", 400);
+        }
     }
 
     /** The material of a key. */
@@ -236,7 +330,9 @@ public class PaymentCryptographyDataPlaneHandler {
         if (modes == null) {
             return;
         }
-        if (modes.containsKey("NoRestrictions")) {
+        // A NoRestrictions that is false is not a permission: a request that names the
+        // member says nothing about what it allows, so the mode itself decides.
+        if (Boolean.TRUE.equals(modes.get("NoRestrictions"))) {
             return;
         }
         if (!Boolean.TRUE.equals(modes.get(mode))) {
@@ -272,15 +368,21 @@ public class PaymentCryptographyDataPlaneHandler {
             String algorithm = text(attributes, "Algorithm");
             if ("ISO9797_ALGORITHM1".equals(algorithm)) {
                 requireMode(key, mode, what);
-                return new MacLeg(IsoMac::alg1, material(key));
+                return new MacLeg(IsoMac::alg1, material(key), LONGEST_MAC);
             }
             if ("ISO9797_ALGORITHM3".equals(algorithm)) {
                 requireMode(key, mode, what);
-                return new MacLeg(IsoMac::alg3, material(key));
+                return new MacLeg(IsoMac::alg3, material(key), LONGEST_MAC);
+            }
+            if ("CMAC".equals(algorithm)) {
+                // The CMAC is the AES-CMAC of RFC 4493, which is a whole block
+                // wide, so it is cut to a length the caller asks for.
+                requireMode(key, mode, what);
+                return new MacLeg(PaymentCryptographyCrypto::cmac, material(key), LONGEST_CMAC);
             }
             throw new AwsException("ValidationException",
                     "Algorithm '" + algorithm + "' not supported by this service "
-                            + "(ISO9797_ALGORITHM1, ISO9797_ALGORITHM3)", 400);
+                            + "(ISO9797_ALGORITHM1, ISO9797_ALGORITHM3, CMAC)", 400);
         }
         if ("DukptIso9797Algorithm1".equals(variant) || "DukptIso9797Algorithm3".equals(variant)) {
             // A DUKPT MAC key is derived from the base derivation key, so that is what the key
@@ -306,7 +408,7 @@ public class PaymentCryptographyDataPlaneHandler {
                         "DUKPT derivation failed: " + e.getMessage(), 400);
             }
             return new MacLeg("DukptIso9797Algorithm1".equals(variant)
-                    ? IsoMac::alg1 : IsoMac::alg3, derived);
+                    ? IsoMac::alg1 : IsoMac::alg3, derived, LONGEST_MAC);
         }
         throw new AwsException("ValidationException",
                 "MacAttributes." + variant + " not supported by this service", 400);
@@ -316,10 +418,13 @@ public class PaymentCryptographyDataPlaneHandler {
     private static final class MacLeg {
         final MacFunction mac;
         final byte[] keyBytes;
+        /** The longest MAC this algorithm gives, in bytes. */
+        final int longest;
 
-        MacLeg(MacFunction mac, byte[] keyBytes) {
+        MacLeg(MacFunction mac, byte[] keyBytes, int longest) {
             this.mac = mac;
             this.keyBytes = keyBytes;
+            this.longest = longest;
         }
     }
 
@@ -393,17 +498,13 @@ public class PaymentCryptographyDataPlaneHandler {
     }
 
     /** The length of the MAC the caller asks for, which the service computes. */
-    private static int macLength(JsonNode request) {
-        int length = request.path("MacLength").asInt(LONGEST_MAC);
-        if (!isMacLength(length)) {
+    private static int macLength(JsonNode request, MacLeg leg) {
+        int length = request.path("MacLength").asInt(leg.longest);
+        if (length < SHORTEST_MAC || length > leg.longest) {
             throw new AwsException("ValidationException",
-                    "MacLength must be between " + SHORTEST_MAC + " and " + LONGEST_MAC, 400);
+                    "MacLength must be between " + SHORTEST_MAC + " and " + leg.longest, 400);
         }
         return length;
-    }
-
-    private static boolean isMacLength(int length) {
-        return length >= SHORTEST_MAC && length <= LONGEST_MAC;
     }
 
     /** A blob as the protocol carries it: hexadecimal. */

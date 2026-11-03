@@ -92,13 +92,24 @@ class PaymentCryptographyDataPlaneHandlerTest {
         return node;
     }
 
+
+    /** The encryption attributes of a request that encrypts in CBC mode. */
+    private JsonNode cbc() {
+        ObjectNode symmetric = mapper.createObjectNode();
+        symmetric.put("Mode", "CBC");
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.set("Symmetric", symmetric);
+        return attributes;
+    }
+
     @Test
     void aKeyEncryptsAndDecrypts() {
         PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");
 
         Map<String, Object> encrypted = handler.encryptData(request(Map.of(
                 "KeyIdentifier", key.getArn(),
-                "PlainText", hex("hello, world".getBytes()))), "us-east-1");
+                "PlainText", hex("hello, world".getBytes()),
+                "EncryptionAttributes", cbc())), "us-east-1");
 
         assertEquals(key.getArn(), encrypted.get("KeyArn"));
         assertEquals(key.getKeyCheckValue(), encrypted.get("KeyCheckValue"));
@@ -106,7 +117,8 @@ class PaymentCryptographyDataPlaneHandlerTest {
 
         Map<String, Object> decrypted = handler.decryptData(request(Map.of(
                 "KeyIdentifier", key.getArn(),
-                "CipherText", cipherText)), "us-east-1");
+                "CipherText", cipherText,
+                "DecryptionAttributes", cbc())), "us-east-1");
 
         assertEquals(hex("hello, world".getBytes()), decrypted.get("PlainText"));
     }
@@ -117,9 +129,11 @@ class PaymentCryptographyDataPlaneHandlerTest {
         String plain = hex("the same plaintext".getBytes());
 
         String first = (String) handler.encryptData(request(Map.of(
-                "KeyIdentifier", key.getArn(), "PlainText", plain)), "us-east-1").get("CipherText");
+                "KeyIdentifier", key.getArn(), "PlainText", plain,
+                "EncryptionAttributes", cbc())), "us-east-1").get("CipherText");
         String second = (String) handler.encryptData(request(Map.of(
-                "KeyIdentifier", key.getArn(), "PlainText", plain)), "us-east-1").get("CipherText");
+                "KeyIdentifier", key.getArn(), "PlainText", plain,
+                "EncryptionAttributes", cbc())), "us-east-1").get("CipherText");
 
         assertNotEquals(plain, first);
         assertNotEquals(first, second, "two encryptions of the same plaintext are the same");
@@ -195,16 +209,20 @@ class PaymentCryptographyDataPlaneHandlerTest {
         PaymentCryptographyKey outgoing = createKey("Encrypt", "Decrypt");
         String cipherText = (String) handler.encryptData(request(Map.of(
                 "KeyIdentifier", incoming.getArn(),
-                "PlainText", hex("moved here".getBytes()))), "us-east-1").get("CipherText");
+                "PlainText", hex("moved here".getBytes()),
+                "EncryptionAttributes", cbc())), "us-east-1").get("CipherText");
 
         Map<String, Object> reEncrypted = handler.reEncryptData(request(Map.of(
                 "IncomingKeyIdentifier", incoming.getArn(),
                 "OutgoingKeyIdentifier", outgoing.getArn(),
-                "CipherText", cipherText)), "us-east-1");
+                "CipherText", cipherText,
+                "IncomingEncryptionAttributes", cbc(),
+                "OutgoingEncryptionAttributes", cbc())), "us-east-1");
 
         Map<String, Object> decrypted = handler.decryptData(request(Map.of(
                 "KeyIdentifier", outgoing.getArn(),
-                "CipherText", (String) reEncrypted.get("CipherText"))), "us-east-1");
+                "CipherText", (String) reEncrypted.get("CipherText"),
+                "DecryptionAttributes", cbc())), "us-east-1");
         assertEquals(hex("moved here".getBytes()), decrypted.get("PlainText"));
     }
 
@@ -230,7 +248,8 @@ class PaymentCryptographyDataPlaneHandlerTest {
         PaymentCryptographyKey key = createKey("NoRestrictions");
 
         Map<String, Object> encrypted = handler.encryptData(request(Map.of(
-                "KeyIdentifier", key.getArn(), "PlainText", hex("xxxxxxxx".getBytes()))), "us-east-1");
+                "KeyIdentifier", key.getArn(), "PlainText", hex("xxxxxxxx".getBytes()),
+                "EncryptionAttributes", cbc())), "us-east-1");
 
         assertTrue(encrypted.containsKey("CipherText"));
     }
@@ -241,9 +260,11 @@ class PaymentCryptographyDataPlaneHandlerTest {
         byte[] plain = "a longer plaintext that spans a block boundary".getBytes(StandardCharsets.UTF_8);
 
         String cipherText = (String) handler.encryptData(request(Map.of(
-                "KeyIdentifier", key.getArn(), "PlainText", hex(plain))), "us-east-1").get("CipherText");
+                "KeyIdentifier", key.getArn(), "PlainText", hex(plain),
+                "EncryptionAttributes", cbc())), "us-east-1").get("CipherText");
 
         assertEquals(hex(plain), handler.decryptData(request(Map.of(
-                "KeyIdentifier", key.getArn(), "CipherText", cipherText)), "us-east-1").get("PlainText"));
+                "KeyIdentifier", key.getArn(), "CipherText", cipherText,
+                "DecryptionAttributes", cbc())), "us-east-1").get("PlainText"));
     }
 }

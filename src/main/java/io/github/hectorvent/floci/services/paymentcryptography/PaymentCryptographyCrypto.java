@@ -175,9 +175,37 @@ final class PaymentCryptographyCrypto {
      * bytes in one blob, which is how the service answers.
      */
     static byte[] encryptCbc(byte[] key, byte[] plaintext, SecureRandom random) {
+        return encryptCbc(key, plaintext, null, random);
+    }
+
+    /**
+     * The ciphertext of a plaintext under a key, with the initialization vector the request
+     * names.
+     *
+     * <p>A request that names a vector gets the ciphertext under it, so two parties that
+     * agree on the vector can read each other's ciphertext. A request that names none gets a
+     * fresh one.
+     *
+     * @param key the key
+     * @param plaintext the bytes to encrypt
+     * @param initializationVector the vector to encrypt under, or null for a fresh one
+     * @param random the randomness a fresh vector comes from
+     * @return the vector and the encrypted bytes in one blob
+     */
+    static byte[] encryptCbc(byte[] key, byte[] plaintext, byte[] initializationVector,
+                             SecureRandom random) {
         try {
-            byte[] iv = new byte[IV_LENGTH];
-            random.nextBytes(iv);
+            byte[] iv;
+            if (initializationVector == null) {
+                iv = new byte[IV_LENGTH];
+                random.nextBytes(iv);
+            } else {
+                if (initializationVector.length != IV_LENGTH) {
+                    throw new IllegalArgumentException("the initialization vector is "
+                            + initializationVector.length + " bytes; it is " + IV_LENGTH);
+                }
+                iv = initializationVector.clone();
+            }
             Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
             cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
             byte[] encrypted = cipher.doFinal(plaintext);
