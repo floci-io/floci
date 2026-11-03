@@ -692,6 +692,10 @@ public class IamActionRegistry {
         // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
         // bucket's one trailing slash, so an S3 path is matched as sent.
         String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
+        String modeled = IamRestRoutes.actionFor(credentialScope, method, path);
+        if (modeled != null) {
+            return modeled;
+        }
 
         if ("s3".equals(credentialScope)) {
             // An S3 Control route is matched before the query overrides below, which would read the
