@@ -55,7 +55,7 @@ descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `Ske
 | Action | Description |
 |--------|-------------|
 | CreatePartition | Creates a partition for a Data Catalog table. |
-| GetPartitions | Lists partitions stored for a Data Catalog table. With a `Segment`, returns that segment's share of them: each partition is in exactly one of `TotalSegments` (1 to 10) segments; a `Segment` member that is not an integer is a `SerializationException`. |
+| GetPartitions | Lists partitions stored for a Data Catalog table. With a `Segment`, returns that segment's share of them: each partition is in exactly one of `TotalSegments` (1 to 10) segments; a `Segment` member that is not an integer is a `SerializationException`. AWS documents `SegmentNumber` values from 0 through `TotalSegments` minus 1 and not what a larger one returns, so a `SegmentNumber` of `TotalSegments` or more returning no partitions is Floci's reading. |
 | BatchDeletePartition | Deletes up to 25 partitions, reporting the ones not found in `Errors`. |
 | CreatePartitionIndex | Registers a partition index on a table. Keys must name partition columns, and a table holds at most 3 indexes. The index reports `CREATING` before `ACTIVE`. |
 | GetPartitionIndexes | Lists a table's partition indexes, each with its keys resolved to name and type. |
