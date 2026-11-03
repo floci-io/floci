@@ -570,34 +570,65 @@ public class IamActionRegistry {
         rule("resource-groups", "POST", "^/_rg/list-group-resources/?$", "resource-groups:ListGroupResources"),
         // The Payment Cryptography data plane. Its routes sit under the internal prefix, so
         // the rules name that prefix, the way the other REST services' rules do.
-        rule("payment-cryptography-data", "POST", "^/_paymentcryptography/keys/[^/]+/encrypt/?$",
+        //
+        // The key of the request may be named by its ARN, and an ARN holds a slash that the
+        // client sends encoded. The rules are matched on the rewritten path, which is
+        // decoded, so the segment holds a real slash and stops at the first one would
+        // leave the request with no action at all.
+        //
+        // The rules are named for both of the service's scopes. A client of the data plane
+        // signs for the service, which is one scope for both planes, and a client that
+        // signs for the data plane's own scope is served as well. A rule under a scope no
+        // request carries would never match, and a request that matches no rule resolves to
+        // no action, which the enforcement filter treats as ALLOW: the policy would not be
+        // enforced at all.
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/keys/.+/encrypt/?$",
                 "payment-cryptography:EncryptData"),
-        rule("payment-cryptography-data", "POST", "^/_paymentcryptography/keys/[^/]+/decrypt/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/keys/.+/decrypt/?$",
                 "payment-cryptography:DecryptData"),
-        rule("payment-cryptography-data", "POST",
-                "^/_paymentcryptography/keys/[^/]+/reencrypt/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/keys/.+/reencrypt/?$",
                 "payment-cryptography:ReEncryptData"),
-        rule("payment-cryptography-data", "POST", "^/_paymentcryptography/mac/generate/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/mac/generate/?$",
                 "payment-cryptography:GenerateMac"),
-        rule("payment-cryptography-data", "POST", "^/_paymentcryptography/mac/verify/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/mac/verify/?$",
                 "payment-cryptography:VerifyMac"),
-        rule("payment-cryptography-data", "POST", "^/_paymentcryptography/pindata/generate/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/pindata/generate/?$",
                 "payment-cryptography:GeneratePinData"),
-        rule("payment-cryptography-data", "POST", "^/_paymentcryptography/pindata/verify/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/pindata/verify/?$",
                 "payment-cryptography:VerifyPinData"),
-        rule("payment-cryptography-data", "POST", "^/_paymentcryptography/pindata/translate/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/pindata/translate/?$",
                 "payment-cryptography:TranslatePinData"),
-        rule("payment-cryptography-data", "POST",
-                "^/_paymentcryptography/cardvalidationdata/generate/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/cardvalidationdata/generate/?$",
                 "payment-cryptography:GenerateCardValidationData"),
-        rule("payment-cryptography-data", "POST",
-                "^/_paymentcryptography/cardvalidationdata/verify/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/cardvalidationdata/verify/?$",
                 "payment-cryptography:VerifyCardValidationData"),
-        rule("payment-cryptography-data", "POST",
-                "^/_paymentcryptography/cryptogram/generate/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/cryptogram/generate/?$",
                 "payment-cryptography:GenerateAuthRequestCryptogram"),
-        rule("payment-cryptography-data", "POST",
-                "^/_paymentcryptography/cryptogram/verify/?$",
+        dataPlaneRule("payment-cryptography", "POST", "^/_paymentcryptography/cryptogram/verify/?$",
+                "payment-cryptography:VerifyAuthRequestCryptogram"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/keys/.+/encrypt/?$",
+                "payment-cryptography:EncryptData"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/keys/.+/decrypt/?$",
+                "payment-cryptography:DecryptData"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/keys/.+/reencrypt/?$",
+                "payment-cryptography:ReEncryptData"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/mac/generate/?$",
+                "payment-cryptography:GenerateMac"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/mac/verify/?$",
+                "payment-cryptography:VerifyMac"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/pindata/generate/?$",
+                "payment-cryptography:GeneratePinData"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/pindata/verify/?$",
+                "payment-cryptography:VerifyPinData"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/pindata/translate/?$",
+                "payment-cryptography:TranslatePinData"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/cardvalidationdata/generate/?$",
+                "payment-cryptography:GenerateCardValidationData"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/cardvalidationdata/verify/?$",
+                "payment-cryptography:VerifyCardValidationData"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/cryptogram/generate/?$",
+                "payment-cryptography:GenerateAuthRequestCryptogram"),
+        dataPlaneRule("payment-cryptography-data", "POST", "^/_paymentcryptography/cryptogram/verify/?$",
                 "payment-cryptography:VerifyAuthRequestCryptogram"),
 
         // ── Kinesis ────────────────────────────────────────────────────────────
@@ -606,6 +637,25 @@ public class IamActionRegistry {
 
     private static ActionRule rule(String service, String method, String path, String action) {
         return rule(service, method, path, null, null, action);
+    }
+
+    /**
+     * A rule of the Payment Cryptography data plane.
+     *
+     * <p>The data plane is signed for the service, which is one scope for both of its planes,
+     * and a client may sign for the data plane's own scope as well. A rule under a scope no
+     * request carries would never match, and a request that matches no rule resolves to no
+     * action, which the enforcement filter treats as ALLOW: the policy would not be enforced
+     * at all. So the rules are named for both scopes.
+     *
+     * @param scope   the credential scope a client of the data plane may sign for
+     * @param method  the HTTP method of the route
+     * @param path    the route, on the internal prefix the request is rewritten onto
+     * @param action  the action AWS checks the operation for
+     * @return the rule
+     */
+    private static ActionRule dataPlaneRule(String scope, String method, String path, String action) {
+        return rule(scope, method, path, null, null, action);
     }
 
     private static ActionRule rule(String service, String method, String path, String queryParameter,
