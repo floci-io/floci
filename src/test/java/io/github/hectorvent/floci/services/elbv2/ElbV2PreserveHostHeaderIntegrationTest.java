@@ -180,7 +180,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
 
                 BufferedReader input = new BufferedReader(
                         new InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1));
-                assertEquals(503, readStatus(input));
+                assertEquals(502, readStatus(input));
 
                 output.write(("GET /healthy HTTP/1.1\r\n"
                         + "Host: " + host + "\r\n"

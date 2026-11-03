@@ -1225,6 +1225,52 @@ class ElbV2ServiceTest {
         return target;
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {-1, 0, 1, 121, Integer.MAX_VALUE})
+    void createRejectsInvalidHealthTimeoutBeforePublishing(int timeout) {
+        AwsException error = assertThrows(AwsException.class, () -> service.createTargetGroup(
+                REGION, "invalid-timeout", "HTTP", "HTTP1", 80, "vpc-a", "ip",
+                "HTTP", "traffic-port", true, "/", 30, timeout, 5, 2, "200", "ipv4", Map.of()));
+        assertEquals("ValidationError", error.getErrorCode());
+        assertTrue(error.getMessage().contains("healthCheckTimeoutSeconds"));
+        assertTrue(service.describeTargetGroups(REGION, null, null, null).isEmpty());
+        verifyNoInteractions(healthChecker);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-1, 0, 1, 121, Integer.MAX_VALUE})
+    void modifyRejectsInvalidHealthTimeoutBeforeAnyMutation(int timeout) {
+        String arn = createTargetGroup("timeout-state");
+        AwsException error = assertThrows(AwsException.class, () -> service.modifyTargetGroup(
+                REGION, arn, "HTTPS", "443", false, "/changed", 60, timeout, 3, 4, "204"));
+        assertEquals("ValidationError", error.getErrorCode());
+        TargetGroup group = service.describeTargetGroups(REGION, null, List.of(arn), null).getFirst();
+        assertEquals("HTTP", group.getHealthCheckProtocol());
+        assertEquals("traffic-port", group.getHealthCheckPort());
+        assertTrue(group.getHealthCheckEnabled());
+        assertEquals("/v1/ready", group.getHealthCheckPath());
+        assertEquals(30, group.getHealthCheckIntervalSeconds());
+        assertEquals(5, group.getHealthCheckTimeoutSeconds());
+        assertEquals(5, group.getHealthyThresholdCount());
+        assertEquals(2, group.getUnhealthyThresholdCount());
+        assertEquals("200", group.getMatcher());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {2, 120})
+    void healthTimeoutBoundariesAndOmittedUpdateRemainValid(int timeout) {
+        TargetGroup group = service.createTargetGroup(REGION, "timeout-boundary", "HTTP", "HTTP1", 80,
+                "vpc-a", "ip", "HTTP", "traffic-port", true, "/", 30, timeout, 5, 2,
+                "200", "ipv4", Map.of());
+        assertEquals(timeout, group.getHealthCheckTimeoutSeconds());
+        service.modifyTargetGroup(REGION, group.getTargetGroupArn(), null, null, null,
+                "/changed", null, null, null, null, null);
+        assertEquals(timeout, group.getHealthCheckTimeoutSeconds());
+        service.modifyTargetGroup(REGION, group.getTargetGroupArn(), null, null, null,
+                null, null, timeout == 2 ? 120 : 2, null, null, null);
+        assertEquals(timeout == 2 ? 120 : 2, group.getHealthCheckTimeoutSeconds());
+    }
+
     private String createTargetGroup(String name) {
         return service.createTargetGroup(
                 REGION, name, "HTTP", "HTTP1", 9999, "vpc-a", "instance",
