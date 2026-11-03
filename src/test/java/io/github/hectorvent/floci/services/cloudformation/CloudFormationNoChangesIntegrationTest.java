@@ -598,8 +598,6 @@ class CloudFormationNoChangesIntegrationTest {
         return request;
     }
 
-
-
     private static ValidatableResponse listChangeSets(String stackName) {
         return given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "ListChangeSets")

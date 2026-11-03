@@ -952,9 +952,9 @@ inherited ones. Updating the root stack's tags updates its nested stacks even wh
 have not changed, and a template holding a nested stack is never refused as having nothing to
 change: AWS reads the child template again and counts the nested stack as a change on every update.
 
-If an existing child's template URL becomes unreadable, an update with the same resolved URL,
-effective child parameters, and child tags keeps that child's deployed state. Creating a child or
-changing those inputs still requires a readable template URL.
+Every update requires a readable child template URL, including an output-only parent update.
+If the child template is missing, the child update fails and the parent rolls back while the
+existing child's deployment remains intact.
 
 When a later resource fails the parent update, a nested stack the update re-provisioned with the
 template and the parameter values it already ran gets its prior tags back, its descendants'

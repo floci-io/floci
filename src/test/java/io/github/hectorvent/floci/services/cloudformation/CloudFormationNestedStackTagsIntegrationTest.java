@@ -12,6 +12,7 @@ import java.util.UUID;
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.github.hectorvent.floci.testing.CfnRequests.tags;
 import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
@@ -27,11 +28,12 @@ class CloudFormationNestedStackTagsIntegrationTest {
                 """;
         String childTemplate = childTemplate("child", bucket);
         String parentTemplate = parentTemplate(bucket);
-        given().when().put("/" + bucket).then().statusCode(200);
-        uploadTemplate(bucket, "grandchild.json", grandchildTemplate);
-        uploadTemplate(bucket, "child.json", childTemplate);
-
+        Throwable testFailure = null;
         try {
+            given().when().put("/" + bucket).then().statusCode(200);
+            uploadTemplate(bucket, "grandchild.json", grandchildTemplate);
+            uploadTemplate(bucket, "child.json", childTemplate);
+
             withTags(cfn("CreateStack", stackName).formParam("TemplateBody", parentTemplate), "blue", "owner-a")
                     .when().post("/").then().statusCode(200);
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
@@ -97,12 +99,23 @@ class CloudFormationNestedStackTagsIntegrationTest {
             assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             assertEquals(Map.of("team", "child"), tags(childStack));
             assertEquals(Map.of("team", "child"), tags(grandchildStack));
+        } catch (RuntimeException | Error failure) {
+            testFailure = failure;
+            throw failure;
         } finally {
-            cfn("DeleteStack", stackName).when().post("/").then().statusCode(200);
-            CfnStackWaits.awaitStackDeleted(stackName);
-            given().when().delete("/" + bucket + "/child.json");
-            given().when().delete("/" + bucket + "/grandchild.json");
-            given().when().delete("/" + bucket);
+            try {
+                assertAll("nested stack cleanup",
+                        () -> cfn("DeleteStack", stackName).when().post("/").then().statusCode(200),
+                        () -> CfnStackWaits.awaitStackDeleted(stackName),
+                        () -> given().when().delete("/" + bucket + "/child.json").then().statusCode(204),
+                        () -> given().when().delete("/" + bucket + "/grandchild.json").then().statusCode(204),
+                        () -> given().when().delete("/" + bucket).then().statusCode(204));
+            } catch (RuntimeException | Error cleanupFailure) {
+                if (testFailure == null) {
+                    throw cleanupFailure;
+                }
+                testFailure.addSuppressed(cleanupFailure);
+            }
         }
     }
 
@@ -138,8 +151,6 @@ class CloudFormationNestedStackTagsIntegrationTest {
                 .then().statusCode(200).extract().asString();
         return XmlParser.extractPairs(xml, "member", "LogicalResourceId", "PhysicalResourceId").get(logicalId);
     }
-
-
 
     private static String deployedTemplate(String stackName) {
         String xml = cfn("GetTemplate", stackName).when().post("/")
