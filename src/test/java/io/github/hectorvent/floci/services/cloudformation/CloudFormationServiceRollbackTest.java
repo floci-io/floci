@@ -80,6 +80,102 @@ import static org.mockito.Mockito.when;
 class CloudFormationServiceRollbackTest {
 
     @Test
+    void nestedCreate_failsWhenTemplateIsUnavailable() throws Exception {
+        when(templateStore.getObject("templates", "child.json"))
+                .thenThrow(new AwsException("NoSuchKey", "template removed", 404));
+        createNestedTree(treeParentTemplate());
+        Stack parent = service.describeStacks("rollback-tree", REGION, ACCOUNT).getFirst();
+        assertEquals("CREATE_FAILED", parent.getStatus());
+        assertTrue(parent.getStatusReason().contains("NoSuchKey"), parent.getStatusReason());
+    }
+
+    @Test
+    void parentOutputUpdate_keepsUnchangedChildWhenTemplateIsUnavailable() throws Exception {
+        assertUnavailableChildUpdate("unchanged", false, false);
+    }
+
+    @Test
+    void parentOutputUpdate_keepsLegacyChildWhenTemplateIsUnavailable() throws Exception {
+        assertUnavailableChildUpdate("unchanged", true, false);
+    }
+
+    @Test
+    void parentRollback_keepsChildSkippedForUnavailableTemplate() throws Exception {
+        assertUnavailableChildUpdate("unchanged", false, true);
+    }
+
+    @Test
+    void parentUpdate_rejectsChangedUrlWhenTemplateIsUnavailable() throws Exception {
+        assertUnavailableChildUpdate("url", false, false);
+    }
+
+    @Test
+    void parentUpdate_rejectsChangedChildParametersWhenTemplateIsUnavailable() throws Exception {
+        assertUnavailableChildUpdate("parameters", false, false);
+    }
+
+    @Test
+    void parentUpdate_rejectsChangedTagsWhenTemplateIsUnavailable() throws Exception {
+        assertUnavailableChildUpdate("tags", false, false);
+    }
+
+    @Test
+    void parentUpdate_rejectsChangedParameterUrlWhenTemplateIsUnavailable() throws Exception {
+        assertUnavailableChildUpdate("parameterUrl", false, false);
+    }
+
+    @Test
+    void parentOutputUpdate_keepsLegacyParameterUrlWhenTemplateIsUnavailable() throws Exception {
+        assertUnavailableChildUpdate("legacyParameterUrl", true, false);
+    }
+
+    private void assertUnavailableChildUpdate(String change, boolean legacy, boolean laterFailure) throws Exception {
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        serveTreeTemplates(new AtomicReference<>(treeChildTemplate()),
+                new AtomicReference<>(previousGrandchildTemplate()));
+        String parentTemplate = treeParentTemplate();
+        if (change.endsWith("ParameterUrl") || "parameterUrl".equals(change)) {
+            parentTemplate = parentTemplate.replace("{\"Resources\":", "{\"Parameters\":{\"ChildUrl\":{\"Type\":\"String\","
+                    + "\"Default\":\"http://localhost/templates/child.json\"}},\"Resources\":")
+                    .replace("\"TemplateURL\":\"http://localhost/templates/child.json\"", "\"TemplateURL\":{\"Ref\":\"ChildUrl\"}");
+        }
+        createNestedTree(parentTemplate);
+        Stack parent = service.describeStacks("rollback-tree", REGION, ACCOUNT).getFirst();
+        Stack child = service.describeStacks("rollback-tree-Child", REGION, ACCOUNT).getFirst();
+        String childId = child.getStackId();
+        if (legacy) {
+            parent.getResources().get("Child").getAttributes().remove("__FlociNestedStackTemplateURL");
+        }
+        when(templateStore.getObject(eq("templates"), anyString()))
+                .thenThrow(new AwsException("NoSuchKey", "template removed", 404));
+        String update = (laterFailure ? failingParentTemplate() : parentTemplate).replace(
+                "\"Resources\":", "\"Outputs\":{\"ParentOut\":{\"Value\":\"static\"}},\"Resources\":");
+        if ("url".equals(change)) {
+            update = update.replace("child.json", "missing-child.json");
+        } else if ("parameters".equals(change)) {
+            update = update.replace("\"TemplateURL\":\"http://localhost/templates/child.json\"",
+                    "\"TemplateURL\":\"http://localhost/templates/child.json\",\"Parameters\":{\"Revision\":\"changed\"}");
+        }
+        service.createChangeSet("rollback-tree", "update", "UPDATE", update, null, "parameterUrl".equals(change)
+                        ? Map.of("ChildUrl", "http://localhost/templates/missing-child.json") : Map.of(), List.of(),
+                "tags".equals(change) ? Map.of("team", "changed") : null, REGION, ACCOUNT);
+        service.executeChangeSet("rollback-tree", "update", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+
+        if ("unchanged".equals(change) || "legacyParameterUrl".equals(change)) {
+            assertEquals(laterFailure ? "UPDATE_ROLLBACK_COMPLETE" : "UPDATE_COMPLETE", parent.getStatus());
+            if (!laterFailure) {
+                assertEquals("static", parent.getOutputs().get("ParentOut"));
+            }
+        } else {
+            assertTrue(parent.getStatus().startsWith("UPDATE_ROLLBACK_"), parent.getStatus());
+        }
+        assertEquals(childId, child.getStackId());
+        assertEquals(treeChildTemplate(), child.getTemplateBody());
+        assertEquals(Map.of("team", "old"), child.tagsSnapshot());
+        assertEquals("previous", child.parametersSnapshot().get("Revision"));
+    }
+
+    @Test
     void unchangedParent_schedulesNestedWorkWhenOnlyGrandchildTemplateChanges() throws Exception {
         assertGrandchildUpdate(true);
     }
