@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
@@ -1347,6 +1348,42 @@ class Ec2ContainerManagerTest {
                 executor,
                 retryExecutor,
                 Duration.ofSeconds(5));
+    }
+
+    @Test
+    void readSshHostKeysReturnsTheGuestsHostKeys() {
+        DockerClient docker = mock(DockerClient.class);
+        String keys = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj root@guest\n";
+        ContainerExecStubs.completeEveryExec(docker, TEST_CONTAINER_ID, 0L, keys, "");
+
+        assertEquals(keys, managerOnDocker(docker).readSshHostKeys(TEST_CONTAINER_ID));
+    }
+
+    @Test
+    void readSshHostKeysIgnoresOutputBeyondWhatHostKeysCanTake() {
+        DockerClient docker = mock(DockerClient.class);
+        String planted = "x".repeat(Ec2ContainerManager.SSH_HOST_KEYS_MAX_BYTES + 1);
+        ContainerExecStubs.completeEveryExec(docker, TEST_CONTAINER_ID, 0L, planted, "");
+
+        assertEquals("", managerOnDocker(docker).readSshHostKeys(TEST_CONTAINER_ID));
+    }
+
+    private static Ec2ContainerManager managerOnDocker(DockerClient docker) {
+        return new Ec2ContainerManager(
+                mock(ContainerBuilder.class),
+                mock(ContainerLifecycleManager.class),
+                mock(ContainerLogStreamer.class),
+                mock(ContainerDetector.class),
+                mock(DockerHostResolver.class),
+                docker,
+                mock(PortAllocator.class),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
+                mock(Ec2MetadataServer.class),
+                mock(Ec2PortForwardManager.class),
+                mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class),
+                mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class));
     }
 
     private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {

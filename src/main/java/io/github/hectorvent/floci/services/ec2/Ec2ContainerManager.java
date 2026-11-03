@@ -91,6 +91,9 @@ public class Ec2ContainerManager {
     private static final int LAUNCH_QUEUE_CAPACITY = 64;
     // ponytail: a fixed cap on concurrent post-start IMDS setups; a start beyond it skips the setup.
     private static final int METADATA_SETUP_CONCURRENCY = 16;
+    /** Real host public keys, one line per type, come to well under a kilobyte together. */
+    static final int SSH_HOST_KEYS_MAX_BYTES = 16 * 1024;
+    private static final int SSH_HOST_KEYS_STDERR_BYTES = 1024;
     private static final long USER_DATA_EXECUTION_TIMEOUT_MINUTES = 30;
     // Wait for capacity so accepted launches are not dropped, but never run launch work on callers.
     static final RejectedExecutionHandler BLOCKING_BACKPRESSURE = (runnable, executor) -> {
@@ -1983,8 +1986,19 @@ public class Ec2ContainerManager {
      */
     public String readSshHostKeys(String containerId) {
         String[] cmd = {"sh", "-c", "for f in /etc/ssh/ssh_host_*_key.pub; do [ -f \"$f\" ] && cat \"$f\"; done"};
-        ContainerExec.Result result = ContainerExec.run(dockerClient, containerId, cmd, 15);
-        return result.exitCode() == 0 ? result.stdout() : "";
+        // The files are the guest's to write, so capture no more than real host keys can take.
+        UserDataPipeline.BoundedOutput stdout = new UserDataPipeline.BoundedOutput(SSH_HOST_KEYS_MAX_BYTES);
+        UserDataPipeline.BoundedOutput stderr = new UserDataPipeline.BoundedOutput(SSH_HOST_KEYS_STDERR_BYTES);
+        ContainerExec.Result result = ContainerExec.run(dockerClient, containerId, cmd, 15, stdout, stderr);
+        if (result.exitCode() != 0) {
+            return "";
+        }
+        if (stdout.truncated()) {
+            LOG.warnv("Ignoring SSH host keys of container {0}: {1} bytes exceed the {2}-byte limit",
+                    containerId, stdout.totalBytes(), SSH_HOST_KEYS_MAX_BYTES);
+            return "";
+        }
+        return new String(stdout.toByteArray(), StandardCharsets.UTF_8);
     }
 
 }
