@@ -453,8 +453,8 @@ final class PaymentCryptographyKeyExchange {
             case "Tr31KeyBlock" -> importTr31(region, material);
             case "KeyCryptogram" -> importCryptogram(material);
             case "Tr34KeyBlock" -> importTr34(region, material);
-            case "RootCertificatePublicKey" -> importPublicKey(material, null);
-            case "TrustedCertificatePublicKey" -> importPublicKey(material,
+            case "RootCertificatePublicKey" -> importPublicKey(region, material, "");
+            case "TrustedCertificatePublicKey" -> importPublicKey(region, material,
                     text(material, "CertificateAuthorityPublicKeyIdentifier"));
             case "DiffieHellmanTr31KeyBlock" -> importEcdh(region, material);
             case "As2805KeyCryptogram" -> importAs2805(region, material);
@@ -502,6 +502,13 @@ final class PaymentCryptographyKeyExchange {
         String mode = PaymentCryptographyTr31.modeOf(block);
         boolean exportable = "E".equals(PaymentCryptographyTr31.exportabilityOf(block));
         String algorithm = PaymentCryptographyService.algorithmOf(block, material2.length);
+        // The wrapping key has to be at least as strong as the key it protects, the
+        // same rule the export enforces.
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(
+                protection.getKeyAlgorithm(), algorithm);
+        if (tooWeak != null) {
+            throw validation(tooWeak);
+        }
         return new Imported(algorithm, PaymentCryptographyService.usageName(usage),
                 PaymentCryptographyService.modesFor(mode, PaymentCryptographyService.isKeyEncryptionKey(PaymentCryptographyService.usageName(usage))),
                 exportable, material2, null, null, null, "SYMMETRIC_KEY");
@@ -624,7 +631,8 @@ final class PaymentCryptographyKeyExchange {
     }
 
     /** A public key out of a certificate. */
-    private Imported importPublicKey(Map<String, Object> material, String caIdentifier) {
+    private Imported importPublicKey(String region, Map<String, Object> material,
+                                    String caIdentifier) {
         String certText = text(material, "PublicKeyCertificate");
         if (certText.isEmpty()) {
             throw validation("KeyMaterial.PublicKeyCertificate is required");
@@ -634,6 +642,25 @@ final class PaymentCryptographyKeyExchange {
             certificate = X509.parseCertificate(certText);
         } catch (RuntimeException e) {
             throw validation("the public key certificate is not a certificate: " + e.getMessage());
+        }
+        // A trusted certificate is one the named authority signed, so it is checked against
+        // that authority. A root certificate stands on its own: it is the authority.
+        if (!caIdentifier.isEmpty()) {
+            PaymentCryptographyKey caKey = service.findKey(region, caIdentifier);
+            if (caKey == null) {
+                throw notFound(caIdentifier);
+            }
+            PublicKey caPublicKey = publicKeyOf(caKey);
+            if (caPublicKey == null) {
+                throw validation("CertificateAuthorityPublicKeyIdentifier does not reference a "
+                        + "public-key certificate");
+            }
+            try {
+                certificate.verify(caPublicKey);
+            } catch (GeneralSecurityException e) {
+                throw validation("the public key certificate is not signed by the certificate "
+                        + "authority " + caKey.getArn() + ": " + e.getMessage());
+            }
         }
         PublicKey publicKey = certificate.getPublicKey();
         Map<String, Object> attributes = object(material, "KeyAttributes");
@@ -758,6 +785,16 @@ final class PaymentCryptographyKeyExchange {
         String mode = PaymentCryptographyTr31.modeOf(block);
         boolean exportable = "E".equals(PaymentCryptographyTr31.exportabilityOf(block));
         String algorithm = PaymentCryptographyService.algorithmOf(block, clear.length);
+        // The derived key protects the imported one, so it has to be as strong as it.
+        int derivedBits = Math.min(
+                PaymentCryptographyKeyStrength.bitsOf(deriveAlgorithm.name()),
+                Math.min(PaymentCryptographyKeyStrength.eccBitsOf(serviceKey.getKeyAlgorithm()),
+                        PaymentCryptographyKeyStrength.eccBitsOf((ECKey) counterpartyKey)));
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(derivedBits,
+                PaymentCryptographyKeyStrength.bitsOf(algorithm), deriveAlgorithm.name(), algorithm);
+        if (tooWeak != null) {
+            throw validation(tooWeak);
+        }
         return new Imported(algorithm, PaymentCryptographyService.usageName(usage),
                 PaymentCryptographyService.modesFor(mode, PaymentCryptographyService.isKeyEncryptionKey(PaymentCryptographyService.usageName(usage))),
                 exportable, clear, null, null, null, "SYMMETRIC_KEY");
@@ -786,6 +823,12 @@ final class PaymentCryptographyKeyExchange {
                 && !"TR31_K1_KEY_BLOCK_PROTECTION_KEY".equals(kek.getKeyUsage())) {
             throw validation("an AS2805 cryptogram is wrapped under a key encryption key, but "
                     + kek.getArn() + " is " + kek.getKeyUsage());
+        }
+        // The wrapping key opens an incoming cryptogram, so it has to be allowed to unwrap.
+        if (!PaymentCryptographyService.mayUnwrap(kek)) {
+            throw new AwsException("InvalidKeyUsageException",
+                    "the key " + kek.getArn() + " does not have the mode of use Unwrap, which it "
+                            + "needs to unwrap a key", 400);
         }
         String cryptogram = text(material, "WrappedKeyCryptogram");
         if (cryptogram.isEmpty()) {

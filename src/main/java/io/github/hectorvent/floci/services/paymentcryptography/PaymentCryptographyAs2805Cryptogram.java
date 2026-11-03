@@ -108,37 +108,37 @@ public final class PaymentCryptographyAs2805Cryptogram {
         byte[] body = new byte[payload.length - MARKER.length];
         System.arraycopy(payload, MARKER.length, body, 0, body.length);
 
-        byte[] plain;
+        // Every way the cryptogram can fail says the same thing.
+        //
+        // <p>The padding, the length and the check value each fail in their own way, and
+        // saying which one failed tells a caller who can change the cryptogram how far its
+        // plaintext is from being right. So the three failures are one failure here, and the
+        // caller is told only that the cryptogram did not open.
         try {
-            plain = wrappingAlgorithm.isAes()
+            byte[] plain = wrappingAlgorithm.isAes()
                     ? Ciphers.aesCbcDecrypt(body, wrappingKey, new byte[16])
                     : Ciphers.tdesCbcDecrypt(body, wrappingKey, new byte[8]);
+            plain = unpad(plain, blockSize(wrappingAlgorithm));
+
+            int expected = expectedBytes(algorithm);
+            if (plain.length != expected + KCV_BYTES) {
+                throw new IllegalArgumentException("the cryptogram carries the wrong length");
+            }
+            byte[] bound = new byte[expected];
+            System.arraycopy(plain, 0, bound, 0, expected);
+            byte[] carried = new byte[KCV_BYTES];
+            System.arraycopy(plain, expected, carried, 0, KCV_BYTES);
+
+            byte[] clear = unbind(bound, variantByte);
+            String expectedCheck = checkValueHex(clear, algorithm);
+            String carriedCheck = Hex.encodeUpper(carried);
+            if (!expectedCheck.equals(carriedCheck)) {
+                throw new IllegalArgumentException("the cryptogram carries the wrong check value");
+            }
+            return clear;
         } catch (RuntimeException e) {
-            throw new IllegalArgumentException(
-                    "the cryptogram did not decrypt under the wrapping key: " + e.getMessage());
+            throw new IllegalArgumentException("the cryptogram did not open under the wrapping key");
         }
-        plain = unpad(plain, blockSize(wrappingAlgorithm));
-
-        int expected = expectedBytes(algorithm);
-        if (plain.length != expected + KCV_BYTES) {
-            throw new IllegalArgumentException("the cryptogram carries " + plain.length
-                    + " bytes of key and check value; " + algorithm.name() + " needs "
-                    + (expected + KCV_BYTES));
-        }
-        byte[] bound = new byte[expected];
-        System.arraycopy(plain, 0, bound, 0, expected);
-        byte[] carried = new byte[KCV_BYTES];
-        System.arraycopy(plain, expected, carried, 0, KCV_BYTES);
-
-        byte[] clear = unbind(bound, variantByte);
-        String expectedCheck = checkValueHex(clear, algorithm);
-        String carriedCheck = Hex.encodeUpper(carried);
-        if (!expectedCheck.equals(carriedCheck)) {
-            throw new IllegalArgumentException("the cryptogram carries the check value "
-                    + carriedCheck + ", but the key it decrypts to has the check value "
-                    + expectedCheck + "; the wrapping key or the variant is wrong");
-        }
-        return clear;
     }
 
     /** The key, with the variant exclusive-ored into its first byte. */
