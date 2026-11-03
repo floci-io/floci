@@ -12604,9 +12604,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /** The public suffix every endpoint DNS name ends in; it resolves to 127.0.0.1 in public DNS. */
     static final String INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX = "localhost.floci.io";
     private static final Set<String> INSTANCE_CONNECT_ENDPOINT_IP_TYPES = Set.of("ipv4", "dualstack", "ipv6");
-    /** The names matchesInstanceConnectEndpointFilter implements; tag:&lt;key&gt; is admitted through tag-key. */
+    /**
+     * The names matchesInstanceConnectEndpointFilter implements, exactly the DescribeInstanceConnectEndpoints
+     * reference's list; tag:&lt;key&gt; is admitted through tag-key.
+     */
     private static final Set<String> INSTANCE_CONNECT_ENDPOINT_FILTERS = Set.of("instance-connect-endpoint-id",
-            "state", "vpc-id", "subnet-id", "availability-zone", "owner-id", "tag-key");
+            "state", "vpc-id", "subnet-id", "tag-key", "tag-value");
     /**
      * Creates an endpoint in {@code subnetId}. Creation is immediate ({@code create-complete}); on
      * AWS it takes a few minutes. The DNS names live under {@link #INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX},
@@ -12810,8 +12813,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "state" -> matchesFilterValue(values, endpoint.getState());
             case "vpc-id" -> matchesFilterValue(values, endpoint.getVpcId());
             case "subnet-id" -> matchesFilterValue(values, endpoint.getSubnetId());
-            case "availability-zone" -> matchesFilterValue(values, endpoint.getAvailabilityZone());
-            case "owner-id" -> matchesFilterValue(values, endpoint.getOwnerId());
+            case "tag-value" -> endpoint.getTags().stream().anyMatch(tag -> matchesFilterValue(values, tag.getValue()));
             default -> throw new AwsException("InvalidParameterValue",
                     "The filter '" + name + "' is invalid", 400);
         };

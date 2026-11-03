@@ -332,6 +332,38 @@ class Ec2InstanceConnectEndpointServiceTest {
     }
 
     @Test
+    void tagValueMatchesAnEndpointCarryingThatValueUnderAnyKey() {
+        Ec2Service service = newService();
+        String vpcId = service.createVpc(REGION, "10.81.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.81.1.0/24", "us-east-1a").getSubnetId();
+        String id = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
+                List.of(new Tag("Name", "kthw"), new Tag("Team", "infra")), null).getInstanceConnectEndpointId();
+
+        assertEquals(List.of(id), service.describeInstanceConnectEndpoints(REGION, List.of(),
+                Map.of("tag-value", List.of("nope", "infra")))
+                .stream().map(InstanceConnectEndpoint::getInstanceConnectEndpointId).toList());
+        assertTrue(service.describeInstanceConnectEndpoints(REGION, List.of(),
+                Map.of("tag-value", List.of("Team"))).isEmpty(), "a key is not a value");
+    }
+
+    @Test
+    void availabilityZoneAndOwnerIdAreRefusedLikeAnyFilterAwsDoesNotList() {
+        Ec2Service service = newService();
+        String vpcId = service.createVpc(REGION, "10.82.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.82.1.0/24", "us-east-1a").getSubnetId();
+        service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(), null);
+        AwsException unknown = assertThrows(AwsException.class, () -> service
+                .describeInstanceConnectEndpoints(REGION, List.of(), Map.of("bogus", List.of("x"))));
+        for (String name : List.of("availability-zone", "owner-id")) {
+            AwsException error = assertThrows(AwsException.class, () -> service
+                    .describeInstanceConnectEndpoints(REGION, List.of(), Map.of(name, List.of("x"))), name);
+            assertEquals(unknown.getErrorCode(), error.getErrorCode(), name);
+            assertEquals(unknown.getHttpStatus(), error.getHttpStatus(), name);
+            assertEquals("The filter '" + name + "' is invalid", error.getMessage(), name);
+        }
+    }
+
+    @Test
     void theEndpointsInterfaceResolvesInDescribeNetworkInterfacesUntilItIsDeleted() {
         Ec2Service service = newService();
         String vpcId = service.createVpc(REGION, "10.79.0.0/16", false).getVpcId();
