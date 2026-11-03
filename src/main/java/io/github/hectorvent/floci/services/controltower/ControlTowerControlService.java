@@ -48,7 +48,7 @@ public class ControlTowerControlService {
         String controlIdentifier = requireArn(request, "controlIdentifier");
         String targetIdentifier = requireArn(request, "targetIdentifier");
         JsonNode parameters = validateParameters(request.get("parameters"), false);
-        Map<String, String> tags = validateTags(request.get("tags"));
+        Map<String, String> tags = ControlTowerTags.fromRequest(request.get("tags"));
         String key = key(region, targetIdentifier, controlIdentifier);
         if (controls.get(key).isPresent()) {
             throw new AwsException("ConflictException", "The control is already enabled on the specified target.", 409);
@@ -106,9 +106,7 @@ public class ControlTowerControlService {
         EnabledControl control = get(region, arn);
         Map<String, String> merged = new LinkedHashMap<>(listTags(region, arn));
         merged.putAll(tags);
-        if (merged.size() > 200 || merged.entrySet().stream().anyMatch(e -> !validTag(e.getKey(), e.getValue()))) {
-            throw validation("tags contain an invalid key or value.");
-        }
+        ControlTowerTags.validate(merged);
         control.setTags(merged);
         controls.put(key(region, control.getTargetIdentifier(), control.getControlIdentifier()), control);
     }
@@ -232,24 +230,6 @@ public class ControlTowerControlService {
             }
         }
         return parameters.deepCopy();
-    }
-
-    private static boolean validTag(String key, String value) {
-        return !key.isBlank() && key.length() <= 128 && value != null && value.length() <= 256;
-    }
-
-    private static Map<String, String> validateTags(JsonNode tags) {
-        if (tags == null || tags.isNull()) return Map.of();
-        if (!tags.isObject() || tags.size() > 200) throw validation("tags must be an object with at most 200 entries.");
-        Map<String, String> result = new LinkedHashMap<>();
-        tags.fields().forEachRemaining(entry -> {
-            if (entry.getKey().isBlank() || entry.getKey().length() > 128 || !entry.getValue().isTextual()
-                    || entry.getValue().textValue().length() > 256) {
-                throw validation("tags contain an invalid key or value.");
-            }
-            result.put(entry.getKey(), entry.getValue().textValue());
-        });
-        return Map.copyOf(result);
     }
 
     private static Set<String> stringSet(JsonNode node) {

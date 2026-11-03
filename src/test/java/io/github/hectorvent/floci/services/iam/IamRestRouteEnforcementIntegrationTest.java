@@ -275,6 +275,13 @@ class IamRestRouteEnforcementIntegrationTest {
                 "controltower:TagResource");
         refused(as(user, "controltower").queryParam("tagKeys", "team").delete("/tags/" + landingZone).then(),
                 "controltower:UntagResource");
+        // The shared controller also serves the bare /tags path, naming the ARN in the query or the body.
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).get("/tags").then(),
+                "controltower:ListTagsForResource");
+        refused(as(user, "controltower").body("{\"resourceArn\":\"" + landingZone + "\",\"tags\":{\"team\":\"a\"}}")
+                .post("/tags").then(), "controltower:TagResource");
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).queryParam("tagKeys", "team")
+                .delete("/tags").then(), "controltower:UntagResource");
 
         policy(user, allow("controltower:ListTagsForResource", "*"));
         as(user, "controltower").get("/tags/" + landingZone).then().statusCode(not(403));

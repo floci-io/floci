@@ -421,9 +421,9 @@ public class IamActionRegistry {
         rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
 
         // ── Control Tower ──────────────────────────────────────────────────────
-        rule("controltower", "GET",    "^/tags/.+$", "controltower:ListTagsForResource"),
-        rule("controltower", "POST",   "^/tags/.+$", "controltower:TagResource"),
-        rule("controltower", "DELETE", "^/tags/.+$", "controltower:UntagResource"),
+        rule("controltower", "GET",    "^/tags(/.+)?$", "controltower:ListTagsForResource"),
+        rule("controltower", "POST",   "^/tags(/.+)?$", "controltower:TagResource"),
+        rule("controltower", "DELETE", "^/tags(/.+)?$", "controltower:UntagResource"),
 
         // ── Bedrock ────────────────────────────────────────────────────────────
         rule("bedrock", "POST",   "^/resource-policy$",   "bedrock:PutResourcePolicy"),

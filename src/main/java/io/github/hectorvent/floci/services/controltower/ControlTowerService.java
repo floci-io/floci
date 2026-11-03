@@ -186,7 +186,7 @@ public class ControlTowerService {
         if (!version.matches("^\\d+\\.\\d+$") || version.length() < 3 || version.length() > 10) {
             throw validation("version must be a valid landing zone version.");
         }
-        Map<String, String> tags = validateTags(request.get("tags"));
+        Map<String, String> tags = ControlTowerTags.fromRequest(request.get("tags"));
         if (landingZoneStore.get(region).isPresent()) {
             throw new AwsException("ConflictException",
                     "Updating or deleting the resource can cause an inconsistent state.", 409);
@@ -211,7 +211,7 @@ public class ControlTowerService {
         LandingZone landingZone = requireSeededLandingZone(accountId, region, arn);
         Map<String, String> merged = new LinkedHashMap<>(listLandingZoneTags(accountId, region, arn));
         merged.putAll(tags);
-        validateTagMap(merged);
+        ControlTowerTags.validate(merged);
         landingZone.setTags(merged);
         landingZoneStore.put(region, landingZone);
     }
@@ -822,35 +822,6 @@ public class ControlTowerService {
             values.add(value.asText());
         }
         return values;
-    }
-
-    private static Map<String, String> validateTags(JsonNode tags) {
-        if (tags == null || tags.isNull()) {
-            return Map.of();
-        }
-        if (!tags.isObject()) {
-            throw validation("tags must be an object with at most 200 entries.");
-        }
-        Map<String, String> values = new LinkedHashMap<>();
-        tags.fields().forEachRemaining(entry -> {
-            if (!entry.getValue().isTextual()) {
-                throw validation("tags must contain string values with valid lengths.");
-            }
-            values.put(entry.getKey(), entry.getValue().textValue());
-        });
-        validateTagMap(values);
-        return values;
-    }
-
-    private static void validateTagMap(Map<String, String> tags) {
-        if (tags.size() > 200) {
-            throw validation("tags must be an object with at most 200 entries.");
-        }
-        tags.forEach((key, value) -> {
-            if (key.isBlank() || key.length() > 128 || value == null || value.length() > 256) {
-                throw validation("tags must contain string values with valid lengths.");
-            }
-        });
     }
 
     private static void validateParameters(JsonNode parameters) {
