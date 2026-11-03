@@ -37,7 +37,7 @@ import java.util.regex.Pattern;
 public final class ChoiceOperators {
 
     private static final Pattern VARIABLE_REFERENCE =
-            Pattern.compile("^\\$([A-Za-z_][A-Za-z0-9_]*)((?:[.\\[].*)?)$");
+            Pattern.compile("^\\$([_\\p{javaUnicodeIdentifierStart}][\\p{javaUnicodeIdentifierPart}]*)((?:[.\\[].*)?)$");
 
     private ChoiceOperators() {
     }

@@ -14,6 +14,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.ArrayList;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -72,6 +73,47 @@ class AslExecutorJsonPathVariablesTest {
         assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
         assertEquals("dwg", output(exec).path("route").asText());
         assertEquals("a.dwg", output(exec).path("name").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"r\u00E9sultat", "\u53D8\u91CF", "e\u0301", "var\u0661", "\uD801\uDC00value", "_existing"})
+    void unicodeVariableNamesAreReadByParametersAndIntrinsics(String variableName) throws Exception {
+        Execution exec = run("""
+                {"StartAt":"Set","States":{
+                  "Set":{"Type":"Pass","Assign":{"%s":"ok"},"Next":"Use"},
+                  "Use":{"Type":"Pass","Parameters":{
+                    "direct.$":"$%s",
+                    "formatted.$":"States.Format('{}!', $%s)"},"End":true}}}
+                """.formatted(variableName, variableName, variableName), "{}");
+
+        assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
+        assertEquals("ok", output(exec).path("direct").asText());
+        assertEquals("ok!", output(exec).path("formatted").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"r\u00E9sultat", "\u53D8\u91CF", "e\u0301", "var\u0661", "\uD801\uDC00value", "_existing"})
+    void unicodeVariableNamesWithFieldAndIndexSuffixesWorkInChoice(String variableName) throws Exception {
+        assertTrue(ChoiceOperators.isReferencePath("$" + variableName + ".field[0]"));
+
+        Execution exec = run("""
+                {"StartAt":"Set","States":{
+                  "Set":{"Type":"Pass","Assign":{"%s":{"field":[true]}},"Next":"Route"},
+                  "Route":{"Type":"Choice","Choices":[{
+                    "Variable":"$%s.field[0]","BooleanEquals":true,"Next":"Matched"}],
+                    "Default":"Unmatched"},
+                  "Matched":{"Type":"Pass","Result":"matched","End":true},
+                  "Unmatched":{"Type":"Pass","Result":"unmatched","End":true}}}
+                """.formatted(variableName, variableName), "{}");
+
+        assertEquals("SUCCEEDED", exec.getStatus(), exec.getCause());
+        assertEquals("matched", output(exec).asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"1name", "\u0301name", "\uD83D\uDE00name"})
+    void variableNamesRejectInvalidFirstCharacter(String variableName) {
+        assertFalse(ChoiceOperators.isReferencePath("$" + variableName));
     }
 
     @Test
