@@ -36,6 +36,23 @@ class AccountAwareStorageBackendTest {
     }
 
     @Test
+    void isEmptyLooksOnlyAtTheCurrentAccount() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<String> first =
+                new AccountAwareStorageBackend<>(raw, null, "111111111111");
+        AccountAwareStorageBackend<String> second =
+                new AccountAwareStorageBackend<>(raw, null, "222222222222");
+
+        assertTrue(first.isEmpty());
+        assertTrue(second.isEmpty());
+
+        first.put("resource", "value");
+
+        assertFalse(first.isEmpty());
+        assertTrue(second.isEmpty());
+    }
+
+    @Test
     void putAllPrefixesEveryEntryWithTheRequestScope() {
         InMemoryStorage<String, String> raw = new InMemoryStorage<>();
         AccountAwareStorageBackend<String> storage =
