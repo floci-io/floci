@@ -954,40 +954,37 @@ public class RdsService implements Resettable, ResourceProvider {
                     }
                 }
             }
+            List<String> originalMembers = currentCluster == null
+                    ? null : new ArrayList<>(currentCluster.getDbClusterMembers());
+            String originalWriter = currentCluster == null
+                    ? null : currentCluster.getClusterWriterIdentifier();
+            boolean instanceWriteStarted = false;
             boolean proxyStartAttempted = false;
+            boolean memberMutationStarted = false;
             try {
                 if (manageInstancePassword) {
                     attachManagedMasterUserSecret(
                             instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
                 }
+                instanceWriteStarted = true;
                 putInstanceForScope(accountId, effectiveRegion, id, instance);
 
                 if (!mock && hasBackend(backendHost, backendPort)) {
                     final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
                     InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
-                    try {
-                        proxyStartAttempted = true;
-                        proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                                backendIdentity.runtimeId(), engine, iamEnabled, proxyPort,
-                                backendHost, backendPort, instance.getEndpoint().address(),
-                                instance.getMasterUsername(), instance.getMasterPassword(), dbName,
-                                (user, pw) -> validateDbPasswordForScope(
-                                        accountId, instanceRegion, id, user, pw),
-                                proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                        instanceRegion, accountId, backendIdentity.dbUserResourceId()));
-                    } catch (RuntimeException | Error failure) {
-                        if (!isBlank(dbClusterIdentifier)) {
-                            try {
-                                deleteInstanceForScope(accountId, effectiveRegion, id);
-                            } catch (RuntimeException | Error rollbackFailure) {
-                                addSuppressedUnlessSelf(failure, rollbackFailure);
-                            }
-                        }
-                        throw failure;
-                    }
+                    proxyStartAttempted = true;
+                    proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                            backendIdentity.runtimeId(), engine, iamEnabled, proxyPort,
+                            backendHost, backendPort, instance.getEndpoint().address(),
+                            instance.getMasterUsername(), instance.getMasterPassword(), dbName,
+                            (user, pw) -> validateDbPasswordForScope(
+                                    accountId, instanceRegion, id, user, pw),
+                            proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
+                                    instanceRegion, accountId, backendIdentity.dbUserResourceId()));
                 }
 
                 if (currentCluster != null) {
+                    memberMutationStarted = true;
                     currentCluster.getDbClusterMembers().add(id);
                     if (currentCluster.resolveWriterIdentifier() == null
                             || !currentCluster.getDbClusterMembers().contains(currentCluster.getClusterWriterIdentifier())) {
@@ -1002,6 +999,10 @@ public class RdsService implements Resettable, ResourceProvider {
                 if (isBlank(dbClusterIdentifier)) {
                     rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
                             effectiveRegion, proxyStartAttempted, manageInstancePassword, mock);
+                } else if (currentCluster != null) {
+                    rollbackFailedClusterMemberCreate(failure, instance, currentCluster,
+                            originalMembers, originalWriter, accountId, effectiveRegion,
+                            instanceWriteStarted, proxyStartAttempted, memberMutationStarted);
                 }
                 throw failure;
             }
@@ -1088,6 +1089,80 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (RuntimeException | Error persistenceFailure) {
                 addSuppressedUnlessSelf(failure, persistenceFailure);
             }
+        }
+    }
+
+    private void rollbackFailedClusterMemberCreate(
+            Throwable failure, DbInstance instance, DbCluster cluster,
+            List<String> originalMembers, String originalWriter, String accountId, String region,
+            boolean instanceWriteStarted, boolean proxyStartAttempted, boolean memberMutationStarted) {
+        String id = instance.getDbInstanceIdentifier();
+        int proxyPort = instance.getProxyPort();
+        if (instanceWriteStarted) {
+            instance.setStatus(DbInstanceStatus.DELETING);
+            instance.setDeletionProtection(false);
+            try {
+                putInstanceForScope(accountId, region, id, instance);
+            } catch (RuntimeException | Error rollbackFailure) {
+                addSuppressedUnlessSelf(failure, rollbackFailure);
+                return;
+            }
+        }
+
+        boolean membershipRestored = !memberMutationStarted;
+        if (memberMutationStarted) {
+            try {
+                cluster.getDbClusterMembers().clear();
+                cluster.getDbClusterMembers().addAll(originalMembers);
+                cluster.setClusterWriterIdentifier(originalWriter);
+                putClusterForScope(accountId, region, cluster.getDbClusterIdentifier(), cluster);
+                membershipRestored = true;
+            } catch (RuntimeException | Error rollbackFailure) {
+                addSuppressedUnlessSelf(failure, rollbackFailure);
+            }
+        }
+
+        boolean proxyStopped = !proxyStartAttempted;
+        if (proxyStartAttempted) {
+            try {
+                proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+                proxyStopped = true;
+            } catch (RuntimeException | Error rollbackFailure) {
+                addSuppressedUnlessSelf(failure, rollbackFailure);
+            }
+        }
+
+        boolean instanceRemoved = !instanceWriteStarted;
+        if (instanceWriteStarted && proxyStopped && membershipRestored) {
+            try {
+                deleteInstanceForScope(accountId, region, id);
+            } catch (RuntimeException | Error rollbackFailure) {
+                addSuppressedUnlessSelf(failure, rollbackFailure);
+            }
+            try {
+                instanceRemoved = !scopedKeyExists(instances, accountId, dbResourceKey(region, id));
+            } catch (RuntimeException | Error verificationFailure) {
+                addSuppressedUnlessSelf(failure, verificationFailure);
+            }
+        }
+        boolean releasePort = proxyStopped && instanceRemoved;
+        if (!instanceRemoved) {
+            DbEndpoint originalEndpoint = instance.getEndpoint();
+            if (proxyStopped) {
+                instance.setProxyPort(0);
+                instance.setEndpoint(null);
+            }
+            try {
+                putInstanceForScope(accountId, region, id, instance);
+                releasePort = proxyStopped;
+            } catch (RuntimeException | Error rollbackFailure) {
+                instance.setProxyPort(proxyPort);
+                instance.setEndpoint(originalEndpoint);
+                addSuppressedUnlessSelf(failure, rollbackFailure);
+            }
+        }
+        if (releasePort) {
+            releaseProxyPort(proxyPort);
         }
     }
 
