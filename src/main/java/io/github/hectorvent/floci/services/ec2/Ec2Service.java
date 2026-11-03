@@ -12531,31 +12531,46 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (address.getNetworkInterfaceId() == null) {
                 continue;
             }
-            NetworkInterface ni = new NetworkInterface();
-            ni.setNetworkInterfaceId(address.getNetworkInterfaceId());
-            ni.setSubnetId(natGateway.getSubnetId());
-            ni.setVpcId(natGateway.getVpcId());
-            ni.setAvailabilityZone(subnet.getAvailabilityZone());
-            ni.setDescription("Interface for NAT Gateway " + natGateway.getNatGatewayId());
-            ni.setInterfaceType("nat_gateway");
-            ni.setRequesterManaged(true);
-            ni.setOwnerId(ownerId);
-            ni.setPrivateIpAddress(address.getPrivateIp());
-            NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
-            primaryIp.setPrivateIpAddress(address.getPrivateIp());
-            primaryIp.setPrimary(true);
+            NetworkInterface ni = requesterManagedInterface(address.getNetworkInterfaceId(),
+                    natGateway.getSubnetId(), natGateway.getVpcId(), subnet.getAvailabilityZone(),
+                    "Interface for NAT Gateway " + natGateway.getNatGatewayId(), "nat_gateway", ownerId,
+                    address.getPrivateIp());
             if (address.getPublicIp() != null) {
                 NetworkInterfaceAssociation assoc = new NetworkInterfaceAssociation();
                 assoc.setPublicIp(address.getPublicIp());
                 assoc.setAllocationId(address.getAllocationId());
                 assoc.setAssociationId(address.getAssociationId());
                 assoc.setIpOwnerId(ownerId);
-                primaryIp.setAssociation(assoc);
+                ni.getPrivateIpAddresses().getFirst().setAssociation(assoc);
             }
-            ni.getPrivateIpAddresses().add(primaryIp);
             result.add(ni);
         }
         return result;
+    }
+
+    /**
+     * A requester-managed interface with one primary private address: the shape a NAT gateway's
+     * and an instance connect endpoint's interface share.
+     */
+    private static NetworkInterface requesterManagedInterface(String eniId, String subnetId, String vpcId,
+                                                              String availabilityZone, String description,
+                                                              String interfaceType, String ownerId,
+                                                              String privateIp) {
+        NetworkInterface ni = new NetworkInterface();
+        ni.setNetworkInterfaceId(eniId);
+        ni.setSubnetId(subnetId);
+        ni.setVpcId(vpcId);
+        ni.setAvailabilityZone(availabilityZone);
+        ni.setDescription(description);
+        ni.setInterfaceType(interfaceType);
+        ni.setRequesterManaged(true);
+        ni.setOwnerId(ownerId);
+        ni.setPrivateIpAddress(privateIp);
+        NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
+        primaryIp.setPrivateIpAddress(privateIp);
+        primaryIp.setPrimary(true);
+        ni.getPrivateIpAddresses().add(primaryIp);
+        return ni;
     }
 
     /**
@@ -12568,20 +12583,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                                               String ownerId) {
         List<NetworkInterface> result = new ArrayList<>();
         for (String eniId : endpoint.getNetworkInterfaceIds()) {
-            NetworkInterface ni = new NetworkInterface();
-            ni.setNetworkInterfaceId(eniId);
-            ni.setSubnetId(endpoint.getSubnetId());
-            ni.setVpcId(endpoint.getVpcId());
-            ni.setAvailabilityZone(endpoint.getAvailabilityZone());
-            ni.setDescription("EC2 Instance Connect Endpoint " + endpoint.getInstanceConnectEndpointId());
-            ni.setInterfaceType("ec2_instance_connect_endpoint");
-            ni.setRequesterManaged(true);
-            ni.setOwnerId(ownerId);
-            ni.setPrivateIpAddress(endpoint.getPrivateIpAddress());
-            NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
-            primaryIp.setPrivateIpAddress(endpoint.getPrivateIpAddress());
-            primaryIp.setPrimary(true);
-            ni.getPrivateIpAddresses().add(primaryIp);
+            NetworkInterface ni = requesterManagedInterface(eniId, endpoint.getSubnetId(), endpoint.getVpcId(),
+                    endpoint.getAvailabilityZone(),
+                    "EC2 Instance Connect Endpoint " + endpoint.getInstanceConnectEndpointId(),
+                    "ec2_instance_connect_endpoint", ownerId, endpoint.getPrivateIpAddress());
             for (String securityGroupId : endpoint.getSecurityGroupIds()) {
                 GroupIdentifier group = new GroupIdentifier();
                 group.setGroupId(securityGroupId);
@@ -14744,47 +14749,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             result.add(endpointNi);
         }
 
-        // The ENI a NAT gateway owns. DescribeNatGateways publishes its id (aws_nat_gateway's
-        // network_interface_id), so it has to resolve here too. Unlike the endpoint arm above this
-        // one honours the explicit account: gateways and their subnets are read for safeAccount.
+        // The ENIs a NAT gateway and an instance connect endpoint own, NAT first. DescribeNatGateways
+        // publishes a gateway's id (aws_nat_gateway's network_interface_id) and an endpoint publishes
+        // its own in networkInterfaceIdSet, so both have to resolve here too. Unlike the VPC endpoint
+        // arm above this one honours the explicit account: gateways, endpoints and the records their
+        // interfaces are built from are read for safeAccount.
+        List<NetworkInterface> managedInterfaces = new ArrayList<>();
         for (NatGateway natGateway : natGatewaysOf(safeAccount)) {
-            if (!region.equals(natGateway.getRegion())) {
-                continue;
-            }
-            for (NetworkInterface natNi : natNetworkInterfacesOf(natGateway, safeAccount)) {
-                String natEniId = natNi.getNetworkInterfaceId();
-                if (foundIds.contains(natEniId)) {
-                    continue;
-                }
-                if (!networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(natEniId)) {
-                    continue;
-                }
-                foundIds.add(natEniId);
-                natNi.getTagSet().addAll(tagsOf(safeAccount, region, natEniId).orElse(List.of()));
-                if (!matchesFilters(natNi, filters, region)) {
-                    continue;
-                }
-                result.add(natNi);
+            if (region.equals(natGateway.getRegion())) {
+                managedInterfaces.addAll(natNetworkInterfacesOf(natGateway, safeAccount));
             }
         }
-
-        // The ENI an instance connect endpoint owns, published in its networkInterfaceIdSet.
         List<InstanceConnectEndpoint> regionEndpoints =
                 instanceConnectEndpoints instanceof AccountAwareStorageBackend<InstanceConnectEndpoint> aware
                         ? aware.scanForAccount(safeAccount, k -> k.startsWith(region + "::"))
                         : instanceConnectEndpoints.scan(k -> k.startsWith(region + "::"));
         for (InstanceConnectEndpoint endpoint : regionEndpoints) {
-            for (NetworkInterface eiceNi : instanceConnectEndpointNetworkInterfacesOf(endpoint, safeAccount)) {
-                String eiceEniId = eiceNi.getNetworkInterfaceId();
-                if (foundIds.contains(eiceEniId)
-                        || !networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(eiceEniId)) {
-                    continue;
-                }
-                foundIds.add(eiceEniId);
-                eiceNi.getTagSet().addAll(tagsOf(safeAccount, region, eiceEniId).orElse(List.of()));
-                if (matchesFilters(eiceNi, filters, region)) {
-                    result.add(eiceNi);
-                }
+            managedInterfaces.addAll(instanceConnectEndpointNetworkInterfacesOf(endpoint, safeAccount));
+        }
+        for (NetworkInterface managedNi : managedInterfaces) {
+            String managedEniId = managedNi.getNetworkInterfaceId();
+            if (foundIds.contains(managedEniId)
+                    || !networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(managedEniId)) {
+                continue;
+            }
+            foundIds.add(managedEniId);
+            managedNi.getTagSet().addAll(tagsOf(safeAccount, region, managedEniId).orElse(List.of()));
+            if (matchesFilters(managedNi, filters, region)) {
+                result.add(managedNi);
             }
         }
 
