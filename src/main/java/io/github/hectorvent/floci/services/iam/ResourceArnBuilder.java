@@ -190,6 +190,9 @@ public class ResourceArnBuilder {
         if (credentialScope == null) {
             return List.of("*");
         }
+        if (operation != null && operation.startsWith(credentialScope + ":") && RequestResources.reads(operation)) {
+            return namedResources(credentialScope, operation, ctx, region, accountId, partition);
+        }
         String path = "s3".equals(credentialScope) ? ctx.getUriInfo().getPath()
                 : IamActionRegistry.decodedPath(ctx);
         return switch (credentialScope) {

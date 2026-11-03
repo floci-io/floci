@@ -42,7 +42,11 @@ class RequestResourceMembersTest {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
         assertTrue(table.handBuilt().contains("lambda"));
-        assertTrue(table.namespaces().stream().noneMatch(table.handBuilt()::contains));
+        assertEquals(Set.of("dynamodb"), table.namespaces().stream().filter(table.handBuilt()::contains)
+                .collect(Collectors.toSet()));
+        assertEquals(Set.of("dynamodb:ListTables"), table.operations().keySet().stream()
+                .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
+                .collect(Collectors.toSet()), "only explicit corrections override hand-built operations");
         assertTrue(table.namespaces().stream().noneMatch(table.notCovered()::contains));
         assertTrue(table.otherNamespaces().stream().noneMatch(table.notCovered()::contains));
         table.operations().forEach((operation, resources) -> {

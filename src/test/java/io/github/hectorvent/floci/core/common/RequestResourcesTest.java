@@ -16,6 +16,8 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -24,6 +26,19 @@ class RequestResourcesTest {
 
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
+
+    @Test
+    void listTablesCorrectionReadsTheCollectionAndLeavesOtherDynamoOperationsHandBuilt() {
+        assertTrue(RequestResources.reads("dynamodb:ListTables"));
+        assertFalse(RequestResources.reads("dynamodb:BatchWriteItem"));
+        assertFalse(RequestResources.reads("dynamodb:ExecuteStatement"));
+        assertFalse(RequestResources.reads(null));
+        for (String body : List.of("{}", "{\"TableName\":\"ignored\",\"ExclusiveStartTableName\":\"cursor\"}")) {
+            assertEquals(List.of("arn:aws-us-gov:dynamodb:us-gov-west-1:111122223333:table/*"),
+                    RequestResources.of("dynamodb:ListTables", json(body), "aws-us-gov", "us-gov-west-1",
+                            "111122223333"));
+        }
+    }
 
     @Test
     void aMemberHoldingAnArnOfATypeTheActionActsOnNamesThatResource() {

@@ -59,8 +59,9 @@ A type nothing names is not checked: an action lists the optional resources its 
 that covers what it does name. An operation whose action acts on no resource type, or whose request
 names none, is checked on `*`, as AWS checks it.
 
-Only the namespaces in `NAMESPACES` are read, and in them every operation, whether Floci serves it
-or not. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
+Every operation in `NAMESPACES` is read, whether Floci serves it or not. Explicit `CORRECTIONS`
+in `HAND_BUILT` are also read, overriding only those operations while the remaining operations
+keep their existing resource builders. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
 `NOT_COVERED` the ones Floci serves that are not read yet, each with its reason;
 `RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
 `CORRECTIONS` gives an operation's resources where the rule gets them wrong, each with its reason; a
@@ -261,6 +262,10 @@ NOT_COVERED: dict[str, str] = {
 # them apart (EventBridge's `events` and EventBridge V2's `eventsv2`): Floci applies it only to a request the service
 # of that endpoint serves, never by a member a caller could add to a request of the other.
 CORRECTIONS: dict[str, tuple[list[dict], str]] = {
+    "dynamodb:ListTables": ([{"type": "table", "fill": {}}],
+                            "AWS policy probes accepted by review #7336 authorize the literal regional table/*: "
+                            "table/? matches while table/ does not, despite the Service Reference listing no "
+                            "resource types; request-body table names and pagination do not select its resource"),
     **{f"states:{operation}": ([{"type": kind, "fill": {}, "find": ["taskToken"]}
                                 for kind in ("activity", "statemachine")],
                               "AWS callback policy probes on 2026-11-02 authorize an activity token against its "
@@ -884,13 +889,14 @@ def with_through(resources: list[dict], namespace: str, types: list[str], member
 
 def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> dict:
     upstream = checked_actions(documents)
-    covered = {operation: value for operation, value in upstream.items() if namespace_of(operation) in NAMESPACES}
+    covered = {operation: value for operation, value in upstream.items() if reads(operation)}
     _check_overrides(covered)
+    read_namespaces = set(NAMESPACES) | {namespace_of(operation) for operation in covered}
     namespaces = {namespace: sorted({client for operation, value in covered.items()
                                      if namespace_of(operation) == namespace for client in value["clients"]
                                      if client not in CLIENTS_NOT_READ})
-                  for namespace in sorted(NAMESPACES)}
-    formats = arn_formats(documents, set(NAMESPACES))
+                  for namespace in sorted(read_namespaces)}
+    formats = arn_formats(documents, read_namespaces)
     unqualified = unqualified_types()
     minted = minted_types()
     missing = [f"{name} names {namespace}:{kind}, no resource type with an ARN format of a namespace the file reads"
@@ -961,6 +967,12 @@ def _with_resource_types(documents: list[dict]) -> set[str]:
     """The namespaces with an action that acts on a resource type."""
     return {document["Name"] for document in documents
             if any(action.get("Resources") for action in document.get("Actions", []))}
+
+
+def reads(operation: str) -> bool:
+    """Read whole namespaces, or explicit corrections in a namespace otherwise built by hand."""
+    namespace = namespace_of(operation)
+    return namespace in NAMESPACES or namespace in HAND_BUILT and operation in CORRECTIONS
 
 
 def _check_overrides(covered: dict[str, dict]) -> None:
@@ -1189,7 +1201,9 @@ def verify_against(vendored: dict, upstream: dict[str, dict], formats: dict[str,
         if changed:
             untrue.append(f"AWS no longer gives {namespace}'s {', '.join(changed)} the ARN format the file does")
     added = sorted(operation for operation in upstream
-                   if namespace_of(operation) in vendored["namespaces"] and operation not in vendored["operations"])
+                   if namespace_of(operation) in vendored["namespaces"]
+                   and (namespace_of(operation) not in vendored["handBuilt"] or operation in CORRECTIONS)
+                   and operation not in vendored["operations"])
     return untrue, added
 
 

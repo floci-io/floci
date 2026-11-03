@@ -663,6 +663,36 @@ def test_callback_resources_are_resolved_from_the_token(operation):
     assert "no resource types" in reason
 
 
+def test_list_tables_correction_names_the_literal_collection_without_selectors():
+    resources, reason = r.CORRECTIONS["dynamodb:ListTables"]
+    assert resources == [{"type": "table", "fill": {}}]
+    assert "table/?" in reason
+    formats = {"table": "arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}"}
+    assert not r._resource_problems("dynamodb:ListTables", resources[0], [], formats)
+    assert r._resource_problems("dynamodb:OtherOperation", resources[0], [], formats)
+    assert r.reads("dynamodb:ListTables")
+    assert not r.reads("dynamodb:BatchWriteItem")
+    assert not r.reads("dynamodb:ExecuteStatement")
+
+
+def test_hand_built_correction_is_generated_without_claiming_other_operations(corrections, tmp_path):
+    corrections.setattr(r, "CORRECTIONS", {"hand:ListThings": ([{"type": "thing", "fill": {}}], "measured collection")})
+    documents = DOCUMENTS + [reference("hand", {"ListThings": [], "PutThing": ["thing"]},
+                                       {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"})]
+    hand = model({"ListThings": {}, "PutThing": {"ThingName": "String"}})
+    hand["metadata"]["endpointPrefix"] = "hand"
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "hand": hand})
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert document["operations"]["hand:ListThings"] == {
+        "action": "hand:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
+    assert "hand:PutThing" not in document["operations"]
+    assert document["namespaces"]["hand"] == ["hand"]
+    assert document["handBuilt"] == ["hand"]
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+    assert r.verify_against(document, r.checked_actions(documents), document["arnFormats"]) == ([], [])
+
+
 def test_measured_callback_correction_retains_action_metadata_and_rejects_unlisted_resources():
     formats = {"activity": "arn:${Partition}:states:${Region}:${Account}:activity:${ActivityName}",
                "statemachine": "arn:${Partition}:states:${Region}:${Account}:stateMachine:${StateMachineName}"}
