@@ -78,97 +78,162 @@ import static org.mockito.Mockito.when;
  */
 class CloudFormationServiceRollbackTest {
 
+    /**
+     * A failing update that only moved the inherited tags re-provisioned the child with the very
+     * template and parameter values it already ran, so the deployment saved before that call still
+     * matches and the rollback restores the child's prior tags and the grandchild's inherited ones.
+     */
     @Test
-    void parentRollback_restoresGrandchildDeploymentWhenItsS3TemplateChanged() throws Exception {
-        assertGrandchildDeploymentRestored(true);
-    }
-
-    @Test
-    void parentRollback_restoresGrandchildDeploymentWithoutTagChanges() throws Exception {
-        assertGrandchildDeploymentRestored(false);
-    }
-
-    @Test
-    void parentRollback_recreatesGrandchildRemovedByChildUpdate() throws Exception {
-        assertGrandchildDeploymentRestored(true, true);
+    void parentRollback_restoresInheritedTagsOfATagOnlyUpdate() throws Exception {
+        assertTagOnlyRollback(false);
     }
 
     @Test
-    void parentRollback_recreatesRemovedGrandchildWithoutTagChanges() throws Exception {
-        assertGrandchildDeploymentRestored(false, true);
+    void parentRollback_preservesExplicitGrandchildTagMatchingAttemptedInheritance() throws Exception {
+        assertTagOnlyRollback(true);
     }
 
-    @Test
-    void parentRollback_reusesGrandchildRetainedByChildUpdate() throws Exception {
-        assertGrandchildDeploymentRestored(true, true, true);
-    }
-
-    private void assertGrandchildDeploymentRestored(boolean changeTags) throws Exception {
-        assertGrandchildDeploymentRestored(changeTags, false);
-    }
-
-    private void assertGrandchildDeploymentRestored(boolean changeTags, boolean removeGrandchild) throws Exception {
-        assertGrandchildDeploymentRestored(changeTags, removeGrandchild, false);
-    }
-
-    private void assertGrandchildDeploymentRestored(
-            boolean changeTags, boolean removeGrandchild, boolean retainGrandchild) throws Exception {
+    private void assertTagOnlyRollback(boolean explicitGrandchildTag) throws Exception {
         when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
-        String childTemplate = """
-                {"Resources":{"Grandchild":{"Type":"AWS::CloudFormation::Stack",
-                  "Properties":{"TemplateURL":"http://localhost/templates/grandchild.json"}}}}
-                """;
-        if (retainGrandchild) {
-            childTemplate = childTemplate.replace("\"Properties\":", "\"DeletionPolicy\":\"Retain\",\"Properties\":");
-        }
-        String previousGrandchild = """
-                {"Resources":{},"Outputs":{"Revision":{"Value":"previous"}}}
-                """;
-        AtomicReference<String> grandchildTemplate = new AtomicReference<>(previousGrandchild);
-        AtomicReference<String> childTemplateInS3 = new AtomicReference<>(childTemplate);
-        when(templateStore.getObject("templates", "child.json")).thenAnswer(invocation ->
-                new S3Object("templates", "child.json", childTemplateInS3.get().getBytes(StandardCharsets.UTF_8),
-                        "application/json"));
-        when(templateStore.getObject("templates", "grandchild.json")).thenAnswer(invocation ->
-                new S3Object("templates", "grandchild.json", grandchildTemplate.get().getBytes(StandardCharsets.UTF_8),
-                        "application/json"));
-        String parentTemplate = """
-                {"Resources":{"Child":{"Type":"AWS::CloudFormation::Stack",
-                  "Properties":{"TemplateURL":"http://localhost/templates/child.json"}}}}
-                """;
-        service.createChangeSet("rollback-tree", "create", "CREATE", parentTemplate, null,
-                Map.of(), List.of(), Map.of("team", "old"), REGION, ACCOUNT);
-        service.executeChangeSet("rollback-tree", "create", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+        String childTemplate = explicitGrandchildTag ? treeChildTemplate().replace(
+                "\"TemplateURL\":\"http://localhost/templates/grandchild.json\"",
+                "\"TemplateURL\":\"http://localhost/templates/grandchild.json\","
+                        + "\"Tags\":[{\"Key\":\"team\",\"Value\":\"new\"}]") : treeChildTemplate();
+        AtomicReference<String> childInS3 = new AtomicReference<>(childTemplate);
+        AtomicReference<String> grandchildInS3 = new AtomicReference<>(previousGrandchildTemplate());
+        serveTreeTemplates(childInS3, grandchildInS3);
+        createNestedTree(treeParentTemplate());
         Stack parent = service.describeStacks("rollback-tree", REGION, ACCOUNT).getFirst();
-        Stack grandchild = service.describeStacks("rollback-tree-Child-Grandchild", REGION, ACCOUNT).getFirst();
         assertEquals("CREATE_COMPLETE", parent.getStatus());
-        assertEquals("previous", grandchild.getOutputs().get("Revision"));
 
-        grandchildTemplate.set(previousGrandchild.replace("previous", "changed"));
-        childTemplateInS3.set(removeGrandchild ? "{\"Resources\":{}}"
-                : childTemplate.replace("\"Resources\":", "\"Description\":\"changed child\",\"Resources\":"));
-        String failingParent = parentTemplate.replace("\"Child\":", "\"ZFail\":{\"Type\":\"AWS::CloudFormation::Stack\","
-                + "\"DependsOn\":\"Child\",\"Properties\":{}},\"Child\":");
-        service.createChangeSet("rollback-tree", "update", "UPDATE", failingParent, null,
-                Map.of(), List.of(), Map.of("team", changeTags ? "new" : "old"), REGION, ACCOUNT);
+        service.createChangeSet("rollback-tree", "update", "UPDATE", failingParentTemplate(), null,
+                Map.of(), List.of(), Map.of("team", "new"), REGION, ACCOUNT);
         service.executeChangeSet("rollback-tree", "update", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
 
         assertEquals("UPDATE_ROLLBACK_COMPLETE", parent.getStatus());
         assertTrue(service.describeStackEvents("rollback-tree", REGION).stream()
                 .anyMatch(event -> "ZFail".equals(event.getLogicalResourceId())
                         && "Missing TemplateURL".equals(event.getResourceStatusReason())));
-        Stack restoredGrandchild = service.describeStacks("rollback-tree-Child-Grandchild", REGION, ACCOUNT).getFirst();
-        assertEquals(previousGrandchild, restoredGrandchild.getTemplateBody());
-        assertEquals("previous", restoredGrandchild.getOutputs().get("Revision"));
-        assertEquals(Map.of("team", "old"), restoredGrandchild.tagsSnapshot());
-        if (removeGrandchild && retainGrandchild) {
-            assertEquals(grandchild.getStackId(), restoredGrandchild.getStackId());
-        } else if (removeGrandchild) {
-            assertEquals("DELETE_COMPLETE", grandchild.getStatus());
-            assertEquals("CREATE_COMPLETE", restoredGrandchild.getStatus());
-            Stack child = service.describeStacks("rollback-tree-Child", REGION, ACCOUNT).getFirst();
-            assertEquals(restoredGrandchild.getStackId(), child.getResources().get("Grandchild").getPhysicalId());
-        }
+        assertEquals(Map.of("team", "old"), parent.tagsSnapshot());
+        Stack child = service.describeStacks("rollback-tree-Child", REGION, ACCOUNT).getFirst();
+        assertEquals(Map.of("team", "old"), child.tagsSnapshot());
+        Stack grandchild = service.describeStacks("rollback-tree-Child-Grandchild", REGION, ACCOUNT).getFirst();
+        assertEquals(Map.of("team", explicitGrandchildTag ? "new" : "old"), grandchild.tagsSnapshot());
+        assertEquals(previousGrandchildTemplate(), grandchild.getTemplateBody());
+        assertEquals("previous", grandchild.getOutputs().get("Revision"));
+    }
+
+    /**
+     * The parent's TemplateURL and the root tags never moved; the child template in S3 did. What
+     * the child runs no longer matches what was saved before the update, so the rollback reports
+     * the nested stack as not rolled back rather than claiming the prior deployment is live with
+     * only its tags put back. Restoring a moved deployment is a rollback deferred to its own
+     * change.
+     */
+    @Test
+    void parentRollback_failsHonestlyWhenTheChildTemplateChanged() throws Exception {
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        AtomicReference<String> childInS3 = new AtomicReference<>(treeChildTemplate());
+        AtomicReference<String> grandchildInS3 = new AtomicReference<>(previousGrandchildTemplate());
+        serveTreeTemplates(childInS3, grandchildInS3);
+        createNestedTree(treeParentTemplate());
+        Stack parent = service.describeStacks("rollback-tree", REGION, ACCOUNT).getFirst();
+        assertEquals("CREATE_COMPLETE", parent.getStatus());
+
+        childInS3.set(treeChildTemplate().replace("\"Resources\":",
+                "\"Description\":\"changed child\",\"Resources\":"));
+        service.createChangeSet("rollback-tree", "update", "UPDATE", failingParentTemplate(), null,
+                Map.of(), List.of(), Map.of("team", "old"), REGION, ACCOUNT);
+        service.executeChangeSet("rollback-tree", "update", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+
+        assertEquals("UPDATE_ROLLBACK_FAILED", parent.getStatus());
+        assertTrue(parent.getStatusReason().contains("failed to roll back: [Child]"), parent.getStatusReason());
+        Stack child = service.describeStacks("rollback-tree-Child", REGION, ACCOUNT).getFirst();
+        assertTrue(child.getTemplateBody().contains("changed child"), child.getTemplateBody());
+    }
+
+    @Test
+    void parentRollback_failsHonestlyWhenTheGrandchildTemplateChanged() throws Exception {
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        AtomicReference<String> childInS3 = new AtomicReference<>(treeChildTemplate());
+        AtomicReference<String> grandchildInS3 = new AtomicReference<>(previousGrandchildTemplate());
+        serveTreeTemplates(childInS3, grandchildInS3);
+        createNestedTree(treeParentTemplate());
+        Stack parent = service.describeStacks("rollback-tree", REGION, ACCOUNT).getFirst();
+
+        grandchildInS3.set(previousGrandchildTemplate().replace("previous", "changed"));
+        service.createChangeSet("rollback-tree", "update", "UPDATE", failingParentTemplate(), null,
+                Map.of(), List.of(), Map.of("team", "new"), REGION, ACCOUNT);
+        service.executeChangeSet("rollback-tree", "update", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+
+        assertEquals("UPDATE_ROLLBACK_FAILED", parent.getStatus());
+        Stack grandchild = service.describeStacks("rollback-tree-Child-Grandchild", REGION, ACCOUNT).getFirst();
+        assertEquals("changed", grandchild.getOutputs().get("Revision"));
+    }
+
+    /** Likewise for the parameter values handed to the child, with the child template unchanged. */
+    @Test
+    void parentRollback_failsHonestlyWhenTheChildParametersChanged() throws Exception {
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        AtomicReference<String> childInS3 = new AtomicReference<>(treeChildTemplate());
+        AtomicReference<String> grandchildInS3 = new AtomicReference<>(previousGrandchildTemplate());
+        serveTreeTemplates(childInS3, grandchildInS3);
+        createNestedTree(treeParentTemplate());
+        Stack parent = service.describeStacks("rollback-tree", REGION, ACCOUNT).getFirst();
+        assertEquals("CREATE_COMPLETE", parent.getStatus());
+
+        String givenParameters = failingParentTemplate().replace(
+                "\"TemplateURL\":\"http://localhost/templates/child.json\"",
+                "\"TemplateURL\":\"http://localhost/templates/child.json\",\"Parameters\":{\"Revision\":\"changed\"}");
+        service.createChangeSet("rollback-tree", "update", "UPDATE", givenParameters, null,
+                Map.of(), List.of(), Map.of("team", "old"), REGION, ACCOUNT);
+        service.executeChangeSet("rollback-tree", "update", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+
+        assertEquals("UPDATE_ROLLBACK_FAILED", parent.getStatus());
+        assertTrue(parent.getStatusReason().contains("failed to roll back: [Child]"), parent.getStatusReason());
+        Stack child = service.describeStacks("rollback-tree-Child", REGION, ACCOUNT).getFirst();
+        assertEquals("changed", child.parametersSnapshot().get("Revision"));
+    }
+
+    private void serveTreeTemplates(AtomicReference<String> childInS3, AtomicReference<String> grandchildInS3) {
+        when(templateStore.getObject("templates", "child.json")).thenAnswer(invocation ->
+                new S3Object("templates", "child.json", childInS3.get().getBytes(StandardCharsets.UTF_8),
+                        "application/json"));
+        when(templateStore.getObject("templates", "grandchild.json")).thenAnswer(invocation ->
+                new S3Object("templates", "grandchild.json", grandchildInS3.get().getBytes(StandardCharsets.UTF_8),
+                        "application/json"));
+    }
+
+    private void createNestedTree(String parentTemplate) throws Exception {
+        service.createChangeSet("rollback-tree", "create", "CREATE", parentTemplate, null,
+                Map.of(), List.of(), Map.of("team", "old"), REGION, ACCOUNT);
+        service.executeChangeSet("rollback-tree", "create", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+    }
+
+    private static String treeChildTemplate() {
+        return """
+                {"Parameters":{"Revision":{"Type":"String","Default":"previous"}},
+                 "Resources":{"Grandchild":{"Type":"AWS::CloudFormation::Stack",
+                  "Properties":{"TemplateURL":"http://localhost/templates/grandchild.json"}}}}
+                """;
+    }
+
+    private static String previousGrandchildTemplate() {
+        return """
+                {"Resources":{},"Outputs":{"Revision":{"Value":"previous"}}}
+                """;
+    }
+
+    private static String treeParentTemplate() {
+        return """
+                {"Resources":{"Child":{"Type":"AWS::CloudFormation::Stack",
+                  "Properties":{"TemplateURL":"http://localhost/templates/child.json"}}}}
+                """;
+    }
+
+    private static String failingParentTemplate() {
+        return treeParentTemplate().replace("\"Child\":", "\"ZFail\":{\"Type\":\"AWS::CloudFormation::Stack\","
+                + "\"DependsOn\":\"Child\",\"Properties\":{}},\"Child\":");
     }
 
     @Test
@@ -193,7 +258,7 @@ class CloudFormationServiceRollbackTest {
 
         assertEquals("UPDATE_ROLLBACK_FAILED", stack.getStatus());
         assertEquals("UPDATE_FAILED", nested.getStatus());
-        assertTrue(nested.getStatusReason().contains("nested stack it names is gone"));
+        assertTrue(nested.getStatusReason().contains("Rollback is not implemented"));
         assertEquals(List.of("Child"), stack.getUpdateRollbackResourceIds());
         assertTrue(nested.getAttributes().containsKey(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR));
     }

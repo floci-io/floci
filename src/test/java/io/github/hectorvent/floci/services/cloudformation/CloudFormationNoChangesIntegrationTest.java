@@ -401,11 +401,12 @@ class CloudFormationNoChangesIntegrationTest {
     }
 
     /**
-     * A nested stack's child template is read again before the comparison, as an AWS::Include
-     * fragment is: the same parent with the same child is not an update, and with the child changed
-     * in S3 it is. Regression for the rejection reported on PR #7383: without the nested-stack
-     * exception the comparison only sees the unchanged parent and answers "No updates are to be
-     * performed." before the child is ever read.
+     * A template holding a nested stack is never a no-change, whether or not the child moved: AWS
+     * reads the child template again and reports the nested stack as a change on every update, so
+     * the same parent with the same child is updated, and so is the parent after the child changed
+     * in S3. Regression for the rejection reported on PR #7383: without the nested-stack exception
+     * the comparison only sees the unchanged parent and answers "No updates are to be performed."
+     * before the child is ever read.
      */
     @Test
     void aNestedStackWhoseChildTemplateChangedInS3IsAnUpdate() {
@@ -423,9 +424,8 @@ class CloudFormationNoChangesIntegrationTest {
         try {
             create(stackName, parent);
 
-            update(stackName, parent)
-                    .statusCode(400)
-                    .body(containsString("No updates are to be performed."));
+            update(stackName, parent).statusCode(200);
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
             putChildTemplate(bucket, "Description: second\n");
             update(stackName, parent).statusCode(200);

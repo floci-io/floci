@@ -947,14 +947,16 @@ not to every custom-resource handler.
 
 Stack-level tags passed to `CreateStack` or `UpdateStack` are applied to nested stacks as well as
 the root stack. `DescribeStacks` on a nested stack returns its inherited tags, including through
-multiple levels of nesting. Updating the root stack's tags updates its nested stacks even when their
-templates have not changed, and an update whose parent template is unchanged still applies once the
-child template in S3 has changed. If a later resource fails the parent update, each nested stack is
-restored to the deployment it had before the update, its tags included, with the rest of the
-rollback.
+multiple levels of nesting, and the tags its own `Tags` property declares take precedence over the
+inherited ones. Updating the root stack's tags updates its nested stacks even when their templates
+have not changed, and a template holding a nested stack is never refused as having nothing to
+change: AWS reads the child template again and counts the nested stack as a change on every update.
 
-Rollback snapshots include descendant templates and parameters. Restoring a nested stack uses
-those saved deployments instead of rereading templates that changed in S3 during the failed update.
+When a later resource fails the parent update, a nested stack the update re-provisioned with the
+template and the parameter values it already ran gets its prior tags back, its descendants'
+inherited tags included. A nested stack the update re-deployed with a different template or
+different parameter values, including in a descendant, is not restored: the stack ends `UPDATE_ROLLBACK_FAILED` rather than
+claiming a nested deployment rollback Floci does not implement yet.
 
 ## Failed update rollbacks
 

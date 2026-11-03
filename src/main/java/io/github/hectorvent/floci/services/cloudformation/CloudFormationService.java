@@ -44,11 +44,12 @@ import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
+import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.*;
 import java.util.ArrayList;
-import java.util.Iterator;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -601,8 +602,8 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * Whether an UPDATE has nothing to change: the template it submits comes to the same
-     * {@link ComparedTemplate} as the stack's, with the values each is given, and the stack's own tags
-     * or none are sent. CloudFormation then answers "No updates
+     * {@link ComparedTemplate} as the stack's, with the values each is given, the stack's own tags
+     * or none are sent, and the stack has no nested stack. CloudFormation then answers "No updates
      * are to be performed." A new Description, Metadata, Rules or an unused parameter, mapping or
      * condition is therefore not an update, while a change to an active output is, as on AWS.
      */
@@ -611,9 +612,9 @@ public class CloudFormationService implements ResourceProvider {
         if (stack.getTemplateBody() == null || templateBody == null) {
             return false;
         }
-        // Tags are compared as a set. An update that sends none keeps the stack's current tags.
-        Map<String, String> effectiveTags = tags == null ? stack.tagsSnapshot() : tags;
-        if (!effectiveTags.equals(stack.tagsSnapshot())) {
+        // Tags are compared as a set. An update that sends none keeps the stack's, and so has
+        // nothing to change; an empty set removes them, which is a change only for a tagged stack.
+        if (tags != null && !tags.equals(stack.tagsSnapshot())) {
             return false;
         }
         JsonNode submittedTemplate = parsedOrNull(templateBody);
@@ -631,27 +632,17 @@ public class CloudFormationService implements ResourceProvider {
                 template = samTransformProcessor.expandSamTemplate(template,
                         samTransformParameters(template, given, region));
             }
+            // A nested stack is always updated, whether or not its template changed: AWS reads the
+            // child template again and reports the nested stack as a change on every update.
+            for (JsonNode resource : template.path("Resources")) {
+                if ("AWS::CloudFormation::Stack".equals(resource.path("Type").asText())) {
+                    return false;
+                }
+            }
             Map<String, String> submitted = resolveSsmParameters(template,
                     resolveDefaultParameters(template, given), region);
-            if (comparedDeployedTemplate(stack, deployedTemplate, region)
-                    .equals(comparedTemplate(template, submitted, stack, region, currentDynamicReferences(stack, region)))) {
-                // Comparing the parent only sees the TemplateURL string. Read the child before
-                // rejecting an unchanged parent, since that URL may now hold a different template.
-                JsonNode resources = template.path("Resources");
-                if (resources.isObject()) {
-                    String accountId = ownerAccount(stack);
-                    Iterator<Map.Entry<String, JsonNode>> fields = resources.fields();
-                    while (fields.hasNext()) {
-                        Map.Entry<String, JsonNode> entry = fields.next();
-                        if ("AWS::CloudFormation::Stack".equals(entry.getValue().path("Type").asText())
-                                && isNestedStackChanged(stack, entry.getKey(), entry.getValue(), region, accountId)) {
-                            return false;
-                        }
-                    }
-                }
-                return true;
-            }
-            return false;
+            return comparedDeployedTemplate(stack, deployedTemplate, region)
+                    .equals(comparedTemplate(template, submitted, stack, region, currentDynamicReferences(stack, region)));
         } catch (AwsException e) {
             // An AWS::Include fragment, the SAM transform or an SSM parameter the update cannot
             // process fails the update itself, which reports it as AWS does: it goes ahead rather
@@ -1989,21 +1980,12 @@ public class CloudFormationService implements ResourceProvider {
     private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
                                  Map<String, String> tags,
                                  boolean isCreate, String region, String accountId) {
-        executeTemplate(stack, templateBody, params, tags, isCreate, region, accountId, null);
-    }
-
-    private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
-                                 Map<String, String> tags,
-                                 boolean isCreate, String region, String accountId, JsonNode rollbackDeployment) {
         Map<String, String> previousTags = stack.tagsSnapshot();
         Map<String, String> operationTags = tags == null ? previousTags : new LinkedHashMap<>(tags);
         boolean stackTagsChanged = !operationTags.equals(previousTags);
+        // Taken before the replacement below, so the snapshot carries the prior tags for a rollback.
         StackUpdateSnapshot previousState = snapshotForUpdate(stack);
         if (tags != null) {
-            previousState = new StackUpdateSnapshot(previousState.templateBody(),
-                    previousState.originalTemplateBody(), previousState.parameters(),
-                    previousState.resolvedParameters(), previousState.outputs(), previousState.exports(),
-                    previousState.outputExportNames(), previousState.resources(), previousTags);
             stack.replaceTags(tags);
         }
         boolean updateCommitted = false;
@@ -2061,7 +2043,7 @@ public class CloudFormationService implements ResourceProvider {
 
             // Process resources in order
             JsonNode resources = template.path("Resources");
-            if (!isCreate && (stackTagsChanged || rollbackDeployment != null) && resources.isObject()) {
+            if (!isCreate && stackTagsChanged && resources.isObject()) {
                 resources.fields().forEachRemaining(entry -> {
                     if ("AWS::CloudFormation::Stack".equals(entry.getValue().path("Type").asText())) {
                         changedResourceIds.add(entry.getKey());
@@ -2151,8 +2133,7 @@ public class CloudFormationService implements ResourceProvider {
                     if ("AWS::CloudFormation::Stack".equals(type)) {
                         resource = executeNestedStack(stack, logicalId,
                                 props.isMissingNode() ? null : props,
-                                engine, operationTags, region, accountId, isCreate, previousResource,
-                                rollbackDeployment);
+                                engine, operationTags, region, accountId, isCreate, previousResource);
                     } else {
                         JsonNode previousDefinition = previousResources.path(logicalId);
                         JsonNode priorProps = type.equals(previousDefinition.path("Type").asText())
@@ -2946,7 +2927,7 @@ public class CloudFormationService implements ResourceProvider {
                     resource.setStatusReason(reason);
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "UPDATE_FAILED", reason);
-                } else if (rollbackNestedStack(resource, region, ownerAccount(stack))
+                } else if (rollbackNestedStackTags(resource, region, ownerAccount(stack))
                         || "true".equals(resource.getAttributes().remove(
                         CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR))
                         || dispatcher.rollbackUpdate(resource,
@@ -2984,65 +2965,90 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     /**
-     * Restores a nested stack this update changed but the parent's rollback owes its prior
-     * deployment: puts back the tags, the template body and the parameter values the child ran with
-     * before the update re-provisioned it. The snapshot holds them from before that call, so an S3
-     * object the update replaced in flight cannot carry the restore. A resource carrying no snapshot
-     * was not touched by this update and reports false for the walker's own arms to settle; one
-     * whose snapshot cannot restore the child reports UPDATE_ROLLBACK_FAILED rather than claiming
-     * the prior deployment is live.
+     * Restores the tags a nested stack carried before an in-flight update re-provisioned it, along
+     * with the inherited tags its descendants took from each changed level. The resource's saved
+     * record holds the child's deployment from before that call, so a template the update replaced
+     * in S3 cannot carry the restore unseen: a child whose template body or given parameters now
+     * differ from it is owed a deployment rollback this build does not implement, and reports false
+     * so the walker's own arms settle the stack in UPDATE_ROLLBACK_FAILED rather than claiming the
+     * prior deployment is live. A resource carrying no record was not touched by this update, and
+     * one whose child is gone cannot be compared; both fall through the same way.
      */
-    private boolean rollbackNestedStack(StackResource resource, String region, String accountId) {
-        JsonNode snapshot = CfnRollback.updateSnapshot(
+    private boolean rollbackNestedStackTags(StackResource resource, String region, String accountId) {
+        JsonNode saved = CfnRollback.updateSnapshot(
                 resource, CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR);
-        if (snapshot == null) {
+        if (saved == null) {
             return false;
         }
         Stack childStack = resource.getPhysicalId() == null ? null
                 : resolveStack(resource.getPhysicalId(), region, accountId);
         if (childStack == null) {
-            failNestedStackRollback(resource, "the nested stack it names is gone");
-            return true;
+            return false;
         }
         Map<String, String> priorTags;
-        Map<String, String> childParams;
-        String childTemplate;
         try {
+            if (!savedChildDeploymentMatches(childStack, saved)) {
+                return false;
+            }
             priorTags = objectMapper.convertValue(
-                    snapshot.path("tags"), new TypeReference<Map<String, String>>() {});
-            childParams = new LinkedHashMap<>(objectMapper.convertValue(
-                    snapshot.path("parameters"), new TypeReference<Map<String, String>>() {}));
-            childTemplate = snapshot.path("templateBody").asText(null);
+                    saved.path("tags"), new TypeReference<Map<String, String>>() {});
         } catch (RuntimeException e) {
-            LOG.warnv("Could not read the nested stack rollback snapshot for {0}: {1}",
+            LOG.warnv("Could not read the saved nested stack deployment for {0}: {1}",
                     resource.getLogicalId(), e.getMessage());
-            failNestedStackRollback(resource, "its rollback snapshot could not be read: " + e.getMessage());
-            return true;
+            return false;
         }
-        if (childTemplate == null || childTemplate.isBlank()) {
-            failNestedStackRollback(resource, "its snapshot holds no template body");
-            return true;
+        if (priorTags == null || !restoreSavedDescendantTags(saved, region, accountId)) {
+            return false;
         }
-        try {
-            executeTemplate(childStack, childTemplate, childParams, priorTags, false, region, accountId, snapshot);
-        } catch (RuntimeException e) {
-            LOG.errorv("Could not roll nested stack {0} back: {1}", childStack.getStackName(), e.getMessage());
-            failNestedStackRollback(resource, "restoring it failed: " + e.getMessage());
-            return true;
-        }
-        if (!"UPDATE_COMPLETE".equals(childStack.getStatus())) {
-            failNestedStackRollback(resource, "restoring it ended with the child in " + childStack.getStatus());
-            return true;
-        }
-        childStack.setOriginalTemplateBody(snapshot.path("originalTemplateBody").asText(childTemplate));
+        childStack.replaceTags(priorTags);
         persistStack(childStack);
         resource.getAttributes().remove(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR);
         return true;
     }
 
-    /** Let the rollback walker record a failed restoration and retain its snapshot for a retry. */
-    private static void failNestedStackRollback(StackResource resource, String cause) {
-        throw new IllegalStateException("Could not roll nested stack " + resource.getLogicalId() + " back: " + cause);
+    /**
+     * Whether the child still runs the deployment the record saved: its template body and the
+     * parameter values it was given match, so only its tags moved and restoring them is the whole
+     * rollback owed. A saved field that will not read as the map or string this comparison needs
+     * throws, which the caller settles as an unrestorable record.
+     */
+    private boolean savedChildDeploymentMatches(Stack childStack, JsonNode saved) {
+        if (!saved.path("templateBody").asText("").equals(childStack.getTemplateBody())) {
+            return false;
+        }
+        Map<String, String> savedParameters = objectMapper.convertValue(
+                saved.path("parameters"), new TypeReference<Map<String, String>>() {});
+        return savedParameters.equals(childStack.parametersSnapshot());
+    }
+
+    /** Restores captured tags without inferring whether an equal value was explicit or inherited. */
+    private boolean restoreSavedDescendantTags(JsonNode saved, String region, String accountId) {
+        Map<String, Map<String, String>> priorTags;
+        Map<String, String> priorDeployments;
+        try {
+            priorTags = objectMapper.convertValue(saved.path("descendantTags"), new TypeReference<>() {});
+            priorDeployments = objectMapper.convertValue(saved.path("descendantDeployments"), new TypeReference<>() {});
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not read saved descendant tags: {0}", e.getMessage());
+            return false;
+        }
+        if (priorTags == null || priorDeployments == null || priorTags.values().stream().anyMatch(Objects::isNull)) {
+            return false;
+        }
+        Map<Stack, Map<String, String>> restores = new LinkedHashMap<>();
+        for (Map.Entry<String, Map<String, String>> entry : priorTags.entrySet()) {
+            Stack descendant = resolveStack(entry.getKey(), region, accountId);
+            if (descendant == null || "DELETE_COMPLETE".equals(descendant.getStatus())
+                    || !nestedDeploymentFingerprint(descendant).equals(priorDeployments.get(entry.getKey()))) {
+                return false;
+            }
+            restores.put(descendant, entry.getValue());
+        }
+        restores.forEach((descendant, tags) -> {
+            descendant.replaceTags(tags);
+            persistStack(descendant);
+        });
+        return true;
     }
 
     private void restoreOutputAndExportState(
@@ -4324,7 +4330,7 @@ public class CloudFormationService implements ResourceProvider {
                                              CloudFormationTemplateEngine engine,
                                              Map<String, String> inheritedTags, String region,
                                              String accountId, boolean isCreate,
-                                             StackResource previousResource, JsonNode rollbackDeployment) {
+                                             StackResource previousResource) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType("AWS::CloudFormation::Stack");
@@ -4336,15 +4342,7 @@ public class CloudFormationService implements ResourceProvider {
             return resource;
         }
 
-        JsonNode childDeployment = rollbackDeployment == null ? null
-                : rollbackDeployment.path("nestedStacks").get(logicalId);
-        if (rollbackDeployment != null && childDeployment == null) {
-            resource.setStatus("CREATE_FAILED");
-            resource.setStatusReason("Missing rollback deployment for nested stack " + logicalId);
-            return resource;
-        }
-        String childTemplate = childDeployment == null ? fetchTemplateFromS3(templateUrl)
-                : childDeployment.path("templateBody").asText();
+        String childTemplate = fetchTemplateFromS3(templateUrl);
         String childStackName = parentStack.getStackName() + "-" + logicalId;
 
         // Resolved as a property value: Parameters may be an Fn::If choosing between whole maps,
@@ -4364,11 +4362,6 @@ public class CloudFormationService implements ResourceProvider {
                     childParams.put(e.getKey(), value.isNull() ? "" : value.asText());
                 }
             });
-        }
-        if (childDeployment != null) {
-            childParams.clear();
-            childParams.putAll(objectMapper.convertValue(childDeployment.path("parameters"),
-                    new TypeReference<Map<String, String>>() {}));
         }
         // CloudFormation creates or updates the child with these values, so the call fails as a
         // CreateStack or UpdateStack would, before the child is created or changed: a parameter
@@ -4390,14 +4383,6 @@ public class CloudFormationService implements ResourceProvider {
             childStack = resolveStack(previousResource.getPhysicalId(), region, accountId);
             childCreate = childStack == null;
         }
-        if (childCreate && childDeployment != null) {
-            String priorStackId = childDeployment.path("stackId").asText(null);
-            Stack retainedChild = priorStackId == null ? null : resolveStack(priorStackId, region, accountId);
-            if (retainedChild != null && !"DELETE_COMPLETE".equals(retainedChild.getStatus())) {
-                childStack = retainedChild;
-                childCreate = false;
-            }
-        }
         if (childCreate) {
             childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
             childStack.setStatus("CREATE_IN_PROGRESS");
@@ -4406,20 +4391,12 @@ public class CloudFormationService implements ResourceProvider {
 
         Map<String, String> childTags = new LinkedHashMap<>(inheritedTags);
         childTags.putAll(resolveNestedStackTags(props, engine));
-        if (childDeployment != null) {
-            childTags = objectMapper.convertValue(childDeployment.path("tags"),
-                    new TypeReference<Map<String, String>>() {});
-        }
         if (!childCreate) {
             resource.getAttributes().put(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR,
-                    snapshotNestedDeployment(childStack, region, accountId).toString());
+                    savedChildDeployment(childStack, region, accountId).toString());
         }
 
-        executeTemplate(childStack, childTemplate, childParams, childTags, childCreate, region, accountId, childDeployment);
-        if (childDeployment != null && NESTED_STACK_SUCCESS_STATUSES.contains(childStack.getStatus())) {
-            childStack.setOriginalTemplateBody(childDeployment.path("originalTemplateBody").asText(childTemplate));
-            persistStack(childStack);
-        }
+        executeTemplate(childStack, childTemplate, childParams, childTags, childCreate, region, accountId);
 
         resource.setPhysicalId(childStack.getStackId());
         resource.getAttributes().put("Arn", childStack.getStackId());
@@ -4446,25 +4423,53 @@ public class CloudFormationService implements ResourceProvider {
         return resource;
     }
 
-    private ObjectNode snapshotNestedDeployment(Stack stack, String region, String accountId) {
-        ObjectNode snapshot = objectMapper.createObjectNode();
-        snapshot.put("stackId", stack.getStackId());
-        snapshot.set("tags", objectMapper.valueToTree(stack.tagsSnapshot()));
-        snapshot.put("templateBody", stack.getTemplateBody());
-        snapshot.put("originalTemplateBody", stack.getOriginalTemplateBody());
-        snapshot.set("parameters", objectMapper.valueToTree(stack.parametersSnapshot()));
-        ObjectNode nestedStacks = snapshot.putObject("nestedStacks");
-        for (StackResource nested : stack.resourcesSnapshot().values()) {
-            if ("AWS::CloudFormation::Stack".equals(nested.getResourceType())) {
-                Stack child = nested.getPhysicalId() == null ? null
-                        : resolveStack(nested.getPhysicalId(), region, accountId);
-                if (child == null) {
-                    throw new IllegalStateException("Cannot snapshot missing nested stack " + nested.getLogicalId());
-                }
-                nestedStacks.set(nested.getLogicalId(), snapshotNestedDeployment(child, region, accountId));
+    /**
+     * The child stack's own deployment before an update re-provisions it: the tags it ran with, its
+     * template body and the parameter values it was given. Descendant tags are captured separately;
+     * their templates, parameters and resources are not restored here.
+     */
+    private ObjectNode savedChildDeployment(Stack stack, String region, String accountId) {
+        ObjectNode saved = objectMapper.createObjectNode();
+        saved.put("templateBody", stack.getTemplateBody());
+        saved.set("parameters", objectMapper.valueToTree(stack.parametersSnapshot()));
+        saved.set("tags", objectMapper.valueToTree(stack.tagsSnapshot()));
+        Map<String, Map<String, String>> descendantTags = new LinkedHashMap<>();
+        Map<String, String> descendantDeployments = new LinkedHashMap<>();
+        collectDescendantTags(stack, descendantTags, descendantDeployments, region, accountId);
+        saved.set("descendantTags", objectMapper.valueToTree(descendantTags));
+        saved.set("descendantDeployments", objectMapper.valueToTree(descendantDeployments));
+        return saved;
+    }
+
+    /** Captures tags and comparison fingerprints, never descendant state to re-provision. */
+    private void collectDescendantTags(Stack stack, Map<String, Map<String, String>> tags,
+                                       Map<String, String> deployments,
+                                       String region, String accountId) {
+        for (StackResource resource : stack.resourcesSnapshot().values()) {
+            if (!"AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
+                continue;
+            }
+            Stack descendant = resource.getPhysicalId() == null ? null
+                    : resolveStack(resource.getPhysicalId(), region, accountId);
+            if (descendant != null && !tags.containsKey(descendant.getStackId())) {
+                tags.put(descendant.getStackId(), descendant.tagsSnapshot());
+                deployments.put(descendant.getStackId(), nestedDeploymentFingerprint(descendant));
+                collectDescendantTags(descendant, tags, deployments, region, accountId);
             }
         }
-        return snapshot;
+    }
+
+    private String nestedDeploymentFingerprint(Stack stack) {
+        ObjectNode deployment = objectMapper.createObjectNode();
+        deployment.put("templateBody", stack.getTemplateBody());
+        deployment.set("parameters", objectMapper.valueToTree(new TreeMap<>(stack.parametersSnapshot())));
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(deployment.toString().getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("Could not compare nested stack deployment", e);
+        }
     }
 
     private Map<String, String> resolveNestedStackTags(JsonNode props, CloudFormationTemplateEngine engine) {
