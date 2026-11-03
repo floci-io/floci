@@ -579,10 +579,7 @@ public class EmrServerlessJobRunService implements Resettable {
     static List<String> hiveArguments(Application app, JobRun run, JobDriver.Hive hive) {
         List<String> arguments = new ArrayList<>();
         for (String classification : HIVE_CLASSIFICATIONS) {
-            classificationProperties(app, run, classification).forEach((name, value) -> {
-                arguments.add(EmrServerlessSparkRunner.HIVECONF_OPTION);
-                arguments.add(name + "=" + value);
-            });
+            arguments.addAll(EmrServerlessSparkRunner.hiveSettings(classificationProperties(app, run, classification)));
         }
         if (hive.getInitQueryFile() != null) {
             arguments.add("-i");
