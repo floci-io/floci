@@ -15,6 +15,15 @@ class ExternalReferenceScannerTest {
     private static final Set<String> SCHEMAS = Set.of("analytics", "Mixed");
 
     @Test
+    void aStringThatLooksLikePunctuationDoesNotEndTheTableContext() {
+        for (String text : new String[] {";", "(", ")", ","}) {
+            assertThat(text, ExternalReferenceScanner.scan(
+                    "SELECT e.id FROM (SELECT '" + text + "') s, analytics.events e", SCHEMAS),
+                    contains(new Reference("analytics", "events")));
+        }
+    }
+
+    @Test
     void findsQualifiedReferencesAndIgnoresOtherSchemas() {
         assertThat(ExternalReferenceScanner.scan("SELECT * FROM analytics.events e JOIN public.users u ON true", SCHEMAS),
                 contains(new Reference("analytics", "events")));

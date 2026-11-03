@@ -621,6 +621,10 @@ class RedshiftSpectrumIntegrationTest {
                 "text/csv", null);
         s3Service.putObject(bucket, "events/day=2/part-1.csv", "not-a-number,30\n".getBytes(StandardCharsets.UTF_8),
                 "text/csv", null);
+        glueDatabase = "spectrum_pruning_" + System.nanoTime();
+        Database database = new Database();
+        database.setName(glueDatabase);
+        glueService.createDatabase(database);
         clusterId = "it-pruning-" + System.nanoTime();
         Cluster cluster = createClusterWithRole(clusterId);
         // a partition that cannot be read fails the query that reads it, which shows which partitions were read
@@ -632,8 +636,8 @@ class RedshiftSpectrumIntegrationTest {
                 .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
                 .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
              Statement statement = connection.createStatement()) {
-            statement.execute("CREATE EXTERNAL SCHEMA " + schemaName + " FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '"
-                    + ROLE_ARN + "'");
+            statement.execute("CREATE EXTERNAL SCHEMA " + schemaName + " FROM DATA CATALOG DATABASE '" + glueDatabase
+                    + "' IAM_ROLE '" + ROLE_ARN + "'");
             statement.execute("CREATE EXTERNAL TABLE " + schemaName + ".events (id INTEGER, amount INTEGER) "
                     + "PARTITIONED BY (day INTEGER) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' "
                     + "STORED AS TEXTFILE LOCATION 's3://" + bucket + "/events/'");

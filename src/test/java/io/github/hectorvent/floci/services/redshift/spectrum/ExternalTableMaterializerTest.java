@@ -961,7 +961,7 @@ class ExternalTableMaterializerTest {
                 release.countDown();
                 assertEquals(ExternalTableMaterializer.Outcome.LOADED, load.get(10, TimeUnit.SECONDS));
                 assertTrue(drop.get(10, TimeUnit.SECONDS));
-                assertEquals("DROP TABLE IF EXISTS \"analytics\".\"events\" RESTRICT", backend.statements.getLast());
+                assertEquals(ExternalTableMaterializer.dropRelationSql("analytics", "events", false), backend.statements.getLast());
                 assertEquals(ExternalTableMaterializer.Outcome.NOT_EXTERNAL,
                         materializer.ensureCurrent(backend, session(false), BINDING, "events"));
                 assertTrue(materializer.loadedTables(BINDING.clusterKey(), "dev", "analytics").isEmpty());
@@ -1133,6 +1133,54 @@ class ExternalTableMaterializerTest {
     }
 
     @Test
+    void exposesAPartitionedTableAsAViewOfTheDeclaredColumnsOnly() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one));
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL);
+
+        String load = backend.statements.getLast();
+        assertThat(load, containsString("CREATE TABLE \"analytics\".\"_floci_spectrum_events\" (\"id\" integer, "
+                + "\"name\" text, \"day\" text, \"_floci_partition\" VARCHAR)"));
+        assertThat(load, containsString("CREATE OR REPLACE VIEW \"analytics\".\"events\" AS SELECT \"id\", \"name\", \"day\" "
+                + "FROM \"analytics\".\"_floci_spectrum_events\""));
+        assertThat(load.substring(load.indexOf("CREATE OR REPLACE VIEW")), not(containsString("_floci_partition")));
+    }
+
+    @Test
+    void keepsAnUnpartitionedTableAsAPlainTable() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+
+        materializer.ensureCurrent(backend, session(false), BINDING, "events");
+
+        assertThat(backend.statements.getLast(), containsString("CREATE TABLE \"analytics\".\"events\""));
+        assertThat(backend.statements.getLast(), not(containsString("CREATE OR REPLACE VIEW")));
+        assertThat(backend.statements.getLast(), not(containsString("CREATE TABLE \"analytics\".\"_floci_")));
+    }
+
+    @Test
+    void dropsAViewAndItsBackingTableWhicheverTheNameIsNow() {
+        String sql = ExternalTableMaterializer.dropRelationSql("analytics", "ev'ents", true);
+
+        assertThat(sql, containsString("c.relkind = 'v') THEN DROP VIEW \"analytics\".\"ev'ents\" CASCADE; "
+                + "ELSE DROP TABLE IF EXISTS \"analytics\".\"ev'ents\" CASCADE"));
+        assertThat(sql, containsString("c.relname = 'ev''ents'"));
+        assertThat(sql, containsString("DROP TABLE IF EXISTS \"analytics\".\"_floci_spectrum_ev'ents\" CASCADE"));
+    }
+
+    @Test
+    void namesTheBackingTableWithinThePostgresIdentifierLimit() {
+        String longName = "t".repeat(60);
+        String backing = ExternalTableMaterializer.backingName(longName);
+
+        assertThat(backing.length() <= 63, equalTo(true));
+        assertThat(backing, equalTo(ExternalTableMaterializer.backingName(longName)));
+        assertThat(backing.equals(ExternalTableMaterializer.backingName("u".repeat(60))), equalTo(false));
+        assertThat(ExternalTableMaterializer.backingName("events"), equalTo("_floci_spectrum_events"));
+    }
+
+    @Test
     void loadsOnlyThePartitionsTheWhereCanSelect() {
         Table table = dayPartitionedTable();
         Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
@@ -1162,7 +1210,7 @@ class ExternalTableMaterializerTest {
         List<String> added = backend.statements.subList(loaded, backend.statements.size());
         assertThat(added.stream().noneMatch(sql -> sql.contains("TRUNCATE") || sql.contains("DROP TABLE \"analytics\"")),
                 equalTo(true));
-        assertThat(added.stream().anyMatch(sql -> sql.contains("INSERT INTO \"analytics\".\"events\"")), equalTo(true));
+        assertThat(added.stream().anyMatch(sql -> sql.contains("INSERT INTO \"analytics\".\"_floci_spectrum_events\"")), equalTo(true));
         assertThat(added.stream().noneMatch(sql -> sql.contains("DELETE FROM")), equalTo(true));
         assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", null),
                 equalTo(ExternalTableMaterializer.Outcome.CURRENT));
@@ -1185,7 +1233,7 @@ class ExternalTableMaterializerTest {
 
         List<String> changed = backend.statements.subList(loaded, backend.statements.size());
         assertThat(changed.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM \"analytics\".\"events\" WHERE \"_floci_partition\" = '"
+                "DELETE FROM \"analytics\".\"_floci_spectrum_events\" WHERE \"_floci_partition\" = '"
                         + ExternalTableMaterializer.partitionId(List.of("2026-01-01")) + "'")), equalTo(true));
         assertThat(changed.stream().noneMatch(sql -> sql.contains("2026-01-02")), equalTo(true));
         verify(duck, times(2)).execute(anyString(), any(), anyString(), eq(ACCOUNT));
@@ -1206,7 +1254,7 @@ class ExternalTableMaterializerTest {
 
         List<String> dropped = backend.statements.subList(loaded, backend.statements.size());
         assertThat(dropped.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM \"analytics\".\"events\" WHERE \"_floci_partition\" = '"
+                "DELETE FROM \"analytics\".\"_floci_spectrum_events\" WHERE \"_floci_partition\" = '"
                         + ExternalTableMaterializer.partitionId(List.of("2026-01-02")) + "'")), equalTo(true));
     }
 
@@ -1325,7 +1373,7 @@ class ExternalTableMaterializerTest {
                 && !sql.contains("s3://bucket/zero-one/part-1.csv")), any(), anyString(), eq(ACCOUNT));
         List<String> changed = backend.statements.subList(loaded, backend.statements.size());
         assertThat(changed.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM \"analytics\".\"events\" WHERE \"_floci_partition\" = '"
+                "DELETE FROM \"analytics\".\"_floci_spectrum_events\" WHERE \"_floci_partition\" = '"
                         + ExternalTableMaterializer.partitionId(List.of("1")) + "'")), equalTo(true));
         assertThat(changed.stream().noneMatch(sql -> sql.contains(
                 ExternalTableMaterializer.partitionId(List.of("01")))), equalTo(true));
@@ -1355,7 +1403,7 @@ class ExternalTableMaterializerTest {
 
         List<String> dropped = backend.statements.subList(loaded, backend.statements.size());
         assertThat(dropped.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM \"analytics\".\"events\" WHERE \"_floci_partition\" = '"
+                "DELETE FROM \"analytics\".\"_floci_spectrum_events\" WHERE \"_floci_partition\" = '"
                         + ExternalTableMaterializer.partitionId(List.of("1")) + "'")), equalTo(true));
     }
 
@@ -1383,7 +1431,7 @@ class ExternalTableMaterializerTest {
                 && !sql.contains("s3://bucket/one-zero-zero/part-1.csv")), any(), anyString(), eq(ACCOUNT));
         List<String> changed = backend.statements.subList(loaded, backend.statements.size());
         assertThat(changed.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM \"analytics\".\"events\" WHERE \"_floci_partition\" = '"
+                "DELETE FROM \"analytics\".\"_floci_spectrum_events\" WHERE \"_floci_partition\" = '"
                         + ExternalTableMaterializer.partitionId(List.of("1.0")) + "'")), equalTo(true));
         assertThat(changed.stream().noneMatch(sql -> sql.contains(
                 ExternalTableMaterializer.partitionId(List.of("1.00")))), equalTo(true));

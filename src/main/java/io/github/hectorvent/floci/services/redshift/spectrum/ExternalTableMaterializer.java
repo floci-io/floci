@@ -26,6 +26,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -60,6 +61,9 @@ public class ExternalTableMaterializer {
     private static final String SCRATCH_KEY_PREFIX = "spectrum-";
     private static final String HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__";
     static final String PARTITION_COLUMN = "_floci_partition";
+    /** Prefix of the table behind the view of a partitioned external table. */
+    public static final String BACKING_PREFIX = "_floci_spectrum_";
+    private static final int MAX_IDENTIFIER_BYTES = 63;
     private static final Duration STALE_SCRATCH_AGE = Duration.ofHours(1);
     private static final String ICEBERG_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
     private static final String ICEBERG_MANIFESTS = "SELECT DISTINCT manifest_path FROM read_avro(%s)";
@@ -782,19 +786,26 @@ public class ExternalTableMaterializer {
                     throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "External table \"" + binding.schemaName() + "." + table.getName() + "\" exceeds configured row limit");
                 }
             }
+            // A partitioned table keeps the partition each row came from in a backing table, and the name the
+            // user queries is a view of the declared columns only, so that SELECT * returns what Glue declares.
+            String physical = hasPartitionKeys(table) ? schema + "." + quote(backingName(table.getName())) : target;
+            String view = physical.equals(target) ? "" : "CREATE OR REPLACE VIEW " + target + " AS SELECT "
+                    + plan.columns().stream().map(column -> quote(column.getName())).collect(Collectors.joining(", "))
+                    + " FROM " + physical + "; ";
             if (deletions != null) {
                 // the table already holds other partitions, so only the ones named here are replaced
-                String delete = deletions.isEmpty() ? "" : "DELETE FROM " + target + " WHERE "
+                String delete = deletions.isEmpty() ? "" : "DELETE FROM " + physical + " WHERE "
                         + deletions.stream().map(values -> quote(PARTITION_COLUMN) + " = '" + partitionId(values) + "'")
                         .distinct().collect(Collectors.joining(" OR ")) + "; ";
-                backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); " + delete
-                        + "INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
+                backend.execute("CREATE TABLE IF NOT EXISTS " + physical + " (" + definitions + "); " + delete
+                        + "INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view + "DROP TABLE " + staging);
             } else if (definitions.equals(loadedDefinitions)) {
-                backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); TRUNCATE " + target
-                        + "; INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
+                backend.execute("CREATE TABLE IF NOT EXISTS " + physical + " (" + definitions + "); TRUNCATE " + physical
+                        + "; INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view + "DROP TABLE " + staging);
             } else {
-                backend.execute("DROP TABLE IF EXISTS " + target + "; CREATE TABLE " + target + " (" + definitions
-                        + "); INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
+                backend.execute(dropRelationSql(binding.schemaName(), table.getName(), false) + "; CREATE TABLE " + physical
+                        + " (" + definitions + "); INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view
+                        + "DROP TABLE " + staging);
             }
             stagingCreated = false;
             return definitions;
@@ -847,6 +858,31 @@ public class ExternalTableMaterializer {
             return null;
         }
         return value;
+    }
+
+    /** The table behind the view of a partitioned external table. PostgreSQL cuts an identifier at 63 bytes. */
+    static String backingName(String tableName) {
+        String name = BACKING_PREFIX + tableName;
+        return name.getBytes(StandardCharsets.UTF_8).length <= MAX_IDENTIFIER_BYTES ? name
+                : BACKING_PREFIX + Digests.sha256Hex(tableName).substring(0, 32);
+    }
+
+    /**
+     * Drops what PostgreSQL holds for an external table: a view and its backing table when the table is
+     * partitioned, a plain table otherwise, whichever the name is now. Dependent objects stop a RESTRICT drop.
+     */
+    static String dropRelationSql(String schemaName, String tableName, boolean cascade) {
+        String relation = quote(schemaName) + "." + quote(tableName);
+        String mode = cascade ? " CASCADE" : " RESTRICT";
+        return "DO $floci$ BEGIN IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+                + "WHERE n.nspname = " + literal(schemaName) + " AND c.relname = " + literal(tableName)
+                + " AND c.relkind = 'v') THEN DROP VIEW " + relation + mode + "; ELSE DROP TABLE IF EXISTS " + relation
+                + mode + "; END IF; END $floci$; DROP TABLE IF EXISTS " + quote(schemaName) + "."
+                + quote(backingName(tableName)) + mode;
+    }
+
+    private static String literal(String value) {
+        return "'" + value.replace("'", "''") + "'";
     }
 
     static String partitionId(List<String> values) {

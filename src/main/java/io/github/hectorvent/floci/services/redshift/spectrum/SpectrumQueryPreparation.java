@@ -230,8 +230,8 @@ public class SpectrumQueryPreparation {
         }
         requireSchemaOwner(backend, binding.schemaName());
         // Cold tables have no PostgreSQL relation. Check any cached relation's dependencies before deleting Glue metadata.
-        backend.execute("DROP TABLE IF EXISTS " + ExternalTableMaterializer.quote(binding.schemaName()) + "."
-                + ExternalTableMaterializer.quote(statement.tableName()) + (statement.cascade() ? " CASCADE" : " RESTRICT"));
+        backend.execute(ExternalTableMaterializer.dropRelationSql(binding.schemaName(), statement.tableName(),
+                statement.cascade()));
         materializer.forget(session.clusterKey(), session.databaseName(), binding.schemaName(), statement.tableName());
         if (exists) {
             glue.deleteTable(binding.glueDatabase(), statement.tableName());

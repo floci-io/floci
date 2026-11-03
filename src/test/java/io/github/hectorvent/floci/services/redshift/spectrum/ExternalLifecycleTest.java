@@ -102,7 +102,7 @@ class ExternalLifecycleTest {
     void dropTableRemovesGlueDefinitionAndColdOrCachedBackendRelation() {
         assertTrue(preparation.handlesDdl("DROP TABLE lake.sales", SESSION));
         assertTrue(preparation.prepare("DROP TABLE lake.sales", SESSION, backend));
-        verify(backend).execute("DROP TABLE IF EXISTS \"lake\".\"sales\" RESTRICT");
+        verify(backend).execute(ExternalTableMaterializer.dropRelationSql("lake", "sales", false));
         verify(glue).deleteTable("analytics", "sales");
         verify(materializer).forget(SESSION.clusterKey(), "dev", "lake", "sales");
         verify(metadata).refresh(backend, SESSION.accountId(), BINDING);
@@ -126,7 +126,7 @@ class ExternalLifecycleTest {
         assertEquals("42P01", error.sqlState());
         verifyNoInteractions(backend);
         assertTrue(preparation.prepare("DROP TABLE IF EXISTS lake.sales CASCADE", SESSION, backend));
-        verify(backend).execute("DROP TABLE IF EXISTS \"lake\".\"sales\" CASCADE");
+        verify(backend).execute(ExternalTableMaterializer.dropRelationSql("lake", "sales", true));
         verify(materializer).forget(SESSION.clusterKey(), "dev", "lake", "sales");
         verify(glue, never()).deleteTable(anyString(), anyString());
     }
@@ -208,7 +208,7 @@ class ExternalLifecycleTest {
                 "dev", "a\"b", "analytics", BINDING.iamRoleArn());
         when(registry.list(SESSION.accountId(), SESSION.clusterKey(), "dev")).thenReturn(List.of(quoted));
         assertTrue(preparation.prepare("DROP TABLE IF EXISTS \"a\"\"b\".\"sales\"", SESSION, backend));
-        verify(backend).execute("DROP TABLE IF EXISTS \"a\"\"b\".\"sales\" RESTRICT");
+        verify(backend).execute(ExternalTableMaterializer.dropRelationSql("a\"b", "sales", false));
     }
 
     @Test

@@ -329,8 +329,15 @@ public final class ExternalReferenceScanner {
                 }
                 result.add(new Token(chain, '\0'));
             } else {
-                char symbol = t.text().length() == 1 ? t.text().charAt(0) : '\0';
-                if (symbol == '(' || symbol == ')' || symbol == ',' || symbol == ';') {
+                // by kind, not by text: the string ';' is not a statement separator
+                char symbol = switch (t.kind()) {
+                    case LPAREN -> '(';
+                    case RPAREN -> ')';
+                    case COMMA -> ',';
+                    case SEMICOLON -> ';';
+                    default -> '\0';
+                };
+                if (symbol != '\0') {
                     result.add(new Token(null, symbol));
                 }
                 i++;

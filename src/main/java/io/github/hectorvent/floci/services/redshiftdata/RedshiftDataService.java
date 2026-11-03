@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
+import io.github.hectorvent.floci.services.redshift.spectrum.ExternalTableMaterializer;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
@@ -1169,10 +1170,12 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         try (Connection c = connectionFactory.open(target);
              PreparedStatement ps = c.prepareStatement(
                      "SELECT table_schema, table_name, table_type FROM information_schema.tables "
-                             + "WHERE table_schema LIKE ? AND table_name LIKE ? "
+                             + "WHERE table_schema LIKE ? AND table_name LIKE ? AND table_name NOT LIKE ? "
                              + "ORDER BY table_schema, table_name")) {
             ps.setString(1, schemaPattern);
             ps.setString(2, tablePattern);
+            // the table behind the view of a partitioned external table is Floci's own, not the user's
+            ps.setString(3, ExternalTableMaterializer.BACKING_PREFIX.replace("_", "\\_") + "%");
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     ObjectNode t = objectMapper.createObjectNode();
