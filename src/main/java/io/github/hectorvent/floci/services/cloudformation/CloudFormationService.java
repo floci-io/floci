@@ -4391,9 +4391,12 @@ public class CloudFormationService implements ResourceProvider {
             childCreate = childStack == null;
         }
         if (childCreate && childDeployment != null) {
-            resource.setStatus("CREATE_FAILED");
-            resource.setStatusReason("Nested stack " + logicalId + " is missing during rollback");
-            return resource;
+            String priorStackId = childDeployment.path("stackId").asText(null);
+            Stack retainedChild = priorStackId == null ? null : resolveStack(priorStackId, region, accountId);
+            if (retainedChild != null && !"DELETE_COMPLETE".equals(retainedChild.getStatus())) {
+                childStack = retainedChild;
+                childCreate = false;
+            }
         }
         if (childCreate) {
             childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
@@ -4413,7 +4416,7 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         executeTemplate(childStack, childTemplate, childParams, childTags, childCreate, region, accountId, childDeployment);
-        if (childDeployment != null && "UPDATE_COMPLETE".equals(childStack.getStatus())) {
+        if (childDeployment != null && NESTED_STACK_SUCCESS_STATUSES.contains(childStack.getStatus())) {
             childStack.setOriginalTemplateBody(childDeployment.path("originalTemplateBody").asText(childTemplate));
             persistStack(childStack);
         }
@@ -4445,6 +4448,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private ObjectNode snapshotNestedDeployment(Stack stack, String region, String accountId) {
         ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.put("stackId", stack.getStackId());
         snapshot.set("tags", objectMapper.valueToTree(stack.tagsSnapshot()));
         snapshot.put("templateBody", stack.getTemplateBody());
         snapshot.put("originalTemplateBody", stack.getOriginalTemplateBody());
