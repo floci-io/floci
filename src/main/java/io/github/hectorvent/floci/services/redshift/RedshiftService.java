@@ -970,10 +970,14 @@ public class RedshiftService implements ManagedSecretRotator {
 
     /** The caller's cluster an ARN names, when the ARN is exactly that cluster's in this Region. */
     public Optional<Cluster> findClusterByArn(String clusterArn) {
-        if (clusterArn == null || !clusterArn.contains(":cluster:")) {
+        if (!AwsArnUtils.looksLikeArn(clusterArn)) {
             return Optional.empty();
         }
-        String identifier = clusterArn.substring(clusterArn.indexOf(":cluster:") + ":cluster:".length());
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(clusterArn);
+        if (!"redshift".equals(arn.service()) || !arn.resource().startsWith("cluster:")) {
+            return Optional.empty();
+        }
+        String identifier = arn.resource().substring("cluster:".length());
         return clusters.get(identifier).filter(cluster -> clusterArn.equals(clusterArn(identifier)));
     }
 

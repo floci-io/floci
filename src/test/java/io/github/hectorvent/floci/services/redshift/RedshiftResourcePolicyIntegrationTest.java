@@ -67,8 +67,8 @@ class RedshiftResourcePolicyIntegrationTest {
         if (namespaceName != null) {
             try {
                 serverless.deleteNamespace(namespaceName, REGION);
-            } catch (RuntimeException alreadyDeleted) {
-                // The test deleted it itself.
+            } catch (RuntimeException ignored) {
+                // Safe to ignore: the test deleted the namespace itself.
             }
         }
     }
@@ -104,6 +104,20 @@ class RedshiftResourcePolicyIntegrationTest {
         redshift("DeleteResourcePolicy", "ResourceArn", namespaceArn)
                 .statusCode(404)
                 .body(containsString("<Code>ResourceNotFoundFault</Code>"));
+    }
+
+    @Test
+    void tagsAndUpdatesOnTheNamespaceKeepItsPolicy() {
+        redshift("PutResourcePolicy", "ResourceArn", namespaceArn, "Policy", POLICY).statusCode(200);
+
+        serverless.tagResource(namespaceArn, Map.of("team", "data"), REGION);
+        serverless.untagResource(namespaceArn, List.of("team"), REGION);
+        serverless.updateNamespace(namespaceName, null, null, null, null, List.of("userlog"), REGION);
+
+        redshift("GetResourcePolicy", "ResourceArn", namespaceArn)
+                .statusCode(200)
+                .body("GetResourcePolicyResponse.GetResourcePolicyResult.ResourcePolicy.Policy",
+                        equalTo(STORED_POLICY));
     }
 
     @Test

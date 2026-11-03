@@ -57,6 +57,7 @@ public class Namespace {
         this.status = other.status;
         this.creationDate = other.creationDate;
         this.tags = new LinkedHashMap<>(other.tags);
+        this.resourcePolicy = other.resourcePolicy;
     }
 
     public String getNamespaceName() {
