@@ -2,12 +2,16 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.path.xml.XmlPath;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.GetConsoleOutputResponse;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -16,9 +20,14 @@ import java.util.UUID;
 
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.REGION;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ec2;
+import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -34,6 +43,8 @@ class Ec2GetConsoleOutputIntegrationTest {
 
     private static final String HOST_KEY =
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj root@guest";
+    private static final String HOST_KEY_BLOCK = "-----BEGIN SSH HOST KEY KEYS-----\n" + HOST_KEY
+            + "\n-----END SSH HOST KEY KEYS-----\n";
 
     @Inject
     Ec2Service service;
@@ -44,7 +55,7 @@ class Ec2GetConsoleOutputIntegrationTest {
     @Test
     void consoleOutputCarriesTheGuestsSshHostKeys() {
         String containerId = "console-" + UUID.randomUUID();
-        Instance instance = storedInstance(containerId);
+        Instance instance = storedInstance(containerId, InstanceState.running());
         when(containerManager.readSshHostKeys(containerId)).thenReturn(HOST_KEY + "\n");
         try {
             XmlPath response = ec2("GetConsoleOutput").formParam("InstanceId", instance.getInstanceId())
@@ -53,10 +64,24 @@ class Ec2GetConsoleOutputIntegrationTest {
                     .body("GetConsoleOutputResponse.instanceId", equalTo(instance.getInstanceId()))
                     .extract().xmlPath();
 
-            String output = new String(Base64.getDecoder().decode(
-                    response.getString("GetConsoleOutputResponse.output")), StandardCharsets.UTF_8);
-            assertTrue(output.contains("-----BEGIN SSH HOST KEY KEYS-----\n" + HOST_KEY
-                    + "\n-----END SSH HOST KEY KEYS-----\n"), output);
+            String output = decode(response.getString("GetConsoleOutputResponse.output"));
+            assertTrue(output.contains(HOST_KEY_BLOCK), output);
+        } finally {
+            service.terminateInstances(REGION, List.of(instance.getInstanceId()));
+        }
+    }
+
+    @Test
+    void theSdkReadsTheInstanceIdTimestampAndOutput() {
+        String containerId = "console-" + UUID.randomUUID();
+        Instance instance = storedInstance(containerId, InstanceState.running());
+        when(containerManager.readSshHostKeys(containerId)).thenReturn(HOST_KEY + "\n");
+        try (Ec2Client client = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
+            GetConsoleOutputResponse response = client.getConsoleOutput(r -> r.instanceId(instance.getInstanceId()));
+
+            assertEquals(instance.getInstanceId(), response.instanceId());
+            assertNotNull(response.timestamp());
+            assertTrue(decode(response.output()).contains(HOST_KEY_BLOCK), response.output());
         } finally {
             service.terminateInstances(REGION, List.of(instance.getInstanceId()));
         }
@@ -64,14 +89,47 @@ class Ec2GetConsoleOutputIntegrationTest {
 
     @Test
     void anInstanceWithoutAContainerHasAnEmptyConsoleOutput() {
-        Instance instance = storedInstance(null);
+        Instance instance = storedInstance(null, InstanceState.running());
         try {
-            String output = ec2("GetConsoleOutput").formParam("InstanceId", instance.getInstanceId())
-                    .when().post("/")
-                    .then().statusCode(200)
-                    .extract().xmlPath().getString("GetConsoleOutputResponse.output");
+            assertEquals("", consoleOutput(instance));
+        } finally {
+            service.terminateInstances(REGION, List.of(instance.getInstanceId()));
+        }
+    }
 
-            assertEquals("", output);
+    @Test
+    void aStoppedInstanceHasAnEmptyConsoleOutputWithoutTouchingItsContainer() {
+        Instance instance = storedInstance("console-" + UUID.randomUUID(), InstanceState.stopped());
+        try {
+            assertEquals("", consoleOutput(instance));
+            verify(containerManager, never()).readSshHostKeys(anyString());
+        } finally {
+            service.terminateInstances(REGION, List.of(instance.getInstanceId()));
+        }
+    }
+
+    @Test
+    void aContainerThatCannotBeReadGivesAnEmptyConsoleOutput() {
+        String containerId = "console-" + UUID.randomUUID();
+        Instance instance = storedInstance(containerId, InstanceState.running());
+        when(containerManager.readSshHostKeys(containerId)).thenThrow(new IllegalStateException("container is not running"));
+        try {
+            assertEquals("", consoleOutput(instance));
+        } finally {
+            service.terminateInstances(REGION, List.of(instance.getInstanceId()));
+        }
+    }
+
+    @Test
+    void anInstanceInAnotherRegionIsNotFound() {
+        Instance instance = storedInstance(null, InstanceState.running());
+        try {
+            given().header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20261020/us-west-2/ec2/aws4_request")
+                    .formParam("Action", "GetConsoleOutput")
+                    .formParam("InstanceId", instance.getInstanceId())
+                    .when().post("/")
+                    .then().statusCode(400)
+                    .body("Response.Errors.Error.Code", equalTo("InvalidInstanceID.NotFound"));
         } finally {
             service.terminateInstances(REGION, List.of(instance.getInstanceId()));
         }
@@ -93,12 +151,23 @@ class Ec2GetConsoleOutputIntegrationTest {
                 .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
     }
 
-    private Instance storedInstance(String containerId) {
+    private static String consoleOutput(Instance instance) {
+        return ec2("GetConsoleOutput").formParam("InstanceId", instance.getInstanceId())
+                .when().post("/")
+                .then().statusCode(200)
+                .extract().xmlPath().getString("GetConsoleOutputResponse.output");
+    }
+
+    private static String decode(String output) {
+        return new String(Base64.getDecoder().decode(output), StandardCharsets.UTF_8);
+    }
+
+    private Instance storedInstance(String containerId, InstanceState state) {
         Instance instance = new Instance();
         instance.setInstanceId("i-" + UUID.randomUUID().toString().replace("-", "").substring(0, 17));
         instance.setRegion(REGION);
         instance.setDockerContainerId(containerId);
-        instance.setState(InstanceState.running());
+        instance.setState(state);
         service.putInstanceForTest(instance);
         return instance;
     }

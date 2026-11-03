@@ -1567,12 +1567,14 @@ public class Ec2QueryHandler {
         String output = service.getConsoleOutput(region, instanceId);
         String encoded = Base64.getEncoder().encodeToString(
                 output.getBytes(StandardCharsets.UTF_8));
-        String xml = "<GetConsoleOutputResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">"
-                + "<requestId>" + UUID.randomUUID() + "</requestId>"
-                + "<instanceId>" + instanceId + "</instanceId>"
-                + "<timestamp>" + Instant.now() + "</timestamp>"
-                + "<output>" + encoded + "</output></GetConsoleOutputResponse>";
-        return xmlResponse(xml);
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetConsoleOutputResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("instanceId", instanceId)
+                .elem("timestamp", Instant.now().toString())
+                .elem("output", encoded)
+                .end("GetConsoleOutputResponse");
+        return xmlResponse(xml.build());
     }
 
     private Response handleRebootInstances(MultivaluedMap<String, String> p, String region) {
