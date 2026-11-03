@@ -16007,4 +16007,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         return converted;
     }
+
+    /**
+     * GetConsoleOutput: a console log carrying the instance's SSH host keys between the markers
+     * cloud-init prints, the part clients read from it. An instance without a running container
+     * has an empty log, as a just-launched one does on AWS.
+     */
+    public String getConsoleOutput(String region, String instanceId) {
+        Instance instance = findInstanceById(instanceId);
+        if (instance == null) {
+            throw new AwsException("InvalidInstanceID.NotFound",
+                    "The instance ID '" + instanceId + "' does not exist", 400);
+        }
+        String containerId = instance.getDockerContainerId();
+        if (containerId == null || containerId.isBlank()) {
+            return "";
+        }
+        String keys = containerManager.readSshHostKeys(containerId);
+        if (keys.isBlank()) {
+            return "";
+        }
+        return "Cloud-init finished for " + instanceId + "\n"
+                + "-----BEGIN SSH HOST KEY KEYS-----\n" + keys.strip() + "\n-----END SSH HOST KEY KEYS-----\n";
+    }
+
 }

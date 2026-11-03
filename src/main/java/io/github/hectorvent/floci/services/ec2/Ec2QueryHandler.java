@@ -108,6 +108,7 @@ public class Ec2QueryHandler {
                 case "StartInstances" -> handleStartInstances(params, region);
                 case "StopInstances" -> handleStopInstances(params, region);
                 case "RebootInstances" -> handleRebootInstances(params, region);
+                case "GetConsoleOutput" -> handleGetConsoleOutput(params, region);
                 case "MonitorInstances" -> handleMonitoring(params, region, "MonitorInstances", true);
                 case "UnmonitorInstances" -> handleMonitoring(params, region, "UnmonitorInstances", false);
                 case "DescribeInstanceStatus" -> handleDescribeInstanceStatus(params, region);
@@ -1556,6 +1557,22 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.stopInstances(region, ids);
         return xmlResponse(buildInstanceStateChangeXml("StopInstancesResponse", changes));
+    }
+
+    private Response handleGetConsoleOutput(MultivaluedMap<String, String> p, String region) {
+        String instanceId = p.getFirst("InstanceId");
+        if (instanceId == null || instanceId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
+        }
+        String output = service.getConsoleOutput(region, instanceId);
+        String encoded = Base64.getEncoder().encodeToString(
+                output.getBytes(StandardCharsets.UTF_8));
+        String xml = "<GetConsoleOutputResponse xmlns=\"http://ec2.amazonaws.com/doc/2016-11-15/\">"
+                + "<requestId>" + UUID.randomUUID() + "</requestId>"
+                + "<instanceId>" + instanceId + "</instanceId>"
+                + "<timestamp>" + Instant.now() + "</timestamp>"
+                + "<output>" + encoded + "</output></GetConsoleOutputResponse>";
+        return xmlResponse(xml);
     }
 
     private Response handleRebootInstances(MultivaluedMap<String, String> p, String region) {

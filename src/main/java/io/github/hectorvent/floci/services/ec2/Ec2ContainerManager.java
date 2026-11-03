@@ -1975,4 +1975,16 @@ public class Ec2ContainerManager {
     static Optional<String> preferredMetadataSourceIp(Map<String, ContainerNetwork> networks) {
         return Ec2MetadataProxy.preferredMetadataSourceIp(networks);
     }
+
+    /**
+     * The instance's SSH host public keys, read from its running container. AWS prints these to
+     * the console log at first boot (cloud-init's "SSH HOST KEY KEYS" block), which is how a
+     * client verifies the host it connects to.
+     */
+    public String readSshHostKeys(String containerId) {
+        String[] cmd = {"sh", "-c", "for f in /etc/ssh/ssh_host_*_key.pub; do [ -f \"$f\" ] && cat \"$f\"; done"};
+        ContainerExec.Result result = ContainerExec.run(dockerClient, containerId, cmd, 15);
+        return result.exitCode() == 0 ? result.stdout() : "";
+    }
+
 }
