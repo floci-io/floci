@@ -1049,7 +1049,7 @@ class ExternalTableMaterializerTest {
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events");
 
-        verify(s3).authorizeSignedListBucket(anyString(), anyString(), eq("bucket"));
+        verify(s3).authorizeSignedListBucket(anyString(), anyString(), eq("bucket"), any());
         verify(s3).authorizeSignedGetObject(anyString(), anyString(), eq("bucket"), eq("events/p1.csv"));
         verify(iam).unregisterSession(eq(ACCOUNT), anyString());
     }
@@ -1058,7 +1058,7 @@ class ExternalTableMaterializerTest {
     void releasesTheRoleSessionWhenAuthorizationFails() {
         when(glue.getTable("lake", "events")).thenReturn(csvTable());
         doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)
-                .authorizeSignedListBucket(anyString(), anyString(), eq("bucket"));
+                .authorizeSignedListBucket(anyString(), anyString(), eq("bucket"), any());
 
         assertThrows(SpectrumSqlException.class,
                 () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));

@@ -188,7 +188,7 @@ class RedshiftRoleAccessTest {
         IamService iamService = mock(IamService.class);
         RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAX", "secret", "token");
         doThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist", 404)).when(s3)
-                .authorizeSignedListBucket("ASIAX", "token", "bucket");
+                .authorizeSignedListBucket("ASIAX", "token", "bucket", "");
 
         S3CopySimulator.S3TransferException missing = assertThrows(S3CopySimulator.S3TransferException.class,
                 () -> RedshiftRoleAccess.authorizeRoleList(s3, iamService, session, ROLE_ARN, "bucket", ""));
@@ -204,7 +204,7 @@ class RedshiftRoleAccessTest {
         IamService iamService = mock(IamService.class);
         RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAX", "secret", "token");
         doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)
-                .authorizeSignedListBucket("ASIAX", "token", "bucket");
+                .authorizeSignedListBucket("ASIAX", "token", "bucket", "");
         doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)
                 .authorizeSignedGetObject("ASIAX", "token", "bucket", "key");
 
