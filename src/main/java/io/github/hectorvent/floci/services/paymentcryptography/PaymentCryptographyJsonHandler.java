@@ -86,16 +86,27 @@ public class PaymentCryptographyJsonHandler {
                 declared.put(entry.getKey(), entry.getValue().asText());
             }
         });
-        // The check value of an AES key is a CMAC, which is the only algorithm this
-        // service computes, so a request naming another one is refused rather than
-        // answered with a check value of another kind.
-        if (request.hasNonNull("KeyCheckValueAlgorithm")
-                && !"CMAC".equals(request.get("KeyCheckValueAlgorithm").asText())) {
-            throw new AwsException("ValidationException",
-                    "KeyCheckValueAlgorithm must be CMAC", 400);
+        // The check value follows the key's algorithm: an AES key's is a CMAC and a
+        // TDES key's is the ANSI X9.24 one. A request that names another is refused
+        // rather than answered with a value of another kind.
+        if (request.hasNonNull("KeyCheckValueAlgorithm")) {
+            String wanted = request.get("KeyCheckValueAlgorithm").asText();
+            String algorithm = declared.get("KeyAlgorithm") == null ? ""
+                    : String.valueOf(declared.get("KeyAlgorithm"));
+            String expected = "TDES_2KEY".equals(algorithm) || "TDES_3KEY".equals(algorithm)
+                    ? "ANSI_X9_24" : "CMAC";
+            if (!expected.equals(wanted)) {
+                throw new AwsException("ValidationException",
+                        "KeyCheckValueAlgorithm must be " + expected + " for a " + algorithm + " key",
+                        400);
+            }
         }
         // A key may be created disabled, and it may be created with tags.
         boolean enabled = request.has("Enabled") ? request.path("Enabled").asBoolean(true) : true;
+        if (request.hasNonNull("DeriveKeyUsage")) {
+            // The usage a derivation key derives for sits beside the attributes, not in them.
+            declared.put("DeriveKeyUsage", request.path("DeriveKeyUsage").asText());
+        }
         PaymentCryptographyKey key = service.createKey(region, declared, modesOfUse(attributes),
                 request.path("Exportable").asBoolean(false), enabled, tagsOf(request));
         return Map.of("Key", keyObject(key));
@@ -334,6 +345,9 @@ public class PaymentCryptographyJsonHandler {
         attributes.put("KeyUsage", key.getKeyUsage());
         attributes.put("KeyModesOfUse", answeredModes(key));
         out.put("KeyAttributes", attributes);
+        if (key.getDeriveKeyUsage() != null && !key.getDeriveKeyUsage().isEmpty()) {
+            out.put("DeriveKeyUsage", key.getDeriveKeyUsage());
+        }
         out.put("KeyCheckValue", key.getKeyCheckValue());
         out.put("KeyCheckValueAlgorithm", key.getKeyCheckValueAlgorithm());
         out.put("KeyState", key.getKeyState());

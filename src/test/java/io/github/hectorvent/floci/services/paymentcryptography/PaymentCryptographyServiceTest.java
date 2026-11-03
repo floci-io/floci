@@ -196,7 +196,9 @@ class PaymentCryptographyServiceTest {
     @Test
     void aKeyThatAsksForMaterialTheServiceDoesNotMakeIsRefused() {
         Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("KeyAlgorithm", "AES_128");
+        // The service makes the AES sizes, so the algorithm it does not make is one it has
+        // no material for.
+        attributes.put("KeyAlgorithm", "DES");
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
 
