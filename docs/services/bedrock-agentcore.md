@@ -85,7 +85,6 @@ runtimes reach `READY` immediately and hold metadata only. See
 | `UpdateHarness` | Updates a harness; appends a new immutable version |
 | `DeleteHarness` | Deletes a harness |
 | `ListHarnessVersions` | Lists a harness's versions, newest first (paginated) |
-| `InvokeHarness` | Streams a reply that echoes the last user message; see [`InvokeHarness`](#data-plane-invokeharness) |
 <!-- floci:actions:end -->
 
 A `DEFAULT` endpoint is created automatically with each runtime, and each runtime

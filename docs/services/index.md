@@ -101,7 +101,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AppSync](appsync.md) | `/v1/apis/...` | REST JSON | 33 |
 | [Amazon Bedrock](bedrock.md) | `/guardrails`, `/guardrails/{guardrailIdentifier}`, `/resource-policy`, `/resource-policy/{resourceArn}`, `/tagResource`, `/untagResource`, `/listTagsForResource` | REST JSON | 12 |
 | [Bedrock Runtime](bedrock-runtime.md) | `/model/{modelId}/converse`, `/model/{modelId}/invoke` | REST JSON | 2 (stub; streaming returns 501) |
-| [Bedrock AgentCore Control](bedrock-agentcore.md) | `/runtimes/*`, `/gateways/*`, `/memories/*`, `/identities/*`, `/browsers*`, `/browser-profiles*`, `/code-interpreters*`, `/harnesses*`, `/resourcepolicy/*`, `/tags/{resourceArn}` | REST JSON | 72 (+ 3 tagging via shared `/tags/{arn}` route) |
+| [Bedrock AgentCore Control](bedrock-agentcore.md) | `/runtimes/*`, `/gateways/*`, `/memories/*`, `/identities/*`, `/browsers*`, `/browser-profiles*`, `/code-interpreters*`, `/harnesses*`, `/resourcepolicy/*`, `/tags/{resourceArn}` | REST JSON | 71 (+ 3 tagging via shared `/tags/{arn}` route) |
 | [Bedrock AgentCore](bedrock-agentcore.md#data-plane-invokeagentruntime) | `/runtimes/{agentRuntimeArn}/invocations` | REST JSON (binary payload) | 1 (canned-response stub) |
 | [EKS](eks.md) | `/clusters`, `/clusters/{name}`, `/tags/{resourceArn}` | REST JSON | 7 |
 | [ELB v2](elb.md) | `POST /` with `Action=` param | Query | 37 |

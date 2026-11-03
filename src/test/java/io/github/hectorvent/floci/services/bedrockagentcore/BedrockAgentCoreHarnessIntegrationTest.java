@@ -80,6 +80,19 @@ class BedrockAgentCoreHarnessIntegrationTest {
         assertThat(assistantText(body), containsString("what is EIDR?"));
     }
 
+    /** An SDK client asks for the event stream; that must not be refused as unacceptable. */
+    @Test
+    void aClientAskingForTheEventStreamGetsIt() {
+        request(ARN, SESSION)
+                .header("Accept", "application/vnd.amazon.eventstream")
+                .body("""
+                        {"messages": [{"role": "user", "content": [{"text": "hello"}]}]}
+                        """)
+                .when().post("/harnesses/invoke")
+                .then().statusCode(200)
+                .header("Content-Type", containsString("application/vnd.amazon.eventstream"));
+    }
+
     @Test
     void theStreamCarriesTheFullEventSequenceInOrder() {
         String body = request(ARN, SESSION)

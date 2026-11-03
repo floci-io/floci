@@ -20,7 +20,7 @@ import org.jboss.logging.Logger;
 
 /**
  * Amazon Bedrock AgentCore data-plane stub ({@code InvokeAgentRuntime}). {@code InvokeHarness} is served
- * by {@code BedrockAgentCoreHarnessController}, which owns {@code /harnesses}.
+ * by {@code BedrockAgentCoreHarnessInvokeController}, rooted at {@code /harnesses/invoke}.
  *
  * <p>Real endpoint: {@code POST /runtimes/{agentRuntimeArn}/invocations}. The ARN is
  * URL-encoded in the path, so the template regex captures the remaining path segments.
