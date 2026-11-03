@@ -176,8 +176,8 @@ class RoleTemplateIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
             .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value "
-                    + "at 'replacementValues.Department.values' failed to satisfy constraint: "
-                    + "Member must not be null"))
+                    + "at 'replacementValues.Department.member.values' failed to satisfy "
+                    + "constraint: Member must not be null"))
             .body(not(containsString("NoSuchEntity")));
     }
 
@@ -191,8 +191,8 @@ class RoleTemplateIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
             .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at "
-                    + "'replacementValues.Department.values' failed to satisfy constraint: Member "
-                    + "must have length less than or equal to 20"));
+                    + "'replacementValues.Department.member.values' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 20"));
 
         acquireWithValues(20).when().post("/").then()
             .statusCode(404)
@@ -255,8 +255,8 @@ class RoleTemplateIntegrationTest {
         .when().post("/").then()
             .statusCode(400)
             .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value "
-                    + "at 'replacementValues.Department.values' failed to satisfy constraint: "
-                    + "Member must not be null"));
+                    + "at 'replacementValues.Department.member.values' failed to satisfy "
+                    + "constraint: Member must not be null"));
     }
 
     /**
@@ -280,9 +280,9 @@ class RoleTemplateIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
             .body("ErrorResponse.Error.Message", equalTo("3 validation errors detected: Value at "
                     + "'replacementValues' failed to satisfy constraint: Member must have length "
-                    + "less than or equal to 30; Value at 'replacementValues.Parameter2."
+                    + "less than or equal to 30; Value at 'replacementValues.Parameter2.member."
                     + "values' failed to satisfy constraint: Member must not be null; Value "
-                    + "at 'replacementValues.Parameter10.values' failed to satisfy constraint: "
-                    + "Member must not be null"));
+                    + "at 'replacementValues.Parameter10.member.values' failed to satisfy "
+                    + "constraint: Member must not be null"));
     }
 }
