@@ -35,7 +35,7 @@ import java.util.Map;
  * {@link PaymentCryptographyDataPlaneRouteFilter} moves them for the requests signed for this
  * service.
  */
-@Path("/")
+@Path(PaymentCryptographyDataPlaneRouteFilter.INTERNAL_PREFIX)
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class PaymentCryptographyDataPlaneController {
@@ -54,21 +54,21 @@ public class PaymentCryptographyDataPlaneController {
     }
 
     @POST
-    @Path("/keys/{keyIdentifier}/encrypt")
+    @Path("/keys/{keyIdentifier:.+}/encrypt")
     public Response encryptData(@PathParam("keyIdentifier") String keyIdentifier, String body,
                                  @Context HttpHeaders headers) {
         return respond(handler.encryptData(request(body, keyIdentifier, "KeyIdentifier"), region(headers)));
     }
 
     @POST
-    @Path("/keys/{keyIdentifier}/decrypt")
+    @Path("/keys/{keyIdentifier:.+}/decrypt")
     public Response decryptData(@PathParam("keyIdentifier") String keyIdentifier, String body,
                                  @Context HttpHeaders headers) {
         return respond(handler.decryptData(request(body, keyIdentifier, "KeyIdentifier"), region(headers)));
     }
 
     @POST
-    @Path("/keys/{incomingKeyIdentifier}/reencrypt")
+    @Path("/keys/{incomingKeyIdentifier:.+}/reencrypt")
     public Response reEncryptData(@PathParam("incomingKeyIdentifier") String incomingKeyIdentifier,
                                   String body, @Context HttpHeaders headers) {
         JsonNode request = request(body, incomingKeyIdentifier, "IncomingKeyIdentifier");

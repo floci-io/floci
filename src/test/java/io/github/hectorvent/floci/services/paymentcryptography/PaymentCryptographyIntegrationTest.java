@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
@@ -288,7 +289,10 @@ class PaymentCryptographyIntegrationTest {
 
         // The data plane is rest-json, so its body is plain JSON.
         given().contentType("application/json")
+                .filter(AwsRequestSigner.signedAs("test", "test", "payment-cryptography-data"))
                 .body(body)
+            // The data plane's routes live under the internal prefix, and only a request
+            // signed for the data plane is moved onto them.
             .when().post("/pindata/generate")
             .then().statusCode(200)
                 .body("EncryptedPinBlock", matchesPattern("[0-9A-F]{16}"))

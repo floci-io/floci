@@ -18,6 +18,7 @@ import software.amazon.awssdk.services.paymentcryptography.model.KeyAttributes;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyCheckValueAlgorithm;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyClass;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyState;
+import software.amazon.awssdk.services.paymentcryptography.model.KeySummary;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ListKeysResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.MultiRegionKeyType;
@@ -312,11 +313,20 @@ class PaymentCryptographyTest {
         assertThat(key.primaryRegion()).isEqualTo("us-east-1");
         assertThat(key.replicationStatus()).containsKey("us-west-2");
 
-        // The same key is in the other region, under the same identifier.
+        // The same key is in the other region, under the same identifier. The key is
+        // named by its ARN there, so the replica is found by listing that region.
+        String keyId = key.keyArn().substring(key.keyArn().lastIndexOf('/') + 1);
+        String replicaArn = TestFixtures.paymentCryptographyClient(Region.US_WEST_2)
+                .listKeys(r -> { }).keys().stream()
+                .map(KeySummary::keyArn)
+                .filter(arn -> arn != null && arn.endsWith("/" + keyId))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("the key was not replicated"));
         Key replica = TestFixtures.paymentCryptographyClient(Region.US_WEST_2)
-                .getKey(k -> k.keyIdentifier(key.keyArn().substring(key.keyArn().lastIndexOf('/') + 1)))
-                .key();
+                .getKey(k -> k.keyIdentifier(replicaArn)).key();
         assertThat(replica.keyArn()).isNotEqualTo(key.keyArn());
+        assertThat(replica.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.REPLICA);
+        assertThat(replica.primaryRegion()).isEqualTo("us-east-1");
     }
 
     @Test

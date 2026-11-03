@@ -25,11 +25,16 @@ public class PaymentCryptographyDataPlaneRouteFilter implements ContainerRequest
 
     @Inject
     public PaymentCryptographyDataPlaneRouteFilter(ResolvedServiceCatalog catalog) {
-        this.route = new SignedServiceRoute(catalog, "payment-cryptography-data", INTERNAL_PREFIX,
+        // Both planes of the service are signed for the same scope, so the
+        // path says which plane a request is for, and the control plane never
+        // uses these paths. The scope names the control plane, whose key is
+        // the one a request signed for it carries.
+        this.route = new SignedServiceRoute(catalog, "paymentcryptography", INTERNAL_PREFIX,
                 SignedServiceRoute.under("/mac")
                         .or(SignedServiceRoute.under("/pindata"))
                         .or(SignedServiceRoute.under("/cardvalidationdata"))
-                        .or(SignedServiceRoute.under("/cryptogram")));
+                        .or(SignedServiceRoute.under("/cryptogram"))
+                        .or(SignedServiceRoute.under("/keys")));
     }
 
     @Override
