@@ -1117,8 +1117,8 @@ public interface EmulatorConfig {
 
         /**
          * {@code immediate} follows the job run states without running anything; {@code docker} runs
-         * each Spark job run's {@code spark-submit} in a container of the application's custom image, or
-         * else of the release's EMR Serverless image.
+         * each Spark job run's {@code spark-submit}, and each Hive job run's {@code hive}, in a container of the
+         * application's custom image, or else of the release's EMR Serverless image.
          */
         @WithDefault("immediate")
         String runnerMode();
@@ -1132,6 +1132,14 @@ public interface EmulatorConfig {
          * image on Amazon ECR Public.
          */
         Optional<String> imageTemplate();
+
+        /**
+         * The image a {@code docker} Hive job run uses when its application names no custom image, as
+         * {@link #imageTemplate()} is for a Spark run, for example
+         * "registry.internal/emr-serverless/hive/%s:20250425". If omitted, Floci uses the release's public
+         * Hive image on Amazon ECR Public.
+         */
+        Optional<String> hiveImageTemplate();
 
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR Serverless driver a

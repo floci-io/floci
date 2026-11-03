@@ -30,10 +30,15 @@ public final class EmrServerlessRequests {
 
     /** Creates a SPARK application on {@code releaseLabel} in {@code region} and returns its id. */
     public static String createSparkApplication(String region, String releaseLabel) {
+        return createApplication(region, releaseLabel, "SPARK");
+    }
+
+    /** Creates an application of {@code type}, SPARK or HIVE, on {@code releaseLabel} in {@code region}; its id. */
+    public static String createApplication(String region, String releaseLabel, String type) {
         return emrServerless(region)
                 .body("""
-                        {"name": "app-%s", "releaseLabel": "%s", "type": "SPARK", "clientToken": "%s"}
-                        """.formatted(UUID.randomUUID(), releaseLabel, UUID.randomUUID()))
+                        {"name": "app-%s", "releaseLabel": "%s", "type": "%s", "clientToken": "%s"}
+                        """.formatted(UUID.randomUUID(), releaseLabel, type, UUID.randomUUID()))
                 .when().post("/applications")
                 .then().statusCode(200).extract().path("applicationId");
     }
