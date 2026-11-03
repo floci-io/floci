@@ -507,6 +507,19 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return delegate.scan(k -> k.startsWith(prefix) && keyFilter.test(k.substring(prefix.length())));
     }
 
+    /**
+     * Scans with a filter that sees the stored key, {@code accountId + "/" + relativeKey}, so a prefix
+     * test can run without building the relative key. The filter must check the {@code accountId + "/"}
+     * prefix itself to keep the result to one account.
+     */
+    public List<V> scanRaw(Predicate<String> rawKeyFilter) {
+        return delegate.scan(rawKeyFilter);
+    }
+
+    public static String rawKey(String accountId, String key) {
+        return accountId + "/" + key;
+    }
+
     /** Returns unprefixed pre-account values that satisfy an ownership predicate. */
     public List<V> scanUnscopedLegacy(Predicate<V> legacyOwner) {
         return delegate.scan(k -> !k.contains("/")).stream()

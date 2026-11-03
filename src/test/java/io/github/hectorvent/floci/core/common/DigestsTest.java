@@ -3,9 +3,13 @@ package io.github.hectorvent.floci.core.common;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 
 class DigestsTest {
 
@@ -16,6 +20,13 @@ class DigestsTest {
     @Test
     void md5MatchesTheRfc1321TestVector() {
         assertEquals(ABC_MD5, HexFormat.of().formatHex(Digests.md5("abc".getBytes(StandardCharsets.UTF_8))));
+    }
+
+    @Test
+    void md5DigestIsAFreshInstanceWithTheProviderResult() throws NoSuchAlgorithmException {
+        byte[] data = "floci".getBytes(StandardCharsets.UTF_8);
+        assertArrayEquals(MessageDigest.getInstance("MD5").digest(data), Digests.md5Digest().digest(data));
+        assertNotSame(Digests.md5Digest(), Digests.md5Digest());
     }
 
     @Test
