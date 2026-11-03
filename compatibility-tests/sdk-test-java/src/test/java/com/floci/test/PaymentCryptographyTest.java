@@ -11,10 +11,13 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
+import software.amazon.awssdk.services.paymentcryptography.model.AddKeyReplicationRegionsResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Alias;
 import software.amazon.awssdk.services.paymentcryptography.model.As2805KeyVariant;
 import software.amazon.awssdk.services.paymentcryptography.model.DeriveKeyUsage;
+import software.amazon.awssdk.services.paymentcryptography.model.EnableDefaultKeyReplicationRegionsResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.ExportKeyResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.GetDefaultKeyReplicationRegionsResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.GetParametersForExportResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.GetParametersForImportResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.GetPublicKeyCertificateResponse;
@@ -25,9 +28,12 @@ import software.amazon.awssdk.services.paymentcryptography.model.KeyAttributes;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyCheckValueAlgorithm;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyClass;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyMaterialType;
+import software.amazon.awssdk.services.paymentcryptography.model.KeyReplicationState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ListKeysResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.MultiRegionKeyType;
+import software.amazon.awssdk.services.paymentcryptography.model.RemoveKeyReplicationRegionsResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Tag;
 import software.amazon.awssdk.services.paymentcryptography.model.Tr34KeyBlockFormat;
 import software.amazon.awssdk.services.paymentcryptography.model.WrappedKeyMaterialFormat;
@@ -131,6 +137,158 @@ class PaymentCryptographyTest {
                 .key();
         keyArns.add(key.keyArn());
         return key;
+    }
+
+    @Test
+    void aKeyIsReplicatedToTheRegionsTheAccountReplicatesToByDefault() {
+        EnableDefaultKeyReplicationRegionsResponse enabled = client.enableDefaultKeyReplicationRegions(r -> r
+                .replicationRegions("us-west-2"));
+        try {
+            assertThat(enabled.enabledReplicationRegions()).contains("us-west-2");
+
+            GetDefaultKeyReplicationRegionsResponse defaults = client.getDefaultKeyReplicationRegions(r -> { });
+            assertThat(defaults.enabledReplicationRegions()).contains("us-west-2");
+
+            // A key created while the default is on takes it.
+            Key key = client.createKey(r -> r
+                    .keyAttributes(a -> a
+                            .keyAlgorithm(KeyAlgorithm.AES_256)
+                            .keyClass(KeyClass.SYMMETRIC_KEY)
+                            .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                            .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                    .exportable(true))
+                    .key();
+            keyArns.add(key.keyArn());
+
+            assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
+            assertThat(key.primaryRegion()).isEqualTo("us-east-1");
+            assertThat(key.usingDefaultReplicationRegions()).isTrue();
+            // The status of a replica that is there is that it is in sync.
+            assertThat(key.replicationStatus()).containsKey("us-west-2");
+            assertThat(key.replicationStatus().get("us-west-2").status())
+                    .isEqualTo(KeyReplicationState.SYNCHRONIZED);
+        } finally {
+            client.disableDefaultKeyReplicationRegions(r -> r.replicationRegions("us-west-2"));
+        }
+    }
+
+    @Test
+    void theReplicationRegionsOfAKeyCanBeChanged() {
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(true)
+                .replicationRegions("us-west-2"))
+                .key();
+        keyArns.add(key.keyArn());
+
+        assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
+        assertThat(key.replicationStatus()).containsKey("us-west-2");
+
+        AddKeyReplicationRegionsResponse added = client.addKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-1"));
+        assertThat(added.key().replicationStatus()).containsKeys("us-west-2", "us-west-1");
+
+        RemoveKeyReplicationRegionsResponse removed = client.removeKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-2"));
+        assertThat(removed.key().replicationStatus()).containsKey("us-west-1");
+        assertThat(removed.key().replicationStatus()).doesNotContainKey("us-west-2");
+    }
+
+    @Test
+    void aRegionTheKeyAlreadyReplicatesIntoIsRefused() {
+        // Adding a region the key already replicates into changes nothing, and a request
+        // that cannot be carried out is refused rather than answered with what it already was.
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(true)
+                .replicationRegions("us-west-2"))
+                .key();
+        keyArns.add(key.keyArn());
+
+        assertThatThrownBy(() -> client.addKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-2")))
+                .isInstanceOf(AwsServiceException.class)
+                .hasMessageContaining("already replicates into");
+    }
+
+    @Test
+    void aRegionTheKeyDoesNotReplicateIntoIsRefused() {
+        // There is nothing to take away from a region the key does not replicate into.
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(true)
+                .replicationRegions("us-west-2"))
+                .key();
+        keyArns.add(key.keyArn());
+
+        assertThatThrownBy(() -> client.removeKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-1")))
+                .isInstanceOf(AwsServiceException.class)
+                .hasMessageContaining("does not replicate into");
+    }
+
+    @Test
+    void takingTheLastReplicaAwayEndsTheReplication() {        // Taking the replica regions away is how the replication is turned off for a key, so
+        // a key that replicates nowhere is not a multi-region key and says so by carrying no
+        // type at all.
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(true)
+                .replicationRegions("us-west-2"))
+                .key();
+        keyArns.add(key.keyArn());
+
+        assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
+
+        RemoveKeyReplicationRegionsResponse removed = client.removeKeyReplicationRegions(r -> r
+                .keyIdentifier(key.keyArn())
+                .replicationRegions("us-west-2"));
+
+        assertThat(removed.key().multiRegionKeyType()).isNull();
+        assertThat(removed.key().primaryRegion()).isNull();
+        assertThat(removed.key().replicationStatus()).isEmpty();
+    }
+
+    @Test
+    void aKeyThatIsReplicatedHasToBeExportable() {
+        assertThatThrownBy(() -> client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(false)
+                .replicationRegions("us-west-2")))
+                .isInstanceOf(AwsServiceException.class)
+                .hasMessageContaining("exportable");
+    }
+
+    @Test
+    void aRegionTheServiceDoesNotServeIsRefused() {
+        assertThatThrownBy(() -> client.enableDefaultKeyReplicationRegions(r -> r
+                .replicationRegions("moon-west-1")))
+                .isInstanceOf(AwsServiceException.class)
+                .hasMessageContaining("moon-west-1");
     }
 
     /**
@@ -269,6 +427,27 @@ class PaymentCryptographyTest {
         assertThat(imported.key().keyArn()).isNotBlank();
         assertThat(imported.key().keyAttributes().keyUsage())
                 .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+    }
+
+    @Test
+    void anImportedKeyIsReplicatedToTheRegionsTheRequestNames() {
+        // The model gives an import the same replication regions a creation does, so a key
+        // that comes in can be replicated as soon as it lands.
+        Key wrapping = createWrappingKey();
+        Key key = createAesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.tr31KeyBlock(b -> b.wrappingKeyIdentifier(wrapping.keyArn()))));
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .replicationRegions("us-west-2")
+                .keyMaterial(m -> m.tr31KeyBlock(b -> b
+                        .wrappingKeyIdentifier(wrapping.keyArn())
+                        .wrappedKeyBlock(exported.wrappedKey().keyMaterial()))));
+
+        assertThat(imported.key().multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
+        assertThat(imported.key().primaryRegion()).isEqualTo("us-east-1");
     }
 
     @Test

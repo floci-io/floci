@@ -527,7 +527,10 @@ class PaymentCryptographyIntegrationTest {
                     // key, which the list does not carry.
                     .body("Keys.find { it.KeyArn == '" + arn + "' }.CreateTimestamp", nullValue())
                     .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyOrigin", nullValue())
-                    .body("Keys.find { it.KeyArn == '" + arn + "' }.UsageStartTimestamp", nullValue());
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.UsageStartTimestamp", nullValue())
+                    // A key that replicates nowhere is not a multi-region key, so the summary
+                    // says nothing about where it stands.
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.MultiRegionKeyType", nullValue());
     }
 
     @Test

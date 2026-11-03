@@ -22,6 +22,11 @@
 | `GetPublicKeyCertificate` | The certificate of an asymmetric key |
 | `GetParametersForImport` | The token and the wrapping key certificate an import quotes back |
 | `GetParametersForExport` | The token and the signing key certificate an export quotes back |
+| `AddKeyReplicationRegions` | Add Regions to the key's replication |
+| `RemoveKeyReplicationRegions` | Remove Regions from the key's replication |
+| `GetDefaultKeyReplicationRegions` | The Regions the account replicates a new key to |
+| `EnableDefaultKeyReplicationRegions` | Replicate every new key to the Regions named |
+| `DisableDefaultKeyReplicationRegions` | Stop replicating every new key to the Regions named |
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |
@@ -35,13 +40,15 @@
   algorithm: the leftmost three bytes of the CMAC of sixteen zero bytes under an AES
   key, and the ANSI X9.24 one for a Triple DES key. The material is held by the key
   while the emulator runs and is not written to the store.
-- **Regional:** keys, aliases and tags all live in the region they were made in. The
+- **Regional:** keys and aliases live in the region they were made in. The
   service is regional, and so is this.
 - **Alias names are unique in a region, not in an account:** the same name may name a
   key in two regions, and the two are two aliases. A name that is already taken in
   the key's own region is a `ConflictException`.
-- **Tags are the region's:** they are not part of the replication process, so a key in
-  another region carries its own tag set, and tagging one leaves the others alone.
+- **Tags follow the key they are on.** A key's tags live with it, and a replica is a
+  copy of its primary's material and metadata, so a replica carries the primary's tags
+  and a change to them is replicated. The alias names are the region's own: an alias
+  names a key in its own region, and a replica is named by an alias of that region.
 - **Deletion:** `DeleteKey` removes the key and the aliases that name it, and answers
   with the key, its state `DELETE_PENDING` and the moment its deletion takes effect.
   A key that is gone does not come back: a tagging request for it is refused. The
@@ -181,9 +188,22 @@
 - **The data plane is a service of its own:** the operations that use a key are on
   [the data plane's page](payment-cryptography-data.md), which is reached at its own
   routes.
-- **Not yet emulated:** the multi-region replication operations, the resource policy
-  operations, the key usage operations, the key restore operation, the multi-party
-  approval operations and the certificate signing request.
+- **Multi-Region key replication:** a key may be replicated to other Regions, so the same
+  key material is usable in several of them. The key is created in the Region of the
+  request and is the *Primary Region key* there; every other Region holds a *Replica
+  Region key* with the same key identifier and its own ARN. A key that is replicated has
+  to be exportable, a replica cannot be replicated further, and a replica is read-only:
+  every change is made on the primary. `AddKeyReplicationRegions` and
+  `RemoveKeyReplicationRegions` change the Regions of a key, and the default Regions of
+  the account are set with `EnableDefaultKeyReplicationRegions` and
+  `DisableDefaultKeyReplicationRegions` and read with
+  `GetDefaultKeyReplicationRegions`. A key created while the account has default Regions
+  takes them unless it names its own, and says which it did. Taking the replica Regions
+  away is how the replication is turned off for a key, so a key that replicates nowhere
+  is not a multi-region key and carries no type at all.
+- **Not yet emulated:** the resource policy operations, the key usage operations, the key
+  restore operation, the multi-party approval operations and the certificate signing
+  request.
 
 ## Configuration
 

@@ -762,6 +762,171 @@ class PaymentCryptographyServiceTest {
         assertEquals("ValidationException", refused.getErrorCode());
     }
 
+    @Test
+    void aKeyIsCreatedInEveryRegionItIsReplicatedTo() {
+        PaymentCryptographyKey primary = createReplicatedKey("us-east-1", List.of("us-west-2"));
+
+        assertEquals("us-east-1", primary.getPrimaryRegion());
+        assertEquals("PRIMARY", primary.getMultiRegionKeyType());
+        assertEquals(List.of("us-west-2"), primary.getReplicationRegions());
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", primary.getKeyId());
+
+        assertNotNull(replica, "the key is not in the region it is replicated to");
+        assertEquals(primary.getKeyId(), replica.getKeyId());
+        assertEquals("REPLICA", replica.getMultiRegionKeyType());
+        assertEquals("us-east-1", replica.getPrimaryRegion());
+        assertTrue(replica.getArn().contains(":us-west-2:"), replica.getArn());
+        assertEquals(primary.getKeyMaterialHex(), replica.getKeyMaterialHex());
+    }
+
+    @Test
+    void aKeyThatIsReplicatedHasToBeExportable() {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.createKey("us-east-1",
+                attributes, Map.of(), false, true, Map.of(), List.of("us-west-2")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aRegionTheServiceDoesNotServeIsRefused() {
+        AwsException refused = assertThrows(AwsException.class,
+                () -> createReplicatedKey("us-east-1", List.of("moon-west-1")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void theAccountHasDefaultReplicationRegions() {
+        assertEquals(List.of(), service.defaultReplicationRegions());
+
+        assertEquals(List.of("us-west-2"), service.enableDefaultReplicationRegions(List.of("us-west-2")));
+        assertEquals(List.of("us-west-2"), service.defaultReplicationRegions());
+
+        // A key that is created with the default on is in the default region as well.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of());
+        assertEquals(List.of("us-west-2"), key.getReplicationRegions());
+        assertTrue(key.isUsingDefaultReplicationRegions());
+        assertNotNull(service.findKey("us-west-2", key.getKeyId()));
+
+        // Turning it off leaves the other regions alone.
+        assertEquals(List.of("us-west-2", "us-east-2"),
+                service.enableDefaultReplicationRegions(List.of("us-east-2")));
+        assertEquals(List.of("us-west-2"),
+                service.disableDefaultReplicationRegions(List.of("us-east-2")));
+        assertEquals(List.of(), service.disableDefaultReplicationRegions(List.of("us-west-2")));
+    }
+
+    @Test
+    void theReplicationRegionsOfAKeyCanBeChanged() {
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+
+        PaymentCryptographyKey added = service.addKeyReplicationRegions("us-east-1", key.getKeyId(),
+                List.of("us-west-1"));
+        assertEquals(List.of("us-west-2", "us-west-1"), added.getReplicationRegions());
+        assertNotNull(service.findKey("us-west-1", key.getKeyId()));
+
+        PaymentCryptographyKey removed = service.removeKeyReplicationRegions("us-east-1", key.getKeyId(),
+                List.of("us-west-2"));
+        assertEquals(List.of("us-west-1"), removed.getReplicationRegions());
+        assertNull(service.findKey("us-west-2", key.getKeyId()), "the key is in the region it left");
+    }
+
+    @Test
+    void takingTheLastReplicaAwayEndsTheReplication() {
+        // Taking the replica regions away is how the replication is turned off for a key, so
+        // a key that replicates nowhere is not a multi-region key and says so by carrying no
+        // type at all.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+        assertEquals("PRIMARY", key.getMultiRegionKeyType());
+
+        PaymentCryptographyKey plain = service.removeKeyReplicationRegions("us-east-1",
+                key.getKeyId(), List.of("us-west-2"));
+
+        assertTrue(plain.getReplicationRegions().isEmpty(), "the key replicates nowhere");
+        assertNull(plain.getMultiRegionKeyType(), "the key is still a primary");
+        assertNull(plain.getPrimaryRegion(), "the key still names a primary region");
+        assertNull(service.findKey("us-west-2", key.getKeyId()), "the key is in the region it left");
+    }
+
+    @Test
+    void aReplicaIsReadOnly() {
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.deleteKey(replica));
+        assertEquals("ValidationException", refused.getErrorCode());
+
+        AwsException notPrimary = assertThrows(AwsException.class,
+                () -> service.addKeyReplicationRegions("us-west-2", key.getKeyId(), List.of("us-west-1")));
+        assertEquals("ValidationException", notPrimary.getErrorCode());
+    }
+
+    @Test
+    void aRegionTheKeyAlreadyReplicatesIntoIsRefused() {
+        // Adding a region the key already replicates into changes nothing, and a request
+        // that cannot be carried out is refused rather than answered with what it already was.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.addKeyReplicationRegions("us-east-1", key.getKeyId(),
+                        List.of("us-west-2")));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("already replicates into"), refused.getMessage());
+    }
+
+    @Test
+    void aRegionTheKeyDoesNotReplicateIntoIsRefused() {
+        // There is nothing to take away from a region the key does not replicate into.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.removeKeyReplicationRegions("us-east-1", key.getKeyId(),
+                        List.of("us-west-1")));
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("does not replicate into"), refused.getMessage());
+    }
+
+    @Test
+    void theTagsOfAReplicaAreThePrimaries() {
+        // A replica is a copy of the primary's material and metadata, so it carries the
+        // primary's tags, and a change to them is replicated.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+        service.tag(key, Map.of("owner", "team"));
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+
+        assertEquals("team", replica.getTags().get("owner"));
+        assertEquals("team", service.findKey("us-east-1", key.getKeyId()).getTags().get("owner"));
+    }
+
+    @Test
+    void aReplicaIsReadOnlyForItsOwnMetadata() {
+        // The tags of a replica are the primary's, so a change to them is made on the primary.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.tag(replica, Map.of("owner", "team")));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    private PaymentCryptographyKey createReplicatedKey(String region, List<String> regions) {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        Map<String, Boolean> modes = new LinkedHashMap<>();
+        modes.put("Encrypt", Boolean.TRUE);
+        modes.put("Decrypt", Boolean.TRUE);
+        return service.createKey(region, attributes, modes, true, true, Map.of(), regions);
+    }
+
     /**
      * The TR-31 key block a key leaves the service in.
      */
@@ -785,6 +950,49 @@ class PaymentCryptographyServiceTest {
         return service.importKey(region, "Tr31KeyBlock", Map.of(
                 "WrappingKeyIdentifier", wrappingKeyId,
                 "WrappedKeyBlock", block), "", true, Map.of());
+    }
+
+    @Test
+    void anImportedKeyIsReplicatedToTheRegionsTheRequestNames() {
+        // The model gives an import the same replication regions a creation does, so a key
+        // that comes in can be replicated as soon as it lands.
+        PaymentCryptographyKey protection = createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
+                "TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE));
+        PaymentCryptographyKey key = createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE));
+        String block = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock", Map.of(
+                "WrappingKeyIdentifier", protection.getKeyId(),
+                "WrappedKeyBlock", block), "", true, Map.of(), List.of("us-west-2"));
+
+        assertEquals("PRIMARY", imported.getMultiRegionKeyType());
+        assertEquals("us-east-1", imported.getPrimaryRegion());
+        assertEquals(List.of("us-west-2"), imported.getReplicationRegions());
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", imported.getKeyId());
+        assertNotNull(replica, "the key was not replicated");
+        assertEquals("REPLICA", replica.getMultiRegionKeyType());
+        assertEquals(imported.getKeyMaterialHex(), replica.getKeyMaterialHex());
+    }
+
+    @Test
+    void theTagsOfAReplicaFollowThePrimary() {
+        // A replica is a copy of its primary's material and metadata, so a change to the
+        // primary's tags reaches it.
+        PaymentCryptographyKey key = createReplicatedKey("us-east-1", List.of("us-west-2"));
+
+        service.tag(key, Map.of("owner", "team"));
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", key.getKeyId());
+        assertEquals("team", replica.getTags().get("owner"));
+
+        service.untag(key, List.of("owner"));
+
+        PaymentCryptographyKey after = service.findKey("us-west-2", key.getKeyId());
+        assertNull(after.getTags().get("owner"), "the tag was not taken away");
     }
 
     /** The attributes of a key with that algorithm and usage. */
