@@ -440,9 +440,17 @@ class CodeDeployServiceTest {
                 () -> service.listDeploymentGroups("us-east-1", null));
         assertEquals("ApplicationNameRequiredException", missing.getErrorCode());
         assertEquals(400, missing.getHttpStatus());
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.listDeploymentGroups("us-east-1", ""));
+        assertEquals("ApplicationNameRequiredException", empty.getErrorCode());
+    }
+
+    @Test
+    void listDeploymentGroupsWithWhitespaceApplicationNameThrowsInvalidApplicationName() {
         AwsException blank = assertThrows(AwsException.class,
                 () -> service.listDeploymentGroups("us-east-1", " "));
-        assertEquals("ApplicationNameRequiredException", blank.getErrorCode());
+        assertEquals("InvalidApplicationNameException", blank.getErrorCode());
+        assertEquals(400, blank.getHttpStatus());
     }
 
     @Test
