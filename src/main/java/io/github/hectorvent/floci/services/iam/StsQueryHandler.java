@@ -308,10 +308,12 @@ public class StsQueryHandler {
      * the lookup takes the key whatever state it is in, which is why it is not
      * {@code resolveAccountId}, the authentication path, that answers here.
      *
-     * <p>A key Floci does not hold is the one answer the reference leaves open. It models no error
+     * <p>A key Floci does not hold is the one answer the reference leaves open: it models no error
      * for it and says only that "providing a deleted access key might return an error that the key
-     * doesn't exist", so this answers {@code InvalidParameterValue}, the published common error
-     * nearest that sentence, and {@code docs/services/sts.md} records it as the deviation it is.
+     * doesn't exist". A capture from a real account answers {@code ValidationError} 400, "Access
+     * key ID is not valid.", for an {@code AKIA} and an {@code ASIA} id alike, which settles the
+     * shape of the operation as a refusal rather than a decode of the account out of the id.
+     * {@code docs/services/sts.md} carries the capture.
      */
     private Response handleGetAccessKeyInfo(MultivaluedMap<String, String> params) {
         Response validation = validateDeclaredConstraints("GetAccessKeyInfo", params);
@@ -321,8 +323,11 @@ public class StsQueryHandler {
         String accessKeyId = getParam(params, "AccessKeyId");
         Optional<String> account = iamService.findAccountForAccessKeyId(accessKeyId);
         if (account.isEmpty()) {
-            return AwsQueryResponse.error("InvalidParameterValue",
-                    "The access key " + accessKeyId + " does not exist.", AwsNamespaces.STS, 400);
+            // Captured from a real account against an AKIA and an ASIA id alike: AWS refuses an id
+            // it never issued rather than decoding the account out of it, and the refusal carries
+            // neither the id nor a validation-error count.
+            return AwsQueryResponse.error("ValidationError",
+                    "Access key ID is not valid.", AwsNamespaces.STS, 400);
         }
         String result = new XmlBuilder().elem("Account", account.get()).build();
         return Response.ok(AwsQueryResponse.envelope("GetAccessKeyInfo", AwsNamespaces.STS, result)).build();

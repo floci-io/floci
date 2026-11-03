@@ -614,21 +614,32 @@ returns `EntityAlreadyExists`; `Get`/`Update`/`DeleteLoginProfile` on a user wit
 wholesale replace. A password must be 1–128 characters from AWS's documented password character
 class, and when the account has an [account password policy](#account-password-policy) set, it is
 also checked against that policy's length and character-class requirements, with
-`PasswordPolicyViolation` returned on either action if it doesn't comply. The password itself is never
-echoed back by any of these actions, matching AWS.
+`PasswordPolicyViolation` returned on either action if it doesn't comply, naming the rule the
+password broke, which is also what `ChangePassword` answers for a new password. The password itself
+is never echoed back by any of these actions, matching AWS.
 
 `ChangePassword` is the self-service half of `UpdateLoginProfile`. It takes no `UserName` and acts
 only on the user whose access key signed the request, which is what the API reference means by "the
 IAM user who is calling this operation", and the account root password is not affected by it. A
 caller with no IAM user behind its key, which is Floci's stand-in for account root credentials, is
-refused with `InvalidUserType`, the error the CLI reference documents for that case. `OldPassword`
-must match the stored password, and the reference publishes no error for a mismatch, so Floci
-answers `InvalidParameterValue`, the common error type for a parameter value the service cannot
-accept. It is checked before the new password is held to the account policy, so a caller who cannot
-prove the current password learns nothing about what the policy requires. A successful change
-clears `PasswordResetRequired`, which is what lets a user whose password an administrator reset
-restore their own console access programmatically, and it updates the `password_last_changed` the
-credential report reads.
+refused with `InvalidUserType`, the error the CLI reference documents for that case.
+
+`OldPassword` must match the stored password, and a mismatch answers `AccessDenied` with status
+403 and "Either the new password does not conform to the account password policy or the old
+password was incorrect.", captured from a real account on 2026-10-31. The reference publishes no
+error for a mismatch and none of the six this operation declares describes one, so the capture is
+what settles it. The sentence is AWS's own and is sent as captured, naming both of the operation's
+causes without saying which one refused the call. The old password is checked before the new one is
+held to the account policy, so a caller who cannot prove the current password learns nothing about
+what the policy requires, and a request with both halves wrong answers this.
+
+That the sentence names the policy half does not settle the policy half: the capture covers a wrong
+old password with a conforming new one, and the API model declares `PasswordPolicyViolation` on
+this operation for a password the account policy refuses, so that is what Floci answers there,
+naming the rule the password broke as `CreateLoginProfile` and `UpdateLoginProfile` do. A
+successful change clears `PasswordResetRequired`, which is what lets a user whose password an
+administrator reset restore their own console access programmatically, and it updates the
+`password_last_changed` the credential report reads.
 
 `PasswordReusePrevention` is enforced on `ChangePassword` and on `UpdateLoginProfile`, which share
 one history per login profile, so an administrator reset cannot put back a password a user has just
@@ -712,9 +723,12 @@ matching on one does not match.
 IAM user or role only, not a group. It is held to the 20 characters `arnType` declares before it
 is resolved, so a value too short to be any ARN is a `ValidationError` with status 400 naming the
 length rather than an entity resolved out of whatever follows its last slash. A value that clears
-20 characters and still parses as no ARN is resolved as before: the member publishes a length and
-no pattern, and no source records what AWS answers for one, so inventing a refusal would be a
-guess. The length wording follows the captures of real IAM length violations, naming only the
+20 characters and still parses as no ARN is refused too, with `InvalidInput` and "Invalid ARN
+provided in the request: <value>", captured from a real account on 2026-10-31 for
+`arn:aws:iam:user/bob`, which this emulator used to simulate against a user named `bob`. Parsing
+means the six colon-delimited segments every ARN carries, so a valid ARN naming something that is
+neither a user nor a role still answers the `InvalidInput` about the entity type rather than about
+the shape. The length wording follows the captures of real IAM length violations, naming only the
 bound the value broke and leaving the value itself out of the message. `SimulateCustomPolicy`
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
 limit; extra documents beyond the first are ignored. Neither simulation action evaluates a
