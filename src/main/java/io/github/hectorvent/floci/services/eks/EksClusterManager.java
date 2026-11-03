@@ -35,6 +35,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.ClusterNodeInstanceProvider;
+import io.github.hectorvent.floci.services.ec2.Ec2ImageCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataProxy;
@@ -175,6 +176,7 @@ public class EksClusterManager
     private final EksOidcService oidcService;
     private final FlociCertificateAuthority certificateAuthority;
     private final ContainerLogStreamer logStreamer;
+    private final Ec2ImageCatalog imageCatalog;
     private final Ec2InstanceTypeCatalog instanceTypeCatalog = new Ec2InstanceTypeCatalog();
     private final Map<String, ClusterNodeRecord> clusterNodeInstances = new ConcurrentHashMap<>();
     private final Map<String, Map<String, Instance>> joinedClusterInstances = new ConcurrentHashMap<>();
@@ -451,6 +453,27 @@ public class EksClusterManager
                       ContainerLogStreamer logStreamer,
                       StorageBackend<String, Nodegroup> nodeGroupStorage,
                       long archiveRetryBackoffMillis) {
+        this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
+                dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer,
+                oidcService, certificateAuthority, logStreamer, nodeGroupStorage,
+                archiveRetryBackoffMillis, new Ec2ImageCatalog());
+    }
+
+    EksClusterManager(ContainerBuilder containerBuilder,
+                      ContainerLifecycleManager lifecycleManager,
+                      ContainerDetector containerDetector,
+                      PortAllocator portAllocator,
+                      DockerHostResolver dockerHostResolver,
+                      EcrRegistryManager ecrRegistryManager,
+                      EmulatorConfig config,
+                      RegionResolver regionResolver,
+                      Ec2MetadataServer metadataServer,
+                      EksOidcService oidcService,
+                      FlociCertificateAuthority certificateAuthority,
+                      ContainerLogStreamer logStreamer,
+                      StorageBackend<String, Nodegroup> nodeGroupStorage,
+                      long archiveRetryBackoffMillis,
+                      Ec2ImageCatalog imageCatalog) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
@@ -465,6 +488,7 @@ public class EksClusterManager
         this.logStreamer = logStreamer;
         this.nodeGroupStorage = nodeGroupStorage;
         this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
+        this.imageCatalog = imageCatalog;
     }
 
     @Inject
@@ -480,14 +504,15 @@ public class EksClusterManager
                              EksOidcService oidcService,
                              FlociCertificateAuthority certificateAuthority,
                              ContainerLogStreamer logStreamer,
-                             StorageFactory storageFactory) {
+                             StorageFactory storageFactory,
+                             Ec2ImageCatalog imageCatalog) {
         this(containerBuilder, lifecycleManager, containerDetector, portAllocator,
                 dockerHostResolver, ecrRegistryManager, config, regionResolver, metadataServer,
                 oidcService, certificateAuthority, logStreamer,
                 storageFactory != null
                         ? storageFactory.create("eks", "eks-nodegroups.json",
                                 new TypeReference<Map<String, Nodegroup>>() {})
-                        : null);
+                        : null, RetryingTarCopier.DEFAULT_BACKOFF_MS, imageCatalog);
     }
 
     /**
@@ -3117,6 +3142,11 @@ public class EksClusterManager
     }
 
     private void registerNodeInCluster(Cluster cluster, String containerId, Instance instance) {
+        if (imageCatalog.findByIdOrAlias(instance.getImageId())
+                .map(image -> Boolean.TRUE.equals(image.kubeletRegistersNode)).orElse(false)) {
+            // Do not race the guest kubelet with a status-less Node or synthetic Ready status.
+            return;
+        }
         String region = instance.getRegion() != null ? instance.getRegion() : clusterRegion(cluster);
         String nodeName = deriveInstanceNodeName(instance, region);
         try {

@@ -36,6 +36,7 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.ec2.Ec2ImageCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2InstanceTypeCatalog;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -4165,13 +4166,16 @@ class EksClusterManagerTest {
             EmulatorConfig.ServicesConfig services = Mockito.mock(EmulatorConfig.ServicesConfig.class);
             when(config.services()).thenReturn(services);
             when(services.eks()).thenReturn(Mockito.mock(EmulatorConfig.EksServiceConfig.class));
+            EmulatorConfig.Ec2ServiceConfig ec2 = Mockito.mock(EmulatorConfig.Ec2ServiceConfig.class);
+            when(services.ec2()).thenReturn(ec2);
+            when(ec2.imageCatalogPath()).thenReturn(Optional.of("src/test/resources/ec2/kubelet-image-catalog.yaml"));
             manager = Mockito.spy(new EksClusterManager(Mockito.mock(ContainerBuilder.class),
                     Mockito.mock(ContainerLifecycleManager.class), Mockito.mock(ContainerDetector.class),
                     Mockito.mock(PortAllocator.class), Mockito.mock(DockerHostResolver.class),
                     Mockito.mock(EcrRegistryManager.class), config, new RegionResolver("us-east-1", "000000000000"),
                     Mockito.mock(Ec2MetadataServer.class), Mockito.mock(EksOidcService.class),
                     inlineMock(FlociCertificateAuthority.class), Mockito.mock(ContainerLogStreamer.class),
-                    new InMemoryStorage<>()));
+                    new InMemoryStorage<>(), 0, new Ec2ImageCatalog(config)));
         }
 
         private Cluster clusterNamed(String name, String containerId) {
@@ -4207,6 +4211,62 @@ class EksClusterManagerTest {
             assertTrue(ans.isPresent() && ans.get().addresses().contains("10.0.1.50"));
             manager.unregisterMetadataEndpoint(cluster);
             assertFalse(manager.isInstanceJoined(cluster, "i-0123456789abcdef0"));
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"ami-kubelet-worker", "ami-kubelet-alias"})
+        void kubeletOwnsNodeRegistrationIncludingClusterReplay(String imageId) {
+            Cluster cluster = clusterNamed("kubelet-cluster", "kubelet-container");
+            Instance inst = createInstance("i-kubelet", "us-east-1a", "t4g.medium", "arm64", "10.0.1.51");
+            inst.setImageId(imageId);
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(anyString(), any(), anyInt());
+            List<Instance> notifications = new ArrayList<>();
+            manager.addNodeRegistrationListener(notifications::add);
+
+            manager.joinInstance(cluster, inst);
+            manager.joinInstance(cluster, inst);
+            assertTrue(manager.isInstanceJoined(cluster, inst.getInstanceId()));
+            assertTrue(manager.isJoinedNode(cluster, manager.deriveInstanceNodeName(inst, inst.getRegion())));
+            assertEquals(List.of(inst), manager.getJoinedInstances(cluster));
+            assertEquals(Map.of(inst.getInstanceId(), "us-east-1"), cluster.getJoinedInstanceIds());
+            assertEquals(List.of(inst), notifications);
+            assertThrows(AwsException.class, () -> manager.joinInstance(clusterNamed("other", "other-container"), inst));
+
+            manager.registerAllJoinedNodes(cluster, "recreated-container");
+            manager.unregisterMetadataEndpoint(cluster);
+            // Process restore rebuilds the manager's join map from the persisted instance IDs.
+            manager.joinInstance(cluster, inst);
+            assertEquals(Map.of(inst.getInstanceId(), "us-east-1"), cluster.getJoinedInstanceIds());
+            assertEquals(List.of(inst, inst), notifications);
+            verify(manager, never()).execInContainerForResult(anyString(), any(), anyInt());
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"ami-systemd-guest", "ami-simulated-worker", "ami-unknown"})
+        void imagesWithoutKubeletOwnershipKeepSyntheticRegistrationOnJoinAndReplay(String imageId) {
+            Cluster cluster = clusterNamed("simulated-cluster", "simulated-container");
+            Instance inst = createInstance("i-simulated", "us-east-1a", "t3.medium", "x86_64", "10.0.1.52");
+            inst.setImageId(imageId);
+            ArgumentCaptor<String[]> commands = ArgumentCaptor.forClass(String[].class);
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(anyString(), commands.capture(), anyInt());
+
+            Instance kubelet = createInstance("i-kubelet", "us-east-1a", "t4g.medium", "arm64", "10.0.1.53");
+            kubelet.setImageId("ami-kubelet-worker");
+            manager.joinInstance(cluster, kubelet);
+            manager.joinInstance(cluster, inst);
+            manager.registerAllJoinedNodes(cluster, "recreated-container");
+
+            assertEquals(2, manager.getJoinedInstances(cluster).size());
+            assertEquals(4, commands.getAllValues().size());
+            for (int offset : List.of(0, 2)) {
+                assertTrue(commands.getAllValues().get(offset)[2].contains("kubectl apply -f -"));
+                String[] patch = commands.getAllValues().get(offset + 1);
+                assertEquals("--subresource=status", patch[4]);
+                assertTrue(patch[7].contains("KubeletReady"));
+                assertTrue(patch[7].contains("\"memory\":\"4096Mi\""));
+            }
         }
 
         @Test
