@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.codedeploy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.codedeploy.model.Deployment;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -25,6 +26,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -430,6 +432,32 @@ class CodeDeployServiceTest {
         Map<String, Object> targetMap = target.batchGetDeploymentTargets(REGION, deploymentId, List.of()).get(0);
         Map<String, Object> lambdaTarget = (Map<String, Object>) targetMap.get("lambdaTarget");
         return (List<Map<String, Object>>) lambdaTarget.get("lifecycleEvents");
+    }
+
+    @Test
+    void listDeploymentGroupsWithoutApplicationNameThrowsApplicationNameRequired() {
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.listDeploymentGroups("us-east-1", null));
+        assertEquals("ApplicationNameRequiredException", missing.getErrorCode());
+        assertEquals(400, missing.getHttpStatus());
+        AwsException empty = assertThrows(AwsException.class,
+                () -> service.listDeploymentGroups("us-east-1", ""));
+        assertEquals("ApplicationNameRequiredException", empty.getErrorCode());
+    }
+
+    @Test
+    void listDeploymentGroupsWithWhitespaceApplicationNameThrowsInvalidApplicationName() {
+        AwsException blank = assertThrows(AwsException.class,
+                () -> service.listDeploymentGroups("us-east-1", " "));
+        assertEquals("InvalidApplicationNameException", blank.getErrorCode());
+        assertEquals(400, blank.getHttpStatus());
+    }
+
+    @Test
+    void listDeploymentGroupsForUnknownApplicationStillThrowsDoesNotExist() {
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> service.listDeploymentGroups("us-east-1", "nope"));
+        assertEquals("ApplicationDoesNotExistException", unknown.getErrorCode());
     }
 
     @SuppressWarnings("unchecked")
