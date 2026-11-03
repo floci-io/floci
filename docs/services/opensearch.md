@@ -55,6 +55,19 @@ services:
 | `ListTags` | `GET /2021-01-01/tags/?arn=` | List tags for a domain |
 | `RemoveTags` | `POST /2021-01-01/tags-removal` | Remove tag keys from a domain |
 
+### VPC Endpoints
+
+OpenSearch Service-managed VPC endpoints, which Terraform's `aws_opensearch_vpc_endpoint` manages.
+
+| Operation | Method + Path | Description |
+|---|---|---|
+| `CreateVpcEndpoint` | `POST /2021-01-01/opensearch/vpcEndpoints` | Create an endpoint for a domain, idempotent on `ClientToken` |
+| `DescribeVpcEndpoints` | `POST /2021-01-01/opensearch/vpcEndpoints/describe` | Describe endpoints by id; an unknown id is a `VpcEndpointErrors` entry |
+| `UpdateVpcEndpoint` | `POST /2021-01-01/opensearch/vpcEndpoints/update` | Replace an endpoint's subnets and security groups |
+| `DeleteVpcEndpoint` | `DELETE /2021-01-01/opensearch/vpcEndpoints/{id}` | Delete an endpoint |
+| `ListVpcEndpoints` | `GET /2021-01-01/opensearch/vpcEndpoints` | List the Region's endpoints |
+| `ListVpcEndpointsForDomain` | `GET /2021-01-01/opensearch/domain/{name}/vpcEndpoints` | List one domain's endpoints |
+
 ### Legacy Elasticsearch Service API
 
 The `2015-01-01` API used by `aws es` and Terraform's `aws_elasticsearch_domain` is served over the same domains. It differs only in spelling: `ElasticsearchVersion` (bare, e.g. `7.10`, stored as `Elasticsearch_7.10`; `OS_2.11` and `OpenSearch_2.11` both store and report as `OpenSearch_2.11`) for `EngineVersion`, `ElasticsearchClusterConfig` for `ClusterConfig`, and instance types ending in `.elasticsearch` (`t3.small.elasticsearch` is stored, and reported by the 2021 API, as `t3.small.search`). A domain created without `ElasticsearchVersion` gets `7.10`.
@@ -126,6 +139,14 @@ services:
 - **Domain name validation:** 3–28 characters, must start with a lowercase letter, only lowercase letters, digits, and hyphens.
 - **Regional scoping:** a domain name is unique within one account and one Region, exactly as AWS scopes it. Describe, update, delete, upgrade and list resolve only in the Region the request is signed for, so the same name can exist in two Regions and one Region's requests never see, change or delete another Region's domain. Domain records persisted before regional scoping are migrated onto their Region on first use, taking it from the domain's ARN, which has always carried it.
 - **ARN format:** `arn:aws:es:{region}:{accountId}:domain/{domainName}`
+- **Domains in a VPC:** a domain created with `VPCOptions` reports its address under `Endpoints.vpc` and has no `Endpoint`, as AWS answers and as the Terraform AWS provider requires. In mock mode the address is `vpc-<domain>-<suffix>.<region>.es.amazonaws.com`; in real mode it is the container's address. `Endpoints` is left out until the address is known.
+- **VPC endpoints:**
+    - An id reads `aos-` followed by 12 hexadecimal digits, and endpoints are scoped to an account and a Region like domains.
+    - `CreateVpcEndpoint`, `UpdateVpcEndpoint` and `DeleteVpcEndpoint` answer `CREATING`, `UPDATING` and `DELETING`, and the next read sees the endpoint `ACTIVE` or gone: the change takes effect at once.
+    - `VPCId` and `AvailabilityZones` are filled from the EC2 subnets the request names; a subnet EC2 does not know stays unresolved. Without `SecurityGroupIds` the endpoint takes the VPC's default security group, as in AWS.
+    - `Endpoint` is the domain's own address, since Floci serves a domain at one address; no network interface is created.
+    - A list returns every endpoint in one page, without `NextToken`. A domain name that names no domain lists nothing.
+    - An unknown domain ARN on `CreateVpcEndpoint`, or the ARN of a domain in another Region, is a `ValidationException`, and an unknown id on `UpdateVpcEndpoint` or `DeleteVpcEndpoint` a `ResourceNotFoundException`, as the API reference lists for each operation. Deleting a domain does not delete its VPC endpoints.
 - **Domain ID format:** `{accountId}/{domainName}`
 - **`Created` flag:** `true` immediately in mock mode; set to `true` by the readiness poller in real mode once `/_cluster/health` reports `green` or `yellow`.
 - **`Processing` flag:** `false` immediately in mock mode; `true` until the container is ready in real mode.
@@ -257,4 +278,5 @@ os_client.delete_domain(DomainName="my-search")
 - No Elasticsearch-compatible management endpoints (`/2015-01-01/es/domain/...`).
 - `AccessPolicies`, `VPCOptions`, `AdvancedSecurityOptions`, `EncryptionAtRestOptions`, `NodeToNodeEncryptionOptions`, and `DomainEndpointOptions` round-trip on `CreateDomain` / `UpdateDomainConfig` / `DescribeDomain` / `DescribeDomainConfig`, but are not enforced by the running container — Floci serves the domain over plain HTTP with the security plugin disabled regardless, and `AccessPolicies` is stored verbatim without being evaluated. Round-tripping is enough for SDK clients (Terraform, CDK, Pulumi) to detect drift correctly.
 - Master passwords for `AdvancedSecurityOptions.MasterUserOptions` are accepted but never echoed back, matching AWS behavior.
-- Cross-cluster connections, VPC endpoints, packages, applications, and data sources are not supported and return `UnsupportedOperationException`.
+- Cross-cluster connections, packages, applications, and data sources are not supported and return `UnsupportedOperationException`.
+- The legacy `2015-01-01` API serves no VPC endpoint operations.

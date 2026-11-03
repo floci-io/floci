@@ -553,6 +553,15 @@ public class IamActionRegistry {
         rule("ses", "POST",  "^/v2/email/update-configuration-sets/?$",                              "ses:UpdateConfigurationSet"),
         rule("ses", "POST",  "^/v2/email/vdm/recommendations/?$",                                    "ses:ListRecommendations"),
 
+        // ── OpenSearch Service VPC endpoints ───────────────────────────────────
+        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/?$",          "es:CreateVpcEndpoint"),
+        rule("es", "GET",    "^/2021-01-01/opensearch/vpcEndpoints/?$",          "es:ListVpcEndpoints"),
+        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/describe/?$", "es:DescribeVpcEndpoints"),
+        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/update/?$",   "es:UpdateVpcEndpoint"),
+        rule("es", "DELETE", "^/2021-01-01/opensearch/vpcEndpoints/[^/]+/?$",    "es:DeleteVpcEndpoint"),
+        rule("es", "GET",    "^/2021-01-01/opensearch/domain/[^/]+/vpcEndpoints/?$",
+                "es:ListVpcEndpointsForDomain"),
+
         // ── Resource Groups ─────────────────────────────────────────────────────
         rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
         rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),

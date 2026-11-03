@@ -89,6 +89,19 @@ class IamActionRegistryTest {
                 new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
     }
 
+    @ParameterizedTest
+    @CsvSource({"POST,/2021-01-01/opensearch/vpcEndpoints,CreateVpcEndpoint",
+            "GET,/2021-01-01/opensearch/vpcEndpoints,ListVpcEndpoints",
+            "POST,/2021-01-01/opensearch/vpcEndpoints/describe,DescribeVpcEndpoints",
+            "POST,/2021-01-01/opensearch/vpcEndpoints/update,UpdateVpcEndpoint",
+            "DELETE,/2021-01-01/opensearch/vpcEndpoints/aos-0123456789ab,DeleteVpcEndpoint",
+            "GET,/2021-01-01/opensearch/domain/orders/vpcEndpoints,ListVpcEndpointsForDomain"})
+    void openSearchVpcEndpointRoutesResolveTheirOwnActions(String method, String path, String operation) {
+        ContainerRequestContext ctx = mockCtx(method, path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("es:" + operation, registry.resolveRoute("es", ctx));
+    }
+
     @Test
     void inspector2DisableRouteResolvesItsAction() {
         ContainerRequestContext ctx = mockCtx("POST", "/disable",
