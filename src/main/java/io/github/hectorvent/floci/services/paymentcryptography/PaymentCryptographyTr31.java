@@ -407,10 +407,6 @@ final class PaymentCryptographyTr31 {
     private static byte[] part(byte[] seed, int bits, boolean mac, int counter, byte[] protectionKey) {
         byte[] constant = fromHex(derivationConstant(bits, mac, counter));
         byte[] input = xor(seed, constant);
-        if (System.getenv("APC_DEBUG_TR31") != null) {
-            System.err.println("DEBUG part bits=" + bits + " mac=" + mac + " counter=" + counter
-                    + " constant=" + hexUpper(constant) + " input=" + hexUpper(input));
-        }
         return PaymentCryptographyCrypto.aesEcbEncrypt(input, protectionKey);
     }
 

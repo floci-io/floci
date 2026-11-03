@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.paymentcryptography.crypto;
 
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -29,7 +28,6 @@ class PaymentCryptographyX509Test {
     private static final String CN = "floci key-import KRD";
 
     @Test
-    @DisplayName("CertificateFactory parses the hand-built DER and recovers the public key")
     void parsesWithCertificateFactory() throws Exception {
         KeyPair kp = X509.generateRsaKeyPair(2048);
         X509.Cert cert = X509.mintSelfSigned(kp, CN,
@@ -46,7 +44,6 @@ class PaymentCryptographyX509Test {
     }
 
     @Test
-    @DisplayName("the parsed certificate reports the common name and the validity window")
     void parsesSubjectAndValidity() throws Exception {
         KeyPair kp = X509.generateRsaKeyPair(2048);
         Instant notBefore = Instant.now().minus(1, ChronoUnit.HOURS);
@@ -66,7 +63,6 @@ class PaymentCryptographyX509Test {
     }
 
     @Test
-    @DisplayName("the validity window covers an import token timestamp issued just now")
     void validityCoversTokenTimestamp() throws Exception {
         KeyPair kp = X509.generateRsaKeyPair(2048);
         Instant now = Instant.now();
@@ -82,7 +78,6 @@ class PaymentCryptographyX509Test {
     }
 
     @Test
-    @DisplayName("the certificate verifies against its own public key")
     void selfVerifies() throws Exception {
         KeyPair kp = X509.generateRsaKeyPair(2048);
         X509.Cert cert = X509.mintSelfSigned(kp, CN,
@@ -95,7 +90,6 @@ class PaymentCryptographyX509Test {
     }
 
     @Test
-    @DisplayName("PEM round-trips and is wrapped at 64 characters")
     void pemRoundTrip() throws Exception {
         KeyPair kp = X509.generateRsaKeyPair(2048);
         X509.Cert cert = X509.mintSelfSigned(kp, CN,
@@ -114,7 +108,6 @@ class PaymentCryptographyX509Test {
     }
 
     @Test
-    @DisplayName("two certificates over different keys differ")
     void distinctPerCall() {
         X509.Cert a = X509.mintSelfSigned(X509.generateRsaKeyPair(2048), CN,
                 Instant.now().minus(1, ChronoUnit.HOURS), Instant.now().plus(1, ChronoUnit.DAYS));
@@ -124,14 +117,12 @@ class PaymentCryptographyX509Test {
     }
 
     @Test
-    @DisplayName("an unsupported key size is rejected")
     void rejectsBadKeySize() {
         assertThrows(IllegalArgumentException.class, () -> X509.generateRsaKeyPair(1024));
         assertThrows(IllegalArgumentException.class, () -> X509.generateRsaKeyPair(512));
     }
 
     @Test
-    @DisplayName("the serial number is a positive DER integer")
     void serialIsPositive() {
         byte[] b = new byte[] {0x00, 0x00, (byte) 0xFF, (byte) 0x80, 0x01};
         byte[] der = X509.derInteger(b);

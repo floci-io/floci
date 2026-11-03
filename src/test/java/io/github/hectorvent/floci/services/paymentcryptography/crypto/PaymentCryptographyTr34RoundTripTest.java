@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.paymentcryptography.crypto;
 
 import org.junit.jupiter.api.Assertions;
-import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.security.KeyPair;
@@ -19,7 +18,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 class PaymentCryptographyTr34RoundTripTest {
 
     @Test
-    @DisplayName("a built block recovers under the receiver's key")
     void buildsWhatTheVerifierRecovers() throws Exception {
         // The key receiving device: its key pair and its certificate.
         KeyPair krd = X509.generateRsaKeyPair(2048);
@@ -45,7 +43,6 @@ class PaymentCryptographyTr34RoundTripTest {
     }
 
     @Test
-    @DisplayName("a built block carries the key's TR-31 header")
     void carriesTheHeader() throws Exception {
         KeyPair krd = X509.generateRsaKeyPair(2048);
         KeyPair kdh = X509.generateRsaKeyPair(2048);
@@ -59,7 +56,6 @@ class PaymentCryptographyTr34RoundTripTest {
     }
 
     @Test
-    @DisplayName("a tampered block does not verify")
     void refusesATamperedBlock() throws Exception {
         KeyPair krd = X509.generateRsaKeyPair(2048);
         KeyPair kdh = X509.generateRsaKeyPair(2048);
