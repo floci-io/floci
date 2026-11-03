@@ -503,7 +503,7 @@ class MemoryDbServiceTest {
         CompletableFuture<Cluster> slow = new CompletableFuture<>();
         Thread slowCreate = new Thread(() -> {
             try {
-                slow.complete(racedService.createCluster(clusterSpec("raced"), "us-east-1"));
+                slow.complete(racedService.createCluster(cluster("raced", "open-access"), "us-east-1"));
             } catch (RuntimeException e) {
                 slow.completeExceptionally(e);
             }
@@ -512,7 +512,7 @@ class MemoryDbServiceTest {
         assertTrue(slowCreateLookedUp.await(5, TimeUnit.SECONDS), "the slow create never looked the name up");
         CompletableFuture<Cluster> other = new CompletableFuture<>();
         try {
-            other.complete(racedService.createCluster(clusterSpec("raced"), "us-east-1"));
+            other.complete(racedService.createCluster(cluster("raced", "open-access"), "us-east-1"));
         } catch (RuntimeException e) {
             other.completeExceptionally(e);
         } finally {
@@ -531,13 +531,6 @@ class MemoryDbServiceTest {
         }
         assertEquals(1, succeeded, "exactly one create of the name succeeds");
         verify(containerManager, times(1)).tryStart(anyString(), anyString());
-    }
-
-    private static Cluster clusterSpec(String name) {
-        Cluster spec = new Cluster();
-        spec.setName(name);
-        spec.setAclName("open-access");
-        return spec;
     }
 
     @Test
