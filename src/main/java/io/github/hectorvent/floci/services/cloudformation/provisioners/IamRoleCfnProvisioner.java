@@ -69,6 +69,11 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             path = "/";
         }
         String description = ctx.resolveOptional(props, "Description");
+        Integer declaredDuration = ctx.resolveOptionalInt(props, "MaxSessionDuration");
+        int maxSessionDuration = declaredDuration != null ? declaredDuration : 3600;
+        if (maxSessionDuration < 3600 || maxSessionDuration > 43200) {
+            throw new AwsException("ValidationError", "MaxSessionDuration must be between 3600 and 43200.", 400);
+        }
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
         // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
         String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
@@ -84,8 +89,9 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         String priorAssumeRoleId = null;
         // The adopted role's boundary before this attempt, restored on failure like the trust policy.
         String priorPermissionsBoundary = null;
+        int priorMaxSessionDuration = 3600;
         try {
-            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, 3600, Map.of(),
+            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, maxSessionDuration, Map.of(),
                     permissionsBoundary);
             createdRole = true;
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
@@ -120,6 +126,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             priorAssumeRolePolicyDocument = role.getAssumeRolePolicyDocument();
             priorAssumeRoleId = existingRoleId;
             priorPermissionsBoundary = role.getPermissionsBoundaryArn();
+            priorMaxSessionDuration = role.getMaxSessionDuration();
             iamService.updateAssumeRolePolicy(resolvedRoleName, assumeDoc, existingRoleId);
         }
 
@@ -145,8 +152,14 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         final String documentToRestore = priorAssumeRolePolicyDocument;
         final String roleIdToRestore = priorAssumeRoleId;
         final String boundaryToRestore = priorPermissionsBoundary;
+        final int durationToRestore = priorMaxSessionDuration;
         boolean boundaryChangedByThisAttempt = false;
+        boolean durationChangedByThisAttempt = false;
         try {
+            if (!createdRole && maxSessionDuration != durationToRestore) {
+                iamService.updateRole(resolvedRoleName, null, maxSessionDuration, roleIdToRestore);
+                durationChangedByThisAttempt = true;
+            }
             // createRole() only applies PermissionsBoundary on first create. On adoption, set a
             // changed boundary, and remove one only if the role has one and the template dropped it.
             // ID-verified like the trust-policy write, here and in the rollback restore.
@@ -268,6 +281,13 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                                 iamService.putRolePermissionsBoundary(resolvedRoleName, boundaryToRestore, roleIdToRestore);
                             }
                         })) {
+                    cleanupSucceeded = false;
+                }
+            }
+            if (durationChangedByThisAttempt) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "restore prior session duration on role " + resolvedRoleName,
+                        () -> iamService.updateRole(resolvedRoleName, null, durationToRestore, roleIdToRestore))) {
                     cleanupSucceeded = false;
                 }
             }
