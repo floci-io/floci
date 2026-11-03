@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -29,6 +30,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.TemplateSummary;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -44,12 +46,10 @@ import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
-import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.*;
 import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -927,7 +927,6 @@ public class CloudFormationService implements ResourceProvider {
                 }
             }
 
-            boolean stackTagsChanged = cs.getTags() != null && !cs.getTags().equals(stack.tagsSnapshot());
 
             Set<String> replacedResourceIds = new HashSet<>();
             List<ResourceChange> changes = new ArrayList<>();
@@ -961,8 +960,7 @@ public class CloudFormationService implements ResourceProvider {
                                 : !oldDef.equals(newDef)
                                         || referencesAnyParameter(newDef, changedParams)
                                         || referencesAnyCondition(newDef, changedConditions))
-                        || ("AWS::CloudFormation::Stack".equals(resourceType)
-                                && (stackTagsChanged || isNestedStackChanged(stack, logicalId, newDef, region, accountId))))) {
+                        || "AWS::CloudFormation::Stack".equals(resourceType))) {
                     boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
                     boolean replacement = typeChanged
                             || requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions);
@@ -2421,36 +2419,6 @@ public class CloudFormationService implements ResourceProvider {
         return changedResourceIds;
     }
 
-
-    private boolean isNestedStackChanged(Stack parentStack, String logicalId, JsonNode newDef,
-                                         String region, String accountId) {
-        if (parentStack == null) {
-            return false;
-        }
-        StackResource existingResource = parentStack.getResources().get(logicalId);
-        if (existingResource == null || existingResource.getPhysicalId() == null) {
-            return true;
-        }
-        Stack childStack = resolveStack(existingResource.getPhysicalId(), region, accountId);
-        if (childStack == null) {
-            return true;
-        }
-        String templateUrl = newDef.path("Properties").path("TemplateURL").asText(null);
-        if (templateUrl == null || templateUrl.isBlank()) {
-            return false;
-        }
-        try {
-            String newChildTemplate = fetchTemplateFromS3(templateUrl);
-            String currentChildTemplate = childStack.getOriginalTemplateBody() != null
-                    ? childStack.getOriginalTemplateBody()
-                    : childStack.getTemplateBody();
-            return newChildTemplate != null && !newChildTemplate.equals(currentChildTemplate);
-        } catch (Exception ignored) {
-            // Safe to ignore: if TemplateURL is inaccessible and parent definition didn't change,
-            // treat the nested stack as unchanged so the parent update is not blocked.
-            return false;
-        }
-    }
 
     /**
      * Handles a resource that failed to provision.
@@ -4390,7 +4358,7 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         Map<String, String> childTags = new LinkedHashMap<>(inheritedTags);
-        childTags.putAll(resolveNestedStackTags(props, engine));
+        childTags.putAll(ProvisionContext.resolveTags(props, "Tags", engine));
         if (!childCreate) {
             resource.getAttributes().put(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR,
                     savedChildDeployment(childStack, region, accountId).toString());
@@ -4463,43 +4431,7 @@ public class CloudFormationService implements ResourceProvider {
         ObjectNode deployment = objectMapper.createObjectNode();
         deployment.put("templateBody", stack.getTemplateBody());
         deployment.set("parameters", objectMapper.valueToTree(new TreeMap<>(stack.parametersSnapshot())));
-        try {
-            byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(deployment.toString().getBytes(StandardCharsets.UTF_8));
-            return HexFormat.of().formatHex(digest);
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("Could not compare nested stack deployment", e);
-        }
-    }
-
-    private Map<String, String> resolveNestedStackTags(JsonNode props, CloudFormationTemplateEngine engine) {
-        Map<String, String> tags = new LinkedHashMap<>();
-        if (props == null || !props.has("Tags")) {
-            return tags;
-        }
-        JsonNode resolved = engine.resolveNode(props.get("Tags"));
-        if (resolved == null) {
-            return tags;
-        }
-        if (resolved.isObject()) {
-            resolved.fields().forEachRemaining(entry -> {
-                String value = engine.resolve(entry.getValue());
-                tags.put(entry.getKey(), value == null ? "" : value);
-            });
-            return tags;
-        }
-        if (!resolved.isArray()) {
-            return tags;
-        }
-        for (JsonNode tag : resolved) {
-            String key = engine.resolve(tag.path("Key"));
-            if (key == null || key.isBlank()) {
-                continue;
-            }
-            String value = engine.resolve(tag.path("Value"));
-            tags.put(key, value == null ? "" : value);
-        }
-        return tags;
+        return Digests.sha256Hex(deployment.toString());
     }
 
     /** Prefixes the keys {@link #recordTemplateUses} keeps, one per resource a definition names. */

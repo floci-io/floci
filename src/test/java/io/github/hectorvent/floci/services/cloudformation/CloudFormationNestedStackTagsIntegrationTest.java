@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
+import static io.github.hectorvent.floci.testing.CfnRequests.tags;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -138,11 +139,7 @@ class CloudFormationNestedStackTagsIntegrationTest {
         return XmlParser.extractPairs(xml, "member", "LogicalResourceId", "PhysicalResourceId").get(logicalId);
     }
 
-    private static Map<String, String> tags(String stackName) {
-        String xml = cfn("DescribeStacks", stackName).when().post("/")
-                .then().statusCode(200).extract().asString();
-        return XmlParser.extractPairs(xml, "member", "Key", "Value");
-    }
+
 
     private static String deployedTemplate(String stackName) {
         String xml = cfn("GetTemplate", stackName).when().post("/")

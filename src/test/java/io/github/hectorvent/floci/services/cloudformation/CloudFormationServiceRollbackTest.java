@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -77,6 +78,38 @@ import static org.mockito.Mockito.when;
  * second time nor updated by a change set.
  */
 class CloudFormationServiceRollbackTest {
+
+    @Test
+    void unchangedParent_schedulesNestedWorkWhenOnlyGrandchildTemplateChanges() throws Exception {
+        assertGrandchildUpdate(true);
+    }
+
+    @Test
+    void unchangedParent_executesGrandchildS3Changes() throws Exception {
+        assertGrandchildUpdate(false);
+    }
+
+    private void assertGrandchildUpdate(boolean checkPreview) throws Exception {
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        AtomicReference<String> childInS3 = new AtomicReference<>(treeChildTemplate());
+        AtomicReference<String> grandchildInS3 = new AtomicReference<>(previousGrandchildTemplate());
+        serveTreeTemplates(childInS3, grandchildInS3);
+        createNestedTree(treeParentTemplate());
+        grandchildInS3.set(previousGrandchildTemplate().replace("previous", "changed"));
+
+        ChangeSet changeSet = service.createChangeSet("rollback-tree", "update", "UPDATE", treeParentTemplate(), null,
+                Map.of(), List.of(), null, REGION, ACCOUNT);
+        if (checkPreview) {
+            assertTrue(service.computeChangeSetChanges(changeSet, REGION).stream()
+                    .anyMatch(change -> "Child".equals(change.logicalResourceId()) && "Modify".equals(change.action())));
+        }
+        service.executeChangeSet("rollback-tree", "update", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+
+        Stack parent = service.describeStacks("rollback-tree", REGION, ACCOUNT).getFirst();
+        Stack grandchild = service.describeStacks("rollback-tree-Child-Grandchild", REGION, ACCOUNT).getFirst();
+        assertEquals("UPDATE_COMPLETE", parent.getStatus());
+        assertEquals("changed", grandchild.getOutputs().get("Revision"));
+    }
 
     /**
      * A failing update that only moved the inherited tags re-provisioned the child with the very

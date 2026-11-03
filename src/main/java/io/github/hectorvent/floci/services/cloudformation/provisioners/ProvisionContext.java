@@ -113,6 +113,10 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      * "the template said nothing, leave stored tags alone" must keep that distinction themselves.
      */
     public Map<String, String> resolveTags(JsonNode props, String name) {
+        return resolveTags(props, name, engine);
+    }
+
+    public static Map<String, String> resolveTags(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         Map<String, String> tags = new LinkedHashMap<>();
         if (props == null || !props.has(name)) {
             return tags;

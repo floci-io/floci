@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
@@ -19,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
+import static io.github.hectorvent.floci.testing.CfnRequests.tags;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -598,11 +598,7 @@ class CloudFormationNoChangesIntegrationTest {
         return request;
     }
 
-    private static Map<String, String> tags(String stackName) {
-        String xml = cfn("DescribeStacks", stackName).when().post("/")
-                .then().statusCode(200).extract().asString();
-        return XmlParser.extractPairs(xml, "member", "Key", "Value");
-    }
+
 
     private static ValidatableResponse listChangeSets(String stackName) {
         return given().contentType("application/x-www-form-urlencoded")
