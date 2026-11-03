@@ -13,6 +13,7 @@ import software.amazon.awssdk.services.route53.model.ResourceRecord;
 import software.amazon.awssdk.services.route53.model.ResourceRecordSet;
 import software.amazon.awssdk.services.route53.model.Route53Exception;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -23,6 +24,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class Route53DelegationSetHostedZonesIntegrationTest {
+    @Test
+    void implicitNameserversUseRoute53NamesForZonesAndStandaloneSets() {
+        try (Route53Client client = client("741686000017")) {
+            CreateHostedZoneResponse zone = createZone(client, "generated.example.", null);
+            DelegationSet set = createSet(client);
+            try {
+                List<String> suffixes = List.of("org", "net", "com", "co\\.uk");
+                for (List<String> names : List.of(zone.delegationSet().nameServers(), set.nameServers())) {
+                    assertEquals(4, names.size());
+                    for (int i = 0; i < 4; i++) {
+                        assertTrue(names.get(i).matches("ns-[1-9][0-9]{0,3}\\.awsdns-[0-9]{2}\\." + suffixes.get(i)));
+                    }
+                }
+                assertEquals(zone.delegationSet(), client.getHostedZone(r -> r.id(zone.hostedZone().id()))
+                        .delegationSet());
+            } finally {
+                client.deleteHostedZone(r -> r.id(zone.hostedZone().id()));
+                client.deleteReusableDelegationSet(r -> r.id(set.id()));
+            }
+        }
+    }
+
     @Test
     void zonesReuseTheSetInResponsesAndApexRecordsUntilAllZonesAreDeleted() {
         try (Route53Client client = client("741686000010")) {
@@ -94,7 +117,7 @@ class Route53DelegationSetHostedZonesIntegrationTest {
     void relatedPublicNamesCannotShareNameServersButSiblingDomainsCan() {
         try (Route53Client client = client("741686000013")) {
             DelegationSet set = createSet(client);
-            String zone = createZone(client, "a.example.com.", null).hostedZone().id();
+            String zone = createZone(client, "a.example.com.", set.id()).hostedZone().id();
             try {
                 for (String name : List.of("A.EXAMPLE.COM", "child.a.example.com.", "example.com.")) {
                     assertError("ConflictingDomainExists", () -> createZone(client, name, set.id()));
@@ -106,6 +129,56 @@ class Route53DelegationSetHostedZonesIntegrationTest {
                 client.deleteReusableDelegationSet(r -> r.id(set.id()));
             }
         }
+    }
+
+    @Test
+    void relatedPublicNamesCanUseIndependentNameServers() {
+        try (Route53Client client = client("741686000015")) {
+            CreateHostedZoneResponse parent = createZone(client, "parent.example.com.", null);
+            DelegationSet firstSet = null;
+            DelegationSet secondSet = null;
+            String child = null;
+            String grandchild = null;
+            try {
+                firstSet = createDisjointSet(client, parent.delegationSet().nameServers());
+                child = createZone(client, "child.parent.example.com.", firstSet.id()).hostedZone().id();
+                List<String> used = new ArrayList<>(parent.delegationSet().nameServers());
+                used.addAll(firstSet.nameServers());
+                secondSet = createDisjointSet(client, used);
+                grandchild = createZone(client, "grandchild.child.parent.example.com.", secondSet.id())
+                        .hostedZone().id();
+            } finally {
+                if (grandchild != null) {
+                    String id = grandchild;
+                    client.deleteHostedZone(r -> r.id(id));
+                }
+                if (child != null) {
+                    String id = child;
+                    client.deleteHostedZone(r -> r.id(id));
+                }
+                client.deleteHostedZone(r -> r.id(parent.hostedZone().id()));
+                if (firstSet != null) {
+                    DelegationSet set = firstSet;
+                    client.deleteReusableDelegationSet(r -> r.id(set.id()));
+                }
+                if (secondSet != null) {
+                    DelegationSet set = secondSet;
+                    client.deleteReusableDelegationSet(r -> r.id(set.id()));
+                }
+            }
+        }
+    }
+
+    private DelegationSet createDisjointSet(Route53Client client, List<String> usedNames) {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            DelegationSet set = createSet(client);
+            if (set.nameServers().stream().noneMatch(candidate -> usedNames.stream()
+                    .anyMatch(name -> name.equalsIgnoreCase(candidate)))) {
+                return set;
+            }
+            client.deleteReusableDelegationSet(r -> r.id(set.id()));
+        }
+        throw new AssertionError("Unable to allocate a disjoint reusable delegation set after 100 attempts");
     }
 
     @Test
