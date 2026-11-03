@@ -81,6 +81,12 @@ class ElbV2BackendTlsIntegrationTest {
     @Inject
     Vertx vertx;
 
+    @Inject
+    ElbV2HealthChecker healthChecker;
+
+    @Inject
+    ElbV2Service elbService;
+
     @TestHTTPResource("/")
     URI endpoint;
 
@@ -226,15 +232,15 @@ class ElbV2BackendTlsIntegrationTest {
         HttpServer tls = backend(true);
         healthStatus.set(302);
         createTarget("HTTPS", tls.actualPort(), "HTTPS", tls.actualPort(), "302");
-        awaitHealth("healthy", null);
+        awaitHealth("healthy", null, true);
 
         healthStatus.set(503);
-        awaitHealth("unhealthy", "Target.ResponseCodeMismatch");
+        awaitHealth("unhealthy", "Target.ResponseCodeMismatch", true);
 
         elb.modifyTargetGroup(r -> r.targetGroupArn(groupArn)
                 .matcher(Matcher.builder().httpCode("200-299").build()));
         healthStatus.set(204);
-        awaitHealth("healthy", null);
+        awaitHealth("healthy", null, true);
     }
 
     @Test
@@ -242,13 +248,13 @@ class ElbV2BackendTlsIntegrationTest {
         HttpServer plain = backend(false);
         HttpServer tls = backend(true);
         createTarget("HTTP", plain.actualPort(), "HTTP", plain.actualPort(), "200");
-        awaitHealth("healthy", null);
+        awaitHealth("healthy", null, true);
 
         elb.modifyTargetGroup(r -> r.targetGroupArn(groupArn).healthCheckProtocol("HTTPS"));
-        awaitHealth("unhealthy", "Target.FailedHealthChecks");
+        awaitHealth("unhealthy", "Target.FailedHealthChecks", true);
 
         elb.modifyTargetGroup(r -> r.targetGroupArn(groupArn).healthCheckPort(String.valueOf(tls.actualPort())));
-        awaitHealth("healthy", null);
+        awaitHealth("healthy", null, true);
     }
 
     @Test
@@ -434,7 +440,14 @@ class ElbV2BackendTlsIntegrationTest {
     }
 
     private void awaitHealth(String state, String reason) {
+        awaitHealth(state, reason, false);
+    }
+
+    private void awaitHealth(String state, String reason, boolean triggerProbe) {
         await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+            if (triggerProbe) {
+                healthChecker.probeAll(groupArn, elbService.getTargetGroup(Region.EU_WEST_1.id(), groupArn));
+            }
             List<TargetHealthDescription> targets = elb.describeTargetHealth(r -> r.targetGroupArn(groupArn))
                     .targetHealthDescriptions();
             assertEquals(1, targets.size());
