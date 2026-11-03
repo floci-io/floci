@@ -12,8 +12,10 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -21,25 +23,35 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongSupplier;
 import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.xml.HasXPath.hasXPath;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * DeregisterImage and CopyImage. Without DeregisterImage an iterative image build is one-shot:
@@ -636,23 +648,163 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 "x86_64", "/dev/xvda", null);
     }
 
+    @Test
+    void concurrentProducerFailureCancelsRunningSibling() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch interrupted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        IllegalStateException producerFailure = new IllegalStateException("producer failed");
+        try {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> runConcurrently(pool, List.of(() -> {
+                        assertTrue(entered.await(5, TimeUnit.SECONDS));
+                        throw producerFailure;
+                    }, () -> {
+                        entered.countDown();
+                        try {
+                            release.await();
+                            return "unexpected completion";
+                        } catch (InterruptedException cancellation) {
+                            interrupted.countDown();
+                            throw cancellation;
+                        }
+                    }), TimeUnit.SECONDS.toNanos(30), System::nanoTime));
+            assertSame(producerFailure, failure.getCause());
+            assertEquals(0, interrupted.getCount(), "the running sibling must observe cancellation");
+            assertTrue(pool.isTerminated());
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void concurrentProducerTimeoutCancelsRunningWorkers() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch entered = new CountDownLatch(2);
+        CountDownLatch interrupted = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicInteger clockReads = new AtomicInteger();
+        LongSupplier clock = () -> {
+            if (clockReads.getAndIncrement() == 0) {
+                return 0;
+            }
+            assertTrue(assertDoesNotThrow(() -> entered.await(5, TimeUnit.SECONDS)));
+            return 30;
+        };
+        Callable<String> blocked = () -> {
+            entered.countDown();
+            try {
+                release.await();
+                return "unexpected completion";
+            } catch (InterruptedException cancellation) {
+                interrupted.countDown();
+                throw cancellation;
+            }
+        };
+        try {
+            assertThrows(TimeoutException.class,
+                    () -> runConcurrently(pool, List.of(blocked, blocked), 30, clock));
+            assertEquals(0, entered.getCount());
+            assertEquals(0, interrupted.getCount(), "both running workers must observe cancellation");
+            assertTrue(pool.isTerminated());
+        } finally {
+            release.countDown();
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void concurrentProducersShareOneDeadline() throws Exception {
+        ExecutorService pool = mock(ExecutorService.class);
+        AtomicLong clock = new AtomicLong();
+        CompletableFuture<String> first = new CompletableFuture<>() {
+            @Override
+            public String get(long timeout, TimeUnit unit) {
+                assertEquals(30, unit.toNanos(timeout));
+                clock.set(20);
+                return "first";
+            }
+        };
+        CompletableFuture<String> second = new CompletableFuture<>() {
+            @Override
+            public String get(long timeout, TimeUnit unit) {
+                assertEquals(10, unit.toNanos(timeout), "later producers receive only the remaining budget");
+                return "second";
+            }
+        };
+        doReturn(first, second).when(pool).submit(ArgumentMatchers.<Callable<String>>any());
+        when(pool.awaitTermination(5, TimeUnit.SECONDS)).thenReturn(true);
+        assertEquals(List.of("first", "second"), runConcurrently(pool,
+                List.of(() -> "unused", () -> "unused"), 30, clock::get));
+    }
+
+    @Test
+    void successfulConcurrentProducersTerminateWorkers() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            assertEquals(List.of("completed", "completed"), runConcurrently(pool,
+                    List.of(() -> "completed", () -> "completed"), TimeUnit.SECONDS.toNanos(30), System::nanoTime));
+            assertTrue(pool.isTerminated());
+        } finally {
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     private <T> List<T> runConcurrently(int threads, Callable<T> body) throws Exception {
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        return runConcurrently(Executors.newFixedThreadPool(threads), Collections.nCopies(threads, body),
+                TimeUnit.SECONDS.toNanos(30), System::nanoTime);
+    }
+
+    private static <T> List<T> runConcurrently(ExecutorService pool, List<Callable<T>> bodies,
+                                              long timeoutNanos, LongSupplier clock) throws Exception {
+        long deadline = clock.getAsLong() + timeoutNanos;
         CountDownLatch start = new CountDownLatch(1);
         List<Future<T>> futures = new ArrayList<>();
-        for (int i = 0; i < threads; i++) {
-            futures.add(pool.submit(() -> {
-                start.await();
-                return body.call();
-            }));
+        Throwable primaryFailure = null;
+        try {
+            for (Callable<T> body : bodies) {
+                futures.add(pool.submit(() -> {
+                    start.await();
+                    return body.call();
+                }));
+            }
+            start.countDown();
+            List<T> results = new ArrayList<>();
+            for (Future<T> future : futures) {
+                results.add(future.get(Math.max(0, deadline - clock.getAsLong()), TimeUnit.NANOSECONDS));
+            }
+            return results;
+        } catch (Exception | Error failure) {
+            primaryFailure = failure;
+            throw failure;
+        } finally {
+            for (Future<T> future : futures) {
+                future.cancel(true);
+            }
+            pool.shutdownNow();
+            try {
+                assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS),
+                        "concurrent image workers did not terminate");
+            } catch (Exception | Error cleanupFailure) {
+                if (cleanupFailure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                if (primaryFailure != null) {
+                    primaryFailure.addSuppressed(cleanupFailure);
+                } else {
+                    throw cleanupFailure;
+                }
+            } finally {
+                if (primaryFailure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+            }
         }
-        start.countDown();
-        List<T> results = new ArrayList<>();
-        for (Future<T> future : futures) {
-            results.add(future.get(30, TimeUnit.SECONDS));
-        }
-        pool.shutdown();
-        return results;
     }
 
     /**
