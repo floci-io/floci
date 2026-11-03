@@ -32,6 +32,7 @@ OUTPUT = REPO_ROOT / "src/test/resources/aws/rest-routes.json"
 
 # botocore model -> the credential scope Floci authorizes its requests under.
 MODELS: dict[str, str] = {
+    "accessanalyzer": "access-analyzer",
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
     "dsql": "dsql",

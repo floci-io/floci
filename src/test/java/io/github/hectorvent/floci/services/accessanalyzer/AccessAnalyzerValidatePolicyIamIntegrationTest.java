@@ -17,14 +17,19 @@ import software.amazon.awssdk.services.accessanalyzer.model.AccessDeniedExceptio
 import software.amazon.awssdk.services.accessanalyzer.model.PolicyType;
 
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.List;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -42,7 +47,10 @@ class AccessAnalyzerValidatePolicyIamIntegrationTest {
         String user = "validate-policy-" + UUID.randomUUID().toString().substring(0, 8);
         EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
                 cleanup, endpoint.getPort(), auth(ACCOUNT, "iam"), user);
-        for (String path : List.of("/policy/validation", "/%70olicy/validation", "/policy;ignored=yes/validation")) {
+        for (String path : List.of("/policy/validation", "/%70olicy/validation", "/policy;ignored=yes/validation",
+                "/policy/%76alidation", "/policy/validation;ignored=yes",
+                "/%70olicy;ignored=yes/%76alidation;ignored=yes/",
+                "/%70%6f%6c%69%63%79/%76%61%6c%69%64%61%74%69%6f%6e")) {
             given().urlEncodingEnabled(false).contentType("application/json")
                     .header("Authorization", auth(ACCOUNT, "access-analyzer"))
                     .body("{\"policyDocument\":\"{}\",\"policyType\":\"IDENTITY_POLICY\"}")
@@ -54,6 +62,41 @@ class AccessAnalyzerValidatePolicyIamIntegrationTest {
                     .body("{\"policyDocument\":\"{}\",\"policyType\":\"IDENTITY_POLICY\"}")
                     .post(path).then().statusCode(403).body("__type", equalTo("AccessDeniedException"));
         }
+    }
+
+    @Test
+    void anyRoutableReservedOrDotSegmentAliasStillChecksPermission() throws Exception {
+        String user = "validate-policy-" + UUID.randomUUID().toString().substring(0, 8);
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                cleanup, endpoint.getPort(), auth(ACCOUNT, "iam"), user);
+        try (HttpClient client = HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build()) {
+            for (String path : List.of("/policy%2Fvalidation", "/policy%3Bignored=yes/validation",
+                    "/policy/validation%3Bignored=yes", "/%2570olicy/validation", "/policy/./validation",
+                    "/x/../policy/validation", "/policy/%2e/validation", "//policy/validation",
+                    "/;x/policy/validation", "/policy//validation", "/policy/%2e%2e/policy/validation",
+                    "/policy%2Fvalidation;ignored=yes", "/policy%2Fvalidation/;x")) {
+                HttpResponse<String> root = post(client, path, auth(ACCOUNT, "access-analyzer"));
+                if (root.statusCode() == 200) {
+                    assertTrue(root.body().contains("\"findings\""), path);
+                    assertEquals(403, post(client, path, auth(credentials.accessKeyId(), "access-analyzer"))
+                            .statusCode(), path);
+                } else {
+                    assertTrue(root.statusCode() == 400 || root.statusCode() == 404,
+                            () -> path + " returned " + root.statusCode() + ": " + root.body());
+                }
+            }
+        }
+    }
+
+    private static HttpResponse<String> post(HttpClient client, String path, String authorization) throws Exception {
+        URI uri = URI.create(endpoint.getScheme() + "://" + endpoint.getRawAuthority() + path);
+        assertEquals(path, uri.getRawPath());
+        HttpRequest request = HttpRequest.newBuilder(uri).header("Content-Type", "application/json")
+                .header("Authorization", authorization)
+                .header("X-Amz-Target", "AccessAnalyzer.ListAnalyzers")
+                .POST(HttpRequest.BodyPublishers.ofString("{\"policyDocument\":\"{}\",\"policyType\":\"IDENTITY_POLICY\"}"))
+                .build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     @Test

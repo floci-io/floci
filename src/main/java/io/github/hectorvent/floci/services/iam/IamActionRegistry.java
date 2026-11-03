@@ -5,11 +5,11 @@ import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.ProtocolClaim;
 import io.github.hectorvent.floci.core.common.WireProtocol;
-import io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser;
 import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
+import io.vertx.core.http.impl.HttpUtils;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ResourceInfo;
@@ -17,6 +17,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
+import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 
 import java.util.List;
 import java.util.Map;
@@ -78,6 +80,10 @@ public class IamActionRegistry {
      * type, so IAM checks them against the wildcard rather than a bucket.
      */
     private static final List<ActionRule> RULES = List.of(
+        // JAX-RS ignores raw matrix suffixes on literal route segments.
+        rule("access-analyzer", "POST", "^/policy(?:;[^/]*)?/validation(?:;[^/]*)?$",
+                "access-analyzer:ValidatePolicy"),
+
         // ── S3 Control ───────────────────────────────────────────────────────────
         s3ControlRule("GET",    "^/v20180820/tags/.+",        "s3:ListTagsForResource"),
         s3ControlRule("POST",   "^/v20180820/tags/.+",        "s3:TagResource"),
@@ -641,14 +647,8 @@ public class IamActionRegistry {
         return IamAuthorizedActions.actionFor(credentialScope, operationName);
     }
 
-    /** The serving method identifies these actions even when path encoding or matrix parameters vary. */
+    /** The serving method identifies the Route 53 delegation actions. */
     public String resolveMatchedRoute(String credentialScope, ResourceInfo resourceInfo) {
-        if ("access-analyzer".equals(credentialScope) && resourceInfo != null
-                && AccessAnalyzerController.class.equals(resourceInfo.getResourceClass())
-                && resourceInfo.getResourceMethod() != null
-                && "validatePolicy".equals(resourceInfo.getResourceMethod().getName())) {
-            return "access-analyzer:ValidatePolicy";
-        }
         if ("route53".equals(credentialScope) && resourceInfo != null
                 && Route53Controller.class.equals(resourceInfo.getResourceClass())
                 && resourceInfo.getResourceMethod() != null) {
@@ -661,10 +661,9 @@ public class IamActionRegistry {
      * The action of a REST request, from its method and path alone. A REST request is the operation
      * whose route it reached, so neither an {@code X-Amz-Target} header nor a Query {@code Action}
      * field may name another one: a caller could attach either to have the call checked as an
-     * action they hold. The path is matched as sent, still percent-encoded, which is the form the
-     * router matched: decoded, an encoded {@code /} inside a parameter splits it into two segments,
-     * so the route's rule would not match and the call would pass as an unknown action. It is read
-     * from the request URI because RESTEasy Reactive does not serve {@code UriInfo.getPath(false)}.
+     * action they hold. The framework's matching path preserves the same encoding and matrix-parameter
+     * handling the serving route used. Fully decoding the URI separately could turn an encoded
+     * {@code /} inside a parameter into another segment and miss the route's rule.
      *
      * <p>Returns {@code null} when no rule matches (caller treats this as ALLOW).
      */
@@ -672,7 +671,7 @@ public class IamActionRegistry {
         String method = ctx.getMethod().toUpperCase();
         // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
         // bucket's one trailing slash, so an S3 path is matched as sent.
-        String path = "s3".equals(credentialScope) ? rawPath(ctx.getUriInfo()) : routedPath(ctx.getUriInfo());
+        String path = "s3".equals(credentialScope) ? rawPath(ctx.getUriInfo()) : routedPath(ctx);
 
         if ("s3".equals(credentialScope)) {
             // An S3 Control route is matched before the query overrides below, which would read the
@@ -718,12 +717,27 @@ public class IamActionRegistry {
     }
 
     /**
+     * The path RESTEasy matched, including its matrix-parameter handling. Synthetic contexts use
+     * Vert.x's normalization, which decodes unreserved characters and resolves dot segments without
+     * splitting encoded slashes. S3 keeps its raw key spelling instead.
+     */
+    private static String routedPath(ContainerRequestContext ctx) {
+        String path = ctx instanceof ResteasyReactiveContainerRequestContext reactive
+                && reactive.getServerRequestContext() instanceof ResteasyReactiveRequestContext server
+                ? server.getPathWithoutPrefix() : HttpUtils.normalizePath(rawPath(ctx.getUriInfo()));
+        return withoutTrailingSlash(path);
+    }
+
+    /**
      * {@link #rawPath} without a trailing slash: the router matches {@code /clusters/} as {@code /clusters},
      * so a rule ending at the route's last segment has to match it too, or the request would pass as an
      * unknown action.
      */
     static String routedPath(UriInfo uriInfo) {
-        String path = rawPath(uriInfo);
+        return withoutTrailingSlash(rawPath(uriInfo));
+    }
+
+    private static String withoutTrailingSlash(String path) {
         while (path.length() > 1 && path.endsWith("/")) {
             path = path.substring(0, path.length() - 1);
         }

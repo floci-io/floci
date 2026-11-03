@@ -42,6 +42,25 @@ class IamActionRegistryTest {
     private final IamActionRegistry registry = new IamActionRegistry();
 
     @ParameterizedTest
+    @CsvSource({"/policy/validation", "/%70olicy/validation", "/policy/%76alidation",
+            "/policy;ignored=yes/validation", "/policy/validation;ignored=yes",
+            "/%70olicy;ignored=yes/%76alidation;ignored=yes/", "/policy/%2e/validation",
+            "/x/%2e%2e/policy/validation", "//policy//validation"})
+    void validatePolicyResolvesThroughTheRouteTable(String path) {
+        ContainerRequestContext ctx = mockCtx("POST", path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("access-analyzer:ValidatePolicy", registry.resolveRoute("access-analyzer", ctx));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"/policy%2Fvalidation", "/policy%253Bignored/validation", "/policy/validation/extra"})
+    void policyRouteDoesNotTurnEncodedDelimitersIntoStructure(String path) {
+        ContainerRequestContext ctx = mockCtx("POST", path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertNull(registry.resolveRoute("access-analyzer", ctx));
+    }
+
+    @ParameterizedTest
     @CsvSource({"createReusableDelegationSet,CreateReusableDelegationSet",
             "getReusableDelegationSet,GetReusableDelegationSet",
             "listReusableDelegationSets,ListReusableDelegationSets",
