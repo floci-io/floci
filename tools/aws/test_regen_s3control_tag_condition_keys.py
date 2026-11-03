@@ -8,11 +8,11 @@ from regen_s3control_tag_condition_keys import OUTPUT, action_keys, request_memb
 
 
 def test_action_and_resource_keys_are_combined_and_filtered():
-    reference = {"Name": "s3", "Resources": [{"Name": "job", "ConditionKeys": ["aws:RequestTag/${TagKey}", "s3:JobSuspendedCause"]}],
+    reference = {"Name": "s3", "Resources": [{"Name": "job", "ConditionKeys": ["aws:RequestTag/${TagKey}", "s3:JobSuspendedCause", "s3:ResourceAccount"]}],
                  "Actions": [{"Name": "TagResource", "ActionConditionKeys": ["aws:TagKeys", "s3:authType"]},
                              {"Name": "PutJobTagging", "Resources": [{"Name": "job"}]},
                              {"Name": "ListAccessPoints", "ActionConditionKeys": ["s3:authType"]}]}
-    assert action_keys(reference) == {"s3:PutJobTagging": ["aws:RequestTag/${TagKey}"],
+    assert action_keys(reference) == {"s3:PutJobTagging": ["aws:RequestTag/${TagKey}", "s3:ResourceAccount"],
                                       "s3:TagResource": ["aws:TagKeys"]}
 
 
@@ -42,7 +42,7 @@ def test_body_tags_feed_both_keys_and_query_tag_keys_feed_tag_keys():
 def test_the_vendored_table_reads_tag_resource_and_untag_resource():
     document = json.loads(OUTPUT.read_text())
     assert validate(document) == []
-    assert document["actions"]["s3:TagResource"] == ["aws:RequestTag/${TagKey}", "aws:TagKeys"]
+    assert document["actions"]["s3:TagResource"] == ["aws:RequestTag/${TagKey}", "aws:TagKeys", "s3:ResourceAccount"]
     assert "aws:TagKeys" in document["actions"]["s3:UntagResource"]
     assert document["members"]["s3:TagResource"]["aws:RequestTag/${TagKey}"] == [
         {"member": "Tags[Tag]", "key": "Key", "value": "Value"}]
@@ -85,3 +85,13 @@ def run_aggregate_gate(tmp_path, changed, fail):
         ["make", "--no-print-directory", "iam-data-verify", "CHANGED=" + changed,
          "MAKE=" + str(recursive_make)],
         cwd=OUTPUT.parents[4], capture_output=True, text=True, check=False)
+
+
+def test_resource_account_only_action_and_resource_coverage():
+    reference = {"Name": "s3", "Resources": [
+        {"Name": "object", "ConditionKeys": ["s3:ResourceAccount"]}], "Actions": [
+        {"Name": "GetObject", "Resources": [{"Name": "object"}]},
+        {"Name": "ListBucket", "ActionConditionKeys": ["s3:ResourceAccount"]},
+        {"Name": "PutAccessPointPublicAccessBlock"}]}
+    assert action_keys(reference) == {
+        "s3:GetObject": ["s3:ResourceAccount"], "s3:ListBucket": ["s3:ResourceAccount"]}
