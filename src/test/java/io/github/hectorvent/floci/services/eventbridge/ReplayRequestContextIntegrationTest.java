@@ -59,6 +59,7 @@ class ReplayRequestContextIntegrationTest {
                 requestContext.setRegion("us-west-2");
                 dispatcher.dispatch(replay, List.of(event), events -> {
                     try {
+                        assertEquals(account, requestContext.getAccountId());
                         RequestScopes.runAs(account, () -> {
                             entered.countDown();
                             try {
