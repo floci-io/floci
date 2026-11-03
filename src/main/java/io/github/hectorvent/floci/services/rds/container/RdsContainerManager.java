@@ -1293,11 +1293,14 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 set -e
                 USER="$1"
 
-                # Terminate target connections (including pg_cron workers) when dropping databases
+                # Drop every database but postgres, template0 and template1, including template
+                # databases an image creates at startup (PostGIS's template_postgis), which the dump
+                # creates again. Terminate target connections (including pg_cron workers).
                 psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -tAc \\
-                  "SELECT datname FROM pg_database WHERE datistemplate = false AND datname <> 'postgres'" \\
+                  "SELECT datname FROM pg_database WHERE datname NOT IN ('postgres', 'template0', 'template1')" \\
                   | while read -r db; do
                       [ -z "$db" ] && continue
+                      psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "ALTER DATABASE \\"$db\\" IS_TEMPLATE false"
                       psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -c "DROP DATABASE IF EXISTS \\"$db\\" WITH (FORCE)"
                     done
 
