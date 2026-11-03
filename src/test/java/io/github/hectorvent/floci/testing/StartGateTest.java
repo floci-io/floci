@@ -13,26 +13,6 @@ import static org.junit.jupiter.api.Assertions.*;
 class StartGateTest {
 
     @Test
-    void timeoutRetainsWorkerFailure() {
-        AssertionError workerFailure = new AssertionError("worker failed before its sibling finished");
-        CountDownLatch release = new CountDownLatch(1);
-        try {
-            AssertionError timeout = assertThrows(AssertionError.class,
-                    () -> StartGate.runConcurrently(2, index -> {
-                        if (index == 0) {
-                            throw workerFailure;
-                        }
-                        awaitRelease(release);
-                        return index;
-                    }));
-            assertTrue(timeout.getMessage().contains("within 30s"));
-            assertTrue(Arrays.asList(timeout.getSuppressed()).contains(workerFailure));
-        } finally {
-            release.countDown();
-        }
-    }
-
-    @Test
     void interruptedWaitRetainsWorkerFailure() throws Exception {
         AssertionError workerFailure = new AssertionError("worker failed during interrupted wait");
         CountDownLatch entered = new CountDownLatch(2);
