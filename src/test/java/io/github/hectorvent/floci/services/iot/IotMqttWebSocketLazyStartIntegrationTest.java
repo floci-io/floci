@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.iot;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -11,6 +10,7 @@ import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -18,7 +18,6 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -33,10 +32,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * broker, concurrent first ones all get a session, and an upgrade after a stop starts it again.
  */
 @QuarkusTest
-@TestProfile(IotMqttWebSocketLazyStartIntegrationTest.Profile.class)
+@TestProfile(LazyMqttTestProfile.class)
 class IotMqttWebSocketLazyStartIntegrationTest {
 
-    private static final int PORT = 18838;
+    private static final int PORT = LazyMqttTestProfile.PORT;
 
     @ConfigProperty(name = "quarkus.http.test-port", defaultValue = "0")
     int testHttpPort;
@@ -45,6 +44,7 @@ class IotMqttWebSocketLazyStartIntegrationTest {
     IotMqttBrokerService broker;
 
     @BeforeEach
+    @AfterEach
     void stopBroker() throws InterruptedException {
         broker.stop();
         awaitPortClosed();
@@ -165,14 +165,4 @@ class IotMqttWebSocketLazyStartIntegrationTest {
         }, "the broker port is still accepting after stop()");
     }
 
-    public static final class Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.iot.mqtt.enabled", "true",
-                    "floci.services.iot.mqtt.auto-start", "false",
-                    "floci.services.iot.mqtt.host", "127.0.0.1",
-                    "floci.services.iot.mqtt.port", Integer.toString(PORT));
-        }
-    }
 }
