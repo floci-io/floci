@@ -100,6 +100,46 @@ const unsupported = (name) => () => {
     'FlociUnsupported');
 };
 
+const joinFilterGroups = (left, right) => left.flatMap((base) =>
+  right.map((branch) => [...base, ...branch]));
+
+const expandSubscriptionFilter = (input, ignored) => {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return [];
+  let groups = [[]];
+  for (const [field, conditions] of Object.entries(input)) {
+    let alternatives = [];
+    if (field === 'and' && Array.isArray(conditions)) {
+      let combined = [[]];
+      for (const condition of conditions) {
+        const nested = expandSubscriptionFilter(condition, ignored);
+        if (nested.length) combined = joinFilterGroups(combined, nested);
+      }
+      alternatives = combined.filter((filters) => filters.length);
+    } else if (field === 'or' && Array.isArray(conditions)) {
+      alternatives = conditions.flatMap((condition) => expandSubscriptionFilter(condition, ignored));
+    } else if (!ignored.has(field) && conditions !== null
+      && typeof conditions === 'object' && !Array.isArray(conditions)) {
+      alternatives = Object.entries(conditions).map(([operator, value]) =>
+        [{ fieldName: field, operator, value }]);
+    }
+    if (alternatives.length) groups = joinFilterGroups(groups, alternatives);
+  }
+  return groups.filter((filters) => filters.length);
+};
+
+const toSubscriptionFilter = (input, ignoredFields = [], rules = {}) => {
+  if (input === null) return null;
+  const base = expandSubscriptionFilter(input, new Set(ignoredFields ?? []));
+  const strict = rules !== null && typeof rules === 'object' && !Array.isArray(rules)
+    ? Object.entries(rules).flatMap(([fieldName, conditions]) =>
+      conditions !== null && typeof conditions === 'object' && !Array.isArray(conditions)
+        ? Object.entries(conditions).map(([operator, value]) => [{ fieldName, operator, value }])
+        : [])
+    : [];
+  const groups = strict.length ? joinFilterGroups(base.length ? base : [[]], strict) : base;
+  return { filterGroup: groups.map((filters) => ({ filters })) };
+};
+
 export const util = {
   error(message, type, data, errorInfo) { throw new TemplateError(message, type, data, errorInfo); },
   appendError(message, type, data, errorInfo) {
@@ -179,7 +219,8 @@ export const util = {
   },
   transform: {
     toDynamoDBFilterExpression: unsupported('transform.toDynamoDBFilterExpression'),
-    toElasticsearchQueryDSL: unsupported('transform.toElasticsearchQueryDSL')
+    toElasticsearchQueryDSL: unsupported('transform.toElasticsearchQueryDSL'),
+    toSubscriptionFilter
   },
   str: {
     normalize: (v, form) => String(v).normalize(

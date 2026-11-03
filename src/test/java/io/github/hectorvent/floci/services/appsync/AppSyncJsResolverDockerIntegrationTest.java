@@ -77,6 +77,7 @@ class AppSyncJsResolverDockerIntegrationTest {
               taggedRawInvalidEscapeHole: String
               untaggedInvalidEscape: String
               normalizeString: String
+              subscriptionFilter: String
             }
             """;
 
@@ -384,6 +385,18 @@ class AppSyncJsResolverDockerIntegrationTest {
         }
         """;
 
+    private static final String SUBSCRIPTION_FILTER_RESOLVER = """
+        import { util } from "@aws-appsync/utils";
+        export function request(ctx) {
+          return { payload: null };
+        }
+        export function response(ctx) {
+          return JSON.stringify(util.transform.toSubscriptionFilter(
+            { score: { lte: 50, gte: 20 }, owner: { eq: "ignored" } },
+            ["owner"], { owner: { eq: "A" } }));
+        }
+        """;
+
     @BeforeAll
     static void configure() {
         SidecarContainersProfile.requireDockerAndImage("floci.services.appsync.graphql-image");
@@ -439,6 +452,7 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "untaggedInvalidEscape", "local",
                 UNTAGGED_INVALID_ESCAPE_RESOLVER);
         createUnitResolver(apiId, "Query", "normalizeString", "local", NORMALIZE_STRING_RESOLVER);
+        createUnitResolver(apiId, "Query", "subscriptionFilter", "local", SUBSCRIPTION_FILTER_RESOLVER);
     }
 
     @Test
@@ -515,6 +529,18 @@ class AppSyncJsResolverDockerIntegrationTest {
                 "{\"defaultForm\":\"é\",\"nfc\":\"é\",\"nfd\":\"é\","
                     + "\"nfkc\":\"é\",\"nfkd\":\"é\",\"lowercaseNfkd\":\"é\"}"
             ));
+    }
+
+    @Test
+    void subscriptionFilterHelperExpandsBranchesThroughTheJsResolver() {
+        query("{ subscriptionFilter }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("{\"filterGroup\":[{\"filters\":["
+                    + "{\"fieldName\":\"score\",\"operator\":\"lte\",\"value\":50},"
+                    + "{\"fieldName\":\"owner\",\"operator\":\"eq\",\"value\":\"A\"}]},"
+                    + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"gte\",\"value\":20},"
+                    + "{\"fieldName\":\"owner\",\"operator\":\"eq\",\"value\":\"A\"}]}]}"));
     }
 
     @Test
