@@ -19,6 +19,8 @@ import io.github.hectorvent.floci.services.opensearch.model.DomainEndpointOption
 import io.github.hectorvent.floci.services.opensearch.model.EbsOptions;
 import io.github.hectorvent.floci.services.opensearch.model.EncryptionAtRestOptions;
 import io.github.hectorvent.floci.services.opensearch.model.NodeToNodeEncryptionOptions;
+import io.github.hectorvent.floci.services.opensearch.model.OffPeakWindowOptions;
+import io.github.hectorvent.floci.services.opensearch.model.SoftwareUpdateOptions;
 import io.github.hectorvent.floci.services.opensearch.model.VolumeOwnership;
 import io.github.hectorvent.floci.services.opensearch.model.VpcOptions;
 import jakarta.annotation.PostConstruct;
@@ -30,6 +32,7 @@ import org.jboss.logging.Logger;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -110,10 +113,30 @@ public class OpenSearchService implements ResourceProvider {
             AdvancedSecurityOptions advancedSecurityOptions,
             EncryptionAtRestOptions encryptionAtRestOptions,
             NodeToNodeEncryptionOptions nodeToNodeEncryptionOptions,
-            DomainEndpointOptions domainEndpointOptions) {
+            DomainEndpointOptions domainEndpointOptions,
+            Map<String, String> advancedOptions,
+            String ipAddressType,
+            OffPeakWindowOptions offPeakWindowOptions,
+            SoftwareUpdateOptions softwareUpdateOptions) {
 
         public static final DomainOptions EMPTY = new DomainOptions(null, null, null, null, null);
+
+        public DomainOptions(VpcOptions vpcOptions, AdvancedSecurityOptions advancedSecurityOptions,
+                             EncryptionAtRestOptions encryptionAtRestOptions,
+                             NodeToNodeEncryptionOptions nodeToNodeEncryptionOptions,
+                             DomainEndpointOptions domainEndpointOptions) {
+            this(vpcOptions, advancedSecurityOptions, encryptionAtRestOptions, nodeToNodeEncryptionOptions,
+                    domainEndpointOptions, null, null, null, null);
+        }
     }
+
+    /** AWS's address type for a domain whose request names none. */
+    static final String DEFAULT_IP_ADDRESS_TYPE = "ipv4";
+    /**
+     * The start AWS gives an off-peak window the request leaves unset: 10:00 P.M., which AWS
+     * reads as the Region's local time. Floci keeps no time zone per Region and reports it in UTC.
+     */
+    static final long DEFAULT_OFF_PEAK_START_HOURS = 22;
 
     public Domain createDomain(String domainName, String engineVersion, ClusterConfig clusterConfig,
                                 EbsOptions ebsOptions, Map<String, String> tags, String region) {
@@ -157,6 +180,7 @@ public class OpenSearchService implements ResourceProvider {
             domain.setTags(tags);
         }
         applyDomainOptions(domain, options);
+        applyCreateDefaults(domain);
 
         String creatingKey = accountId + "/" + storageKey(region, domainName);
         if (!creating.add(creatingKey)) {
@@ -284,6 +308,15 @@ public class OpenSearchService implements ResourceProvider {
         if (supplied.isZoneAwarenessEnabled() != null) {
             existing.setZoneAwarenessEnabled(supplied.isZoneAwarenessEnabled());
         }
+        if (supplied.getAvailabilityZoneCount() != null) {
+            existing.setAvailabilityZoneCount(supplied.getAvailabilityZoneCount());
+        }
+        if (supplied.getDedicatedMasterType() != null) {
+            existing.setDedicatedMasterType(supplied.getDedicatedMasterType());
+        }
+        if (supplied.getDedicatedMasterCount() != null) {
+            existing.setDedicatedMasterCount(supplied.getDedicatedMasterCount());
+        }
     }
 
     /** Copies only the fields the request supplied (non-null) onto {@code existing}. */
@@ -299,6 +332,12 @@ public class OpenSearchService implements ResourceProvider {
         }
         if (supplied.getVolumeSize() != null && supplied.getVolumeSize() > 0) {
             existing.setVolumeSize(supplied.getVolumeSize());
+        }
+        if (supplied.getIops() != null) {
+            existing.setIops(supplied.getIops());
+        }
+        if (supplied.getThroughput() != null) {
+            existing.setThroughput(supplied.getThroughput());
         }
     }
 
@@ -483,6 +522,55 @@ public class OpenSearchService implements ResourceProvider {
         }
         if (options.domainEndpointOptions() != null) {
             domain.setDomainEndpointOptions(options.domainEndpointOptions());
+        }
+        if (options.advancedOptions() != null) {
+            domain.setAdvancedOptions(new HashMap<>(options.advancedOptions()));
+        }
+        if (options.ipAddressType() != null) {
+            domain.setIpAddressType(options.ipAddressType());
+        }
+        if (options.offPeakWindowOptions() != null) {
+            OffPeakWindowOptions supplied = options.offPeakWindowOptions();
+            OffPeakWindowOptions current = domain.getOffPeakWindowOptions() != null
+                    ? domain.getOffPeakWindowOptions() : new OffPeakWindowOptions();
+            if (supplied.getEnabled() != null) {
+                current.setEnabled(supplied.getEnabled());
+            }
+            if (supplied.getStartHours() != null) {
+                current.setStartHours(supplied.getStartHours());
+                current.setStartMinutes(supplied.getStartMinutes() != null ? supplied.getStartMinutes() : 0L);
+            }
+            domain.setOffPeakWindowOptions(current);
+        }
+        if (options.softwareUpdateOptions() != null
+                && options.softwareUpdateOptions().getAutoSoftwareUpdateEnabled() != null) {
+            domain.setSoftwareUpdateOptions(options.softwareUpdateOptions());
+        }
+    }
+
+    /**
+     * The settings a new domain reports when its request leaves them out, as AWS fills them: an
+     * {@code ipv4} address type, an enabled off-peak window starting at 10:00 P.M., and automatic
+     * software updates off.
+     */
+    private static void applyCreateDefaults(Domain domain) {
+        if (domain.getIpAddressType() == null) {
+            domain.setIpAddressType(DEFAULT_IP_ADDRESS_TYPE);
+        }
+        OffPeakWindowOptions offPeak = domain.getOffPeakWindowOptions();
+        if (offPeak == null) {
+            offPeak = new OffPeakWindowOptions(true, null, null);
+            domain.setOffPeakWindowOptions(offPeak);
+        }
+        if (offPeak.getEnabled() == null) {
+            offPeak.setEnabled(true);
+        }
+        if (offPeak.getStartHours() == null) {
+            offPeak.setStartHours(DEFAULT_OFF_PEAK_START_HOURS);
+            offPeak.setStartMinutes(0L);
+        }
+        if (domain.getSoftwareUpdateOptions() == null) {
+            domain.setSoftwareUpdateOptions(new SoftwareUpdateOptions(false));
         }
     }
 
