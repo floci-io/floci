@@ -41,7 +41,7 @@ public final class SocketDeadline {
         });
         // Interrupting a virtual thread closes its blocking java.net sockets.
         try {
-            Thread.ofVirtual().name("health-probe").start(() -> {
+            Thread.ofVirtual().name("socket-deadline").start(() -> {
                 try {
                     result.run();
                 } finally {
@@ -55,10 +55,10 @@ public final class SocketDeadline {
         try {
             return result.get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
         } catch (TimeoutException timeout) {
-            throw new SocketTimeoutException("Health check exceeded " + timeoutSeconds + " seconds");
+            throw new SocketTimeoutException("Socket operation exceeded " + timeoutSeconds + " seconds");
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
-            InterruptedIOException failure = new InterruptedIOException("Health check interrupted");
+            InterruptedIOException failure = new InterruptedIOException("Socket operation interrupted");
             failure.initCause(interrupted);
             throw failure;
         } catch (ExecutionException failed) {
@@ -72,7 +72,7 @@ public final class SocketDeadline {
             if (cause instanceof Error error) {
                 throw error;
             }
-            throw new IOException("Health check failed", cause);
+            throw new IOException("Socket operation failed", cause);
         } finally {
             result.cancel(true);
         }
