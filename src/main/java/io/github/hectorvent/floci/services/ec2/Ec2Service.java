@@ -173,7 +173,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // An EC2 id is a known resource prefix, a hyphen and either 8 or more hex digits (8, 17, or 33
     // for an IPAM pool allocation) or a UUID (EC2 Fleet and Spot Fleet requests). Longer prefixes
     // come first so that eni-attach- is read as one type, not as eni-.
-    private static final String TAGGABLE_RESOURCE_TYPES = "(subnet-cidr-assoc|vpc-cidr-assoc"
+    private static final String TAGGABLE_RESOURCE_TYPES = "(cvpn-endpoint|subnet-cidr-assoc|vpc-cidr-assoc"
             + "|ipam-pool-alloc|ipam-scope|ipam-pool|ipam"
             + "|traf-mir-fil|traf-mir-tar|iip-assoc|eni-attach|tgw-attach|tgw-rtb|vpce-svc|aclassoc|eipassoc"
             + "|eipalloc|rtbassoc|subnet|fleet|cagw|dopt|eigw|snap|vpce|acl|ami|cgw|eni|igw|key|nat|pcx|rtb|scr"

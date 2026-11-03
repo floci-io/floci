@@ -55,12 +55,14 @@ public class Ec2QueryHandler {
     private final Ec2BlockPublicAccessService blockPublicAccessService;
     private final Ec2IpamService ipamService;
     private final RegionResolver regionResolver;
+    private final Ec2ClientVpnHandler clientVpnHandler;
 
     @Inject
     public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService,
                            Ec2EbsEncryptionService ebsEncryptionService,
                            Ec2BlockPublicAccessService blockPublicAccessService,
-                           Ec2IpamService ipamService, RegionResolver regionResolver) {
+                           Ec2IpamService ipamService, RegionResolver regionResolver,
+                           Ec2ClientVpnService clientVpnService) {
         this.service = service;
         this.config = config;
         this.flowLogService = flowLogService;
@@ -68,6 +70,16 @@ public class Ec2QueryHandler {
         this.blockPublicAccessService = blockPublicAccessService;
         this.ipamService = ipamService;
         this.regionResolver = regionResolver;
+        this.clientVpnHandler = clientVpnService == null ? null : new Ec2ClientVpnHandler(clientVpnService, service);
+    }
+
+    /** For unit tests that exercise no Client VPN operation. */
+    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService,
+                           Ec2EbsEncryptionService ebsEncryptionService,
+                           Ec2BlockPublicAccessService blockPublicAccessService,
+                           Ec2IpamService ipamService, RegionResolver regionResolver) {
+        this(service, config, flowLogService, ebsEncryptionService, blockPublicAccessService, ipamService,
+                regionResolver, null);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -129,6 +141,26 @@ public class Ec2QueryHandler {
                 case "CreateFlowLogs" -> handleCreateFlowLogs(params, region);
                 case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
                 case "DeleteFlowLogs" -> handleDeleteFlowLogs(params, region);
+                // Client VPN
+                case "CreateClientVpnEndpoint" -> clientVpnHandler.create(params, region,
+                        parseTagsForResource(params, "client-vpn-endpoint"));
+                case "DescribeClientVpnEndpoints" -> clientVpnHandler.describe(params, region);
+                case "ModifyClientVpnEndpoint" -> clientVpnHandler.modify(params, region);
+                case "DeleteClientVpnEndpoint" -> clientVpnHandler.delete(params, region);
+                case "AssociateClientVpnTargetNetwork" -> clientVpnHandler.associate(params, region);
+                case "DescribeClientVpnTargetNetworks" -> clientVpnHandler.describeTargetNetworks(params, region);
+                case "DisassociateClientVpnTargetNetwork" -> clientVpnHandler.disassociate(params, region);
+                case "ApplySecurityGroupsToClientVpnTargetNetwork" ->
+                        clientVpnHandler.applySecurityGroups(params, region);
+                case "AuthorizeClientVpnIngress" -> clientVpnHandler.authorize(params, region);
+                case "DescribeClientVpnAuthorizationRules" ->
+                        clientVpnHandler.describeAuthorizationRules(params, region);
+                case "RevokeClientVpnIngress" -> clientVpnHandler.revoke(params, region);
+                case "CreateClientVpnRoute" -> clientVpnHandler.createRoute(params, region);
+                case "DescribeClientVpnRoutes" -> clientVpnHandler.describeRoutes(params, region);
+                case "DeleteClientVpnRoute" -> clientVpnHandler.deleteRoute(params, region);
+                case "ExportClientVpnClientConfiguration" ->
+                        clientVpnHandler.exportClientConfiguration(params, region);
                 case "DescribePrefixLists" -> handleDescribePrefixLists(params, region);
                 case "CreateManagedPrefixList" -> handleCreateManagedPrefixList(params, region);
                 case "DescribeManagedPrefixLists" -> handleDescribeManagedPrefixLists(params, region);
