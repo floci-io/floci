@@ -4,13 +4,16 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.services.paymentcryptography.crypto.Ciphers;
-import io.github.hectorvent.floci.services.paymentcryptography.crypto.Hex;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
+
+import java.security.GeneralSecurityException;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,6 +21,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -133,6 +137,27 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aKeyPairCarriesItsOwnHalves() {
+        // An RSA key is made of a pair, and the halves are kept with it.
+        PaymentCryptographyKey rsa = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
+                Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE));
+        assertNotNull(rsa.getKeyPublicKeyBase64());
+        assertNotNull(rsa.getKeyPrivateKeyBase64());
+        assertTrue(rsa.getKeyPublicKeyBase64().length() > 256,
+                "the public half of an RSA-2048 key is a long DER encoding");
+
+        // And an EC one is made of a pair on the curve the algorithm names.
+        PaymentCryptographyKey ec = createKey("us-east-1", "ECC_NIST_P256", "ASYMMETRIC_KEY_PAIR",
+                "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT",
+                Map.of("DeriveKey", Boolean.TRUE));
+        assertNotNull(ec.getKeyPublicKeyBase64());
+        assertNotNull(ec.getKeyPrivateKeyBase64());
+        assertNotEquals(rsa.getKeyPublicKeyBase64(), ec.getKeyPublicKeyBase64(),
+                "the two pairs are different");
+    }
+
+    @Test
     void everyAsymmetricUsageTakesAKeyPair() {
         // The usages the model names for a key pair, each of which is made.
         for (String usage : List.of("TR31_D1_ASYMMETRIC_KEY_FOR_DATA_ENCRYPTION",
@@ -163,10 +188,18 @@ class PaymentCryptographyServiceTest {
 
     /** The ANSI X9.24 check value of a key's material, computed the way the standard says. */
     private static String checkValueOf(String materialHex) {
-        byte[] material = Hex.decode(materialHex);
-        byte[] zeros = new byte[8];
-        byte[] encrypted = Ciphers.tdes2Encrypt(zeros, material);
-        return Hex.encodeUpper(encrypted).substring(0, 6);
+        byte[] material = HexFormat.of().parseHex(materialHex);
+        byte[] wide = new byte[24];
+        System.arraycopy(material, 0, wide, 0, 16);
+        System.arraycopy(material, 0, wide, 16, 8);
+        try {
+            Cipher cipher = Cipher.getInstance("DESede/ECB/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(wide, "DESede"));
+            return HexFormat.of().withUpperCase().formatHex(cipher.doFinal(new byte[8]))
+                    .substring(0, 6);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("the Triple DES key could not be used", e);
+        }
     }
 
     private void assertValidation(Runnable refused, String message) {

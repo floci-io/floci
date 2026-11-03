@@ -11,7 +11,6 @@ import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.paymentcryptography.crypto.X509;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -227,10 +226,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             key.setKeyCheckValueAlgorithm(algorithm.checkValueAlgorithm());
             if (key.getKeyPublicKeyBase64() == null) {
                 KeyPair pair = algorithm.rsa
-                        ? X509
-                                .generateRsaKeyPair(algorithm.bytes * 8)
-                        : X509
-                                .generateEcKeyPair(curveOf(algorithm));
+                        ? PaymentCryptographyKeyPairs.rsa(algorithm.bytes * 8, secureRandom)
+                        : PaymentCryptographyKeyPairs.ec(algorithm, secureRandom);
                 key.setKeyPublicKeyBase64(Base64.getEncoder()
                         .encodeToString(pair.getPublic().getEncoded()));
                 if (!PUBLIC_KEY_CLASS.equals(keyClass)) {
@@ -244,19 +241,6 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setUsageStartTimestamp(now);
         keyStore.put(storageKey(region, key.getKeyId()), key);
         return key;
-    }
-
-    /**
-     * The elliptic curve an algorithm names.
-     *
-     * <p>The curve is the NIST one the cardholder-device flow uses.
-     */
-    private static String curveOf(PaymentCryptographyKeyAlgorithm algorithm) {
-        return switch (algorithm) {
-            case ECC_NIST_P384 -> "secp384r1";
-            case ECC_NIST_P521 -> "secp521r1";
-            default -> "secp256r1";
-        };
     }
 
     /** The key an identifier names, or null when there is none. */

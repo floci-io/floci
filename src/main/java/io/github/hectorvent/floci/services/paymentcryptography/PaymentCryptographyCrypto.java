@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
-import io.github.hectorvent.floci.services.paymentcryptography.crypto.Ciphers;
 
 import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
@@ -66,7 +65,7 @@ final class PaymentCryptographyCrypto {
         byte[] key = fromHex(keyHex);
         byte[] mac = algorithm.aes
                 ? cmac(key, ZERO_BLOCK)
-                : Ciphers.tdesEcbEncrypt(new byte[8], key);
+                : tdesEcbEncrypt(new byte[8], key);
         byte[] value = new byte[3];
         System.arraycopy(mac, 0, value, 0, 3);
         return toHex(value).toUpperCase(Locale.ROOT);
@@ -76,7 +75,7 @@ final class PaymentCryptographyCrypto {
     static String checkValue(byte[] key, PaymentCryptographyKeyAlgorithm algorithm) {
         byte[] mac = algorithm.aes
                 ? cmac(key, ZERO_BLOCK)
-                : Ciphers.tdesEcbEncrypt(new byte[8], key);
+                : tdesEcbEncrypt(new byte[8], key);
         byte[] value = new byte[3];
         System.arraycopy(mac, 0, value, 0, 3);
         return toHex(value).toUpperCase(Locale.ROOT);
@@ -88,6 +87,35 @@ final class PaymentCryptographyCrypto {
         byte[] value = new byte[3];
         System.arraycopy(mac, 0, value, 0, 3);
         return toHex(value).toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * The Triple DES encryption of a block under a key, in ECB mode.
+     *
+     * <p>The check value of a Triple DES key is the leftmost three bytes of the encrypted
+     * zeroes, so the block is encrypted and the first three bytes are taken.
+     *
+     * @param data the bytes to encrypt
+     * @param key the key, sixteen or twenty-four bytes
+     * @return the encrypted bytes
+     */
+    private static byte[] tdesEcbEncrypt(byte[] data, byte[] key) {
+        try {
+            byte[] key24 = key.length == 24 ? key : widenTdesKey(key);
+            Cipher cipher = Cipher.getInstance("DESede/ECB/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key24, "DESede"));
+            return cipher.doFinal(data);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("the Triple DES key could not be used", e);
+        }
+    }
+
+    /** A two-key Triple DES key widened to the three the cipher takes. */
+    private static byte[] widenTdesKey(byte[] key) {
+        byte[] wide = new byte[24];
+        System.arraycopy(key, 0, wide, 0, 16);
+        System.arraycopy(key, 0, wide, 16, 8);
+        return wide;
     }
 
     /**
