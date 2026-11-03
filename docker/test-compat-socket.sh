@@ -54,11 +54,10 @@ pid1_home() { docker exec -u 1001 "${NAME}" sh -c "tr '\0' '\n' < /proc/1/enviro
 uid_is() { [ "$(pid1_uid)" = "$1" ]; }
 home_is() { [ "$(pid1_home)" = "$1" ]; }
 reports_unreachable() { docker logs "${NAME}" 2>&1 | grep -q 'Docker is not reachable'; }
-reaches_docker() { ! reports_unreachable; }
 
 # The availability report runs on its own thread after startup and logs nothing when Docker answers.
-# This case has to log it, so it can wait for it. The other cases can only look for its absence, which
-# does not prove their own report has run: the group and uid checks on PID 1 are what prove the fix.
+# Only this case has something to wait for. A missing warning would not prove the report ran, so the
+# other cases do not look for it: the group and uid checks on PID 1 are what prove the fix.
 wait_for_unreachable_report() {
     for _ in $(seq 1 30); do
         reports_unreachable && return 0
@@ -76,17 +75,13 @@ check 'Floci reports Docker as unreachable' wait_for_unreachable_report
 
 echo '--- default'
 start
-sleep 5
 check 'PID 1 is uid 1001' uid_is 1001
 check 'PID 1 has the socket group' pid1_has_socket_group
-check 'Floci reaches Docker' reaches_docker
 check 'PID 1 HOME is /app' home_is /app
 check 'HOME is writable by uid 1001' docker exec -u 1001 "${NAME}" touch /app/.home-write-probe
 
 echo '--- FLOCI_RUN_AS_ROOT=true'
 start -e FLOCI_RUN_AS_ROOT=true
-sleep 5
 check 'PID 1 is uid 0' uid_is 0
-check 'Floci reaches Docker' reaches_docker
 
 exit "${FAIL}"
