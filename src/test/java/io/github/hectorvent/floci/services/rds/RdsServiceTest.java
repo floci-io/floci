@@ -1758,6 +1758,89 @@ class RdsServiceTest {
     }
 
     @Test
+    void failedInitialClusterMemberWriteWithoutRecordReleasesPort() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7001);
+        InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
+        RdsService service = newService(containerManager, proxyManager, instances,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        DbCluster cluster = service.createDbCluster("member-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        IllegalStateException initialFailure = new IllegalStateException("initial write failed before insert");
+        IllegalStateException tombstoneFailure = new IllegalStateException("tombstone write failed before insert");
+        doThrow(initialFailure).doThrow(tombstoneFailure).doCallRealMethod()
+                .when(instances).put(eq("us-east-1::failed-member"), any());
+
+        assertSame(initialFailure, assertThrows(IllegalStateException.class, () ->
+                service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
+                        null, null, "dbname", "db.serverless", 0, false,
+                        null, null, "member-cluster")));
+        assertTrue(List.of(initialFailure.getSuppressed()).contains(tombstoneFailure));
+        assertTrue(instances.get("us-east-1::failed-member").isEmpty());
+        assertTrue(cluster.getDbClusterMembers().isEmpty());
+
+        DbInstance retried = service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
+                null, null, "dbname", "db.serverless", 0, false,
+                null, null, "member-cluster");
+        assertEquals(7001, retried.getProxyPort());
+    }
+
+    @Test
+    void failedInitialClusterMemberWriteWithUncertainWalKeepsPort() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7001);
+        InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
+        doReturn(true).when(instances).hasUncertainWriteFailure();
+        RdsService service = newService(containerManager, proxyManager, instances,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbCluster("member-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        IllegalStateException writeFailure = new IllegalStateException("WAL outcome uncertain");
+        doThrow(writeFailure).when(instances).put(eq("us-east-1::failed-member"), any());
+
+        assertSame(writeFailure, assertThrows(IllegalStateException.class, () ->
+                service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
+                        null, null, "dbname", "db.serverless", 0, false,
+                        null, null, "member-cluster")));
+        assertTrue(instances.get("us-east-1::failed-member").isEmpty());
+        assertEquals("InsufficientDBInstanceCapacity", assertThrows(AwsException.class, () ->
+                service.createDbInstance("other-member", "aurora-postgresql", "16.3",
+                        null, null, "dbname", "db.serverless", 0, false,
+                        null, null, "member-cluster")).getErrorCode());
+    }
+
+    @Test
+    void failedInitialClusterMemberWriteWithPublishedRecordKeepsPort() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7001);
+        InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
+        RdsService service = newService(containerManager, proxyManager, instances,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbCluster("member-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        IllegalStateException initialFailure = new IllegalStateException("initial write published then failed");
+        IllegalStateException tombstoneFailure = new IllegalStateException("tombstone write failed");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw initialFailure;
+        }).doThrow(tombstoneFailure).doCallRealMethod()
+                .when(instances).put(eq("us-east-1::failed-member"), any());
+
+        assertSame(initialFailure, assertThrows(IllegalStateException.class, () ->
+                service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
+                        null, null, "dbname", "db.serverless", 0, false,
+                        null, null, "member-cluster")));
+        assertEquals(7001, service.getDbInstance("failed-member").getProxyPort());
+        assertEquals("InsufficientDBInstanceCapacity", assertThrows(AwsException.class, () ->
+                service.createDbInstance("other-member", "aurora-postgresql", "16.3",
+                        null, null, "dbname", "db.serverless", 0, false,
+                        null, null, "member-cluster")).getErrorCode());
+
+        service.deleteDbInstance("failed-member");
+        DbInstance retried = service.createDbInstance("other-member", "aurora-postgresql", "16.3",
+                null, null, "dbname", "db.serverless", 0, false,
+                null, null, "member-cluster");
+        assertEquals(7001, retried.getProxyPort());
+    }
+
+    @Test
     void failedClusterMembershipRestoreRetainsMemberForDeleteRetry(@TempDir Path tempDir) throws Exception {
         Path file = tempDir.resolve("member-cluster.json");
         TypeReference<Map<String, DbCluster>> type = new TypeReference<>() {};

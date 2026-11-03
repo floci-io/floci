@@ -123,6 +123,11 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     @Override
+    public boolean hasUncertainWriteFailure() {
+        return delegate.hasUncertainWriteFailure();
+    }
+
+    @Override
     public void delete(String key) {
         delegate.delete(prefixed(key));
     }

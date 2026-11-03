@@ -1105,6 +1105,16 @@ public class RdsService implements Resettable, ResourceProvider {
                 putInstanceForScope(accountId, region, id, instance);
             } catch (RuntimeException | Error rollbackFailure) {
                 addSuppressedUnlessSelf(failure, rollbackFailure);
+                if (!proxyStartAttempted && !memberMutationStarted
+                        && !instances.hasUncertainWriteFailure()) {
+                    try {
+                        if (!scopedKeyExists(instances, accountId, dbResourceKey(region, id))) {
+                            releaseProxyPort(proxyPort);
+                        }
+                    } catch (RuntimeException | Error verificationFailure) {
+                        addSuppressedUnlessSelf(failure, verificationFailure);
+                    }
+                }
                 return;
             }
         }
