@@ -44,7 +44,7 @@ public final class CfnRollback {
     /**
      * Holds the child stack deployment a nested-stack resource carried before the update in flight
      * re-provisioned it: the tags it ran with, its template body, and the parameter values it was
-     * given, so a failed parent update can restore the child to that state instead of only its tags.
+     * given, including descendant deployments so rollback does not reread changed S3 templates.
      * Written by {@code CloudFormationService.executeNestedStack} before it runs the child's
      * template and spent once the update commits or the rollback restores the child.
      */

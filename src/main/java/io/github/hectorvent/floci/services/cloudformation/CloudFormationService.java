@@ -1989,6 +1989,12 @@ public class CloudFormationService implements ResourceProvider {
     private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
                                  Map<String, String> tags,
                                  boolean isCreate, String region, String accountId) {
+        executeTemplate(stack, templateBody, params, tags, isCreate, region, accountId, null);
+    }
+
+    private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
+                                 Map<String, String> tags,
+                                 boolean isCreate, String region, String accountId, JsonNode rollbackDeployment) {
         Map<String, String> previousTags = stack.tagsSnapshot();
         Map<String, String> operationTags = tags == null ? previousTags : new LinkedHashMap<>(tags);
         boolean stackTagsChanged = !operationTags.equals(previousTags);
@@ -2055,7 +2061,7 @@ public class CloudFormationService implements ResourceProvider {
 
             // Process resources in order
             JsonNode resources = template.path("Resources");
-            if (!isCreate && stackTagsChanged && resources.isObject()) {
+            if (!isCreate && (stackTagsChanged || rollbackDeployment != null) && resources.isObject()) {
                 resources.fields().forEachRemaining(entry -> {
                     if ("AWS::CloudFormation::Stack".equals(entry.getValue().path("Type").asText())) {
                         changedResourceIds.add(entry.getKey());
@@ -2145,7 +2151,8 @@ public class CloudFormationService implements ResourceProvider {
                     if ("AWS::CloudFormation::Stack".equals(type)) {
                         resource = executeNestedStack(stack, logicalId,
                                 props.isMissingNode() ? null : props,
-                                engine, operationTags, region, accountId, isCreate, previousResource);
+                                engine, operationTags, region, accountId, isCreate, previousResource,
+                                rollbackDeployment);
                     } else {
                         JsonNode previousDefinition = previousResources.path(logicalId);
                         JsonNode priorProps = type.equals(previousDefinition.path("Type").asText())
@@ -3017,7 +3024,7 @@ public class CloudFormationService implements ResourceProvider {
             return true;
         }
         try {
-            executeTemplate(childStack, childTemplate, childParams, priorTags, false, region, accountId);
+            executeTemplate(childStack, childTemplate, childParams, priorTags, false, region, accountId, snapshot);
         } catch (RuntimeException e) {
             LOG.errorv("Could not roll nested stack {0} back: {1}", childStack.getStackName(), e.getMessage());
             failNestedStackRollback(resource, "restoring it failed: " + e.getMessage());
@@ -3027,6 +3034,8 @@ public class CloudFormationService implements ResourceProvider {
             failNestedStackRollback(resource, "restoring it ended with the child in " + childStack.getStatus());
             return true;
         }
+        childStack.setOriginalTemplateBody(snapshot.path("originalTemplateBody").asText(childTemplate));
+        persistStack(childStack);
         resource.getAttributes().remove(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR);
         return true;
     }
@@ -4315,7 +4324,7 @@ public class CloudFormationService implements ResourceProvider {
                                              CloudFormationTemplateEngine engine,
                                              Map<String, String> inheritedTags, String region,
                                              String accountId, boolean isCreate,
-                                             StackResource previousResource) {
+                                             StackResource previousResource, JsonNode rollbackDeployment) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType("AWS::CloudFormation::Stack");
@@ -4327,7 +4336,15 @@ public class CloudFormationService implements ResourceProvider {
             return resource;
         }
 
-        String childTemplate = fetchTemplateFromS3(templateUrl);
+        JsonNode childDeployment = rollbackDeployment == null ? null
+                : rollbackDeployment.path("nestedStacks").get(logicalId);
+        if (rollbackDeployment != null && childDeployment == null) {
+            resource.setStatus("CREATE_FAILED");
+            resource.setStatusReason("Missing rollback deployment for nested stack " + logicalId);
+            return resource;
+        }
+        String childTemplate = childDeployment == null ? fetchTemplateFromS3(templateUrl)
+                : childDeployment.path("templateBody").asText();
         String childStackName = parentStack.getStackName() + "-" + logicalId;
 
         // Resolved as a property value: Parameters may be an Fn::If choosing between whole maps,
@@ -4347,6 +4364,11 @@ public class CloudFormationService implements ResourceProvider {
                     childParams.put(e.getKey(), value.isNull() ? "" : value.asText());
                 }
             });
+        }
+        if (childDeployment != null) {
+            childParams.clear();
+            childParams.putAll(objectMapper.convertValue(childDeployment.path("parameters"),
+                    new TypeReference<Map<String, String>>() {}));
         }
         // CloudFormation creates or updates the child with these values, so the call fails as a
         // CreateStack or UpdateStack would, before the child is created or changed: a parameter
@@ -4368,6 +4390,11 @@ public class CloudFormationService implements ResourceProvider {
             childStack = resolveStack(previousResource.getPhysicalId(), region, accountId);
             childCreate = childStack == null;
         }
+        if (childCreate && childDeployment != null) {
+            resource.setStatus("CREATE_FAILED");
+            resource.setStatusReason("Nested stack " + logicalId + " is missing during rollback");
+            return resource;
+        }
         if (childCreate) {
             childStack = newStack(childStackName, newStackId(childStackName, region, accountId), region, accountId);
             childStack.setStatus("CREATE_IN_PROGRESS");
@@ -4376,18 +4403,20 @@ public class CloudFormationService implements ResourceProvider {
 
         Map<String, String> childTags = new LinkedHashMap<>(inheritedTags);
         childTags.putAll(resolveNestedStackTags(props, engine));
+        if (childDeployment != null) {
+            childTags = objectMapper.convertValue(childDeployment.path("tags"),
+                    new TypeReference<Map<String, String>>() {});
+        }
         if (!childCreate) {
-            // The child deployment this update replaces, so a later parent failure can restore it:
-            // its tags, but also the template body and parameter values it was running, which this
-            // call overwrites before the parent's remaining resources provision.
-            ObjectNode priorState = objectMapper.createObjectNode();
-            priorState.set("tags", objectMapper.valueToTree(childStack.tagsSnapshot()));
-            priorState.put("templateBody", childStack.getTemplateBody());
-            priorState.set("parameters", objectMapper.valueToTree(childStack.parametersSnapshot()));
-            resource.getAttributes().put(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR, priorState.toString());
+            resource.getAttributes().put(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR,
+                    snapshotNestedDeployment(childStack, region, accountId).toString());
         }
 
-        executeTemplate(childStack, childTemplate, childParams, childTags, childCreate, region, accountId);
+        executeTemplate(childStack, childTemplate, childParams, childTags, childCreate, region, accountId, childDeployment);
+        if (childDeployment != null && "UPDATE_COMPLETE".equals(childStack.getStatus())) {
+            childStack.setOriginalTemplateBody(childDeployment.path("originalTemplateBody").asText(childTemplate));
+            persistStack(childStack);
+        }
 
         resource.setPhysicalId(childStack.getStackId());
         resource.getAttributes().put("Arn", childStack.getStackId());
@@ -4412,6 +4441,26 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         return resource;
+    }
+
+    private ObjectNode snapshotNestedDeployment(Stack stack, String region, String accountId) {
+        ObjectNode snapshot = objectMapper.createObjectNode();
+        snapshot.set("tags", objectMapper.valueToTree(stack.tagsSnapshot()));
+        snapshot.put("templateBody", stack.getTemplateBody());
+        snapshot.put("originalTemplateBody", stack.getOriginalTemplateBody());
+        snapshot.set("parameters", objectMapper.valueToTree(stack.parametersSnapshot()));
+        ObjectNode nestedStacks = snapshot.putObject("nestedStacks");
+        for (StackResource nested : stack.resourcesSnapshot().values()) {
+            if ("AWS::CloudFormation::Stack".equals(nested.getResourceType())) {
+                Stack child = nested.getPhysicalId() == null ? null
+                        : resolveStack(nested.getPhysicalId(), region, accountId);
+                if (child == null) {
+                    throw new IllegalStateException("Cannot snapshot missing nested stack " + nested.getLogicalId());
+                }
+                nestedStacks.set(nested.getLogicalId(), snapshotNestedDeployment(child, region, accountId));
+            }
+        }
+        return snapshot;
     }
 
     private Map<String, String> resolveNestedStackTags(JsonNode props, CloudFormationTemplateEngine engine) {

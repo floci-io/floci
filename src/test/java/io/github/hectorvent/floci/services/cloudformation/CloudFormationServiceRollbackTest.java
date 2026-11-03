@@ -26,11 +26,13 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTar
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.WafV2CfnProvisioner;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -75,6 +77,62 @@ import static org.mockito.Mockito.when;
  * second time nor updated by a change set.
  */
 class CloudFormationServiceRollbackTest {
+
+    @Test
+    void parentRollback_restoresGrandchildDeploymentWhenItsS3TemplateChanged() throws Exception {
+        assertGrandchildDeploymentRestored(true);
+    }
+
+    @Test
+    void parentRollback_restoresGrandchildDeploymentWithoutTagChanges() throws Exception {
+        assertGrandchildDeploymentRestored(false);
+    }
+
+    private void assertGrandchildDeploymentRestored(boolean changeTags) throws Exception {
+        when(provisioner.completeUpdate(any())).thenReturn(UpdateCleanupResult.notApplicable());
+        String childTemplate = """
+                {"Resources":{"Grandchild":{"Type":"AWS::CloudFormation::Stack",
+                  "Properties":{"TemplateURL":"http://localhost/templates/grandchild.json"}}}}
+                """;
+        String previousGrandchild = """
+                {"Resources":{},"Outputs":{"Revision":{"Value":"previous"}}}
+                """;
+        AtomicReference<String> grandchildTemplate = new AtomicReference<>(previousGrandchild);
+        AtomicReference<String> childTemplateInS3 = new AtomicReference<>(childTemplate);
+        when(templateStore.getObject("templates", "child.json")).thenAnswer(invocation ->
+                new S3Object("templates", "child.json", childTemplateInS3.get().getBytes(StandardCharsets.UTF_8),
+                        "application/json"));
+        when(templateStore.getObject("templates", "grandchild.json")).thenAnswer(invocation ->
+                new S3Object("templates", "grandchild.json", grandchildTemplate.get().getBytes(StandardCharsets.UTF_8),
+                        "application/json"));
+        String parentTemplate = """
+                {"Resources":{"Child":{"Type":"AWS::CloudFormation::Stack",
+                  "Properties":{"TemplateURL":"http://localhost/templates/child.json"}}}}
+                """;
+        service.createChangeSet("rollback-tree", "create", "CREATE", parentTemplate, null,
+                Map.of(), List.of(), Map.of("team", "old"), REGION, ACCOUNT);
+        service.executeChangeSet("rollback-tree", "create", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+        Stack parent = service.describeStacks("rollback-tree", REGION, ACCOUNT).getFirst();
+        Stack grandchild = service.describeStacks("rollback-tree-Child-Grandchild", REGION, ACCOUNT).getFirst();
+        assertEquals("CREATE_COMPLETE", parent.getStatus());
+        assertEquals("previous", grandchild.getOutputs().get("Revision"));
+
+        grandchildTemplate.set(previousGrandchild.replace("previous", "changed"));
+        childTemplateInS3.set(childTemplate.replace("\"Resources\":", "\"Description\":\"changed child\",\"Resources\":"));
+        String failingParent = parentTemplate.replace("\"Child\":", "\"ZFail\":{\"Type\":\"AWS::CloudFormation::Stack\","
+                + "\"DependsOn\":\"Child\",\"Properties\":{}},\"Child\":");
+        service.createChangeSet("rollback-tree", "update", "UPDATE", failingParent, null,
+                Map.of(), List.of(), Map.of("team", changeTags ? "new" : "old"), REGION, ACCOUNT);
+        service.executeChangeSet("rollback-tree", "update", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", parent.getStatus());
+        assertTrue(service.describeStackEvents("rollback-tree", REGION).stream()
+                .anyMatch(event -> "ZFail".equals(event.getLogicalResourceId())
+                        && "Missing TemplateURL".equals(event.getResourceStatusReason())));
+        assertEquals(previousGrandchild, grandchild.getTemplateBody());
+        assertEquals("previous", grandchild.getOutputs().get("Revision"));
+        assertEquals(Map.of("team", "old"), grandchild.tagsSnapshot());
+    }
 
     @Test
     void updateRollback_missingNestedChildDoesNotReportSuccess() {
@@ -169,6 +227,7 @@ class CloudFormationServiceRollbackTest {
 
     private CfnResourceDispatcher provisioner;
     private CloudFormationService service;
+    private S3Service templateStore;
 
     @BeforeEach
     void setUp() {
@@ -192,15 +251,18 @@ class CloudFormationServiceRollbackTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.defaultAccountId()).thenReturn(ACCOUNT);
 
+        templateStore = mock(S3Service.class);
+        RegionResolver resolver = mock(RegionResolver.class);
+        when(resolver.getAccountId()).thenReturn(ACCOUNT);
         service = new CloudFormationService(
                 provisioner,
-                mock(S3Service.class),
+                templateStore,
                 mock(SsmService.class),
                 mock(GetStackOutputRoleAuthorizer.class),
                 mock(CfnDynamicReferences.class),
                 new ObjectMapper(),
                 config,
-                mock(RegionResolver.class),
+                resolver,
                 Clock.systemUTC(),
                 new InMemoryStorageFactory());
     }

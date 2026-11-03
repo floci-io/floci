@@ -953,6 +953,9 @@ child template in S3 has changed. If a later resource fails the parent update, e
 restored to the deployment it had before the update, its tags included, with the rest of the
 rollback.
 
+Rollback snapshots include descendant templates and parameters. Restoring a nested stack uses
+those saved deployments instead of rereading templates that changed in S3 during the failed update.
+
 ## Failed update rollbacks
 
 When an update fails, Floci rolls back the resources it changed. A resource whose rollback fails

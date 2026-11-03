@@ -60,7 +60,9 @@ class CloudFormationNestedStackTagsIntegrationTest {
                     }}
                     """.formatted(bucket);
             String previousChildTemplate = deployedTemplate(childStack);
+            String previousGrandchildTemplate = deployedTemplate(grandchildStack);
             uploadTemplate(bucket, "child.json", childTemplate("changed in s3", bucket));
+            uploadTemplate(bucket, "grandchild.json", grandchildTemplate.replace("grandchild", "changed grandchild"));
             withTags(cfn("UpdateStack", stackName).formParam("TemplateBody", failingParentTemplate),
                     "orange", "owner-c").when().post("/").then().statusCode(200);
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
@@ -72,6 +74,8 @@ class CloudFormationNestedStackTagsIntegrationTest {
             // just their tags.
             assertEquals(previousChildTemplate, deployedTemplate(childStack),
                     "the rolled-back child must restore its previous template");
+            assertEquals(previousGrandchildTemplate, deployedTemplate(grandchildStack),
+                    "the rolled-back grandchild must restore its previous template");
             String childXml = cfn("DescribeStacks", childStack).when().post("/")
                     .then().statusCode(200).extract().asString();
             assertEquals("previous", XmlParser.extractPairs(childXml, "member", "ParameterKey", "ParameterValue")
