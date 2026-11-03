@@ -2,16 +2,14 @@ package io.github.hectorvent.floci.services.s3.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -113,14 +111,7 @@ public class S3Object {
         this.eTag = source.eTag;
         this.storageClass = source.storageClass;
         this.checksum = source.checksum == null ? null : source.checksum.copy();
-        if (source.parts == null) {
-            this.parts = new ArrayList<>();
-        } else {
-            this.parts = new ArrayList<>(source.parts.size());
-            for (Part part : source.parts) {
-                this.parts.add(part == null ? null : new Part(part));
-            }
-        }
+        this.parts = Part.copyAll(source.parts);
         this.versionId = source.versionId;
         this.deleteMarker = source.deleteMarker;
         this.isLatest = source.isLatest;
@@ -222,12 +213,6 @@ public class S3Object {
     public void setEventSequencer(String eventSequencer) { this.eventSequencer = eventSequencer; }
 
     public static String computeETag(byte[] data) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(data);
-            return "\"" + HexFormat.of().formatHex(digest) + "\"";
-        } catch (NoSuchAlgorithmException e) {
-            return "\"\"";
-        }
+        return "\"" + Digests.md5Hex(data) + "\"";
     }
 }

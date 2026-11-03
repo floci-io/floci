@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 
@@ -29,7 +30,7 @@ final class DigestingInputStream extends FilterInputStream {
     DigestingInputStream(InputStream in, Collection<ChecksumAlgorithm> algorithms, long maxSize) {
         super(in);
         this.maxSize = maxSize;
-        this.md5 = S3Service.md5();
+        this.md5 = Digests.md5Digest();
         for (ChecksumAlgorithm algorithm : algorithms) {
             calculators.put(algorithm, S3Checksum.calculator(algorithm));
         }

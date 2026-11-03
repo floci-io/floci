@@ -32,8 +32,6 @@ public class Bucket {
     private boolean publicAccessBlockDeleted;
     private String ownershipControlsConfiguration; // XML string
     @JsonIgnore
-    private volatile String ownershipParsedFrom;
-    @JsonIgnore
     private boolean ownershipEnforced;
     private String requestPaymentPayer; // "BucketOwner" (default) or "Requester"; null until first PUT
     private String accelerateStatus; // "Enabled" or "Suspended"; null until first PUT
@@ -129,22 +127,13 @@ public class Bucket {
     public String getOwnershipControlsConfiguration() { return ownershipControlsConfiguration; }
     public void setOwnershipControlsConfiguration(String ownershipControlsConfiguration) {
         this.ownershipControlsConfiguration = ownershipControlsConfiguration;
+        this.ownershipEnforced = ownershipControlsConfiguration != null
+                && XmlParser.containsValue(ownershipControlsConfiguration, "ObjectOwnership", "BucketOwnerEnforced");
     }
 
     @JsonIgnore
     public boolean isObjectOwnershipEnforced() {
-        String configuration = ownershipControlsConfiguration;
-        if (configuration == null) {
-            return false;
-        }
-        // The flag is published through the volatile reference written after it.
-        if (ownershipParsedFrom == configuration) {
-            return ownershipEnforced;
-        }
-        boolean enforced = XmlParser.containsValue(configuration, "ObjectOwnership", "BucketOwnerEnforced");
-        ownershipEnforced = enforced;
-        ownershipParsedFrom = configuration;
-        return enforced;
+        return ownershipEnforced;
     }
 
     public String getRequestPaymentPayer() { return requestPaymentPayer; }

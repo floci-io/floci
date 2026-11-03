@@ -71,7 +71,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     @Override
     public void put(String key, V value) {
         String account = prefix();
-        delegate.put(rawKey(account, key), value);
+        delegate.put(account + "/" + key, value);
         trackOwner(account);
     }
 
@@ -327,7 +327,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     public Optional<V> getForAccount(String accountId, String key) {
-        return delegate.get(rawKey(accountId, key));
+        return delegate.get(accountId + "/" + key);
     }
 
     /**
@@ -357,7 +357,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         if (legacy.isEmpty()) {
             return Optional.empty();
         }
-        delegate.put(rawKey(accountId, key), legacy.get());
+        delegate.put(accountId + "/" + key, legacy.get());
         trackOwner(accountId);
         delegate.delete(key);
         return legacy;
@@ -434,7 +434,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     public void putForAccount(String accountId, String key, V value) {
-        delegate.put(rawKey(accountId, key), value);
+        delegate.put(accountId + "/" + key, value);
         trackOwner(accountId);
     }
 
@@ -446,7 +446,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     public void deleteForAccount(String accountId, String key) {
-        delegate.delete(rawKey(accountId, key));
+        delegate.delete(accountId + "/" + key);
     }
 
     @Override
@@ -639,7 +639,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     private String prefixed(String key) {
-        return rawKey(prefix(), key);
+        return prefix() + "/" + key;
     }
 
     /** Whether {@code key} starts with a 12-digit account id and a slash, as account-scoped keys do. */
