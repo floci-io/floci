@@ -232,17 +232,40 @@ class PaymentCryptographyIntegrationTest {
 
     @Test
     void aRequestNamingAFormTheServiceDoesNotServeIsRefused() {
-        // The TR-34 form is one the model has and this service does not make.
+        // Every form the model's union holds is one the service serves now, so a request
+        // that names a member the union does not hold names no form at all.
         String arn = call("CreateKey", CREATE_KEY)
                 .then().statusCode(200)
                     .extract().path("Key.KeyArn");
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
-                + "\"Tr34KeyBlock\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn
-                + "\",\"WrappingKeyCertificate\":\"x\",\"KeyBlockFormat\":\"X9_TR34_2012\"}}}")
+                + "\"Nonsense\":{}}}")
                 .then().statusCode(400)
                     .body("__type", equalTo("ValidationException"))
-                    .body("message", containsString("not a form the service exports"));
+                    .body("message", containsString("must specify exactly one variant"));
+    }
+
+    @Test
+    void theTr34AndAs2805FormsAreServed() {
+        // The TR-34 and the AS2805 forms are ones the service makes now, so a request that
+        // names one is refused for what it is missing and not for naming an unserved form.
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"Tr34KeyBlock\":{\"WrappingKeyCertificate\":\"x\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("CertificateAuthorityPublicKeyIdentifier"));
+
+        call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"As2805KeyCryptogram\":{\"As2805KeyVariant\":"
+                + "\"PIN_ENCRYPTION_KEY_VARIANT_28\"}}}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("WrappingKeyIdentifier"));
     }
 
     /**
@@ -370,6 +393,79 @@ class PaymentCryptographyIntegrationTest {
      * The refusal a caller sees when a request is missing a member the model requires: the
      * shape check's, because the shape check runs before the operation does.
      */
+    @Test
+    void theModelCheckRefusesATr34ExportWithoutItsWrappingKeyCertificate() {
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"Tr34KeyBlock\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn + "\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}");
+
+        assertTheModelRefused(answer, "WrappingKeyCertificate");
+    }
+
+    @Test
+    void theModelCheckRefusesATr34ExportWithoutItsCertificateAuthority() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"Tr34KeyBlock\":{\"WrappingKeyCertificate\":\"x\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}");
+
+        assertTheModelRefused(answer, "CertificateAuthorityPublicKeyIdentifier");
+    }
+
+    @Test
+    void theModelCheckRefusesATr34ImportWithoutItsSigningKeyCertificate() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"Tr34KeyBlock\":{"
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"WrappedKeyBlock\":\"" + "0".repeat(64) + "\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}");
+
+        assertTheModelRefused(answer, "SigningKeyCertificate");
+    }
+
+    @Test
+    void theModelCheckRefusesATr34ImportWithoutItsWrappedKeyBlock() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"Tr34KeyBlock\":{"
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"SigningKeyCertificate\":\"x\","
+                + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}");
+
+        assertTheModelRefused(answer, "WrappedKeyBlock");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAs2805ExportWithoutItsWrappingKey() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"As2805KeyCryptogram\":{"
+                + "\"As2805KeyVariant\":\"PIN_ENCRYPTION_KEY_VARIANT_28\"}}}");
+
+        assertTheModelRefused(answer, "WrappingKeyIdentifier");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAs2805ExportUnderAVariantItDoesNotName() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"As2805KeyCryptogram\":{"
+                + "\"As2805KeyVariant\":\"TERMINAL_MINOR_KEY_VARIANT_01\","
+                + "\"WrappingKeyIdentifier\":\"" + keyArn() + "\"}}}");
+
+        assertTheModelRefused(answer, "As2805KeyVariant");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAs2805ImportWithoutItsWrappedKeyCryptogram() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"As2805KeyCryptogram\":{"
+                + "\"As2805KeyVariant\":\"PIN_ENCRYPTION_KEY_VARIANT_28\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true},"
+                + "\"KeyAlgorithm\":\"AES_256\","
+                + "\"Exportable\":true,"
+                + "\"WrappingKeyIdentifier\":\"" + keyArn() + "\"}}}");
+
+        assertTheModelRefused(answer, "WrappedKeyCryptogram");
+    }
+
     private static void assertTheModelRefused(Response answer, String member) {
         answer.then().statusCode(400)
                 .body("__type", equalTo("ValidationException"))
@@ -398,6 +494,31 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(200)
                     .body("Keys", hasSize(greaterThanOrEqualTo(1)))
                     .body("Keys.KeyArn", hasItem(equalTo(arn)));
+    }
+
+    @Test
+    void aListedKeyIsItsSummary() {
+        // A list carries the key's summary and not the whole key: the identifier, the state,
+        // the attributes, the check value and the two flags.
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("ListKeys", "{}")
+                .then().statusCode(200)
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyState",
+                            equalTo("CREATE_COMPLETE"))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyAttributes.KeyAlgorithm",
+                            equalTo("AES_256"))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyAttributes.KeyUsage",
+                            equalTo("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyCheckValue", notNullValue())
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.Enabled", equalTo(true))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.Exportable", equalTo(true))
+                    // The summary holds no timestamp and no origin: those belong to the whole
+                    // key, which the list does not carry.
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.CreateTimestamp", nullValue())
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyOrigin", nullValue())
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.UsageStartTimestamp", nullValue());
     }
 
     @Test

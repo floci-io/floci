@@ -1,5 +1,9 @@
 package com.floci.test;
 
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -8,9 +12,12 @@ import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
 import software.amazon.awssdk.services.paymentcryptography.model.Alias;
+import software.amazon.awssdk.services.paymentcryptography.model.As2805KeyVariant;
+import software.amazon.awssdk.services.paymentcryptography.model.DeriveKeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ExportKeyResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.GetParametersForExportResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.GetParametersForImportResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.GetPublicKeyCertificateResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.ImportKeyResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Key;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyAlgorithm;
@@ -22,9 +29,21 @@ import software.amazon.awssdk.services.paymentcryptography.model.KeyState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ListKeysResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Tag;
+import software.amazon.awssdk.services.paymentcryptography.model.Tr34KeyBlockFormat;
 import software.amazon.awssdk.services.paymentcryptography.model.WrappedKeyMaterialFormat;
 
+import java.io.ByteArrayInputStream;
+import java.math.BigInteger;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.MessageDigest;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.security.spec.ECGenParameterSpec;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -96,6 +115,26 @@ class PaymentCryptographyTest {
                         .keyUsage(KeyUsage.TR31_K1_KEY_BLOCK_PROTECTION_KEY)
                         .keyModesOfUse(m -> m.wrap(true).unwrap(true)))
                 .exportable(true))
+                .key();
+        keyArns.add(key.keyArn());
+        return key;
+    }
+
+    /**
+     * The public half of a certificate, held by the service as a key.
+     *
+     * <p>The certificate is the one the service minted for the occasion, and it stands on
+     * its own, so it comes in as the public key of a root certificate.
+     */
+    private static Key importPublicKey(String certificate) {
+        Key key = client.importKey(r -> r
+                .keyMaterial(m -> m.rootCertificatePublicKey(b -> b
+                        .publicKeyCertificate(certificate)
+                        .keyAttributes(a -> a
+                                .keyAlgorithm(KeyAlgorithm.RSA_2048)
+                                .keyClass(KeyClass.PUBLIC_KEY)
+                                .keyUsage(KeyUsage.TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE)
+                                .keyModesOfUse(modes -> modes.verify(true))))))
                 .key();
         keyArns.add(key.keyArn());
         return key;
@@ -212,6 +251,143 @@ class PaymentCryptographyTest {
         assertThat(imported.key().keyArn()).isNotBlank();
         assertThat(imported.key().keyAttributes().keyUsage())
                 .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+    }
+
+    @Test
+    void aKeyLeavesTheServiceAndComesBackThroughATr34KeyBlock() {
+        // The parameters of the import name the certificate the block is wrapped under, and
+        // the parameters of the export name the certificate the block is signed with.
+        GetParametersForImportResponse importParameters = client.getParametersForImport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .wrappingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+        GetParametersForExportResponse exportParameters = client.getParametersForExport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .signingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+
+        // Each certificate is the authority of the party it belongs to.
+        Key receiver = importPublicKey(importParameters.wrappingKeyCertificate());
+        Key sender = importPublicKey(exportParameters.signingKeyCertificate());
+
+        Key key = createTdesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.tr34KeyBlock(b -> b
+                        .certificateAuthorityPublicKeyIdentifier(receiver.keyArn())
+                        .wrappingKeyCertificate(importParameters.wrappingKeyCertificate())
+                        .exportToken(exportParameters.exportToken())
+                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
+                        .randomNonce("A1B2C3D4E5F60718"))));
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.TR34_KEY_BLOCK);
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.tr34KeyBlock(b -> b
+                        .certificateAuthorityPublicKeyIdentifier(sender.keyArn())
+                        .signingKeyCertificate(exportParameters.signingKeyCertificate())
+                        .importToken(importParameters.importToken())
+                        .wrappedKeyBlock(exported.wrappedKey().keyMaterial())
+                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
+                        .randomNonce("A1B2C3D4E5F60718"))));
+
+        assertThat(imported.key().keyArn()).isNotBlank();
+        assertThat(imported.key().keyAttributes().keyUsage())
+                .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+    }
+
+    @Test
+    void aKeyLeavesTheServiceAndComesBackThroughAnAs2805Cryptogram() {
+        Key encryptionKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(encryptionKey.keyArn());
+        Key key = createAesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.KEY_CRYPTOGRAM);
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn())
+                        .wrappedKeyCryptogram(exported.wrappedKey().keyMaterial())
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
+                        .exportable(true))));
+
+        assertThat(imported.key().keyArn()).isNotBlank();
+        assertThat(imported.key().keyAttributes().keyUsage())
+                .isEqualTo(KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+    }
+
+    @Test
+    void aCryptogramUnderEachSupportedVariantIsServed() {
+        // The model names four variants, and the service serves every one of them.
+        Key encryptionKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(encryptionKey.keyArn());
+        Key key = createAesKey();
+
+        for (As2805KeyVariant variant : new As2805KeyVariant[] {
+                As2805KeyVariant.TERMINAL_MAJOR_KEY_VARIANT_00,
+                As2805KeyVariant.DATA_ENCRYPTION_KEY_VARIANT_22,
+                As2805KeyVariant.MESSAGE_AUTHENTICATION_KEY_VARIANT_24,
+                As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28}) {
+            ExportKeyResponse exported = client.exportKey(r -> r
+                    .exportKeyIdentifier(key.keyArn())
+                    .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                            .as2805KeyVariant(variant)
+                            .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+
+            assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                    .as(variant.toString())
+                    .isEqualTo(WrappedKeyMaterialFormat.KEY_CRYPTOGRAM);
+            assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+        }
+    }
+
+    @Test
+    void aCryptogramUnderAKeyThatIsNotAKeyEncryptionKeyIsRefused() {
+        // A key that is neither a key encryption key nor a key block protection key cannot
+        // be the one a cryptogram is wrapped under.
+        Key dataKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(dataKey.keyArn());
+        Key key = createAesKey();
+
+        assertThatThrownBy(() -> client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(dataKey.keyArn())))))
+                .isInstanceOf(AwsServiceException.class)
+                .hasMessageContaining("key encryption key");
     }
 
     @Test
@@ -361,5 +537,194 @@ class PaymentCryptographyTest {
         } finally {
             elsewhere.close();
         }
+    }
+
+    @Test
+    void aPublicKeyCertificateIsServedForAKeyPair() throws Exception {
+        // The certificate of a key pair is how the pair is handed to a counterparty.
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.ECC_NIST_P256)
+                        .keyClass(KeyClass.ASYMMETRIC_KEY_PAIR)
+                        .keyUsage(KeyUsage.TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE)
+                        .keyModesOfUse(m -> m.sign(true).verify(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(key.keyArn());
+
+        GetPublicKeyCertificateResponse certificate = client.getPublicKeyCertificate(r -> r
+                .keyIdentifier(key.keyArn()));
+
+        assertThat(certificate.keyCertificate()).isNotNull();
+        // The certificate is base64 of a PEM, so it parses as one.
+        X509Certificate parsed = (X509Certificate) CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(
+                        Base64.getDecoder().decode(certificate.keyCertificate())));
+        assertThat(parsed.getPublicKey()).isNotNull();
+        // The chain of a certificate the service minted is the certificate itself.
+        assertThat(certificate.keyCertificateChain()).isNotNull();
+    }
+
+    @Test
+    void aTagIsRemovedFromAKey() {
+        Key key = createAesKey();
+
+        client.tagResource(t -> t
+                .resourceArn(key.keyArn())
+                .tags(Tag.builder().key("owner").value("team").build()));
+        assertThat(client.listTagsForResource(r -> r.resourceArn(key.keyArn())).tags())
+                .anySatisfy(tag -> assertThat(tag.key()).isEqualTo("owner"));
+
+        client.untagResource(u -> u
+                .resourceArn(key.keyArn())
+                .tagKeys("owner"));
+        assertThat(client.listTagsForResource(r -> r.resourceArn(key.keyArn())).tags())
+                .noneSatisfy(tag -> assertThat(tag.key()).isEqualTo("owner"));
+    }
+
+    @Test
+    void aKeyLeavesUnderAnRsaCryptogramAndComesBack() throws Exception {
+        // The RSA wrap form: the key is encrypted under the counterparty's certificate and
+        // comes back under the token the import holds.
+        GetParametersForImportResponse parameters = client.getParametersForImport(r -> r
+                .keyMaterialType(KeyMaterialType.KEY_CRYPTOGRAM)
+                .wrappingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+
+        // The certificate the service minted is the authority that vouches for it.
+        Key authority = importPublicKey(parameters.wrappingKeyCertificate());
+
+        Key key = createTdesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.keyCryptogram(b -> b
+                        .certificateAuthorityPublicKeyIdentifier(authority.keyArn())
+                        .wrappingKeyCertificate(parameters.wrappingKeyCertificate())
+                        .wrappingSpec("RSA_OAEP_SHA_256"))));
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.KEY_CRYPTOGRAM);
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.keyCryptogram(b -> b
+                        .importToken(parameters.importToken())
+                        .wrappedKeyCryptogram(exported.wrappedKey().keyMaterial())
+                        .wrappingSpec("RSA_OAEP_SHA_256")
+                        .exportable(true)
+                        .keyAttributes(a -> a
+                                .keyAlgorithm(KeyAlgorithm.TDES_2_KEY)
+                                .keyClass(KeyClass.SYMMETRIC_KEY)
+                                .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                                .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))))));
+
+        assertThat(imported.key().keyArn()).isNotBlank();
+        assertThat(imported.key().keyAttributes().keyUsage())
+                .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+    }
+
+    @Test
+    void aKeyLeavesUnderAKeyTheTwoPartiesAgreed() throws Exception {
+        // The ECDH form: the two parties agree on a key, and the service wraps the key under
+        // it. The counterparty's certificate is minted here, signed by an authority the
+        // service holds.
+        KeyPair authority = rsaKeyPair();
+        KeyPair counterparty = eccKeyPair();
+        X509Certificate authorityCertificate = certificate(authority, "floci CA", authority, "floci CA");
+        X509Certificate counterpartyCertificate =
+                certificate(counterparty, "floci peer", authority, "floci CA");
+
+        Key ca = importPublicKey(Base64.getEncoder().encodeToString(authorityCertificate.getEncoded()));
+
+        // The service's own half of the agreement.
+        Key pair = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.ECC_NIST_P256)
+                        .keyClass(KeyClass.ASYMMETRIC_KEY_PAIR)
+                        .keyUsage(KeyUsage.TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT)
+                        .keyModesOfUse(m -> m.deriveKey(true)))
+                .deriveKeyUsage("TR31_K1_KEY_BLOCK_PROTECTION_KEY")
+                .exportable(true))
+                .key();
+        keyArns.add(pair.keyArn());
+
+        Key key = createTdesKey();
+        String peerCertificate = Base64.getEncoder().encodeToString(counterpartyCertificate.getEncoded());
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.diffieHellmanTr31KeyBlock(b -> b
+                        .privateKeyIdentifier(pair.keyArn())
+                        .certificateAuthorityPublicKeyIdentifier(ca.keyArn())
+                        .publicKeyCertificate(peerCertificate)
+                        .deriveKeyAlgorithm("AES_256")
+                        .keyDerivationFunction("NIST_SP800")
+                        .keyDerivationHashAlgorithm("SHA_256")
+                        .derivationData(d -> d.sharedInformation("ADEF567890")))));
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.TR31_KEY_BLOCK);
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+    }
+
+    @Test
+    void theTimestampsAreInstants() {
+        // A timestamp that is in the wrong unit is still a timestamp, so the answers are
+        // checked against a range a clock could have produced.
+        Key key = createAesKey();
+        assertThat(key.createTimestamp()).isAfter(Instant.parse("2020-01-01T00:00:00Z"));
+        assertThat(key.createTimestamp()).isBefore(Instant.parse("2100-01-01T00:00:00Z"));
+        assertThat(key.usageStartTimestamp()).isAfter(Instant.parse("2020-01-01T00:00:00Z"));
+
+        GetParametersForImportResponse parameters = client.getParametersForImport(r -> r
+                .keyMaterialType(KeyMaterialType.KEY_CRYPTOGRAM)
+                .wrappingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+        assertThat(parameters.parametersValidUntilTimestamp())
+                .isAfter(Instant.parse("2020-01-01T00:00:00Z"));
+    }
+
+    @Test
+    void aKeyIsCreatedWithADeriveKeyUsage() throws Exception {
+        // The usage a derived key is for is named when the key pair is made.
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.ECC_NIST_P256)
+                        .keyClass(KeyClass.ASYMMETRIC_KEY_PAIR)
+                        .keyUsage(KeyUsage.TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT)
+                        .keyModesOfUse(m -> m.deriveKey(true)))
+                .deriveKeyUsage("TR31_K1_KEY_BLOCK_PROTECTION_KEY")
+                .exportable(true))
+                .key();
+        keyArns.add(key.keyArn());
+
+        assertThat(key.deriveKeyUsage()).isEqualTo(DeriveKeyUsage.TR31_K1_KEY_BLOCK_PROTECTION_KEY);
+        assertThat(client.getKey(r -> r.keyIdentifier(key.keyArn())).key().deriveKeyUsage())
+                .isEqualTo(DeriveKeyUsage.TR31_K1_KEY_BLOCK_PROTECTION_KEY);
+    }
+
+    /** An RSA key pair, for the authority that signs the certificates. */
+    private static KeyPair rsaKeyPair() throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048);
+        return generator.generateKeyPair();
+    }
+
+    /** An elliptic curve key pair, for the counterparty that agrees on a key. */
+    private static KeyPair eccKeyPair() throws Exception {
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
+        generator.initialize(new ECGenParameterSpec("secp256r1"));
+        return generator.generateKeyPair();
+    }
+
+    /** A certificate over a key pair, signed by an issuer. */
+    private static X509Certificate certificate(KeyPair subject, String subjectName,
+                                               KeyPair issuer, String issuerName) throws Exception {
+        Instant now = Instant.now();
+        JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(
+                new X500Name("CN=" + issuerName), BigInteger.valueOf(now.toEpochMilli()),
+                Date.from(now.minusSeconds(3600)), Date.from(now.plusSeconds(86400)),
+                new X500Name("CN=" + subjectName), subject.getPublic());
+        return new JcaX509CertificateConverter().getCertificate(builder.build(
+                new JcaContentSignerBuilder("SHA256withRSA").build(issuer.getPrivate())));
     }
 }

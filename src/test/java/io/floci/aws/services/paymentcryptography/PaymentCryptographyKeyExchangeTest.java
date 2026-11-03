@@ -404,6 +404,202 @@ class PaymentCryptographyKeyExchangeTest {
         assertEquals("ValidationException", refused.getErrorCode());
     }
 
+    @Test
+    void aKeyPairHasACertificate() {
+        PaymentCryptographyKey key = createKeyPair("RSA_2048");
+
+        Map<String, Object> answer = service.publicKeyCertificate(key);
+
+        String certificate = (String) answer.get("KeyCertificate");
+        assertNotNull(certificate);
+        assertNotNull(Certificates.parseCertificate(certificate));
+    }
+
+    @Test
+    void aKeyThatLeavesUnderACertificateComesBack() {
+        // The service that exports mints the parameters; the service that imports holds the
+        // token that names the key the block is wrapped under.
+        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
+                "RSA_2048", false);
+        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
+                "RSA_2048", false);
+
+        PaymentCryptographyKey key = createKey("TDES_2KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        // The receiver's authority vouches for the certificate the key is wrapped under; the
+        // sender's authority vouches for the certificate the block was signed with.
+        PaymentCryptographyKey receiver = createAuthority(
+                (String) importParameters.get("WrappingKeyCertificate"));
+        PaymentCryptographyKey sender = createAuthority(
+                (String) exportParameters.get("SigningKeyCertificate"));
+
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("ExportToken", exportParameters.get("ExportToken"));
+        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
+        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
+        material.put("KeyBlockFormat", "X9_TR34_2012");
+        material.put("RandomNonce", "A1B2C3D4E5F60718");
+
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
+                material, "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        assertEquals("TR34_KEY_BLOCK", wrapped.get("WrappedKeyMaterialFormat"));
+
+        Map<String, Object> incoming = new LinkedHashMap<>();
+        incoming.put("ImportToken", importParameters.get("ImportToken"));
+        incoming.put("SigningKeyCertificate", exportParameters.get("SigningKeyCertificate"));
+        incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
+        incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
+        incoming.put("KeyBlockFormat", "X9_TR34_2012");
+        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock", incoming,
+                "", true, Map.of());
+
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals(key.getKeyUsage(), imported.getKeyUsage());
+    }
+
+    @Test
+    void aBlockThatWasSignedByAnotherAuthorityDoesNotOpen() {
+        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
+                "RSA_2048", false);
+        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
+                "RSA_2048", false);
+
+        PaymentCryptographyKey key = createKey("TDES_2KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        PaymentCryptographyKey receiver = createAuthority(
+                (String) importParameters.get("WrappingKeyCertificate"));
+        PaymentCryptographyKey sender = createAuthority(
+                (String) exportParameters.get("SigningKeyCertificate"));
+
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("ExportToken", exportParameters.get("ExportToken"));
+        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
+        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
+        material.put("KeyBlockFormat", "X9_TR34_2012");
+        material.put("RandomNonce", "A1B2C3D4E5F60718");
+
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr34KeyBlock",
+                material, "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+
+        // Another authority signs it, so the signature does not verify against this one.
+        SecureRandom random = new SecureRandom();
+        KeyPair other = PaymentCryptographyKeyPairs.rsa(2048, random);
+        Certificates.Minted otherCertificate = CertificatesTest.mint(other.getPublic(),
+                "floci other", other.getPrivate(), "floci other");
+
+        Map<String, Object> incoming = new LinkedHashMap<>();
+        incoming.put("ImportToken", importParameters.get("ImportToken"));
+        incoming.put("SigningKeyCertificate", otherCertificate.pem());
+        incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
+        incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
+        incoming.put("KeyBlockFormat", "X9_TR34_2012");
+        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aKeyThatLeavesUnderAnAs2805CryptogramComesBack() {
+        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        Map<String, Object> material = Map.of(
+                "As2805KeyVariant", "PIN_ENCRYPTION_KEY_VARIANT_28",
+                "WrappingKeyIdentifier", kek.getKeyId());
+
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(),
+                "As2805KeyCryptogram", material, "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        assertEquals("KEY_CRYPTOGRAM", wrapped.get("WrappedKeyMaterialFormat"));
+
+        Map<String, Object> incoming = Map.of(
+                "As2805KeyVariant", "PIN_ENCRYPTION_KEY_VARIANT_28",
+                "WrappingKeyIdentifier", kek.getKeyId(),
+                "WrappedKeyCryptogram", wrapped.get("KeyMaterial"),
+                "KeyAlgorithm", "AES_256",
+                "KeyAttributes", Map.of(
+                        "KeyAlgorithm", "AES_256",
+                        "KeyClass", "SYMMETRIC_KEY",
+                        "KeyUsage", "TR31_P0_PIN_ENCRYPTION_KEY",
+                        "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)),
+                "Exportable", true);
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "As2805KeyCryptogram",
+                incoming, "", true, Map.of());
+
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals("TR31_P0_PIN_ENCRYPTION_KEY", imported.getKeyUsage());
+    }
+
+    @Test
+    void aCryptogramUnderAVariantTheServiceDoesNotServeIsRefused() {
+        // The model's union names four variants, and the service serves every one of them,
+        // so a variant outside the four names no variant at all.
+        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
+                        Map.of(
+                                "As2805KeyVariant", "TERMINAL_MINOR_KEY_VARIANT_01",
+                                "WrappingKeyIdentifier", kek.getKeyId()), "", ""));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aCryptogramThatIsWrappedUnderTheWrongVariantDoesNotOpen() {
+        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(),
+                "As2805KeyCryptogram", Map.of(
+                        "As2805KeyVariant", "PIN_ENCRYPTION_KEY_VARIANT_28",
+                        "WrappingKeyIdentifier", kek.getKeyId()), "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+
+        Map<String, Object> incoming = Map.of(
+                "As2805KeyVariant", "DATA_ENCRYPTION_KEY_VARIANT_22",
+                "WrappingKeyIdentifier", kek.getKeyId(),
+                "WrappedKeyCryptogram", wrapped.get("KeyMaterial"),
+                "KeyAlgorithm", "AES_256",
+                "KeyAttributes", Map.of(
+                        "KeyAlgorithm", "AES_256",
+                        "KeyClass", "SYMMETRIC_KEY",
+                        "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                        "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)),
+                "Exportable", true);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "As2805KeyCryptogram", incoming, "", true,
+                        Map.of()));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void anImportTokenIsRefusedForAnotherKindOfMaterial() {
+        // A token is issued for one kind of material, so it cannot be spent on another.
+        Map<String, Object> parameters = service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048",
+                false);
+        String token = (String) parameters.get("ImportToken");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "Tr34KeyBlock", Map.of(
+                        "ImportToken", token,
+                        "CertificateAuthorityPublicKeyIdentifier", protection.getKeyId(),
+                        "KeyBlockFormat", "X9_TR34_2012",
+                        "RandomNonce", "0102030405060708",
+                        "SigningKeyCertificate", "x",
+                        "WrappedKeyBlock", "00"), "", true, Map.of()));
+
+        assertEquals("ResourceNotFoundException", refused.getErrorCode());
+    }
+
     /** A symmetric key of the given algorithm and usage. */
     private PaymentCryptographyKey createKey(String algorithm, String usage) {
         Map<String, Object> attributes = new LinkedHashMap<>();

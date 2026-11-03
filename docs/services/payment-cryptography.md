@@ -46,7 +46,7 @@
   with the key, its state `DELETE_PENDING` and the moment its deletion takes effect.
   A key that is gone does not come back: a tagging request for it is refused. The
   service deletes a key the moment it is asked to, so the waiting period of
-  `DeleteKeyInDays` is read and checked but not waited for.
+  `DeleteKeyInDays` is checked against the range the model states and is not waited for.
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled` and `Tags`, and a key
   created disabled or with tags comes back that way. The `KeyUsage` and the
   `KeyModesOfUse` of the key are required, as the reference requires them. The answer
@@ -73,14 +73,16 @@
   and `NextToken`, and answer with one page and the token that asks for the next.
 - **The key exchange:** `ExportKey` and `ImportKey` take the form of the key material the
   request names, one form per request. A key leaves under a TR-31 block the service wraps
-  with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, or
-  under a key the two parties agreed with ECDH; it comes back under the same protections, and
-  a public key comes back under the certificate that carries it. A key that is not exportable
-  does not leave, a key pair has no material a key block could carry, and a counterparty's
-  certificate that the named authority did not sign is refused. An export may name an initial
-  DUKPT key by its serial number, and the derived key leaves instead of the base derivation
-  key. The base derivation key may not be exportable itself and still derive that initial key,
-  which the export guide says the standards allow.
+  with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, under
+  a TR-34 key block the service signs and wraps for the receiver, under an AS2805 cryptogram
+  the receiver's key encryption key protects, or under a key the two parties agreed with ECDH;
+  it comes back under the same protections, and a public key comes back under the certificate
+  that carries it. A key that is not exportable does not leave, a key pair has no material a
+  key block could carry, and a counterparty's certificate that the named authority did not
+  sign is refused. An export may name an initial DUKPT key by its serial number, and the
+  derived key leaves instead of the base derivation key. The base derivation key may not be
+  exportable itself and still derive that initial key, which the export guide says the
+  standards allow.
 - **The keys a key exchange names:** a TR-31 block's wrapping key must be a key
   encryption key that may wrap, and of the family the block's own type names, so a TDES
   wrapping key carries a type B block and an AES one a type D block. A key agreement needs
@@ -95,9 +97,19 @@
   is capped by the curve's strength, so P-256 carries no AES-192.
 - **The check value of an export:** a key block carries the check value of the key it
   carries, and a cryptogram carries none, because it carries no key block at all.
-- **The TR-34 and the AS2805 forms are not made.** A request that asks for one of them is
-  refused with the error that says so, rather than answered with something of another kind,
-  and the refusal names the forms the service serves.
+- **The TR-34 key block:** a key leaves under a TR-31 block the service signs with its signing
+  key and wraps for the receiver under the receiver's certificate, in the `X9_TR34_2012`
+  format, and comes back the same way. The block carries the TR-31 header in the clear, the
+  nonce the two passes agree on, and the digest of the envelope it wraps, all under the
+  signature of the signing certificate, which has to chain to the named authority. A block
+  whose signature does not verify, whose digest does not match, or whose nonce is not the
+  one the request quotes is refused.
+- **The AS2805 key cryptogram:** a key leaves under a key encryption key, bound to its
+  purpose by the AS2805 variant, and comes back the same way. The variant is exclusive-ored
+  into the key before it is encrypted, so a cryptogram wrapped under one variant does not
+  open under another, and the check value inside it catches a wrong wrapping key. The
+  variants served are `TERMINAL_MAJOR_KEY_VARIANT_00`, `DATA_ENCRYPTION_KEY_VARIANT_22`,
+  `MESSAGE_AUTHENTICATION_KEY_VARIANT_24` and `PIN_ENCRYPTION_KEY_VARIANT_28`.
 - **The block headers a request names:** an export may name the modes of use, the
   exportability, the version and the optional blocks of the TR-31 block it produces, and
   the block carries them. An optional block is written with its length in hexadecimal, and
