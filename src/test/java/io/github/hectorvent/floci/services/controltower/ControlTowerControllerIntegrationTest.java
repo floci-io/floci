@@ -137,6 +137,46 @@ class ControlTowerControllerIntegrationTest {
     }
 
     @Test
+    void landingZoneTagsForAnotherAccountAreNotFoundAndSeedNothing() {
+        String caller = auth("000000000296", EAST);
+        String other = listLandingZonesArn(auth("000000000295", EAST));
+
+        given()
+                .header("Authorization", caller)
+                .when()
+                .get("/tags/" + other)
+                .then()
+                .statusCode(404)
+                .body("__type", containsString("ResourceNotFoundException"));
+
+        assertTrue(listLandingZonesArn(caller).contains(":000000000296:"));
+    }
+
+    @Test
+    void landingZoneTagRequestsWithMalformedTagsAreRejected() {
+        String authorization = auth("000000000294", EAST);
+        String arn = listLandingZonesArn(authorization);
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"tags\":{\"env\":123}}")
+                .when()
+                .post("/tags/" + arn)
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"));
+
+        given()
+                .header("Authorization", authorization)
+                .when()
+                .delete("/tags/" + arn)
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
     void getLandingZoneAcceptsLandingZoneIdLikeTheTerraformProvider() {
         String authorization = auth("000000000250", EAST);
         String arn = listLandingZonesArn(authorization);

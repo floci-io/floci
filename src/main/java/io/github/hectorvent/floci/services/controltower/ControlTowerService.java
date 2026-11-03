@@ -202,31 +202,26 @@ public class ControlTowerService {
         return new CreateLandingZoneResult(arn, operationIdentifier);
     }
 
-    public synchronized Map<String, String> listLandingZoneTags(String arn) {
-        Map<String, String> tags = landingZoneByArn(arn).getTags();
+    public synchronized Map<String, String> listLandingZoneTags(String accountId, String region, String arn) {
+        Map<String, String> tags = requireSeededLandingZone(accountId, region, arn).getTags();
         return tags == null ? Map.of() : tags;
     }
 
-    public synchronized void tagLandingZone(String arn, Map<String, String> tags) {
-        LandingZone landingZone = landingZoneByArn(arn);
-        Map<String, String> merged = new LinkedHashMap<>(listLandingZoneTags(arn));
+    public synchronized void tagLandingZone(String accountId, String region, String arn, Map<String, String> tags) {
+        LandingZone landingZone = requireSeededLandingZone(accountId, region, arn);
+        Map<String, String> merged = new LinkedHashMap<>(listLandingZoneTags(accountId, region, arn));
         merged.putAll(tags);
         validateTagMap(merged);
         landingZone.setTags(merged);
-        landingZoneStore.put(AwsArnUtils.parse(arn).region(), landingZone);
+        landingZoneStore.put(region, landingZone);
     }
 
-    public synchronized void untagLandingZone(String arn, List<String> tagKeys) {
-        LandingZone landingZone = landingZoneByArn(arn);
-        Map<String, String> remaining = new LinkedHashMap<>(listLandingZoneTags(arn));
+    public synchronized void untagLandingZone(String accountId, String region, String arn, List<String> tagKeys) {
+        LandingZone landingZone = requireSeededLandingZone(accountId, region, arn);
+        Map<String, String> remaining = new LinkedHashMap<>(listLandingZoneTags(accountId, region, arn));
         tagKeys.forEach(remaining::remove);
         landingZone.setTags(remaining);
-        landingZoneStore.put(AwsArnUtils.parse(arn).region(), landingZone);
-    }
-
-    private LandingZone landingZoneByArn(String arn) {
-        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
-        return requireSeededLandingZone(parsed.accountId(), parsed.region(), arn);
+        landingZoneStore.put(region, landingZone);
     }
 
     public synchronized LandingZone getLandingZone(String accountId, String region, JsonNode request) {
