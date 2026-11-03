@@ -50,6 +50,11 @@ public final class RequestResources {
     private RequestResources() {
     }
 
+    /** Whether the generated table owns this operation, including corrections to hand-built namespaces. */
+    public static boolean reads(String operation) {
+        return operation != null && RequestResourceMembers.table().operations().containsKey(operation);
+    }
+
     /**
      * The ARNs of the resources a request names, in the request's partition, Region and account: empty when the
      * table does not read the operation or its request names none, so it is checked on {@code *}. The operation,

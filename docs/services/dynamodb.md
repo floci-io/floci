@@ -14,6 +14,9 @@ The listing is not filtered to the caller's individually authorized tables.
 This resource matching was checked against live AWS with isolated role sessions.
 Pagination and ignored table selectors do not change the collection being authorized.
 Other DynamoDB operations retain their own authorization resources.
+The generated IAM request-resource table records `ListTables` as a measured correction to
+the Service Reference. Other DynamoDB operations keep their existing resource builders,
+including batch, transaction and PartiQL table extraction.
 
 ## Supported Actions
 
