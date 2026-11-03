@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.StoredResourceArns;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.paymentcryptography.crypto.DukptCrypto;
@@ -65,11 +66,17 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /** The class of a key that is only a public half. */
     private static final String PUBLIC_KEY_CLASS = "PUBLIC_KEY";
 
-    /** The regions the account replicates a new key to when the request names none. */
-    private final Set<String> defaultReplicationRegions = new LinkedHashSet<>();
+    /**
+     * The storage key the account's default replication regions are kept under.
+     *
+     * <p>The store is account-aware, so what is under this key belongs to the account that
+     * put it there and to no other.
+     */
+    private static final String DEFAULT_REGIONS_KEY = "default-replication-regions";
 
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
+    private final StorageBackend<String, List<String>> settingsStore;
 
     /** The key exchange: the forms a key may leave in, and the certificates that carry them. */
     private final PaymentCryptographyKeyExchange exchange;
@@ -84,6 +91,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                         new TypeReference<>() {}),
                 storageFactory.create(STORAGE_KEY, "payment-cryptography-aliases.json",
                         new TypeReference<>() {}),
+                storageFactory.create(STORAGE_KEY, "payment-cryptography-settings.json",
+                        new TypeReference<Map<String, List<String>>>() {}),
                 regionResolver,
                 new SecureRandom(),
                 requestContext);
@@ -93,7 +102,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 RegionResolver regionResolver,
                                 PaymentCryptographyRequestContext requestContext) {
-        this(keyStore, aliasStore, regionResolver, new SecureRandom(), requestContext);
+        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, new SecureRandom(),
+                requestContext);
     }
 
     /**
@@ -105,16 +115,19 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 RegionResolver regionResolver) {
-        this(keyStore, aliasStore, regionResolver, new SecureRandom(), new PaymentCryptographyRequestContext());
+        this(keyStore, aliasStore, new InMemoryStorage<>(), regionResolver, new SecureRandom(),
+                new PaymentCryptographyRequestContext());
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
+                                StorageBackend<String, List<String>> settingsStore,
                                 RegionResolver regionResolver,
                                 SecureRandom secureRandom,
                                 PaymentCryptographyRequestContext requestContext) {
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
+        this.settingsStore = settingsStore;
         this.regionResolver = regionResolver;
         this.secureRandom = secureRandom;
         this.requestContext = requestContext;
@@ -147,7 +160,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         if (replicationRegions != null && !replicationRegions.isEmpty()) {
             regions.addAll(replicationRegions);
         } else {
-            regions.addAll(defaultReplicationRegions);
+            regions.addAll(defaultReplicationRegions());
             usingDefaults = !regions.isEmpty();
         }
         regions.remove(region);
@@ -357,7 +370,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             }
             return null;
         }
-        PaymentCryptographyKey byId = keyStore.get(storageKey(region, identifier)).orElse(null);
+        PaymentCryptographyKey byId = findKeyRecord(keyStore, region, identifier);
         return byId != null && region.equals(byId.getRegion()) ? byId : null;
     }
 
@@ -412,6 +425,11 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setKeyState("DELETE_PENDING");
         key.setEnabled(false);
         key.setDeletePendingTimestamp(now);
+        // The replicas of a key go when the key goes. A replica left behind would be a
+        // record of a key that is gone, and it could not be deleted on its own.
+        for (String target : key.getReplicationRegions()) {
+            keyStore.delete(storageKey(target, key.getKeyId()));
+        }
         keyStore.delete(storageKey(key.getRegion(), key.getKeyId()));
         for (PaymentCryptographyAlias alias : aliasStore.scan(a -> true)) {
             if (key.getKeyId().equals(alias.getKeyId())) {
@@ -430,7 +448,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * by name and region together.
      */
     public PaymentCryptographyAlias findAlias(String region, String aliasName) {
-        return aliasStore.get(aliasKey(aliasName, region)).orElse(null);
+        return findAliasRecord(region, aliasName);
     }
 
     /**
@@ -543,7 +561,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized void tag(PaymentCryptographyKey key, Map<String, String> tags) {
         PaymentCryptographyKey current = liveKey(key);
         current.getTags().putAll(tags);
-        keyStore.put(storageKey(current.getRegion(), current.getKeyId()), current);
+        storeKey(current);
     }
 
     /**
@@ -555,12 +573,29 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * read again under the lock and the request fails if it is not there.
      */
     private PaymentCryptographyKey liveKey(PaymentCryptographyKey key) {
-        PaymentCryptographyKey current = keyStore.get(storageKey(key.getRegion(), key.getKeyId())).orElse(null);
+        PaymentCryptographyKey current =
+                findKeyRecord(keyStore, key.getRegion(), key.getKeyId());
         if (current == null) {
             throw new AwsException("ResourceNotFoundException",
                     "Key " + key.getArn() + " is not found", 400);
         }
         return current;
+    }
+
+    /**
+     * Writes a key back, under the name the store holds it under now.
+     *
+     * <p>A record that was found under the older name is moved to the current one, so the
+     * store holds one record of the key and not two.
+     *
+     * @param key the key to write
+     */
+    private void storeKey(PaymentCryptographyKey key) {
+        String current = storageKey(key.getRegion(), key.getKeyId());
+        keyStore.put(current, key);
+        if (!key.getKeyId().equals(current)) {
+            keyStore.delete(key.getKeyId());
+        }
     }
 
     /** Removes tags from a key, in this region only. */
@@ -569,7 +604,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         for (String tagKey : tagKeys) {
             current.getTags().remove(tagKey);
         }
-        keyStore.put(storageKey(current.getRegion(), current.getKeyId()), current);
+        storeKey(current);
     }
 
     /**
@@ -598,9 +633,13 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
 
     /**
      * The regions the account replicates a new key to when the request names none.
+     *
+     * <p>They are kept in the account-aware store, so they belong to the account that set
+     * them and to no other account.
      */
     public List<String> defaultReplicationRegions() {
-        return new ArrayList<>(defaultReplicationRegions);
+        List<String> regions = settingsStore.get(DEFAULT_REGIONS_KEY).orElseGet(ArrayList::new);
+        return new ArrayList<>(regions);
     }
 
     /**
@@ -616,7 +655,13 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                         "the region " + region + " is not a region this service serves", 400);
             }
         }
-        defaultReplicationRegions.addAll(regions);
+        List<String> current = defaultReplicationRegions();
+        for (String region : regions) {
+            if (!current.contains(region)) {
+                current.add(region);
+            }
+        }
+        settingsStore.put(DEFAULT_REGIONS_KEY, current);
         return defaultReplicationRegions();
     }
 
@@ -626,7 +671,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * <p>Only the regions the request names are turned off, so the others stay on.
      */
     public List<String> disableDefaultReplicationRegions(List<String> regions) {
-        defaultReplicationRegions.removeAll(regions);
+        List<String> current = defaultReplicationRegions();
+        current.removeAll(regions);
+        settingsStore.put(DEFAULT_REGIONS_KEY, current);
         return defaultReplicationRegions();
     }
 
@@ -654,9 +701,17 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             }
             added.add(target);
         }
+        // A key with a replica is a primary, and says which region it is the primary of.
+        key.setMultiRegionKeyType("PRIMARY");
+        key.setPrimaryRegion(key.getPrimaryRegion() == null ? region : key.getPrimaryRegion());
         key.setReplicationRegions(new ArrayList<>(added));
         keyStore.put(storageKey(region, key.getKeyId()), key);
         for (String target : added) {
+            // A replica that is already there keeps what it holds, which is its own tags and
+            // its own alias names. Only a replica that is missing is made.
+            if (findKey(target, key.getKeyId()) != null) {
+                continue;
+            }
             PaymentCryptographyKey replica = replicaOf(key, target);
             keyStore.put(storageKey(target, replica.getKeyId()), replica);
         }
@@ -672,6 +727,15 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public PaymentCryptographyKey removeKeyReplicationRegions(String region, String keyIdentifier,
                                                                List<String> regions) {
         PaymentCryptographyKey key = primaryOf(region, keyIdentifier);
+        for (String target : regions) {
+            // The region the primary is in is not a replica, and taking it away would
+            // delete the key without going through the deletion operation.
+            if (target.equals(region)) {
+                throw new AwsException("ValidationException",
+                        "the key " + key.getArn() + " is the primary in " + region
+                                + ", and its own region is not a region to remove", 400);
+            }
+        }
         Set<String> left = new LinkedHashSet<>(key.getReplicationRegions());
         left.removeAll(regions);
         key.setReplicationRegions(new ArrayList<>(left));
@@ -1099,6 +1163,42 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
+     * The key a store holds under the name it was saved under.
+     *
+     * <p>A store written before the region became part of the name holds its keys under
+     * their identifier alone, and its aliases under their name alone. A record saved then is
+     * still found here, so a store that was not emptied keeps working.
+     *
+     * @param store the store to look in
+     * @param region the region the key is in
+     * @param keyId the key's identifier
+     * @param <T> what the store holds
+     * @return the key, or null when the store holds none
+     */
+    private static <T> T findKeyRecord(StorageBackend<String, T> store, String region,
+                                       String keyId) {
+        Optional<T> current = store.get(storageKey(region, keyId));
+        if (current.isPresent()) {
+            return current.get();
+        }
+        return store.get(keyId).orElse(null);
+    }
+
+    /**
+     * The alias a store holds under the name it was saved under.
+     *
+     * <p>An alias saved before the region became part of the name is still found here.
+     *
+     * @param region the region the alias is in
+     * @param aliasName the alias's name
+     * @return the alias, or null when the store holds none
+     */
+    private PaymentCryptographyAlias findAliasRecord(String region, String aliasName) {
+        PaymentCryptographyAlias current = aliasStore.get(aliasKey(aliasName, region)).orElse(null);
+        return current != null ? current : aliasStore.get(aliasName).orElse(null);
+    }
+
+    /**
      * The storage key of an alias.
      *
      * <p>The name and the region together, because the name is unique in the
@@ -1131,7 +1231,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public void clear() {
         keyStore.clear();
         aliasStore.clear();
-        defaultReplicationRegions.clear();
+        settingsStore.clear();
     }
 
     /** The key store, for the tests. */
