@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -47,7 +48,8 @@ public class BedrockAgentCoreHarnessRegistry {
     private static final int MAX_VERSION = 99999;
 
     private static final Pattern HARNESS_NAME = Pattern.compile("[a-zA-Z][a-zA-Z0-9_]{0,39}");
-    private static final Pattern ROLE_ARN = Pattern.compile("arn:aws(-[^:]+)?:iam::([0-9]{12})?:role/.+");
+    private static final Pattern ROLE_ARN =
+            Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::([0-9]{12})?:role/.+");
 
     private static final String RUNTIME_ENVIRONMENT = "agentCoreRuntimeEnvironment";
     private static final int DEFAULT_IDLE_SESSION_TIMEOUT = 900;
