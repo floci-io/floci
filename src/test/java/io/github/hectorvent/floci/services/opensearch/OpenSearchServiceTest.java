@@ -77,9 +77,9 @@ class OpenSearchServiceTest {
     }
 
     /**
-     * Two concurrent creates of one name start one container: the second waits for the first and
-     * is refused as the name already exists, rather than starting a second container whose
-     * domain overwrites the first and leaves the first container running with nothing to stop it.
+     * Two concurrent creates of one name start one container: the second is refused as the name
+     * already exists, rather than starting a second container whose domain overwrites the first
+     * and leaves the first container running with nothing to stop it.
      */
     @Test
     void concurrentCreatesOfOneNameStartOneContainerAndRefuseTheSecond() throws Exception {
@@ -100,18 +100,10 @@ class OpenSearchServiceTest {
         CompletableFuture<Domain> first = CompletableFuture.supplyAsync(() -> service.createDomain(
                 "raced-domain", "OpenSearch_2.11", null, null, null, US_EAST_1));
         assertTrue(firstStarting.await(10, TimeUnit.SECONDS), "the first create never started its container");
-        CompletableFuture<Domain> second = new CompletableFuture<>();
-        Thread secondCreate = new Thread(() -> {
-            try {
-                second.complete(service.createDomain("raced-domain", "OpenSearch_2.11", null, null, null, US_EAST_1));
-            } catch (RuntimeException e) {
-                second.completeExceptionally(e);
-            }
-        });
-        secondCreate.start();
+        CompletableFuture<Domain> second = CompletableFuture.supplyAsync(() -> service.createDomain(
+                "raced-domain", "OpenSearch_2.11", null, null, null, US_EAST_1));
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (secondStarting.getCount() > 0 && secondCreate.getState() != Thread.State.BLOCKED
-                && System.nanoTime() < deadline) {
+        while (secondStarting.getCount() > 0 && !second.isDone() && System.nanoTime() < deadline) {
             Thread.sleep(10);
         }
         releaseFirst.countDown();
@@ -121,6 +113,19 @@ class OpenSearchServiceTest {
         AwsException cause = assertInstanceOf(AwsException.class, refused.getCause());
         assertEquals("ResourceAlreadyExistsException", cause.getErrorCode());
         assertEquals(1, starts.get());
+    }
+
+    @Test
+    void createDomainWhoseContainerFailedToStartCanBeRetried() {
+        when(domainManager.tryStartDomain(any()))
+                .thenThrow(new IllegalStateException("container failed to start"))
+                .thenReturn(true);
+
+        assertThrows(IllegalStateException.class, () -> service.createDomain(
+                "retried-domain", "OpenSearch_2.11", null, null, null, US_EAST_1));
+        Domain domain = service.createDomain("retried-domain", "OpenSearch_2.11", null, null, null, US_EAST_1);
+
+        assertEquals("retried-domain", domain.getDomainName());
     }
 
     /**

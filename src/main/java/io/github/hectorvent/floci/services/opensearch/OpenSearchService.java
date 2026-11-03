@@ -59,9 +59,9 @@ public class OpenSearchService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final OpenSearchDomainManager domainManager;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
-    // One monitor per account and storage key, held by createDomain from its existence check to the
-    // save, so a concurrent create of the same name sees the first domain and starts no container.
-    private final ConcurrentHashMap<String, Object> createLocks = new ConcurrentHashMap<>();
+    // The account and storage key of each domain a createDomain is creating, from its existence
+    // check to its save, so a concurrent create of the same name is refused and starts no container.
+    private final Set<String> creating = ConcurrentHashMap.newKeySet();
 
     @Inject
     public OpenSearchService(StorageFactory storageFactory, EmulatorConfig config,
@@ -158,10 +158,13 @@ public class OpenSearchService implements ResourceProvider {
         }
         applyDomainOptions(domain, options);
 
-        synchronized (createLockFor(accountId, region, domainName)) {
+        String creatingKey = accountId + "/" + storageKey(region, domainName);
+        if (!creating.add(creatingKey)) {
+            throw domainAlreadyExists(domainName);
+        }
+        try {
             if (findDomain(accountId, region, domainName).isPresent()) {
-                throw new AwsException("ResourceAlreadyExistsException",
-                        "Domain with name " + domainName + " already exists.", 409);
+                throw domainAlreadyExists(domainName);
             }
             if (config.services().opensearch().mock()) {
                 domain.setProcessing(false);
@@ -174,6 +177,8 @@ public class OpenSearchService implements ResourceProvider {
                 }
             }
             domainStore.putForAccount(accountId, storageKey(region, domainName), domain);
+        } finally {
+            creating.remove(creatingKey);
         }
         LOG.infov("Created OpenSearch domain: {0}", domainName);
         return domain;
@@ -405,8 +410,9 @@ public class OpenSearchService implements ResourceProvider {
         }
     }
 
-    private Object createLockFor(String accountId, String region, String domainName) {
-        return createLocks.computeIfAbsent(accountId + "/" + storageKey(region, domainName), k -> new Object());
+    private static AwsException domainAlreadyExists(String domainName) {
+        return new AwsException("ResourceAlreadyExistsException",
+                "Domain with name " + domainName + " already exists.", 409);
     }
 
     private static String storageKey(String region, String domainName) {
