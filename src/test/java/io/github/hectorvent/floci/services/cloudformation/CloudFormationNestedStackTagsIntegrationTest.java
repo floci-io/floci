@@ -12,6 +12,7 @@ import java.util.UUID;
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 @QuarkusTest
 class CloudFormationNestedStackTagsIntegrationTest {
@@ -101,6 +102,24 @@ class CloudFormationNestedStackTagsIntegrationTest {
             assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             assertEquals(Map.of("team", "child"), tags(childStack));
             assertEquals(Map.of("team", "child"), tags(grandchildStack));
+
+            String priorChildTemplate = deployedTemplate(childStack);
+            String priorGrandchildTemplate = deployedTemplate(grandchildStack);
+            uploadTemplate(bucket, "child.json", "{\"Resources\":{}}");
+            String removalThenFailure = explicitChildTags.replace("\"Resources\":{",
+                    "\"Resources\":{\"ZFail\":{\"Type\":\"AWS::CloudFormation::Stack\","
+                            + "\"DependsOn\":\"ChildStack\",\"Properties\":{}},");
+            withTags(cfn("UpdateStack", stackName).formParam("TemplateBody", removalThenFailure), "failed", "owner-e")
+                    .when().post("/").then().statusCode(200);
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            String recreatedGrandchild = nestedStackId(childStack, "GrandchildStack");
+            assertNotEquals(grandchildStack, recreatedGrandchild,
+                    "the removed grandchild must be recreated from its saved deployment");
+            assertEquals(priorChildTemplate, deployedTemplate(childStack));
+            assertEquals(priorGrandchildTemplate, deployedTemplate(recreatedGrandchild));
+            assertEquals(Map.of(), tags(stackName));
+            assertEquals(Map.of("team", "child"), tags(childStack));
+            assertEquals(Map.of("team", "child"), tags(recreatedGrandchild));
         } finally {
             cfn("DeleteStack", stackName).when().post("/").then().statusCode(200);
             CfnStackWaits.awaitStackDeleted(stackName);
