@@ -141,7 +141,18 @@ class RedshiftResourcePolicyIntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("InvalidPolicyFault"));
 
         String namespaces = namespaceArn.substring(0, namespaceArn.lastIndexOf('/') + 1);
-        refused("GetResourcePolicy", namespaces + "00000000-0000-0000-0000-000000000000", 404,
+        String unknownNamespace = namespaces + "00000000-0000-0000-0000-000000000000";
+        // An empty policy is refused before the resource is looked up, as AWS does; a valid policy on
+        // the same missing namespace is the control.
+        redshift("PutResourcePolicy", "ResourceArn", unknownNamespace, "Policy", "{}")
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidPolicyFault"));
+        redshift("PutResourcePolicy", "ResourceArn", namespaceArn, "Policy", " { } ")
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidPolicyFault"));
+        refused("PutResourcePolicy", unknownNamespace, 404,
+                "ResourceNotFoundFault", "The requested namespace doesn't exist.");
+        refused("GetResourcePolicy", unknownNamespace, 404,
                 "ResourceNotFoundFault", "The requested namespace doesn't exist.");
         refused("PutResourcePolicy", namespaces + "not-a-uuid", 400,
                 "InvalidParameterValue", "The format of the provided identifier is invalid.");

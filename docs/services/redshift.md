@@ -425,7 +425,8 @@ A zero-ETL integration needs a resource policy on its target that lets the sourc
 Serverless namespace or of a provisioned cluster, so `aws_redshift_resource_policy` applies as it
 does on AWS:
 
-- The policy must be a JSON object, or the call is refused with `InvalidPolicyFault`.
+- The policy must be a nonempty JSON object, or the call is refused with `InvalidPolicyFault` before
+  the resource is looked up.
 - The policy is stored the way AWS returns it: `Version` and `Statement` first, each statement's
   `Effect`, `Principal`, `Action`, `Resource` and `Condition` first, other keys after them in the
   order sent, pretty-printed. The provider compares policies by content, so this causes no drift.

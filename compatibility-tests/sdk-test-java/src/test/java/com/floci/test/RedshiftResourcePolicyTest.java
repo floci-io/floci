@@ -97,6 +97,11 @@ class RedshiftResourcePolicyTest {
 
         String unknown = namespaceArn.substring(0, namespaceArn.lastIndexOf('/') + 1)
                 + "00000000-0000-0000-0000-000000000000";
+        // An empty policy is refused before the missing namespace is looked up; a valid one is not.
+        assertThatThrownBy(() -> redshift.putResourcePolicy(r -> r.resourceArn(unknown).policy("{}")))
+                .isInstanceOf(InvalidPolicyException.class);
+        assertThatThrownBy(() -> redshift.putResourcePolicy(r -> r.resourceArn(unknown).policy(POLICY)))
+                .isInstanceOf(ResourceNotFoundException.class);
         assertThatThrownBy(() -> redshift.getResourcePolicy(r -> r.resourceArn(unknown)))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("The requested namespace doesn't exist.");

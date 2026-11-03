@@ -151,6 +151,7 @@ public class RedshiftResourcePolicies {
         return policy;
     }
 
+    /** The policy as a nonempty JSON object; anything else is {@code InvalidPolicyFault}. */
     private ObjectNode requireJsonObject(String policy) {
         JsonNode parsed;
         try {
@@ -158,7 +159,8 @@ public class RedshiftResourcePolicies {
         } catch (IOException e) {
             throw invalidPolicy();
         }
-        if (!(parsed instanceof ObjectNode object)) {
+        // AWS refuses an empty object too, before it looks the resource up.
+        if (!(parsed instanceof ObjectNode object) || object.isEmpty()) {
             throw invalidPolicy();
         }
         return object;
