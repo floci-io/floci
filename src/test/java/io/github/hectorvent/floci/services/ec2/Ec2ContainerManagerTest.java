@@ -1128,6 +1128,31 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void aFailedLookupIsRetriedInTheBackgroundByTheNextAddressRead() {
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        InspectContainerResponse guest = docker.inspectContainerCmd(TEST_CONTAINER_ID).exec();
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec())
+                .thenThrow(new IllegalStateException("daemon busy")).thenReturn(guest);
+        List<Runnable> tasks = new ArrayList<>();
+        ExecutorService executor = mock(ExecutorService.class);
+        doAnswer(invocation -> tasks.add(invocation.getArgument(0))).when(executor).execute(any(Runnable.class));
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker, executor);
+        Instance instance = serviceNetworkInstance();
+        manager.refreshServiceNetworkIp(instance);
+        clearInvocations(docker);
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+        verify(docker, never()).inspectContainerCmd(anyString());
+        assertEquals(1, tasks.size());
+
+        tasks.getFirst().run();
+
+        assertEquals("172.20.0.9", manager.reachablePublicAddress(instance));
+        assertEquals(1, tasks.size());
+    }
+
+    @Test
     void aProtectedGuestReportsItsFirewallHelpersServiceNetworkAddress() {
         DockerClient docker = guestDocker(null, "172.20.0.11");
         Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
@@ -1219,9 +1244,14 @@ class Ec2ContainerManagerTest {
         return inspect;
     }
 
-    /** A manager on {@code docker} whose bridge addresses are unroutable from the host. */
     private static Ec2ContainerManager managerOnServiceNetwork(boolean enabled, boolean inContainer,
                                                                DockerClient docker) {
+        return managerOnServiceNetwork(enabled, inContainer, docker, mock(ExecutorService.class));
+    }
+
+    /** A manager on {@code docker} whose bridge addresses are unroutable from the host. */
+    private static Ec2ContainerManager managerOnServiceNetwork(boolean enabled, boolean inContainer,
+                                                               DockerClient docker, ExecutorService executor) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ec2().publicIpFromServiceNetwork()).thenReturn(enabled);
         ContainerDetector detector = mock(ContainerDetector.class);
@@ -1243,7 +1273,9 @@ class Ec2ContainerManagerTest {
                 mock(RegionResolver.class),
                 mock(ContainerNetworkReachability.class),
                 mock(VpcNetworkManager.class),
-                mock(ContainerReachableEndpoint.class));
+                mock(ContainerReachableEndpoint.class),
+                executor,
+                Duration.ofSeconds(5));
     }
 
     private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {

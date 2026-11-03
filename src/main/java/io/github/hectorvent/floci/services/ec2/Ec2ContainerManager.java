@@ -159,6 +159,9 @@ public class Ec2ContainerManager {
     private final ExecutorService executor;
     private final Semaphore metadataSetupSlots = new Semaphore(METADATA_SETUP_CONCURRENCY);
     private final Map<String, CompletableFuture<Void>> lifecycleOperations = new ConcurrentHashMap<>();
+    /** Instances whose service-network lookup failed and is retried on the next address read. */
+    private final Set<String> serviceNetworkRetries = ConcurrentHashMap.newKeySet();
+    private final Set<String> serviceNetworkRetriesRunning = ConcurrentHashMap.newKeySet();
     private final Duration userDataExecutionTimeout;
     private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
 
@@ -186,11 +189,10 @@ public class Ec2ContainerManager {
             return null;
         }
         InspectContainerResponse worker = dockerClient.inspectContainerCmd(containerId).exec();
-        String mode = worker.getHostConfig() == null ? null : worker.getHostConfig().getNetworkMode();
-        if (mode == null || !mode.startsWith("container:")) {
+        String helperId = namespaceOwnerId(worker);
+        if (helperId == null) {
             return null;
         }
-        String helperId = mode.substring("container:".length());
         InspectContainerResponse helper = dockerClient.inspectContainerCmd(helperId).exec();
         Map<String, String> labels = helper.getConfig().getLabels();
         if (!ALIASES.consistent(helperId, labels)
@@ -207,6 +209,15 @@ public class Ec2ContainerManager {
     }
 
     private record ProtectedNamespace(String helperId, String transportAddress) {}
+
+    /**
+     * The container whose network namespace this one joined through a {@code container:} network
+     * mode, as a security-group protected guest joins its firewall helper's; null when it has its own.
+     */
+    private static String namespaceOwnerId(InspectContainerResponse container) {
+        String mode = container.getHostConfig() == null ? null : container.getHostConfig().getNetworkMode();
+        return mode != null && mode.startsWith("container:") ? mode.substring("container:".length()) : null;
+    }
 
     public void restoreSecurityGroups(Instance instance, String region, List<SecurityGroup> groups,
                                       Map<String, List<String>> prefixLists) {
@@ -767,6 +778,7 @@ public class Ec2ContainerManager {
             instance.setSshHostPort(0);
             instance.setContainerBridgeIp(null);
             instance.setServiceNetworkIp(null);
+            serviceNetworkRetries.remove(instance.getInstanceId());
         }
         if (alreadyCleaned) {
             return;
@@ -1320,10 +1332,12 @@ public class Ec2ContainerManager {
         if (instance == null) {
             return null;
         }
-        String serviceNetworkIp = instance.getServiceNetworkIp();
-        if (serviceNetworkIp != null && !serviceNetworkIp.isBlank()
-                && config.services().ec2().publicIpFromServiceNetwork()) {
-            return serviceNetworkIp;
+        if (config.services().ec2().publicIpFromServiceNetwork()) {
+            retryServiceNetworkIp(instance);
+            String serviceNetworkIp = instance.getServiceNetworkIp();
+            if (serviceNetworkIp != null && !serviceNetworkIp.isBlank()) {
+                return serviceNetworkIp;
+            }
         }
         String containerIp = instance.getContainerBridgeIp();
         if (containerIp == null || containerIp.isBlank()) {
@@ -1339,7 +1353,38 @@ public class Ec2ContainerManager {
      * addresses are (re)learned: launch, start and restore.
      */
     void refreshServiceNetworkIp(Instance instance) {
-        instance.setServiceNetworkIp(resolveServiceNetworkIp(instance));
+        try {
+            instance.setServiceNetworkIp(resolveServiceNetworkIp(instance));
+            serviceNetworkRetries.remove(instance.getInstanceId());
+        } catch (RuntimeException e) {
+            // A Docker hiccup is not an answer: keep what was recorded and let the next address
+            // read retry the lookup in the background.
+            LOG.debugv("Could not read the service-network address of {0}, will retry: {1}",
+                    instance.getInstanceId(), e.getMessage());
+            serviceNetworkRetries.add(instance.getInstanceId());
+        }
+    }
+
+    /**
+     * Retries a failed {@link #refreshServiceNetworkIp} on the executor, at most one attempt per
+     * instance at a time, so the address read that notices it never waits on Docker.
+     */
+    private void retryServiceNetworkIp(Instance instance) {
+        String instanceId = instance.getInstanceId();
+        if (!serviceNetworkRetries.contains(instanceId) || !serviceNetworkRetriesRunning.add(instanceId)) {
+            return;
+        }
+        try {
+            executor.execute(() -> {
+                try {
+                    refreshServiceNetworkIp(instance);
+                } finally {
+                    serviceNetworkRetriesRunning.remove(instanceId);
+                }
+            });
+        } catch (RuntimeException e) {
+            serviceNetworkRetriesRunning.remove(instanceId);
+        }
     }
 
     private String resolveServiceNetworkIp(Instance instance) {
@@ -1351,24 +1396,19 @@ public class Ec2ContainerManager {
         if (network.isEmpty()) {
             return null;
         }
-        try {
-            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(instance.getDockerContainerId()).exec();
-            // A security-group protected guest joins its firewall helper's network namespace and has
-            // no attachment of its own: the helper's address on the network is the guest's.
-            String mode = inspect.getHostConfig() == null ? null : inspect.getHostConfig().getNetworkMode();
-            if (mode != null && mode.startsWith("container:")) {
-                inspect = dockerClient.inspectContainerCmd(mode.substring("container:".length())).exec();
-            }
-            if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
-                return null;
-            }
-            ContainerNetwork attached = inspect.getNetworkSettings().getNetworks().get(network.get());
-            return attached == null || attached.getIpAddress() == null || attached.getIpAddress().isBlank()
-                    ? null : attached.getIpAddress();
-        } catch (RuntimeException e) {
-            LOG.debugv("No service-network address for {0}: {1}", instance.getInstanceId(), e.getMessage());
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(instance.getDockerContainerId()).exec();
+        // A security-group protected guest joins its firewall helper's network namespace and has
+        // no attachment of its own: the helper's address on the network is the guest's.
+        String helperId = namespaceOwnerId(inspect);
+        if (helperId != null) {
+            inspect = dockerClient.inspectContainerCmd(helperId).exec();
+        }
+        if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
             return null;
         }
+        ContainerNetwork attached = inspect.getNetworkSettings().getNetworks().get(network.get());
+        return attached == null || attached.getIpAddress() == null || attached.getIpAddress().isBlank()
+                ? null : attached.getIpAddress();
     }
 
     /**
