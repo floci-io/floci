@@ -97,6 +97,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -1253,9 +1254,7 @@ class RdsServiceTest {
                     assertEquals("DBInstanceNotFound", e.getErrorCode());
                 }
             });
-            await().pollInterval(Duration.ofMillis(10)).atMost(Duration.ofSeconds(5)).until(() ->
-                    delete.isDone() || (deleteThread.get() != null
-                            && deleteThread.get().getState() == Thread.State.BLOCKED));
+            awaitBlockedOrDone(deleteThread, delete);
             assertFalse(delete.isDone(), "delete must wait while failed-create rollback owns the instance");
             assertEquals(Thread.State.BLOCKED, deleteThread.get().getState());
 
