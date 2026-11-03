@@ -29,7 +29,9 @@ final class Ec2QueryProtocol {
         List<String> result = new ArrayList<>();
         for (int i = 1; ; i++) {
             String v = p.getFirst(prefix + "." + i);
-            if (v == null) break;
+            if (v == null) {
+                break;
+            }
             result.add(v);
         }
         return result;
@@ -52,7 +54,9 @@ final class Ec2QueryProtocol {
         List<Map.Entry<String, List<String>>> filters = new ArrayList<>();
         for (int i = 1; ; i++) {
             String name = p.getFirst("Filter." + i + ".Name");
-            if (name == null) break;
+            if (name == null) {
+                break;
+            }
             filters.add(new AbstractMap.SimpleEntry<>(name, getList(p, "Filter." + i + ".Value")));
         }
         return filters;
