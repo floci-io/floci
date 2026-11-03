@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.core.storage.WalStorage;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
@@ -69,10 +70,15 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Field;
 import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -1248,6 +1254,32 @@ class RdsServiceTest {
     }
 
     @Test
+    void failedContainerBeforeInstanceWriteDoesNotReservePortForUnrelatedIoFailure() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
+        RdsService service = newService(containerManager, proxyManager, instances,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        IOException cause = new IOException("container failed before instance write");
+        cause.addSuppressed(new IOException("container cleanup also failed"));
+        UncheckedIOException startupFailure = new UncheckedIOException(cause);
+        UncheckedIOException tombstoneFailure = new UncheckedIOException(
+                "Failed to inspect WAL before append", new IOException("WAL path is not a regular file"));
+        doThrow(startupFailure).doReturn(new RdsContainerHandle("cont-id", "id", "localhost", 5432))
+                .when(containerManager).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        doThrow(tombstoneFailure).doCallRealMethod()
+                .when(instances).put(eq("us-east-1::failed-instance"), any());
+
+        assertSame(startupFailure, assertThrows(UncheckedIOException.class, () ->
+                service.createDbInstance("failed-instance", "postgres", "13", "admin", "secret",
+                        "app", "db.t3.micro", 20, false, null, null, null)));
+        assertTrue(List.of(startupFailure.getSuppressed()).contains(tombstoneFailure));
+        assertTrue(instances.get("us-east-1::failed-instance").isEmpty());
+        DbInstance retried = service.createDbInstance("failed-instance", "postgres", "13",
+                "admin", "secret", "app", "db.t3.micro", 20, false, null, null, null);
+        assertEquals(7000, retried.getProxyPort());
+    }
+
+    @Test
     void failedInitialStandaloneWritesKeepPortWhenBackendCleanupFails() {
         when(rdsConfig.proxyMaxPort()).thenReturn(7000);
         InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
@@ -1903,6 +1935,98 @@ class RdsServiceTest {
         assertTrue(instances.get("us-east-1::failed-member").isEmpty());
         assertTrue(cluster.getDbClusterMembers().isEmpty());
 
+        DbInstance retried = service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
+                null, null, "dbname", "db.serverless", 0, false,
+                null, null, "member-cluster");
+        assertEquals(7001, retried.getProxyPort());
+    }
+
+    @Test
+    void failedBufferedWalRollbackKeepsRecoveredMemberPort(@TempDir Path tempDir) throws Exception {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7001);
+        Path snapshot = tempDir.resolve("member-instances.json");
+        Path log = tempDir.resolve("member-instances.wal");
+        Path retainedLog = tempDir.resolve("retained-member-instances.wal");
+        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
+        WalStorage<String, DbInstance> wal = new WalStorage<>(snapshot, log, type, Long.MAX_VALUE);
+        wal.load();
+        try {
+            AccountAwareStorageBackend<DbInstance> instances =
+                    new AccountAwareStorageBackend<>(wal, null, "123456789012");
+            RdsService service = newService(containerManager, proxyManager, instances,
+                    new InMemoryStorage<>(), new InMemoryStorage<>(),
+                    new InMemoryStorage<>(), new InMemoryStorage<>());
+            service.createDbCluster("member-cluster", "aurora-postgresql", "16.3",
+                    "admin", "password", "dbname", false, null);
+
+            Field writerField = WalStorage.class.getDeclaredField("walWriter");
+            writerField.setAccessible(true);
+            ((DataOutputStream) writerField.get(wal)).close();
+            OutputStream append = Files.newOutputStream(log, StandardOpenOption.APPEND);
+            writerField.set(wal, new DataOutputStream(append) {
+                @Override
+                public void flush() throws IOException {
+                    append.flush();
+                    append.close();
+                    Files.move(log, retainedLog);
+                    Files.createDirectory(log);
+                    throw new IOException("flush failed after complete WAL append");
+                }
+
+                @Override
+                public void close() throws IOException {
+                    append.close();
+                }
+            });
+
+            UncheckedIOException failure = assertThrows(UncheckedIOException.class, () ->
+                    service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
+                            null, null, "dbname", "db.serverless", 0, false,
+                            null, null, "member-cluster"));
+            assertEquals(1, failure.getCause().getSuppressed().length);
+            assertTrue(instances.getForAccount("123456789012", "us-east-1::failed-member").isEmpty());
+            assertEquals("InsufficientDBInstanceCapacity", assertThrows(AwsException.class, () ->
+                    service.createDbInstance("other-member", "aurora-postgresql", "16.3",
+                            null, null, "dbname", "db.serverless", 0, false,
+                            null, null, "member-cluster")).getErrorCode());
+
+            Files.delete(log);
+            Files.move(retainedLog, log);
+            WalStorage<String, DbInstance> reloaded = new WalStorage<>(snapshot, log, type, Long.MAX_VALUE);
+            reloaded.load();
+            try {
+                DbInstance recovered = reloaded.get("123456789012/us-east-1::failed-member").orElseThrow();
+                assertEquals(7001, recovered.getProxyPort());
+                assertEquals(DbInstanceStatus.CREATING, recovered.getStatus());
+            } finally {
+                reloaded.shutdown();
+            }
+        } finally {
+            wal.shutdown();
+        }
+    }
+
+    @Test
+    void failedPreAppendWalInspectionWithoutRecordReleasesMemberPort() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7001);
+        InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
+        RdsService service = newService(containerManager, proxyManager, instances,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbCluster("member-cluster", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        UncheckedIOException initialFailure = new UncheckedIOException(
+                "Failed to inspect WAL before append", new IOException("WAL path is not a regular file"));
+        UncheckedIOException tombstoneFailure = new UncheckedIOException(
+                "Failed to inspect WAL before append", new IOException("WAL path is not a regular file"));
+        doThrow(initialFailure).doThrow(tombstoneFailure).doCallRealMethod()
+                .when(instances).put(eq("us-east-1::failed-member"), any());
+
+        assertSame(initialFailure, assertThrows(UncheckedIOException.class, () ->
+                service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
+                        null, null, "dbname", "db.serverless", 0, false,
+                        null, null, "member-cluster")));
+        assertTrue(List.of(initialFailure.getSuppressed()).contains(tombstoneFailure));
+        assertTrue(instances.get("us-east-1::failed-member").isEmpty());
         DbInstance retried = service.createDbInstance("failed-member", "aurora-postgresql", "16.3",
                 null, null, "dbname", "db.serverless", 0, false,
                 null, null, "member-cluster");

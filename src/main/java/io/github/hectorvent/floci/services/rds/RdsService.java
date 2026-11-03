@@ -74,6 +74,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.UncheckedIOException;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -907,7 +908,7 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (RuntimeException | Error failure) {
                 synchronized (instance) {
                     rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
-                            effectiveRegion, false, false, mock);
+                            effectiveRegion, false, false, false, mock);
                 }
                 throw failure;
             }
@@ -998,7 +999,8 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (RuntimeException | Error failure) {
                 if (isBlank(dbClusterIdentifier)) {
                     rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
-                            effectiveRegion, proxyStartAttempted, manageInstancePassword, mock);
+                            effectiveRegion, instanceWriteStarted, proxyStartAttempted,
+                            manageInstancePassword, mock);
                 } else if (currentCluster != null) {
                     rollbackFailedClusterMemberCreate(failure, instance, currentCluster,
                             originalMembers, originalWriter, accountId, effectiveRegion,
@@ -1014,12 +1016,13 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private void rollbackFailedStandaloneInstanceCreate(
             Throwable failure, DbInstance instance, String accountId, String region,
-            boolean proxyStartAttempted, boolean managedPassword, boolean mock) {
+            boolean instanceWriteStarted, boolean proxyStartAttempted,
+            boolean managedPassword, boolean mock) {
         instance.setBackendCleanupRequired(!mock && instance.getDockerVolumeName() != null);
         instance.setManagedSecretCleanupRequired(managedPassword
                 && (instance.getMasterUserSecretArn() != null
                 || instance.isManagedSecretCleanupRequired()));
-        rollbackFailedInstanceCreate(failure, instance, accountId, region, true,
+        rollbackFailedInstanceCreate(failure, instance, accountId, region, true, instanceWriteStarted,
                 proxyStartAttempted, null, managedPassword, mock);
     }
 
@@ -1027,8 +1030,8 @@ public class RdsService implements Resettable, ResourceProvider {
             Throwable failure, DbInstance instance, DbCluster cluster,
             List<String> originalMembers, String originalWriter, String accountId, String region,
             boolean instanceWriteStarted, boolean proxyStartAttempted, boolean memberMutationStarted) {
-        rollbackFailedInstanceCreate(failure, instance, accountId, region, instanceWriteStarted,
-                proxyStartAttempted,
+        rollbackFailedInstanceCreate(failure, instance, accountId, region,
+                instanceWriteStarted, instanceWriteStarted, proxyStartAttempted,
                 new ClusterMemberRollback(cluster, originalMembers, originalWriter, memberMutationStarted),
                 false, false);
     }
@@ -1038,7 +1041,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private void rollbackFailedInstanceCreate(
             Throwable failure, DbInstance instance, String accountId, String region,
-            boolean tombstoneWriteNeeded, boolean proxyStartAttempted,
+            boolean tombstoneWriteNeeded, boolean instanceWriteStarted, boolean proxyStartAttempted,
             ClusterMemberRollback clusterRollback, boolean managedPassword, boolean mock) {
         String id = instance.getDbInstanceIdentifier();
         int proxyPort = instance.getProxyPort();
@@ -1050,7 +1053,9 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (RuntimeException | Error rollbackFailure) {
                 addSuppressedUnlessSelf(failure, rollbackFailure);
                 if (!proxyStartAttempted
-                        && (clusterRollback == null || !clusterRollback.memberMutationStarted())) {
+                        && (clusterRollback == null || !clusterRollback.memberMutationStarted())
+                        && !(instanceWriteStarted && hasFailedWalRollback(failure))
+                        && !hasFailedWalRollback(rollbackFailure)) {
                     try {
                         if (!scopedKeyExists(instances, accountId, dbResourceKey(region, id))) {
                             if (clusterRollback != null || cleanupFailedStandaloneResources(
@@ -1126,6 +1131,12 @@ public class RdsService implements Resettable, ResourceProvider {
         if (releasePort) {
             releaseProxyPort(proxyPort);
         }
+    }
+
+    private boolean hasFailedWalRollback(Throwable failure) {
+        // WalStorage adds suppressed failures only when recovery of an appended record fails.
+        return failure instanceof UncheckedIOException ioFailure
+                && ioFailure.getCause().getSuppressed().length > 0;
     }
 
     private boolean cleanupFailedStandaloneResources(
