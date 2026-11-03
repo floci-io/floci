@@ -149,6 +149,7 @@ public class CognitoJsonHandler {
             case "StartWebAuthnRegistration" -> handleStartWebAuthnRegistration(request);
             case "CompleteWebAuthnRegistration" -> handleCompleteWebAuthnRegistration(request);
             case "ListWebAuthnCredentials" -> handleListWebAuthnCredentials(request);
+            case "AdminListUserAuthEvents" -> handleAdminListUserAuthEvents(request);
             case "DeleteWebAuthnCredential" -> handleDeleteWebAuthnCredential(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
@@ -1639,6 +1640,14 @@ public class CognitoJsonHandler {
     private Response handleListWebAuthnCredentials(JsonNode request) {
         return Response.ok(objectMapper.valueToTree(service.listWebAuthnCredentials(
                 request.path("AccessToken").asText(),
+                request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null,
+                request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null))).build();
+    }
+
+    private Response handleAdminListUserAuthEvents(JsonNode request) {
+        return Response.ok(objectMapper.valueToTree(service.adminListUserAuthEvents(
+                request.path("UserPoolId").asText(),
+                request.path("Username").asText(),
                 request.hasNonNull("MaxResults") ? request.path("MaxResults").asInt() : null,
                 request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null))).build();
     }
