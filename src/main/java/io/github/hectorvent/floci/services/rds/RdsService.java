@@ -74,6 +74,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.UncheckedIOException;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -907,7 +908,7 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (RuntimeException | Error failure) {
                 synchronized (instance) {
                     rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
-                            effectiveRegion, false, false, mock);
+                            effectiveRegion, false, false, false, mock);
                 }
                 throw failure;
             }
@@ -954,40 +955,37 @@ public class RdsService implements Resettable, ResourceProvider {
                     }
                 }
             }
+            List<String> originalMembers = currentCluster == null
+                    ? null : new ArrayList<>(currentCluster.getDbClusterMembers());
+            String originalWriter = currentCluster == null
+                    ? null : currentCluster.getClusterWriterIdentifier();
+            boolean instanceWriteStarted = false;
             boolean proxyStartAttempted = false;
+            boolean memberMutationStarted = false;
             try {
                 if (manageInstancePassword) {
                     attachManagedMasterUserSecret(
                             instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
                 }
+                instanceWriteStarted = true;
                 putInstanceForScope(accountId, effectiveRegion, id, instance);
 
                 if (!mock && hasBackend(backendHost, backendPort)) {
                     final String instanceRegion = regionFromArn(instance.getDbInstanceArn());
                     InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
-                    try {
-                        proxyStartAttempted = true;
-                        proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                                backendIdentity.runtimeId(), engine, iamEnabled, proxyPort,
-                                backendHost, backendPort, instance.getEndpoint().address(),
-                                instance.getMasterUsername(), instance.getMasterPassword(), dbName,
-                                (user, pw) -> validateDbPasswordForScope(
-                                        accountId, instanceRegion, id, user, pw),
-                                proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                        instanceRegion, accountId, backendIdentity.dbUserResourceId()));
-                    } catch (RuntimeException | Error failure) {
-                        if (!isBlank(dbClusterIdentifier)) {
-                            try {
-                                deleteInstanceForScope(accountId, effectiveRegion, id);
-                            } catch (RuntimeException | Error rollbackFailure) {
-                                addSuppressedUnlessSelf(failure, rollbackFailure);
-                            }
-                        }
-                        throw failure;
-                    }
+                    proxyStartAttempted = true;
+                    proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
+                            backendIdentity.runtimeId(), engine, iamEnabled, proxyPort,
+                            backendHost, backendPort, instance.getEndpoint().address(),
+                            instance.getMasterUsername(), instance.getMasterPassword(), dbName,
+                            (user, pw) -> validateDbPasswordForScope(
+                                    accountId, instanceRegion, id, user, pw),
+                            proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
+                                    instanceRegion, accountId, backendIdentity.dbUserResourceId()));
                 }
 
                 if (currentCluster != null) {
+                    memberMutationStarted = true;
                     currentCluster.getDbClusterMembers().add(id);
                     if (currentCluster.resolveWriterIdentifier() == null
                             || !currentCluster.getDbClusterMembers().contains(currentCluster.getClusterWriterIdentifier())) {
@@ -1001,7 +999,12 @@ public class RdsService implements Resettable, ResourceProvider {
             } catch (RuntimeException | Error failure) {
                 if (isBlank(dbClusterIdentifier)) {
                     rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
-                            effectiveRegion, proxyStartAttempted, manageInstancePassword, mock);
+                            effectiveRegion, instanceWriteStarted, proxyStartAttempted,
+                            manageInstancePassword, mock);
+                } else if (currentCluster != null) {
+                    rollbackFailedClusterMemberCreate(failure, instance, currentCluster,
+                            originalMembers, originalWriter, accountId, effectiveRegion,
+                            instanceWriteStarted, proxyStartAttempted, memberMutationStarted);
                 }
                 throw failure;
             }
@@ -1013,32 +1016,132 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private void rollbackFailedStandaloneInstanceCreate(
             Throwable failure, DbInstance instance, String accountId, String region,
-            boolean proxyStartAttempted, boolean managedPassword, boolean mock) {
-        String id = instance.getDbInstanceIdentifier();
-        instance.setStatus(DbInstanceStatus.DELETING);
-        instance.setDeletionProtection(false);
+            boolean instanceWriteStarted, boolean proxyStartAttempted,
+            boolean managedPassword, boolean mock) {
         instance.setBackendCleanupRequired(!mock && instance.getDockerVolumeName() != null);
         instance.setManagedSecretCleanupRequired(managedPassword
                 && (instance.getMasterUserSecretArn() != null
                 || instance.isManagedSecretCleanupRequired()));
-        try {
-            putInstanceForScope(accountId, region, id, instance);
-        } catch (RuntimeException | Error persistenceFailure) {
-            addSuppressedUnlessSelf(failure, persistenceFailure);
-            return;
+        rollbackFailedInstanceCreate(failure, instance, accountId, region, true, instanceWriteStarted,
+                proxyStartAttempted, null, managedPassword, mock);
+    }
+
+    private void rollbackFailedClusterMemberCreate(
+            Throwable failure, DbInstance instance, DbCluster cluster,
+            List<String> originalMembers, String originalWriter, String accountId, String region,
+            boolean instanceWriteStarted, boolean proxyStartAttempted, boolean memberMutationStarted) {
+        rollbackFailedInstanceCreate(failure, instance, accountId, region,
+                instanceWriteStarted, instanceWriteStarted, proxyStartAttempted,
+                new ClusterMemberRollback(cluster, originalMembers, originalWriter, memberMutationStarted),
+                false, false);
+    }
+
+    private record ClusterMemberRollback(DbCluster cluster, List<String> originalMembers,
+                                         String originalWriter, boolean memberMutationStarted) {}
+
+    private void rollbackFailedInstanceCreate(
+            Throwable failure, DbInstance instance, String accountId, String region,
+            boolean tombstoneWriteNeeded, boolean instanceWriteStarted, boolean proxyStartAttempted,
+            ClusterMemberRollback clusterRollback, boolean managedPassword, boolean mock) {
+        String id = instance.getDbInstanceIdentifier();
+        int proxyPort = instance.getProxyPort();
+        if (tombstoneWriteNeeded) {
+            instance.setStatus(DbInstanceStatus.DELETING);
+            instance.setDeletionProtection(false);
+            try {
+                putInstanceForScope(accountId, region, id, instance);
+            } catch (RuntimeException | Error rollbackFailure) {
+                addSuppressedUnlessSelf(failure, rollbackFailure);
+                if (!proxyStartAttempted
+                        && (clusterRollback == null || !clusterRollback.memberMutationStarted())
+                        && !(instanceWriteStarted && hasFailedWalRollback(failure))
+                        && !hasFailedWalRollback(rollbackFailure)) {
+                    try {
+                        if (!scopedKeyExists(instances, accountId, dbResourceKey(region, id))) {
+                            if (clusterRollback != null || cleanupFailedStandaloneResources(
+                                    failure, instance, region, managedPassword, mock)) {
+                                releaseProxyPort(proxyPort);
+                            }
+                        }
+                    } catch (RuntimeException | Error verificationFailure) {
+                        addSuppressedUnlessSelf(failure, verificationFailure);
+                    }
+                }
+                return;
+            }
         }
 
         boolean cleanupComplete = true;
+        if (clusterRollback != null && clusterRollback.memberMutationStarted()) {
+            try {
+                DbCluster cluster = clusterRollback.cluster();
+                cluster.getDbClusterMembers().clear();
+                cluster.getDbClusterMembers().addAll(clusterRollback.originalMembers());
+                cluster.setClusterWriterIdentifier(clusterRollback.originalWriter());
+                putClusterForScope(accountId, region, cluster.getDbClusterIdentifier(), cluster);
+            } catch (RuntimeException | Error rollbackFailure) {
+                cleanupComplete = false;
+                addSuppressedUnlessSelf(failure, rollbackFailure);
+            }
+        }
+
         boolean proxyStopped = !proxyStartAttempted;
         if (proxyStartAttempted) {
             try {
                 proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
                 proxyStopped = true;
-            } catch (RuntimeException | Error cleanupFailure) {
-                cleanupComplete = false;
-                addSuppressedUnlessSelf(failure, cleanupFailure);
+            } catch (RuntimeException | Error rollbackFailure) {
+                addSuppressedUnlessSelf(failure, rollbackFailure);
             }
         }
+
+        if (clusterRollback == null) {
+            cleanupComplete = cleanupFailedStandaloneResources(failure, instance, region, managedPassword, mock);
+        }
+
+        boolean instanceRemoved = !tombstoneWriteNeeded;
+        if (tombstoneWriteNeeded && proxyStopped && cleanupComplete) {
+            try {
+                deleteInstanceForScope(accountId, region, id);
+            } catch (RuntimeException | Error rollbackFailure) {
+                addSuppressedUnlessSelf(failure, rollbackFailure);
+            }
+            try {
+                instanceRemoved = !scopedKeyExists(instances, accountId, dbResourceKey(region, id));
+            } catch (RuntimeException | Error verificationFailure) {
+                addSuppressedUnlessSelf(failure, verificationFailure);
+            }
+        }
+        boolean releasePort = proxyStopped && instanceRemoved;
+        if (!instanceRemoved) {
+            DbEndpoint originalEndpoint = instance.getEndpoint();
+            if (proxyStopped) {
+                instance.setProxyPort(0);
+                instance.setEndpoint(null);
+            }
+            try {
+                putInstanceForScope(accountId, region, id, instance);
+                releasePort = proxyStopped;
+            } catch (RuntimeException | Error rollbackFailure) {
+                instance.setProxyPort(proxyPort);
+                instance.setEndpoint(originalEndpoint);
+                addSuppressedUnlessSelf(failure, rollbackFailure);
+            }
+        }
+        if (releasePort) {
+            releaseProxyPort(proxyPort);
+        }
+    }
+
+    private boolean hasFailedWalRollback(Throwable failure) {
+        // WalStorage adds suppressed failures only when recovery of an appended record fails.
+        return failure instanceof UncheckedIOException ioFailure
+                && ioFailure.getCause().getSuppressed().length > 0;
+    }
+
+    private boolean cleanupFailedStandaloneResources(
+            Throwable failure, DbInstance instance, String region, boolean managedPassword, boolean mock) {
+        boolean cleanupComplete = true;
         if (!mock && instance.getDockerVolumeName() != null) {
             try {
                 if (instance.getContainerId() != null) {
@@ -1066,29 +1169,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 addSuppressedUnlessSelf(failure, cleanupFailure);
             }
         }
-        if (proxyStopped) {
-            releaseProxyPort(instance.getProxyPort());
-            instance.setProxyPort(0);
-            instance.setEndpoint(null);
-        }
-        if (!cleanupComplete) {
-            try {
-                putInstanceForScope(accountId, region, id, instance);
-            } catch (RuntimeException | Error persistenceFailure) {
-                addSuppressedUnlessSelf(failure, persistenceFailure);
-            }
-            return;
-        }
-        try {
-            deleteInstanceForScope(accountId, region, id);
-        } catch (RuntimeException | Error deletionFailure) {
-            addSuppressedUnlessSelf(failure, deletionFailure);
-            try {
-                putInstanceForScope(accountId, region, id, instance);
-            } catch (RuntimeException | Error persistenceFailure) {
-                addSuppressedUnlessSelf(failure, persistenceFailure);
-            }
-        }
+        return cleanupComplete;
     }
 
     public DbSnapshot createDbSnapshot(String snapshotId, String instanceId) {
