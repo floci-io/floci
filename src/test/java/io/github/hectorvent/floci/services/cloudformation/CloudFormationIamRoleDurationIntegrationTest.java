@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -11,8 +12,6 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.iam.IamClient;
@@ -53,14 +52,9 @@ class CloudFormationIamRoleDurationIntegrationTest {
 
     @BeforeEach
     void clients() {
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create("test", "test"));
-        cfn = CloudFormationClient.builder().endpointOverride(endpoint).region(Region.EU_WEST_1)
-                .credentialsProvider(credentials).build();
-        iam = IamClient.builder().endpointOverride(endpoint).region(Region.EU_WEST_1)
-                .credentialsProvider(credentials).build();
-        sts = StsClient.builder().endpointOverride(endpoint).region(Region.EU_WEST_1)
-                .credentialsProvider(credentials).build();
+        cfn = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.EU_WEST_1, endpoint);
+        iam = AwsTestClients.create(IamClient.builder(), "test", Region.EU_WEST_1, endpoint);
+        sts = AwsTestClients.create(StsClient.builder(), "test", Region.EU_WEST_1, endpoint);
     }
 
     @AfterEach

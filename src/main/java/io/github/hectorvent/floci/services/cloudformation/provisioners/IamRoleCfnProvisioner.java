@@ -6,10 +6,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.iam.IamRequestShapes;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
@@ -78,9 +81,10 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         String description = ctx.resolveOptional(props, "Description");
         Integer declaredDuration = ctx.resolveOptionalInt(props, "MaxSessionDuration");
         int maxSessionDuration = declaredDuration != null ? declaredDuration : 3600;
-        if (maxSessionDuration < 3600 || maxSessionDuration > 43200) {
-            throw new AwsException("ValidationError", "MaxSessionDuration must be between 3600 and 43200.", 400);
-        }
+        MultivaluedMap<String, String> durationParams = new MultivaluedHashMap<>();
+        durationParams.putSingle("RoleName", resolvedRoleName);
+        durationParams.putSingle("MaxSessionDuration", Integer.toString(maxSessionDuration));
+        IamRequestShapes.check("UpdateRole", durationParams);
         List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
         // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
         String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);

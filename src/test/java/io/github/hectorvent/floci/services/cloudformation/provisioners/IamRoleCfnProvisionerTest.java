@@ -112,6 +112,18 @@ class IamRoleCfnProvisionerTest {
         verifyNoInteractions(iam);
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {3599, 43201})
+    void durationRangeUsesTheIamQueryValidationMessage(int duration) {
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(),
+                props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":" + duration + "}"), ctx()));
+
+        String bound = duration < 3600 ? "greater than or equal to 3600" : "less than or equal to 43200";
+        assertEquals("1 validation error detected: Value at 'maxSessionDuration' failed to satisfy constraint: "
+                + "Member must have value " + bound, failure.getMessage());
+        verifyNoInteractions(iam);
+    }
+
     @Test
     void durationUpdateCannotChangeAnotherRoleThatTookTheSameName() {
         IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
