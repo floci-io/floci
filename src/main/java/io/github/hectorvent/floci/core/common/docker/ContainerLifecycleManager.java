@@ -23,6 +23,7 @@ import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.api.model.Volume;
+import com.github.dockerjava.api.model.WaitContainerCondition;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -653,6 +654,8 @@ public class ContainerLifecycleManager {
      * {@link #stopAndRemove(String, Closeable)}. Resource-deletion paths that must retain their
      * persisted record for a retry use this stricter variant instead. The log stream is closed
      * only once the container is gone; when removal fails it is left open for the retry.
+     * A concurrent Docker removal is given up to five seconds to finish, followed by an
+     * independent absence check before cleanup succeeds.
      */
     public void stopAndRemoveStrict(String containerId, Closeable logStream) {
         stopAndRemoveStrict(containerId, logStream, 5);
@@ -698,18 +701,40 @@ public class ContainerLifecycleManager {
         } catch (NotFoundException e) {
             // Already gone, so cleanup succeeded.
         } catch (Exception e) {
-            IllegalStateException cleanupFailure = new IllegalStateException(
-                    "Failed to remove container " + containerId, e);
-            if (stopFailure != null) {
-                cleanupFailure.addSuppressed(stopFailure);
+            boolean absent = presenceOf(containerId) == ContainerPresence.ABSENT;
+            if (!absent && e instanceof ConflictException) {
+                absent = awaitConcurrentRemoval(containerId);
             }
-            // The container still exists and may still be logging, so the stream stays open for
-            // the caller's retry.
-            throw cleanupFailure;
+            if (!absent) {
+                IllegalStateException cleanupFailure = new IllegalStateException(
+                        "Failed to remove container " + containerId, e);
+                if (stopFailure != null) {
+                    cleanupFailure.addSuppressed(stopFailure);
+                }
+                // Retain the stream and original failure for the caller's retry.
+                throw cleanupFailure;
+            }
+            LOG.debugv("Container {0} is absent after its removal response failed", containerId);
         }
         // Closed only once the container is stopped and gone, as in stopAndRemove, so the follower
         // can drain the final tail.
         closeLogStreamIfPresent(logStream);
+    }
+
+    private boolean awaitConcurrentRemoval(String containerId) {
+        try (WaitContainerResultCallback callback = new WaitContainerResultCallback()) {
+            dockerClient.waitContainerCmd(containerId).withCondition(WaitContainerCondition.REMOVED).exec(callback);
+            callback.awaitCompletion(5, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            LOG.debugv("Interrupted waiting for container {0} removal", containerId);
+            return false;
+        } catch (Exception e) {
+            // Removal can finish before the wait registers, or the wait transport can fail.
+            // In either case, inspect must confirm absence before cleanup succeeds.
+            LOG.debugv("Could not await container {0} removal: {1}", containerId, e.getMessage());
+        }
+        return presenceOf(containerId) == ContainerPresence.ABSENT;
     }
 
     private void withTeardownSlot(Runnable stopAndRemove) {
