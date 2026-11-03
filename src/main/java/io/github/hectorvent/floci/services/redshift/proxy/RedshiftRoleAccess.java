@@ -96,9 +96,7 @@ public final class RedshiftRoleAccess {
         }
         // The path counts, as STS AssumeRole takes it: an ARN naming the role under another path names no role,
         // so the iam:PassRole check on the ARN the cluster was given covers the role assumed here.
-        String roleName = parsed.resource().substring(parsed.resource().lastIndexOf('/') + 1);
-        Optional<IamRole> role = iamService.findRole(parsed.accountId(), roleName)
-                .filter(found -> IamService.roleArnMatches(iamRoleArn, found));
+        Optional<IamRole> role = findRole(iamRoleArn, iamService);
         if (role.isEmpty()) {
             throw new S3CopySimulator.S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                     "IAM Role '" + iamRoleArn + "' could not be assumed: role does not exist", null);
@@ -122,6 +120,32 @@ public final class RedshiftRoleAccess {
                 secretAccessKey, sessionToken, iamRoleArn,
                 Instant.now().plus(sessionTtl), null);
         return new RoleSession(accessKeyId, secretAccessKey, sessionToken);
+    }
+
+    /**
+     * Looks up the role {@code iamRoleArn} names, honouring its path through {@link IamService#roleArnMatches}.
+     */
+    public static Optional<IamRole> findRole(String iamRoleArn, IamService iamService) {
+        if (iamRoleArn == null || !AwsArnUtils.isArn(iamRoleArn)) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(iamRoleArn);
+        } catch (IllegalArgumentException e) {
+            return Optional.empty();
+        }
+        if (!"iam".equals(parsed.service()) || !parsed.resource().startsWith("role/")) {
+            return Optional.empty();
+        }
+        String roleName = parsed.resource().substring(parsed.resource().lastIndexOf('/') + 1);
+        return iamService.findRole(parsed.accountId(), roleName)
+                .filter(found -> IamService.roleArnMatches(iamRoleArn, found));
+    }
+
+    /** Returns whether {@code iamRoleArn} names a role IAM knows. */
+    public static boolean roleExists(String iamRoleArn, IamService iamService) {
+        return findRole(iamRoleArn, iamService).isPresent();
     }
 
     /**

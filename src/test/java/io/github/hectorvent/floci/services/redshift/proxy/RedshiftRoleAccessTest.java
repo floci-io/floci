@@ -17,8 +17,10 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -118,6 +120,26 @@ class RedshiftRoleAccessTest {
                 RedshiftRoleAccess.resolveRoleSession(held, iamService, ACCOUNT, List.of(held));
         verify(iamService).registerSessionForAccount(eq(ACCOUNT), eq(session.accessKeyId()), anyString(),
                 eq(session.sessionToken()), eq(held), any(Instant.class), isNull());
+    }
+
+    @Test
+    void findRoleLooksUpTheRoleHonouringItsPath() {
+        String held = "arn:aws:iam::111111111111:role/app/spectrum-role";
+        String otherPath = "arn:aws:iam::111111111111:role/sandbox/spectrum-role";
+        IamService iamService = iamServiceWithRole(TRUST_POLICY, held);
+
+        assertTrue(RedshiftRoleAccess.findRole(held, iamService).isPresent());
+        assertTrue(RedshiftRoleAccess.findRole(otherPath, iamService).isEmpty());
+        assertTrue(RedshiftRoleAccess.findRole(ROLE_ARN, iamService).isEmpty());
+        assertTrue(RedshiftRoleAccess.findRole("not-an-arn", iamService).isEmpty());
+        assertTrue(RedshiftRoleAccess.findRole("arn:aws:iam::111111111111:user/someone", iamService).isEmpty());
+        assertTrue(RedshiftRoleAccess.findRole(null, iamService).isEmpty());
+
+        assertTrue(RedshiftRoleAccess.roleExists(held, iamService));
+        assertFalse(RedshiftRoleAccess.roleExists(otherPath, iamService));
+        assertFalse(RedshiftRoleAccess.roleExists(ROLE_ARN, iamService));
+        assertFalse(RedshiftRoleAccess.roleExists("not-an-arn", iamService));
+        assertFalse(RedshiftRoleAccess.roleExists(null, iamService));
     }
 
     @Test

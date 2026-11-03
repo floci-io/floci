@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.firehose;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.DatabaseSecretCredentials;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
@@ -159,15 +158,7 @@ public class FirehoseRedshiftDelivery {
      * enforcement off a stream may name a role IAM does not know, and the load then runs without credentials.
      */
     private RedshiftRoleAccess.RoleSession mintLoadCredentials(String roleArn) {
-        if (roleArn == null || !AwsArnUtils.isArn(roleArn)) {
-            return null;
-        }
-        AwsArnUtils.Arn parsed = AwsArnUtils.parse(roleArn);
-        String roleName = parsed.resource().substring(parsed.resource().lastIndexOf('/') + 1);
-        boolean known = iamService.findRole(parsed.accountId(), roleName)
-                .filter(role -> IamService.roleArnMatches(roleArn, role))
-                .isPresent();
-        return known
+        return RedshiftRoleAccess.roleExists(roleArn, iamService)
                 ? RedshiftRoleAccess.resolveRoleSession(roleArn, iamService, null, null, LOAD_CREDENTIALS_TTL)
                 : null;
     }
