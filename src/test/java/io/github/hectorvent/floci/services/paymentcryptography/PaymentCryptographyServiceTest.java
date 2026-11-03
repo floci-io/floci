@@ -130,11 +130,25 @@ class PaymentCryptographyServiceTest {
         assertValidation(() -> createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
                 "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE)),
                 "may not be made of");
-        // The usage the algorithm does serve is made.
-        PaymentCryptographyKey key = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
-                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE));
-        assertEquals("RSA_2048", key.getKeyAlgorithm());
+    }
+
+    @Test
+    void everyAsymmetricUsageTakesAKeyPair() {
+        // The usages the model names for a key pair, each of which is made.
+        for (String usage : List.of("TR31_D1_ASYMMETRIC_KEY_FOR_DATA_ENCRYPTION",
+                "TR31_K2_TR34_ASYMMETRIC_KEY",
+                "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE")) {
+            PaymentCryptographyKey key = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                    usage, Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE));
+            assertEquals("RSA_2048", key.getKeyAlgorithm());
+            assertEquals(usage, key.getKeyUsage());
+        }
+        // And the key agreement one takes a curve as well.
+        PaymentCryptographyKey agreed = createKey("us-east-1", "ECC_NIST_P256",
+                "ASYMMETRIC_KEY_PAIR", "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT",
+                Map.of("DeriveKey", Boolean.TRUE));
+        assertEquals("ECC_NIST_P256", agreed.getKeyAlgorithm());
     }
 
     @Test
