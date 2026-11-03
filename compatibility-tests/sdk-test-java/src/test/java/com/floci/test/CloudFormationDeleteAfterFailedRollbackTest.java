@@ -123,7 +123,7 @@ class CloudFormationDeleteAfterFailedRollbackTest {
 
     /** The role and log group; the update changes both and adds a group that collides with outsideGroup. */
     private String template(boolean failingUpdate) {
-        String roleExtra = failingUpdate ? ", \"Description\": \"updated\"" : "";
+        String rolePrincipal = !failingUpdate ? "lambda.amazonaws.com" : "events.amazonaws.com";
         String groupExtra = failingUpdate ? ", \"RetentionInDays\": 7" : "";
         String dup = failingUpdate ? """
                 ,
@@ -143,10 +143,10 @@ class CloudFormationDeleteAfterFailedRollbackTest {
                           "Version": "2012-10-17",
                           "Statement": [{
                             "Effect": "Allow",
-                            "Principal": {"Service": "lambda.amazonaws.com"},
+                            "Principal": {"Service": "%s"},
                             "Action": "sts:AssumeRole"
                           }]
-                        }%s
+                        }
                       }
                     },
                     "LogGroup": {
@@ -155,7 +155,7 @@ class CloudFormationDeleteAfterFailedRollbackTest {
                     }%s
                   }
                 }
-                """.formatted(roleName, roleExtra, logGroup, groupExtra, dup);
+                """.formatted(roleName, rolePrincipal, logGroup, groupExtra, dup);
     }
 
     private String awaitStable() throws InterruptedException {

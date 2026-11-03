@@ -1524,20 +1524,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * request carrying both is refused whole, before the description is written.
      */
     public IamRole updateRole(String roleName, String description, int maxSessionDuration) {
+        return updateRole(roleName, description, maxSessionDuration, null);
+    }
+
+    /** Applies an update only to the verified role, even if another role has since taken its name. */
+    public IamRole updateRole(String roleName, String description, int maxSessionDuration, String expectedRoleId) {
         validateRoleName(roleName);
         validateRoleDescription(description);
-        IamRole role = getRole(roleName);
-        if (maxSessionDuration > 0) {
-            requireNotServiceLinked(role, roleName);
+        synchronized (resourceNameLock) {
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            if (maxSessionDuration > 0) {
+                requireNotServiceLinked(role, roleName);
+            }
+            if (description != null) {
+                role.setDescription(description);
+            }
+            if (maxSessionDuration > 0) {
+                role.setMaxSessionDuration(maxSessionDuration);
+            }
+            roles.put(roleName, role);
+            return role;
         }
-        if (description != null) {
-            role.setDescription(description);
-        }
-        if (maxSessionDuration > 0) {
-            role.setMaxSessionDuration(maxSessionDuration);
-        }
-        roles.put(roleName, role);
-        return role;
     }
 
     /**

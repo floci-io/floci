@@ -3,6 +3,14 @@
 **Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 **Endpoint:** `POST http://localhost:4566/`
 
+## IAM role session duration
+
+`AWS::IAM::Role` applies `MaxSessionDuration` on creation and update, including
+resolved parameters. Its range is 3,600 to 43,200 seconds; omitting the property
+uses 3,600 seconds. Updates preserve the role's identity, and failed updates
+restore its previous duration. The limit controls new STS sessions without
+changing credentials already issued.
+
 ## Supported Actions
 
 <!-- floci:actions:start -->
