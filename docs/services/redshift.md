@@ -143,6 +143,9 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `CreateIntegration` | Create a DynamoDB zero-ETL integration from a table (or a stream) to a Redshift Serverless namespace (or a provisioned cluster). Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
 | `DescribeIntegrations` | List integrations with `Filters`, `MaxRecords` and `Marker` pagination, or the one an `IntegrationArn` names |
 | `DeleteIntegration` | Remove a zero-ETL integration |
+| `PutResourcePolicy` | Set the resource policy of a Redshift Serverless namespace or a provisioned cluster, see [Resource policies](#resource-policies) |
+| `GetResourcePolicy` | Return the resource policy of a namespace or cluster |
+| `DeleteResourcePolicy` | Remove the resource policy of a namespace or cluster |
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
@@ -414,6 +417,32 @@ restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `sy
 approximation to indicate that initial backfill is in progress); it becomes `active` once the scan is
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
+
+### Resource policies
+
+A zero-ETL integration needs a resource policy on its target that lets the source in.
+`PutResourcePolicy`, `GetResourcePolicy` and `DeleteResourcePolicy` take the ARN of a Redshift
+Serverless namespace or of a provisioned cluster, so `aws_redshift_resource_policy` applies as it
+does on AWS:
+
+- The policy must be a nonempty JSON object, or the call is refused with `InvalidPolicyFault` before
+  the resource is looked up.
+- The policy is stored the way AWS returns it: `Version` and `Statement` first, each statement's
+  `Effect`, `Principal`, `Action`, `Resource` and `Condition` first, other keys after them in the
+  order sent, pretty-printed. The provider compares policies by content, so this causes no drift.
+- A namespace that does not exist is `ResourceNotFoundFault` ("The requested namespace doesn't
+  exist."), as is a cluster that does not exist, or a resource without a policy on
+  `GetResourcePolicy` and `DeleteResourcePolicy`.
+- An ARN in another Region, a namespace id that is not a UUID, and an ARN of any other resource type
+  (a workgroup, a snapshot) are `InvalidParameterValue`, with AWS's messages.
+- Deleting the namespace or cluster deletes its policy.
+- Floci does not evaluate the policy: `CreateIntegration` does not require one.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift put-resource-policy \
+  --resource-arn arn:aws:redshift-serverless:us-east-1:000000000000:namespace/<namespace-id> \
+  --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"redshift.amazonaws.com"},"Action":"redshift:AuthorizeInboundIntegration","Resource":"*"}]}'
+```
 
 ### EventBridge events
 

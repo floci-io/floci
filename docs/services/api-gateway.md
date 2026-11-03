@@ -176,6 +176,19 @@ deleted, or not bound to the stage by a usage plan, with `403` `{"message":"Forb
 `x-amzn-ErrorType: ForbiddenException`, as AWS does. The header stays when the API customises its
 `INVALID_API_KEY` gateway response.
 
+#### API key source
+
+A REST API's `apiKeySource` is set with `CreateRestApi`, a `replace /apiKeySource` patch on
+`UpdateRestApi`, or an imported `x-amazon-apigateway-api-key-source`, and defaults to `HEADER`. Any
+other value is refused with `BadRequestException`. A stage export leaves the extension out, as AWS's
+does.
+
+With `AUTHORIZER`, the `x-api-key` header is not read. The key is the `usageIdentifierKey` the
+method's Lambda authorizer returns, checked against usage plans as above, and reported as
+`requestContext.identity.apiKey` and `apiKeyId` to a Lambda proxy integration. The authorizer's own
+event carries no key, since none is known before it runs. A method that requires a key and is not
+behind a Lambda authorizer then always answers `403`.
+
 ### REST Lambda Authorizers
 
 TOKEN and REQUEST authorizers must return a nonempty `principalId` and an IAM policy. Floci

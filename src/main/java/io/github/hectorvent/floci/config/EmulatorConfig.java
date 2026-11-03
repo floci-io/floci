@@ -1250,17 +1250,13 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("ns-1.awsdns-01.org")
-        String defaultNameserver1();
+        Optional<String> defaultNameserver1();
 
-        @WithDefault("ns-2.awsdns-02.net")
-        String defaultNameserver2();
+        Optional<String> defaultNameserver2();
 
-        @WithDefault("ns-3.awsdns-03.com")
-        String defaultNameserver3();
+        Optional<String> defaultNameserver3();
 
-        @WithDefault("ns-4.awsdns-04.co.uk")
-        String defaultNameserver4();
+        Optional<String> defaultNameserver4();
 
         /**
          * Optional control-plane processing window for VPC association mutations. A positive

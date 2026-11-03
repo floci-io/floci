@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.route53.model.DelegationSet;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
+import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import io.github.hectorvent.floci.testing.StorageFactories;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
@@ -24,6 +25,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -32,6 +34,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -111,20 +114,112 @@ class Route53DelegationSetsServiceTest {
     }
 
     @Test
-    void legacyPublicZonesParticipateInConflictsBeforeTheirFirstRead() throws Exception {
+    void legacyPublicZonesUsePersistedNameServersForConflictChecks() throws Exception {
         seedLegacyZone();
         try (Fixture fixture = fixture("persistent", "original")) {
-            DelegationSet set = fixture.service().createReusableDelegationSet("set", null);
+            DelegationSet set = fixture.service().createReusableDelegationSet("set", "ZLEGACY");
             assertError("ConflictingDomainExists", () -> fixture.service()
                     .createHostedZone("child.legacy.example.", "child", null, null, set.id()));
         }
     }
 
     @Test
+    void independentZonesAndReusableSetsHaveDistinctNameServers() {
+        try (Fixture fixture = fixture("memory", null)) {
+            Route53Service service = fixture.service();
+            HostedZone firstZone = service.createHostedZone("first.example.", "first-zone", null, null).zone();
+            HostedZone secondZone = service.createHostedZone("second.example.", "second-zone", null, null).zone();
+            DelegationSet firstSet = service.createReusableDelegationSet("first-set", null);
+            DelegationSet secondSet = service.createReusableDelegationSet("second-set", null);
+            List<List<String>> assignments = List.of(service.getDelegationSet(firstZone).nameServers(),
+                    service.getDelegationSet(secondZone).nameServers(), firstSet.nameServers(), secondSet.nameServers());
+            for (int i = 0; i < assignments.size(); i++) {
+                assertEquals(4, assignments.get(i).size());
+                for (int j = i + 1; j < assignments.size(); j++) {
+                    assertNotEquals(assignments.get(i), assignments.get(j));
+                }
+            }
+        }
+    }
+
+    @Test
+    void explicitlyConfiguredNameServersRemainUnchangedForZonesAndSets() {
+        try (Fixture fixture = fixture("memory", "configured")) {
+            Route53Service service = fixture.service();
+            String zoneId = service.createHostedZone("configured.example.", "configured-zone", null, null)
+                    .zone().getId();
+            DelegationSet set = service.createReusableDelegationSet("configured-set", null);
+            List<String> configured = List.of("configured-1.test", "configured-2.test",
+                    "configured-3.test", "configured-4.test");
+            assertEquals(configured, service.getAssignedNameServers(zoneId));
+            assertEquals(configured, set.nameServers());
+        }
+    }
+
+    @Test
+    void explicitlyConfiguredLiteralDefaultsRemainUnchanged() {
+        try (Fixture fixture = fixture("memory", "literal-defaults")) {
+            Route53Service service = fixture.service();
+            String zoneId = service.createHostedZone("literal.example.", "literal-zone", null, null)
+                    .zone().getId();
+            DelegationSet set = service.createReusableDelegationSet("literal-set", null);
+            List<String> configured = List.of("ns-1.awsdns-01.org", "ns-2.awsdns-02.net",
+                    "ns-3.awsdns-03.com", "ns-4.awsdns-04.co.uk");
+            assertEquals(configured, service.getAssignedNameServers(zoneId));
+            assertEquals(configured, set.nameServers());
+        }
+    }
+
+    @Test
+    void mixedConfigurationOverridesOnlyItsExplicitSlot() {
+        try (Fixture fixture = fixture("memory", "mixed")) {
+            Route53Service service = fixture.service();
+            String publicId = service.createHostedZone("mixed.example.", "mixed-public", null, null)
+                    .zone().getId();
+            String privateId = service.createHostedZone("private.mixed.example.", "mixed-private", null,
+                    new VpcAssociation("vpc-mixed", "us-east-1")).zone().getId();
+            DelegationSet set = service.createReusableDelegationSet("mixed-set", null);
+            List<String> publicNames = service.getAssignedNameServers(publicId);
+            assertEquals("configured-1.test", publicNames.getFirst());
+            assertEquals("configured-1.test", set.nameServers().getFirst());
+            for (int i = 1; i < 4; i++) {
+                assertTrue(publicNames.get(i).matches("ns-[1-9][0-9]{0,3}\\.awsdns-[0-9]{2}\\..+"));
+                assertTrue(set.nameServers().get(i).matches("ns-[1-9][0-9]{0,3}\\.awsdns-[0-9]{2}\\..+"));
+            }
+            assertEquals(List.of("configured-1.test", "ns-2.awsdns-02.net", "ns-3.awsdns-03.com",
+                    "ns-4.awsdns-04.co.uk"), service.getAssignedNameServers(privateId));
+        }
+    }
+
+    @Test
+    void ordinaryZoneAssignmentSurvivesStorageReloadAndConfigurationChange() {
+        String zoneId;
+        List<String> original;
+        try (Fixture fixture = fixture("persistent", "original")) {
+            zoneId = fixture.service().createHostedZone("stable.example.", "stable", null, null).zone().getId();
+            original = fixture.service().getAssignedNameServers(zoneId);
+        }
+        try (Fixture reloaded = fixture("persistent", "changed")) {
+            Route53Service service = reloaded.service();
+            assertEquals(original, service.getAssignedNameServers(zoneId));
+            List<ResourceRecordSet> records = service.listResourceRecordSets(zoneId, null, null, 100);
+            assertEquals(original.stream().map(name -> name + ".").toList(), records.stream()
+                    .filter(record -> "NS".equals(record.getType())).findFirst().orElseThrow().getRecords().stream()
+                    .map(ResourceRecord::getValue).toList());
+            assertTrue(records.stream().filter(record -> "SOA".equals(record.getType())).findFirst().orElseThrow()
+                    .getRecords().getFirst().getValue().startsWith(original.getFirst() + ". "));
+            String next = service.createHostedZone("new.example.", "new", null, null).zone().getId();
+            assertTrue(service.getAssignedNameServers(next).stream().noneMatch(original::contains));
+        }
+    }
+
+    @Test
     void promotionAfterConfigurationChangePreservesTheOriginalZoneAssignment() {
         String zoneId;
+        List<String> original;
         try (Fixture fixture = fixture("persistent", "original")) {
             zoneId = fixture.service().createHostedZone("original.example.", "original", null, null).zone().getId();
+            original = fixture.service().getAssignedNameServers(zoneId);
             ResourceRecordSet ns = fixture.service().listResourceRecordSets(zoneId, null, null, 100).stream()
                     .filter(record -> "NS".equals(record.getType())).findFirst().orElseThrow();
             ns.setRecords(List.of(new ResourceRecord("custom.nameserver.test.")));
@@ -132,8 +227,7 @@ class Route53DelegationSetsServiceTest {
         }
         try (Fixture fixture = fixture("persistent", "changed")) {
             DelegationSet set = fixture.service().createReusableDelegationSet("promoted", zoneId);
-            assertEquals(List.of("original-1.test", "original-2.test", "original-3.test", "original-4.test"),
-                    set.nameServers());
+            assertEquals(original, set.nameServers());
         }
     }
 
@@ -285,10 +379,27 @@ class Route53DelegationSetsServiceTest {
 
     private EmulatorConfig config(String prefix) {
         EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
-        when(config.services().route53().defaultNameserver1()).thenReturn(prefix + "-1.test.");
-        when(config.services().route53().defaultNameserver2()).thenReturn(prefix + "-2.test.");
-        when(config.services().route53().defaultNameserver3()).thenReturn(prefix + "-3.test.");
-        when(config.services().route53().defaultNameserver4()).thenReturn(prefix + "-4.test.");
+        if (prefix == null) {
+            when(config.services().route53().defaultNameserver1()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver2()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver3()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver4()).thenReturn(Optional.empty());
+        } else if ("mixed".equals(prefix)) {
+            when(config.services().route53().defaultNameserver1()).thenReturn(Optional.of("configured-1.test."));
+            when(config.services().route53().defaultNameserver2()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver3()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver4()).thenReturn(Optional.empty());
+        } else if ("literal-defaults".equals(prefix)) {
+            when(config.services().route53().defaultNameserver1()).thenReturn(Optional.of("ns-1.awsdns-01.org"));
+            when(config.services().route53().defaultNameserver2()).thenReturn(Optional.of("ns-2.awsdns-02.net"));
+            when(config.services().route53().defaultNameserver3()).thenReturn(Optional.of("ns-3.awsdns-03.com"));
+            when(config.services().route53().defaultNameserver4()).thenReturn(Optional.of("ns-4.awsdns-04.co.uk"));
+        } else {
+            when(config.services().route53().defaultNameserver1()).thenReturn(Optional.of(prefix + "-1.test."));
+            when(config.services().route53().defaultNameserver2()).thenReturn(Optional.of(prefix + "-2.test."));
+            when(config.services().route53().defaultNameserver3()).thenReturn(Optional.of(prefix + "-3.test."));
+            when(config.services().route53().defaultNameserver4()).thenReturn(Optional.of(prefix + "-4.test."));
+        }
         return config;
     }
 

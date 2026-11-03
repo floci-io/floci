@@ -65,6 +65,7 @@ AWS::Cognito::UserPool	Arn,ProviderName,ProviderURL,UserPoolId	AccountRecoverySe
 AWS::Cognito::UserPoolClient	ClientId,ClientSecret,Name	AccessTokenValidity,AllowedOAuthFlows,AllowedOAuthFlowsUserPoolClient,AllowedOAuthScopes,AnalyticsConfiguration,AuthSessionValidity,CallbackURLs,ClientName,DefaultRedirectURI,EnablePropagateAdditionalUserContextData,EnableTokenRevocation,ExplicitAuthFlows,GenerateSecret,IdTokenValidity,LogoutURLs,PreventUserExistenceErrors,ReadAttributes,RefreshTokenRotation,RefreshTokenValidity,SupportedIdentityProviders,TokenValidityUnits,UserPoolId,WriteAttributes
 AWS::Cognito::UserPoolDomain	CloudFrontDistribution	CustomDomainConfig,Domain,ManagedLoginVersion,Routing,UserPoolId
 AWS::Cognito::UserPoolGroup		Description,GroupName,Precedence,RoleArn,UserPoolId
+AWS::Cognito::UserPoolIdentityProvider		AttributeMapping,IdpIdentifiers,ProviderDetails,ProviderName,ProviderType,UserPoolId
 AWS::Cognito::UserPoolResourceServer		Identifier,Name,Scopes,UserPoolId
 AWS::Cognito::UserPoolUser		ClientMetadata,DesiredDeliveryMediums,ForceAliasCreation,MessageAction,UserAttributes,UserPoolId,Username,ValidationData
 AWS::Cognito::UserPoolUserToGroupAttachment		GroupName,UserPoolId,Username

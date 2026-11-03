@@ -1700,7 +1700,7 @@ public class CognitoService implements ResourceProvider {
 
     // ──────────────────────────── Identity Providers ────────────────────────────
 
-    private static final Set<String> PROVIDER_TYPES =
+    public static final Set<String> PROVIDER_TYPES =
             Set.of("Facebook", "SAML", "SignInWithApple", "LoginWithAmazon", "OIDC", "Google");
 
     public IdentityProvider createIdentityProvider(String userPoolId, String providerName, String providerType,

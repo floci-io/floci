@@ -203,7 +203,7 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS, and once `SMS_MFA` is on only `MfaConfiguration: OFF` turns it off), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
+| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS, and once `SMS_MFA` is on only `MfaConfiguration: OFF` turns it off), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolIdentityProvider` (Ref returns the ProviderName; changing only `ProviderType` is refused, as on AWS, because the name is always the template's and the replacement would need the same address), `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `ApiDestination`, `Archive` (`KmsKeyIdentifier` is ignored) |
 | EventBridge Scheduler | `Schedule`, `ScheduleGroup` |
@@ -1054,7 +1054,15 @@ parameter is refused when the stack is in any other status, when it names a reso
 not have or has already deleted, or when it names one twice. A retry while that delete is still
 running must repeat the same list in the same order.
 
+A `DeleteStack` that arrives while the stack is still being created or updated waits for that
+operation: a create stops before its next resource, an update runs to its end, and the delete then
+removes everything the stack holds, its exports included. Until the delete starts, the stack keeps
+its in-progress status.
+
 Deviations from AWS to be aware of:
+
+- A delete that arrives during a create does not interrupt the resource being created; that
+  resource finishes, and is then deleted with the rest.
 
 - `Snapshot` deletes the resource without taking a snapshot; floci has no snapshot support for the
   types AWS allows it on.

@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.testing.StartGate;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -20,11 +21,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.Callable;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -548,7 +544,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         for (int round = 0; round < RACE_ROUNDS; round++) {
             String name = uniqueName("floci-race-dst");
             AtomicInteger duplicates = new AtomicInteger();
-            List<Image> created = runConcurrently(RACE_THREADS, () -> {
+            StartGate.Results<Image> created = StartGate.runConcurrently(RACE_THREADS, index -> {
                 try {
                     return service.copyImage(WEST, EAST, source.getImageId(), name, null, false, List.of());
                 } catch (AwsException e) {
@@ -558,7 +554,8 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 }
             });
 
-            List<Image> winners = created.stream().filter(Objects::nonNull).toList();
+            assertTrue(created.errors().isEmpty(), () -> "copy workers failed: " + created.errors());
+            List<Image> winners = created.values().stream().filter(Objects::nonNull).toList();
             assertEquals(1, winners.size(),
                     "exactly one copy may claim the name; round " + round + " produced " + winners.size());
             assertEquals(RACE_THREADS - 1, duplicates.get());
@@ -581,7 +578,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
 
             AtomicInteger successes = new AtomicInteger();
             AtomicInteger unavailable = new AtomicInteger();
-            runConcurrently(RACE_THREADS, () -> {
+            StartGate.Results<Void> results = StartGate.runConcurrently(RACE_THREADS, index -> {
                 try {
                     service.deregisterImage(EAST, image.getImageId(), true);
                     successes.incrementAndGet();
@@ -592,6 +589,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 return null;
             });
 
+            assertTrue(results.errors().isEmpty(), () -> "deregistration workers failed: " + results.errors());
             assertEquals(1, successes.get(), "round " + round + " deregistered the same AMI twice");
             assertEquals(RACE_THREADS - 1, unavailable.get());
             assertTrue(service.describeImages(EAST, List.of(image.getImageId()), List.of()).isEmpty());
@@ -606,12 +604,12 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 "x86_64", "/dev/xvda", null);
         String prefix = uniqueName("floci-fanout-dst");
 
-        AtomicInteger seq = new AtomicInteger();
-        List<Image> copies = runConcurrently(24,
-                () -> service.copyImage(WEST, EAST, source.getImageId(),
-                        prefix + "-" + seq.getAndIncrement(), null, false, List.of()));
+        StartGate.Results<Image> copies = StartGate.runConcurrently(24,
+                index -> service.copyImage(WEST, EAST, source.getImageId(),
+                        prefix + "-" + index, null, false, List.of()));
 
-        Set<String> ids = copies.stream().map(Image::getImageId).collect(Collectors.toSet());
+        assertTrue(copies.errors().isEmpty(), () -> "copy workers failed: " + copies.errors());
+        Set<String> ids = copies.values().stream().map(Image::getImageId).collect(Collectors.toSet());
         assertEquals(24, ids.size(), "every concurrent copy must get a distinct id");
         assertEquals(24, service.describeImages(WEST, List.of(), List.of("self")).stream()
                 .filter(img -> img.getName().startsWith(prefix))
@@ -634,25 +632,6 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         }
         return service.registerImage(EAST, uniqueName("floci-race-src"), null,
                 "x86_64", "/dev/xvda", null);
-    }
-
-    private <T> List<T> runConcurrently(int threads, Callable<T> body) throws Exception {
-        ExecutorService pool = Executors.newFixedThreadPool(threads);
-        CountDownLatch start = new CountDownLatch(1);
-        List<Future<T>> futures = new ArrayList<>();
-        for (int i = 0; i < threads; i++) {
-            futures.add(pool.submit(() -> {
-                start.await();
-                return body.call();
-            }));
-        }
-        start.countDown();
-        List<T> results = new ArrayList<>();
-        for (Future<T> future : futures) {
-            results.add(future.get(30, TimeUnit.SECONDS));
-        }
-        pool.shutdown();
-        return results;
     }
 
     /**
