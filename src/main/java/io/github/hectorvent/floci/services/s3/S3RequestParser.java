@@ -45,8 +45,8 @@ final class S3RequestParser {
             if (end < 0) {
                 end = length;
             }
-            int eq = query.indexOf('=', start);
-            int nameEnd = eq >= 0 && eq < end ? eq : end;
+            int eq = query.indexOf('=', start, end);
+            int nameEnd = eq >= 0 ? eq : end;
             if (nameEnd - start == param.length() && query.startsWith(param, start)) {
                 return true;
             }
