@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshift;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
+import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.spectrum.ExternalCatalogRegistry;
@@ -36,6 +37,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -547,28 +549,43 @@ class RedshiftSpectrumIntegrationTest {
     @Test
     @Timeout(120)
     void queriesParquetPartitionsAndReadsAColumnTheOlderFilesLackAsNull() throws Exception {
+        glueDatabase = "spectrum_parquet_" + System.nanoTime();
+        Database database = new Database();
+        database.setName(glueDatabase);
+        glueService.createDatabase(database);
+
         bucket = "spectrum-parquet-" + System.nanoTime();
         s3Service.createBucket(bucket, "us-east-1");
         s3Service.putObject(bucket, "events/day=2026-01-01/part-1.parquet",
                 Base64.getDecoder().decode(PARQUET_WITH_AMOUNT), "application/octet-stream", null);
         s3Service.putObject(bucket, "events/day=2026-01-02/part-1.parquet",
                 Base64.getDecoder().decode(PARQUET_WITHOUT_AMOUNT), "application/octet-stream", null);
+
+        String schemaName = "parquet_lake";
+        String externalDdl = "CREATE EXTERNAL TABLE " + schemaName + ".events (id INTEGER, name VARCHAR(20), "
+                + "amt DECIMAL(5,2)) PARTITIONED BY (day VARCHAR(10)) STORED AS PARQUET "
+                + "LOCATION 's3://" + bucket + "/events/'";
+        ExternalStatement.CreateTable external = (ExternalStatement.CreateTable)
+                new ExternalStatementParser().parse(externalDdl).orElseThrow();
+        Table glueTable = GlueTableBuilder.toGlueTable(external);
+        glueService.createTable(glueDatabase, glueTable);
+        glueService.createPartition(glueDatabase, "events", GlueTableBuilder.toGluePartition(glueTable,
+                new ExternalStatement.PartitionSpec(Map.of("day", "2026-01-01"),
+                        "s3://" + bucket + "/events/day=2026-01-01/")));
+        glueService.createPartition(glueDatabase, "events", GlueTableBuilder.toGluePartition(glueTable,
+                new ExternalStatement.PartitionSpec(Map.of("day", "2026-01-02"),
+                        "s3://" + bucket + "/events/day=2026-01-02/")));
+
         clusterId = "it-parquet-" + System.nanoTime();
         Cluster cluster = createClusterWithRole(clusterId);
 
         try (Connection connection = waitForConnection(cluster, "admin", "Secret123");
              Statement statement = connection.createStatement()) {
-            statement.execute("CREATE EXTERNAL SCHEMA analytics FROM DATA CATALOG DATABASE 'dev' IAM_ROLE '"
-                    + ROLE_ARN + "'");
-            statement.execute("CREATE EXTERNAL TABLE analytics.events (id INTEGER, name VARCHAR(20), "
-                    + "amt DECIMAL(5,2)) PARTITIONED BY (day VARCHAR(10)) STORED AS PARQUET "
-                    + "LOCATION 's3://" + bucket + "/events/'");
-            statement.execute("ALTER TABLE analytics.events ADD "
-                    + "PARTITION (day='2026-01-01') LOCATION 's3://" + bucket + "/events/day=2026-01-01/' "
-                    + "PARTITION (day='2026-01-02') LOCATION 's3://" + bucket + "/events/day=2026-01-02/'");
+            statement.execute("CREATE EXTERNAL SCHEMA " + schemaName + " FROM DATA CATALOG DATABASE '"
+                    + glueDatabase + "' IAM_ROLE '" + ROLE_ARN + "'");
 
             try (ResultSet rows = statement.executeQuery(
-                    "SELECT id, name, amt::text AS amt, day FROM analytics.events ORDER BY id")) {
+                    "SELECT id, name, amt::text AS amt, day FROM " + schemaName + ".events ORDER BY id")) {
                 assertTrue(rows.next());
                 assertEquals(1, rows.getInt("id"));
                 assertEquals("Alice", rows.getString("name"));
@@ -581,6 +598,7 @@ class RedshiftSpectrumIntegrationTest {
                 assertEquals("2026-01-02", rows.getString("day"));
                 assertFalse(rows.next());
             }
+            statement.execute("DROP SCHEMA IF EXISTS " + schemaName + " CASCADE");
         } finally {
             s3Service.deleteObject(bucket, "events/day=2026-01-01/part-1.parquet");
             s3Service.deleteObject(bucket, "events/day=2026-01-02/part-1.parquet");
