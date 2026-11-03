@@ -4052,7 +4052,12 @@ public class CognitoService implements ResourceProvider {
             event.setSequence(authEventSequence.incrementAndGet());
             event.getChallengeResponses().add(new CognitoAuthEvent.Challenge("Password",
                     passwordVerified ? "Success" : "Failure"));
-            authEventStore.put(authEventKey(pool.getId(), event.getUserSub(), event.getEventId()), event);
+            synchronized (userLock(pool.getId(), user.getUsername())) {
+                if (!userStillOwnsAuthEvents(pool.getId(), user)) {
+                    return null;
+                }
+                authEventStore.put(authEventKey(pool.getId(), event.getUserSub(), event.getEventId()), event);
+            }
             return event.getEventId();
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not record a sign-in event for user {0} in pool {1}", user.getUsername(),
@@ -4068,16 +4073,29 @@ public class CognitoService implements ResourceProvider {
         }
         try {
             String key = authEventKey(poolId, authEventSubject(user), eventId);
-            authEventStore.get(key).ifPresent(event -> {
-                event.setEventResponse("Pass");
-                if (mfaVerified) {
-                    event.getChallengeResponses().add(new CognitoAuthEvent.Challenge("Mfa", "Success"));
+            // The user's lock is the one its deletion sweeps the events under, so a sign-in that finishes
+            // after the user is gone cannot write the event back.
+            synchronized (userLock(poolId, user.getUsername())) {
+                if (!userStillOwnsAuthEvents(poolId, user)) {
+                    return;
                 }
-                authEventStore.put(key, event);
-            });
+                authEventStore.get(key).ifPresent(event -> {
+                    event.setEventResponse("Pass");
+                    if (mfaVerified) {
+                        event.getChallengeResponses().add(new CognitoAuthEvent.Challenge("Mfa", "Success"));
+                    }
+                    authEventStore.put(key, event);
+                });
+            }
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not complete sign-in event {0} in pool {1}", eventId, poolId);
         }
+    }
+
+    private boolean userStillOwnsAuthEvents(String poolId, CognitoUser user) {
+        return userStore.get(userKey(poolId, user.getUsername()))
+                .map(stored -> authEventSubject(stored).equals(authEventSubject(user)))
+                .orElse(false);
     }
 
     private static String authEventSubject(CognitoUser user) {
@@ -4089,18 +4107,28 @@ public class CognitoService implements ResourceProvider {
         return poolId + "::" + userSub + "::" + eventId;
     }
 
+    /**
+     * The keys of the events a pool, or one of its users when {@code userSub} is given, owns. Pool ids and
+     * subs are caller-chosen and may contain the key delimiter, so a key prefix can also match another
+     * pool's or user's events; the stored event's own fields settle ownership.
+     */
+    private List<String> authEventKeysOwnedBy(String poolId, String userSub) {
+        String prefix = userSub == null ? poolId + "::" : authEventKey(poolId, userSub, "");
+        return authEventStore.keys().stream()
+                .filter(k -> k.startsWith(prefix))
+                .filter(k -> authEventStore.get(k)
+                        .map(e -> poolId.equals(e.getUserPoolId())
+                                && (userSub == null || userSub.equals(e.getUserSub())))
+                        .orElse(false))
+                .toList();
+    }
+
     private void deleteAuthEventsOfUser(String poolId, CognitoUser user) {
-        String prefix = authEventKey(poolId, authEventSubject(user), "");
-        authEventStore.keys().stream().filter(k -> k.startsWith(prefix)).toList()
-                .forEach(authEventStore::delete);
+        authEventKeysOwnedBy(poolId, authEventSubject(user)).forEach(authEventStore::delete);
     }
 
     private void deleteAuthEventsOfPool(String poolId) {
-        String prefix = poolId + "::";
-        authEventStore.keys().stream()
-                .filter(k -> k.startsWith(prefix))
-                .toList()
-                .forEach(authEventStore::delete);
+        authEventKeysOwnedBy(poolId, null).forEach(authEventStore::delete);
     }
 
     /**
@@ -4125,9 +4153,7 @@ public class CognitoService implements ResourceProvider {
         }
         CognitoUser user = adminGetUser(userPoolId, username);
         int pageSize = maxResults == null || maxResults == 0 ? MAX_AUTH_EVENTS_PAGE : maxResults;
-        String prefix = authEventKey(userPoolId, authEventSubject(user), "");
-        List<CognitoAuthEvent> events = authEventStore.keys().stream()
-                .filter(k -> k.startsWith(prefix))
+        List<CognitoAuthEvent> events = authEventKeysOwnedBy(userPoolId, authEventSubject(user)).stream()
                 .flatMap(k -> authEventStore.get(k).stream())
                 .toList();
         PaginatedResult<CognitoAuthEvent> listed = Pagination.paginate(events,

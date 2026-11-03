@@ -144,6 +144,79 @@ class CognitoAuthEventsServiceTest {
     }
 
     @Test
+    void delimiterOverlappingSubsKeepTheirOwnEvents() {
+        UserPool pool = createPool("PLUS", "AUDIT");
+        CognitoUser shortSub = createUserWithSub(pool, "short-user", "a");
+        CognitoUser longSub = createUserWithSub(pool, "long-user", "a::b");
+        String shortEvent = service.recordSignInEvent(pool, shortSub, true);
+        String longEvent = service.recordSignInEvent(pool, longSub, true);
+
+        assertEquals(List.of(shortEvent), listedEventIds(pool.getId(), "short-user"));
+        assertEquals(List.of(longEvent), listedEventIds(pool.getId(), "long-user"));
+
+        service.adminDeleteUser(pool.getId(), "short-user");
+
+        assertEquals(List.of(longEvent), listedEventIds(pool.getId(), "long-user"));
+        assertEquals(1, authEvents.keys().size());
+    }
+
+    @Test
+    void delimiterOverlappingPoolIdsKeepTheirOwnEvents() {
+        UserPool outer = createPoolWithId("us-east-1_pool");
+        UserPool inner = createPoolWithId("us-east-1_pool::x");
+        CognitoUser outerUser = createUserWithSub(outer, "alice", "x::alice");
+        CognitoUser innerUser = createUserWithSub(inner, "alice", "alice");
+        String outerEvent = service.recordSignInEvent(outer, outerUser, true);
+        String innerEvent = service.recordSignInEvent(inner, innerUser, true);
+
+        assertEquals(List.of(outerEvent), listedEventIds(outer.getId(), "alice"));
+        assertEquals(List.of(innerEvent), listedEventIds(inner.getId(), "alice"));
+
+        service.deleteUserPool(outer.getId());
+
+        assertEquals(List.of(innerEvent), listedEventIds(inner.getId(), "alice"));
+        assertEquals(1, authEvents.keys().size());
+    }
+
+    @Test
+    void signInEventsOfADeletedUserAreNotRecreated() {
+        UserPool pool = createPool("PLUS", "AUDIT");
+        CognitoUser stale = createUser(pool, "alice");
+        String eventId = service.recordSignInEvent(pool, stale, true);
+        service.adminDeleteUser(pool.getId(), "alice");
+        assertEquals(0, authEvents.keys().size());
+
+        service.completeSignInEvent(pool.getId(), stale, eventId, true);
+        assertEquals(0, authEvents.keys().size());
+
+        assertNull(service.recordSignInEvent(pool, stale, true));
+        assertEquals(0, authEvents.keys().size());
+    }
+
+    private List<String> listedEventIds(String poolId, String username) {
+        List<String> ids = new ArrayList<>();
+        for (Object event : (List<?>) service.adminListUserAuthEvents(poolId, username, null, null)
+                .get("AuthEvents")) {
+            ids.add((String) ((Map<?, ?>) event).get("EventId"));
+        }
+        return ids;
+    }
+
+    private UserPool createPoolWithId(String id) {
+        Map<String, Object> request = new HashMap<>();
+        request.put("PoolName", "events");
+        request.put("UserPoolTier", "PLUS");
+        request.put("UserPoolAddOns", Map.of("AdvancedSecurityMode", "AUDIT"));
+        request.put("UserPoolTags", new HashMap<>(Map.of("floci:override-id", id)));
+        return service.createUserPool(request, "us-east-1");
+    }
+
+    private CognitoUser createUserWithSub(UserPool pool, String username, String sub) {
+        service.adminCreateUser(pool.getId(), username, Map.of("sub", sub), "TempPass1!");
+        return service.adminGetUser(pool.getId(), username);
+    }
+
+    @Test
     void ineligibleListingFailsBeforeTheUserIsLookedUp() {
         UserPool pool = createPool("ESSENTIALS", null);
 

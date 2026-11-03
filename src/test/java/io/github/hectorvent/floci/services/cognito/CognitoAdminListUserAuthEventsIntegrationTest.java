@@ -9,8 +9,10 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -262,7 +264,8 @@ class CognitoAdminListUserAuthEventsIntegrationTest {
         assertEquals("InProgress", events.get(0).path("EventResponse").asText());
         assertEquals("Pass", events.get(1).path("EventResponse").asText());
 
-        cognitoAction("RespondToAuthChallenge", mfaResponse(clientId, challenged, username, "000000"))
+        cognitoAction("RespondToAuthChallenge", mfaResponse(clientId, challenged, username,
+                        invalidTotpCode(secret, clock.instant())))
                 .then().statusCode(400).body("__type", equalTo("CodeMismatchException"));
         events = cognitoJson("AdminListUserAuthEvents", listBody(poolId, username, "")).path("AuthEvents");
         assertEquals("InProgress", events.get(0).path("EventResponse").asText());
@@ -343,6 +346,19 @@ class CognitoAdminListUserAuthEventsIntegrationTest {
     }
 
     // ──────────────────────────── helpers ────────────────────────────
+
+    /** A six-digit code that is no valid TOTP for the secret within two steps either side of now. */
+    private static String invalidTotpCode(String secret, Instant now) {
+        for (int i = 0; i < 1_000_000; i++) {
+            String candidate = String.format(Locale.ROOT, "%06d", i);
+            if (!CognitoTotp.validCode(secret, candidate, now.minusSeconds(30))
+                    && !CognitoTotp.validCode(secret, candidate, now)
+                    && !CognitoTotp.validCode(secret, candidate, now.plusSeconds(30))) {
+                return candidate;
+            }
+        }
+        throw new IllegalStateException("Every six-digit code is valid");
+    }
 
     private static void assertChallenges(JsonNode event, String name, String response) {
         assertEquals(1, event.path("ChallengeResponses").size());
