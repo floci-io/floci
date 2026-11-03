@@ -30,7 +30,7 @@ import java.util.regex.Pattern;
  * another account or Region than the request's is checked as given and as each resource of that name a handler may
  * act on instead, in the ARN's account or the caller's and in the ARN's Region or the request's, and the request is
  * refused if any is denied, as handlers mix them (ECR's tag handlers keep the ARN's account in the request's
- * Region).
+ * Region); one of a resource AWS owns, whose account is {@code aws}, is checked in that account alone.
  */
 public final class RequestResources {
 
@@ -70,7 +70,7 @@ public final class RequestResources {
      * As {@link #of(String, ContainerRequestContext, String, String, String)}, a resource of a type whose service
      * mints an id after its name, or as all of its ARN, being the one {@code stored} finds for the caller under the
      * name or the members the request gives, or else its ARN with that id open, as it is with no {@code stored}; and
-     * one a request names through another of its service's own, the one {@code stored} gives, or none.
+     * those a request names through another of its service's own, the ones {@code stored} gives, or none.
      */
     public static List<String> of(String operation, ContainerRequestContext ctx, String partition, String region,
                                   String accountId, StoredResourceArns stored) {
@@ -99,8 +99,8 @@ public final class RequestResources {
                 for (String value : values(form, body, resource.arn())) {
                     String named = before(value, resource.before());
                     resource.types().stream().map(formats::get).filter(format -> format.pattern().matcher(named).matches())
-                            .findFirst().ifPresent(format -> addNamed(arns, format.checked(named), partition, region,
-                                    accountId));
+                            .findFirst().ifPresent(format -> addNamed(arns, format.checked(named), format.awsOwned(),
+                                    partition, region, accountId));
                 }
             } else if (resource.through() != null) {
                 through(arns, resource, formats, form, body, region, stored);
@@ -152,7 +152,7 @@ public final class RequestResources {
                 String under = parent.resource().substring(created.parentWord().length());
                 addNamed(arns, new AwsArnUtils.Arn(parent.partition(), parent.service(), parent.region(),
                         parent.accountId(), created.childWord() + under + created.separator() + "*").toString(),
-                        partition, region, accountId);
+                        false, partition, region, accountId);
             }
         }
         return List.copyOf(arns);
@@ -319,7 +319,8 @@ public final class RequestResources {
             if (resource.fill().size() == 1 && fromRequest == null) {
                 List<String> asArns = values.stream()
                         .filter(value -> !isArnOf(named, value) && format.pattern().matcher(value).matches()).toList();
-                asArns.forEach(value -> addNamed(arns, format.checked(value), partition, region, accountId));
+                asArns.forEach(value -> addNamed(arns, format.checked(value), format.awsOwned(), partition, region,
+                        accountId));
                 values = values.stream().filter(value -> !asArns.contains(value)).toList();
                 if (values.isEmpty()) {
                     return;
@@ -348,7 +349,8 @@ public final class RequestResources {
                 addNamed(arns, withId(render(format.format(), filling.variables(), from.partition(),
                         from.region().isEmpty() ? region : from.region(),
                         from.accountId().isEmpty() ? accountId : from.accountId()), format,
-                        resource.types().getFirst(), filling.variables(), null, region), partition, region, accountId);
+                        resource.types().getFirst(), filling.variables(), null, region), format.awsOwned(), partition,
+                        region, accountId);
             }
         }
     }
@@ -380,21 +382,23 @@ public final class RequestResources {
     }
 
     /**
-     * The resource of one of the types a request names through a member naming another of its service's own, which
-     * runs on it ({@code through}), when the request gives it one value: the ARN {@code stored} gives for the caller's
-     * resource of that name; none when there is no such resource, which its handler refuses.
+     * The resources of the types a request names through a member naming another of its service's own, which runs on
+     * them, is in them or reaches them ({@code through}), for each value the request gives it: the ARNs
+     * {@code stored} gives for the caller's resource of that name; none for a value naming no such resource, which
+     * its handler refuses.
      */
     private static void through(Set<String> arns, RequestResourceMembers.Resource resource,
                                 Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
                                 JsonNode body, String region, StoredResourceArns stored) {
-        List<String> values = values(form, body, resource.through());
-        if (stored == null || isNull(body, resource.through()) || values.size() != 1) {
+        if (stored == null || isNull(body, resource.through())) {
             return;
         }
-        stored.through(resource.through().name(), values.getFirst(), region)
-                .filter(arn -> resource.types().stream().map(formats::get)
-                        .anyMatch(format -> format.pattern().matcher(arn).matches()))
-                .ifPresent(arns::add);
+        for (String value : values(form, body, resource.through())) {
+            stored.through(resource.through().path(), value, region).stream()
+                    .filter(arn -> resource.types().stream().map(formats::get)
+                            .anyMatch(format -> format.pattern().matcher(arn).matches()))
+                    .forEach(arns::add);
+        }
     }
 
     /** Whether a member that may give an ARN of a type instead of its name gives one. */
@@ -450,15 +454,18 @@ public final class RequestResources {
     /**
      * An ARN the request names: as given, and, when it names another partition, account or Region than the
      * request's, as each resource of that name in the request's partition, in the ARN's account or the caller's and
-     * the ARN's Region or the request's, whichever its handler acts on. An ARN with no account or Region keeps none.
+     * the ARN's Region or the request's, whichever its handler acts on. An ARN with no account or Region keeps none,
+     * and one of a type AWS owns ({@code awsOwned}) its account, {@code aws}, which is no caller's.
      */
-    private static void addNamed(Set<String> arns, String arn, String partition, String region, String accountId) {
+    private static void addNamed(Set<String> arns, String arn, boolean awsOwned, String partition, String region,
+                                 String accountId) {
         arns.add(arn);
         if (!AwsArnUtils.isArn(arn)) {
             return;
         }
         AwsArnUtils.Arn named = AwsArnUtils.parse(arn);
-        List<String> accounts = named.accountId().isEmpty() ? List.of("") : List.of(named.accountId(), accountId);
+        List<String> accounts = named.accountId().isEmpty() || awsOwned ? List.of(named.accountId())
+                : List.of(named.accountId(), accountId);
         List<String> regions = named.region().isEmpty() ? List.of("") : List.of(named.region(), region);
         for (String account : accounts) {
             for (String inRegion : regions) {

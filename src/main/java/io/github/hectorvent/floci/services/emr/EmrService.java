@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -74,7 +75,7 @@ import java.util.function.Supplier;
  * BOOTSTRAPPING, and leave the image its steps then run in.
  */
 @ApplicationScoped
-public class EmrService implements Resettable {
+public class EmrService implements Resettable, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(EmrService.class);
     private static final String UPPER_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -584,6 +585,28 @@ public class EmrService implements Resettable {
         });
     }
 
+    @Override
+    public String namespace() {
+        return "elasticmapreduce";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The cluster an instance group a {@code ModifyInstanceGroups} names by its id alone is in, the one
+     * {@link #modifyInstanceGroups} finds it in and changes it there, read under the service's lock, as
+     * {@code addInstanceGroups} adds to a cluster's groups.
+     */
+    @Override
+    public List<String> through(String member, String value, String region) {
+        return "InstanceGroups[].InstanceGroupId".equals(member)
+                ? call(() -> clusterWithGroup(region, value).map(EmrCluster::getClusterArn).stream().toList())
+                : List.of();
+    }
+
     public List<EmrInstanceGroup> listInstanceGroups(String clusterId) {
         return call(() -> snapshotOf(requireCluster(clusterId)).getInstanceGroups());
     }
@@ -1024,12 +1047,17 @@ public class EmrService implements Resettable {
         if (instanceGroupId == null) {
             throw invalid("InstanceGroupId is required.");
         }
+        return clusterWithGroup(region, instanceGroupId)
+                .map(this::settle)
+                .orElseThrow(() -> invalid("Instance group " + instanceGroupId + " is not valid."));
+    }
+
+    /** The caller's cluster in the Region that has the instance group, as stored. */
+    private Optional<EmrCluster> clusterWithGroup(String region, String instanceGroupId) {
         return clusterStore.scan(k -> true).stream()
                 .filter(c -> region.equals(c.getRegion()))
                 .filter(c -> c.getInstanceGroups().stream().anyMatch(g -> instanceGroupId.equals(g.getId())))
-                .findFirst()
-                .map(this::settle)
-                .orElseThrow(() -> invalid("Instance group " + instanceGroupId + " is not valid."));
+                .findFirst();
     }
 
     private static AwsException invalid(String message) {
