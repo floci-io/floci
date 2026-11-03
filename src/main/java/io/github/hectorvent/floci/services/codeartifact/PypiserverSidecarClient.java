@@ -74,8 +74,11 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
 
     @Override
     public void release(String repositoryContainerId) {
-        manager.release(repositoryContainerId);
-        SidecarConcurrency.release(repositoryContainerId);
+        try {
+            manager.release(repositoryContainerId);
+        } finally {
+            SidecarConcurrency.release(repositoryContainerId);
+        }
     }
 
     /**
@@ -217,22 +220,29 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
         }
     }
 
-    /**
-     * Delegates to {@link SidecarConcurrency#beginUse}: {@code CodeArtifactService} calls this
-     * right after it resolves {@code repositoryContainerId}, closing the window between that
-     * resolution and this client's own {@link #listPackageVersions} call, which brackets the
-     * same key again internally. Nesting is safe: {@link SidecarConcurrency}'s bookkeeping is a
-     * reference count, not a flag.
-     */
     @Override
-    public void beginUse(String repositoryContainerId) {
-        SidecarConcurrency.beginUse(repositoryContainerId);
+    public void registerRepository(String repositoryContainerId) {
+        manager.registerRepository(repositoryContainerId);
     }
 
-    /** Delegates to {@link SidecarConcurrency#endUse}, pairing {@link #beginUse} above. */
+    @Override
+    public void beginUse(String repositoryContainerId) {
+        manager.beginUse(repositoryContainerId);
+        try {
+            SidecarConcurrency.beginUse(repositoryContainerId);
+        } catch (RuntimeException e) {
+            manager.endUse(repositoryContainerId);
+            throw e;
+        }
+    }
+
     @Override
     public void endUse(String repositoryContainerId) {
-        SidecarConcurrency.endUse(repositoryContainerId);
+        try {
+            SidecarConcurrency.endUse(repositoryContainerId);
+        } finally {
+            manager.endUse(repositoryContainerId);
+        }
     }
 
     private Instant lastModified(String fileUrl) {

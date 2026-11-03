@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
@@ -26,12 +27,9 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * {@link PypiserverSidecarManager#stopManagedContainers()} is a thin delegation to
- * {@link PerKeyContainerPool#stopAll()}, whose own behavior is covered by {@code PerKeyContainerPoolTest}.
- * What matters here is the wiring: that the manager implements {@link ContainerTeardown} (so
- * {@code ContainerTeardowns.stopAll} finds it on reset, nuke, and shutdown) and that it stops the
- * containers it actually started. A container is seeded straight into the pool by reflection, so this
- * needs no Docker daemon.
+ * Checks that the manager implements {@link ContainerTeardown} and stops tracked containers on
+ * reset, nuke, and shutdown after their in-flight requests complete. Containers are seeded into
+ * the pool by reflection, so these tests need no Docker daemon.
  */
 class PypiserverSidecarManagerTest {
 
@@ -52,8 +50,26 @@ class PypiserverSidecarManagerTest {
 
         manager.stopManagedContainers();
 
-        verify(lifecycleManager).stopAndRemove("tracked-pypiserver-1", null);
-        verify(lifecycleManager).stopAndRemove("tracked-pypiserver-2", null);
+        verify(lifecycleManager).stopAndRemoveStrict("tracked-pypiserver-1", null);
+        verify(lifecycleManager).stopAndRemoveStrict("tracked-pypiserver-2", null);
+    }
+
+    @Test
+    void releaseDefersContainerStopUntilAnInFlightUseEnds() throws Exception {
+        PypiserverSidecarManager manager = manager();
+        seedPooledContainer(manager, "pypi-repo-1", "tracked-pypiserver-1", "http://127.0.0.1:1");
+        PypiserverSidecarClient client = new PypiserverSidecarClient(manager, new ObjectMapper());
+        client.registerRepository("pypi-repo-1");
+        client.beginUse("pypi-repo-1");
+
+        try {
+            client.release("pypi-repo-1");
+            verifyNoInteractions(lifecycleManager);
+        } finally {
+            client.endUse("pypi-repo-1");
+        }
+
+        verify(lifecycleManager).stopAndRemoveStrict("tracked-pypiserver-1", null);
     }
 
     /**

@@ -548,6 +548,66 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void pypiUploadFinishingAfterRepositoryRecreationDoesNotChangeTheNewRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("pypi");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "pypi", null,
+                "demo");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "pypi", null,
+                "demo", "1.0.0");
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String newId = replacement.getSidecarContainerIds().get("pypi");
+        assertNotEquals(oldId, newId);
+        recordBytes("dom", "repo", "pypi", null, "demo", 13L);
+        recordReadme("dom", "repo", "pypi", null, "demo", "1.0.0", "new readme");
+        when(pypiserverClient.listPackageVersions(newId, "dom", "repo", null, "demo"))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "pypi", null, "demo", List.of("1.0.0"),
+                null, null, "Unlisted");
+        String newRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(REGION, "dom", null,
+                "repo", "pypi", null, "demo", "1.0.0");
+
+        service.completePypiUploadIfCurrentRepository(REGION, "dom", null, "repo", oldId, "demo", "1.0.0",
+                999L, packageFence, newRevision, "old readme", versionFence);
+
+        assertEquals(13L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+        assertEquals("new readme", service.getPackageVersionReadme(REGION, "dom", null, "repo", "pypi", null,
+                "demo", "1.0.0").readme());
+        assertEquals(Map.of("1.0.0", "Unlisted"),
+                service.containerBackedOverriddenVersionStatusesByRepository(REGION, "dom", null, "repo", "pypi")
+                        .get("demo"));
+    }
+
+    @Test
+    void pypiUploadCompletesBookkeepingForItsCurrentRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("pypi");
+        when(pypiserverClient.listPackageVersions(repoId, "dom", "repo", null, "demo"))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "pypi", null, "demo", List.of("1.0.0"),
+                null, null, "Unlisted");
+        String beforeRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(REGION, "dom", null,
+                "repo", "pypi", null, "demo", "1.0.0");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "pypi", null,
+                "demo");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "pypi", null,
+                "demo", "1.0.0");
+
+        service.completePypiUploadIfCurrentRepository(REGION, "dom", null, "repo", repoId, "demo", "1.0.0",
+                37L, packageFence, beforeRevision, "published readme", versionFence);
+
+        assertEquals(37L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+        assertEquals("published readme", service.getPackageVersionReadme(REGION, "dom", null, "repo", "pypi", null,
+                "demo", "1.0.0").readme());
+        assertEquals(Map.of(), service.containerBackedOverridesForPackage(ACCOUNT_ID, REGION, "dom", "repo", "pypi",
+                null, "demo"));
+    }
+
+    @Test
     void oldNugetRetentionClaimCannotWriteAfterRepositoryRecreation() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());

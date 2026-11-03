@@ -4985,6 +4985,29 @@ public class CodeArtifactService implements Resettable {
                 packageName, version, expectedRevisionOrNull);
     }
 
+    /** Completes a PyPI upload only while its leased sidecar belongs to the same repository creation. */
+    public synchronized void completePypiUploadIfCurrentRepository(String region, String domain, String domainOwner,
+            String repository, String repositoryContainerId, String packageName, String version, long bytes,
+            long packageFenceSnapshot, String expectedRevisionOrNull, String readme, long readmeFenceSnapshot) {
+        String owner = effectiveOwner(domainOwner);
+        CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain, repository))
+                .orElse(null);
+        if (current == null || !Objects.equals(repositoryContainerId,
+                current.getSidecarContainerIds().get("pypi"))) {
+            LOG.warnv("Skipping PyPI upload bookkeeping for {0}/{1}: the repository was replaced while its "
+                    + "sidecar request was in flight.", domain, repository);
+            return;
+        }
+        recordContainerBackedAssetBytes(region, domain, owner, repository, "pypi", null, packageName, bytes,
+                packageFenceSnapshot);
+        if (version != null && !version.isBlank()) {
+            forgetContainerBackedStatusOverrideIfUnchanged(region, domain, owner, repository, "pypi", null,
+                    packageName, version, expectedRevisionOrNull);
+            recordPublishedPackageVersionReadme(region, domain, owner, repository, "pypi", null, packageName,
+                    version, readme, readmeFenceSnapshot);
+        }
+    }
+
     /**
      * Cleans up this service's own byte accounting, deletion fence, and captured readmes for one
      * container-backed package after something other than {@link #deletePackage} removed it
