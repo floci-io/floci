@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate src/test/resources/aws/rest-routes.json from botocore's models.
+"""Regenerate src/main/resources/aws/rest-routes.json from botocore's models.
 
 A REST request is authorized by its route: `IamActionRegistry` maps the HTTP method and path to the
 IAM action, and a route no rule maps is left unchecked. Whether every operation of a service reaches
@@ -28,7 +28,7 @@ from regen_partitions import resolve_botocore_data, strip_source
 from regen_query_services import latest_model_dir, load_model
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-OUTPUT = REPO_ROOT / "src/test/resources/aws/rest-routes.json"
+OUTPUT = REPO_ROOT / "src/main/resources/aws/rest-routes.json"
 
 # botocore model -> the credential scope Floci authorizes its requests under.
 MODELS: dict[str, str] = {

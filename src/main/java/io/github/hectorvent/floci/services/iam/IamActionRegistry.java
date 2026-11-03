@@ -81,10 +81,6 @@ public class IamActionRegistry {
      * type, so IAM checks them against the wildcard rather than a bucket.
      */
     private static final List<ActionRule> RULES = List.of(
-        // JAX-RS ignores raw matrix suffixes on literal route segments.
-        rule("access-analyzer", "POST", "^/policy(?:;[^/]*)?/validation(?:;[^/]*)?$",
-                "access-analyzer:ValidatePolicy"),
-
         // ── S3 Control ───────────────────────────────────────────────────────────
         s3ControlRule("GET",    "^/v20180820/tags/.+",        "s3:ListTagsForResource"),
         s3ControlRule("POST",   "^/v20180820/tags/.+",        "s3:TagResource"),
@@ -696,6 +692,10 @@ public class IamActionRegistry {
         // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
         // bucket's one trailing slash, so an S3 path is matched as sent.
         String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
+        String modeled = IamRestRoutes.actionFor(credentialScope, method, path);
+        if (modeled != null) {
+            return modeled;
+        }
 
         if ("s3".equals(credentialScope)) {
             // An S3 Control route is matched before the query overrides below, which would read the
