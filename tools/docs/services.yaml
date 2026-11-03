@@ -51,6 +51,7 @@ services:
       - { path: services/bedrockagentcorecontrol/BedrockAgentCoreToolsController.java, mode: rest }
       - { path: services/bedrockagentcorecontrol/BedrockAgentCoreGatewayRuleController.java, mode: rest }
       - { path: services/bedrockagentcorecontrol/BedrockAgentCoreResourcePolicyController.java, mode: rest }
+      - { path: services/bedrockagentcorecontrol/BedrockAgentCoreHarnessController.java, mode: rest }
     rename_actions:
       CreateEndpoint: CreateAgentRuntimeEndpoint
       GetEndpoint: GetAgentRuntimeEndpoint
