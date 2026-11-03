@@ -44,6 +44,9 @@ public class Route53Service implements Resettable {
 
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final List<String> DEFAULT_NAME_SERVERS = List.of("ns-1.awsdns-01.org", "ns-2.awsdns-02.net",
+            "ns-3.awsdns-03.com", "ns-4.awsdns-04.co.uk");
+    private static final List<String> NAME_SERVER_TLDS = List.of("org", "net", "com", "co.uk");
     private static final int MAX_VPC_ASSOCIATIONS_PER_ZONE = 300;
     private static final int MAX_VPC_ASSOCIATION_AUTHORIZATIONS = 1000;
 
@@ -58,6 +61,7 @@ public class Route53Service implements Resettable {
     private final StorageBackend<String, Map<String, String>> tagStore;
     private final StorageBackend<String, List<VpcAssociation>> vpcAuthorizationStore;
     private final List<String> nameServers;
+    private final List<Optional<String>> configuredNameServers;
     private final String defaultAccountId;
     private final RegionResolver regionResolver;
     private final Ec2Service ec2Service;
@@ -86,12 +90,17 @@ public class Route53Service implements Resettable {
                 new TypeReference<Map<String, List<VpcAssociation>>>() {});
 
         EmulatorConfig.Route53ServiceConfig r53 = config.services().route53();
-        this.nameServers = List.of(
+        this.configuredNameServers = List.of(
                 r53.defaultNameserver1(),
                 r53.defaultNameserver2(),
                 r53.defaultNameserver3(),
                 r53.defaultNameserver4()
-        ).stream().map(Route53Service::delegationName).toList();
+        );
+        List<String> effectiveNames = new ArrayList<>(4);
+        for (int i = 0; i < 4; i++) {
+            effectiveNames.add(delegationName(configuredNameServers.get(i).orElse(DEFAULT_NAME_SERVERS.get(i))));
+        }
+        this.nameServers = List.copyOf(effectiveNames);
         this.defaultAccountId = config.defaultAccountId();
         this.regionResolver = regionResolver;
         this.ec2Service = ec2Service;
@@ -168,8 +177,18 @@ public class Route53Service implements Resettable {
     }
 
     private List<String> newNameServers(String id) {
-        String label = id.toLowerCase(Locale.ROOT);
-        return nameServers.stream().map(name -> label + "." + name).toList();
+        BigInteger value = new BigInteger(id, 36);
+        List<String> assigned = new ArrayList<>(4);
+        for (int i = 0; i < 4; i++) {
+            if (configuredNameServers.get(i).isPresent()) {
+                assigned.add(nameServers.get(i));
+            } else {
+                int slot = value.shiftRight(i * 18).intValue() & 0x3ffff;
+                assigned.add(String.format(Locale.ROOT, "ns-%d.awsdns-%02d.%s",
+                        (slot & 0x7ff) + 1, (slot >>> 11) % 100, NAME_SERVER_TLDS.get(i)));
+            }
+        }
+        return List.copyOf(assigned);
     }
 
     public long getReusableDelegationSetCount() {

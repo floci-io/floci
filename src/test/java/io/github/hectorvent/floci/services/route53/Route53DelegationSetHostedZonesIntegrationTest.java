@@ -24,6 +24,28 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class Route53DelegationSetHostedZonesIntegrationTest {
     @Test
+    void implicitNameserversUseRoute53NamesForZonesAndStandaloneSets() {
+        try (Route53Client client = client("741686000017")) {
+            CreateHostedZoneResponse zone = createZone(client, "generated.example.", null);
+            DelegationSet set = createSet(client);
+            try {
+                List<String> suffixes = List.of("org", "net", "com", "co\\.uk");
+                for (List<String> names : List.of(zone.delegationSet().nameServers(), set.nameServers())) {
+                    assertEquals(4, names.size());
+                    for (int i = 0; i < 4; i++) {
+                        assertTrue(names.get(i).matches("ns-[1-9][0-9]{0,3}\\.awsdns-[0-9]{2}\\." + suffixes.get(i)));
+                    }
+                }
+                assertEquals(zone.delegationSet(), client.getHostedZone(r -> r.id(zone.hostedZone().id()))
+                        .delegationSet());
+            } finally {
+                client.deleteHostedZone(r -> r.id(zone.hostedZone().id()));
+                client.deleteReusableDelegationSet(r -> r.id(set.id()));
+            }
+        }
+    }
+
+    @Test
     void zonesReuseTheSetInResponsesAndApexRecordsUntilAllZonesAreDeleted() {
         try (Route53Client client = client("741686000010")) {
             DelegationSet set = createSet(client);

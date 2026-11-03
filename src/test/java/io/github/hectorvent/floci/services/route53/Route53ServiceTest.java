@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.empty;
@@ -63,10 +64,10 @@ class Route53ServiceTest {
         Mockito.when(config.defaultAccountId()).thenReturn(ACCOUNT);
         Mockito.when(config.services()).thenReturn(servicesConfig);
         Mockito.when(servicesConfig.route53()).thenReturn(route53Config);
-        Mockito.when(route53Config.defaultNameserver1()).thenReturn("ns-1.awsdns-00.com" + nameserverSuffix);
-        Mockito.when(route53Config.defaultNameserver2()).thenReturn("ns-2.awsdns-00.net" + nameserverSuffix);
-        Mockito.when(route53Config.defaultNameserver3()).thenReturn("ns-3.awsdns-00.org" + nameserverSuffix);
-        Mockito.when(route53Config.defaultNameserver4()).thenReturn("ns-4.awsdns-00.co.uk" + nameserverSuffix);
+        Mockito.when(route53Config.defaultNameserver1()).thenReturn(Optional.of("ns-1.awsdns-00.com" + nameserverSuffix));
+        Mockito.when(route53Config.defaultNameserver2()).thenReturn(Optional.of("ns-2.awsdns-00.net" + nameserverSuffix));
+        Mockito.when(route53Config.defaultNameserver3()).thenReturn(Optional.of("ns-3.awsdns-00.org" + nameserverSuffix));
+        Mockito.when(route53Config.defaultNameserver4()).thenReturn(Optional.of("ns-4.awsdns-00.co.uk" + nameserverSuffix));
         Mockito.when(route53Config.vpcAssociationControlPlaneDelayMs()).thenReturn(0L);
 
         Ec2Service ec2Service = Mockito.mock(Ec2Service.class);
@@ -116,7 +117,7 @@ class Route53ServiceTest {
 
     @ParameterizedTest(name = "configured names ending in {0}")
     @ValueSource(strings = {"", ".", " ", ".\t", ".\u2003"})
-    void defaultApexRecordsUseAbsoluteNamesAndTheDelegationSetDoesNot(String nameserverSuffix) {
+    void configuredApexRecordsUseAbsoluteNamesAndTheDelegationSetDoesNot(String nameserverSuffix) {
         Route53Service service = newService(nameserverSuffix);
         String zoneId = service.createHostedZone("authority.example", "authority", null, null).zone().getId();
         List<ResourceRecordSet> records = service.listResourceRecordSets(zoneId, null, null, 100);
@@ -127,10 +128,8 @@ class Route53ServiceTest {
                         valuesOf(records, "SOA"), "SOA"),
                 () -> assertEquals(assigned.stream().map(name -> name + ".").toList(), valuesOf(records, "NS"), "NS"),
                 () -> assertEquals(List.of("ns-1.awsdns-00.com", "ns-2.awsdns-00.net", "ns-3.awsdns-00.org",
-                        "ns-4.awsdns-00.co.uk"), assigned.stream().map(name -> name.substring(name.indexOf('.') + 1))
-                        .toList(), "configured suffixes"),
-                () -> assertEquals(List.of("ns-1.awsdns-00.com", "ns-2.awsdns-00.net", "ns-3.awsdns-00.org",
-                        "ns-4.awsdns-00.co.uk"), service.getNameServers(), "configured bases"));
+                        "ns-4.awsdns-00.co.uk"), assigned, "configured names"),
+                () -> assertEquals(assigned, service.getNameServers(), "configured bases"));
     }
 
     @ParameterizedTest(name = "configured names ending in {0}")
