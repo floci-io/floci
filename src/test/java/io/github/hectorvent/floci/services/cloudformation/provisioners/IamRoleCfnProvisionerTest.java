@@ -155,6 +155,67 @@ class IamRoleCfnProvisionerTest {
     }
 
     @Test
+    void stackRollbackRestoresDurationFromSerializedResource() throws Exception {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        Map<String, String> originalAttributes = new HashMap<>(r.getAttributes());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        assertEquals(14400, realIam.getRole("app-role").getMaxSessionDuration());
+        ObjectMapper storageMapper = new ObjectMapper().findAndRegisterModules();
+        StackResource restored = storageMapper.readValue(storageMapper.writeValueAsString(r), StackResource.class);
+        assertTrue(owner.rollbackUpdate(restored));
+        assertEquals(7200, realIam.getRole("app-role").getMaxSessionDuration());
+        assertEquals(originalAttributes, restored.getAttributes());
+        assertFalse(owner.requiresUpdateRecovery(restored));
+        assertFalse(owner.rollbackUpdate(restored));
+    }
+
+    @Test
+    void stackRollbackRejectsReplacementAndKeepsRecoverySnapshot() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        realIam.deleteRole("app-role");
+        realIam.createRole("app-role", "/", EMPTY_TRUST, null, 21600, Map.of());
+        assertThrows(AwsException.class, () -> owner.rollbackUpdate(r));
+        assertEquals(21600, realIam.getRole("app-role").getMaxSessionDuration());
+        assertTrue(owner.requiresUpdateRecovery(r));
+    }
+
+    @Test
+    void successfulCommitDiscardsOnlyTheCompletedDurationSnapshot() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        owner.completeUpdate(r);
+        assertFalse(owner.requiresUpdateRecovery(r));
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":21600}"), ctx());
+        assertTrue(owner.rollbackUpdate(r));
+        assertEquals(14400, realIam.getRole("app-role").getMaxSessionDuration());
+    }
+
+    @Test
+    void durationRestoreDoesNotClaimOtherPolicyChangesWereRolledBack() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        realIam.putRolePolicy("app-role", "later", EMPTY_TRUST);
+        assertFalse(owner.rollbackUpdate(r));
+        assertEquals(7200, realIam.getRole("app-role").getMaxSessionDuration());
+        assertTrue(owner.requiresUpdateRecovery(r));
+        realIam.deleteRolePolicy("app-role", "later");
+        assertTrue(owner.rollbackUpdate(r));
+    }
+
+    @Test
     void inlinePoliciesArePutOnTheRoleWithResolvedDocuments() {
         stubCreate("app-role");
         StackResource r = resource();

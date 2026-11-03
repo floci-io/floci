@@ -127,6 +127,26 @@ class CloudFormationIamRoleDurationIntegrationTest {
         assertRejected(7201);
     }
 
+    @Test
+    void laterResourceFailureRestoresTheEarlierSuccessfulRoleUpdate() throws Exception {
+        create(7200);
+        Role original = role();
+        ObjectNode updated = (ObjectNode) mapper.readTree(template(14400, false));
+        ObjectNode failure = ((ObjectNode) updated.get("Resources")).putObject("Failure")
+                .put("Type", "AWS::IAM::Role").put("DependsOn", "Role");
+        failure.putObject("Properties").put("RoleName", name + "-invalid")
+                .put("MaxSessionDuration", 1);
+        cfn.updateStack(request -> request.stackName(name).templateBody(updated.toString())
+                .parameters(parameter -> parameter.parameterKey("Duration").parameterValue("14400"))
+                .capabilitiesWithStrings("CAPABILITY_NAMED_IAM"));
+        awaitStack("UPDATE_ROLLBACK_COMPLETE");
+        assertEquals(original.roleId(), role().roleId());
+        assertEquals(7200, role().maxSessionDuration());
+        assumeFor(7200);
+        assertRejected(7201);
+        assertThrows(NoSuchEntityException.class, () -> iam.getRole(request -> request.roleName(name + "-invalid")));
+    }
+
     private void create(int duration) {
         cfn.createStack(request -> request.stackName(name).templateBody(template(duration, false))
                 .capabilitiesWithStrings("CAPABILITY_NAMED_IAM"));

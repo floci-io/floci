@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -19,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * CloudFormation provisioning for {@code AWS::IAM::Role}, moved out of the
@@ -29,6 +33,9 @@ import java.util.Set;
 public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(IamRoleCfnProvisioner.class);
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String DURATION_SNAPSHOT_ATTR = "__FlociRoleDurationSnapshot";
 
     private static final String INLINE_NAMES_ATTR = "__FlociInlinePolicyNames";
     private static final String MANAGED_ARNS_ATTR = "__FlociManagedPolicyArns";
@@ -123,6 +130,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             // write, closing the gap between the check above and this call: a role deleted and
             // recreated under the same name in between would otherwise silently receive an update
             // meant for the role this stack actually owns.
+            snapshotDuration(r, role);
             priorAssumeRolePolicyDocument = role.getAssumeRolePolicyDocument();
             priorAssumeRoleId = existingRoleId;
             priorPermissionsBoundary = role.getPermissionsBoundaryArn();
@@ -316,6 +324,73 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         // What the next execution compares its template against.
         CfnTrackedSets.write(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
         CfnTrackedSets.write(r, MANAGED_ARNS_ATTR, managedPolicyArns);
+    }
+
+    private void snapshotDuration(StackResource resource, IamRole role) {
+        if (requiresUpdateRecovery(resource)) {
+            return;
+        }
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("name", role.getRoleName());
+        snapshot.put("id", role.getRoleId());
+        snapshot.put("duration", role.getMaxSessionDuration());
+        snapshot.set("otherConfiguration", otherConfiguration(role));
+        snapshot.set("attributes", MAPPER.valueToTree(resource.getAttributes()));
+        resource.getAttributes().put(DURATION_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    private JsonNode otherConfiguration(IamRole role) {
+        ObjectNode configuration = MAPPER.createObjectNode();
+        configuration.put("trust", role.getAssumeRolePolicyDocument());
+        configuration.put("boundary", role.getPermissionsBoundaryArn());
+        configuration.set("inline", MAPPER.valueToTree(role.getInlinePolicies()));
+        configuration.set("managed", MAPPER.valueToTree(new TreeSet<>(role.getAttachedPolicyArns())));
+        return configuration;
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        String raw = resource.getAttributes().get(DURATION_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return false;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Invalid IAM role duration rollback snapshot", e);
+        }
+        IamRole role = iamService.updateRole(snapshot.path("name").asText(), null,
+                snapshot.path("duration").asInt(), snapshot.path("id").asText());
+        // Duration rollback must not report success for trust or policy changes it did not undo.
+        if (!snapshot.path("otherConfiguration").equals(otherConfiguration(role))) {
+            return false;
+        }
+        resource.getAttributes().clear();
+        snapshot.path("attributes").properties().forEach(attribute ->
+                resource.getAttributes().put(attribute.getKey(), attribute.getValue().asText()));
+        return true;
+    }
+
+    @Override
+    public boolean retainsFailedUpdateState(StackResource resource) {
+        return requiresUpdateRecovery(resource);
+    }
+
+    @Override
+    public boolean requiresUpdateRecovery(StackResource resource) {
+        return resource.getAttributes().containsKey(DURATION_SNAPSHOT_ATTR);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        clearUpdate(resource);
+        return UpdateCleanupResult.notApplicable();
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(DURATION_SNAPSHOT_ATTR);
     }
 
     @Override
