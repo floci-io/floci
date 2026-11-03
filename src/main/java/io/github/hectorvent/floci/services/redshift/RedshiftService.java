@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
+import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
@@ -111,6 +112,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private final RedshiftEventService events;
     private final RedshiftIntegrationEventPublisher integrationEvents;
     private final Ec2Service ec2Service;
+    private final RedshiftZeroEtlEndpoints zeroEtlEndpoints;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
@@ -194,7 +196,7 @@ public class RedshiftService implements ManagedSecretRotator {
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
                             DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
                             RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents,
-                            Ec2Service ec2Service) {
+                            Ec2Service ec2Service, RedshiftZeroEtlEndpoints zeroEtlEndpoints) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.snapshotCopies = storageFactory.create("redshift", "redshift-snapshot-copies.json", new TypeReference<Map<String, Snapshot>>() {});
@@ -218,6 +220,7 @@ public class RedshiftService implements ManagedSecretRotator {
         this.events = events;
         this.integrationEvents = integrationEvents;
         this.ec2Service = ec2Service;
+        this.zeroEtlEndpoints = zeroEtlEndpoints;
     }
 
     // Hand-built test constructions need not supply EC2; a null ec2Service skips subnet resolution.
@@ -229,7 +232,20 @@ public class RedshiftService implements ManagedSecretRotator {
                     RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents) {
         this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
-                integrationEvents, null);
+                integrationEvents, null, null);
+    }
+
+    // Hand-built test constructions that create integrations in the AWS form need the endpoints.
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver, RedshiftProxyManager proxyManager,
+                    DockerHostResolver dockerHostResolver, RedshiftCredentialBroker credentialBroker,
+                    SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                    DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
+                    RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents,
+                    RedshiftZeroEtlEndpoints zeroEtlEndpoints) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
+                integrationEvents, null, zeroEtlEndpoints);
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -554,8 +570,7 @@ public class RedshiftService implements ManagedSecretRotator {
 
     // ── Zero-ETL integrations ────────────────────────────────────
     //
-    // Metadata only: no data is replicated from the source. The shape and the lower case status
-    // were captured from a live integration in us-west-2.
+    // The shape and the lower case status were captured from a live integration in us-west-2.
 
     public Integration createIntegration(String integrationName, String sourceArn, String targetArn,
                                          String kmsKeyId, String description,
@@ -586,26 +601,41 @@ public class RedshiftService implements ManagedSecretRotator {
         if (targetArn == null || targetArn.isBlank()) {
             throw new AwsException("InvalidParameterValue", "TargetArn is required.", 400);
         }
-        AwsArnUtils.Arn source = parseZeroEtlArn(sourceArn, "DynamoDB stream");
-        if (!"dynamodb".equals(source.service()) || !source.resource().startsWith("table/")
-                || !source.resource().contains("/stream/")) {
+        // AWS takes a DynamoDB table as the source. A stream ARN is Floci's original form and is kept.
+        AwsArnUtils.Arn source = parseZeroEtlArn(sourceArn, "DynamoDB table");
+        if (!"dynamodb".equals(source.service()) || !source.resource().startsWith("table/")) {
             throw new AwsException("InvalidParameterValue",
-                    "SourceArn must identify a DynamoDB stream.", 400);
+                    "SourceArn must identify a DynamoDB table or stream.", 400);
         }
-        if (streamReader == null) {
-            throw new AwsException("InternalFailure", "DynamoDB stream service is unavailable.", 500);
+        String sourceStreamArn;
+        if (RedshiftZeroEtlEndpoints.isStreamArn(sourceArn)) {
+            if (streamReader == null) {
+                throw new AwsException("InternalFailure", "DynamoDB stream service is unavailable.", 500);
+            }
+            streamReader.describeStream(DynamoDbStreamReader.Stream.of(sourceArn), null, null);
+            sourceStreamArn = sourceArn;
+        } else {
+            TableDefinition table = requireZeroEtlEndpoints().sourceTable(integrations.accountId(), sourceArn);
+            // Changes are read from the table's latest stream; the consumer follows one enabled later.
+            sourceStreamArn = table.getStreamArn();
         }
-        streamReader.describeStream(DynamoDbStreamReader.Stream.of(sourceArn), null, null);
-        AwsArnUtils.Arn target = parseZeroEtlArn(targetArn, "Redshift cluster");
-        if (!"redshift".equals(target.service()) || !target.resource().startsWith("cluster:")) {
+        // AWS takes a Redshift Serverless namespace as the target. A provisioned cluster ARN is
+        // Floci's original form and is kept.
+        AwsArnUtils.Arn target = parseZeroEtlArn(targetArn, "Redshift");
+        String clusterIdentifier = null;
+        if (RedshiftZeroEtlEndpoints.isNamespaceArn(targetArn)) {
+            requireZeroEtlEndpoints().requireTargetNamespace(targetArn);
+        } else if ("redshift".equals(target.service()) && target.resource().startsWith("cluster:")) {
+            clusterIdentifier = target.resource().substring("cluster:".length());
+            if (clusterIdentifier.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "TargetArn must identify a Redshift cluster.", 400);
+            }
+            describeClusters(clusterIdentifier);
+        } else {
             throw new AwsException("InvalidParameterValue",
-                    "TargetArn must identify a provisioned Redshift cluster.", 400);
+                    "TargetArn must identify a Redshift Serverless namespace or a provisioned Redshift cluster.",
+                    400);
         }
-        String clusterIdentifier = target.resource().substring("cluster:".length());
-        if (clusterIdentifier.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "TargetArn must identify a Redshift cluster.", 400);
-        }
-        describeClusters(clusterIdentifier);
         if (description != null && description.length() > MAX_INTEGRATION_DESCRIPTION) {
             throw new AwsException("InvalidParameterValue",
                     "Description must be at most " + MAX_INTEGRATION_DESCRIPTION + " characters.", 400);
@@ -632,7 +662,7 @@ public class RedshiftService implements ManagedSecretRotator {
         integration.setIntegrationName(integrationName);
         integration.setSourceArn(sourceArn);
         integration.setTargetArn(targetArn);
-        integration.setSourceStreamArn(sourceArn);
+        integration.setSourceStreamArn(sourceStreamArn);
         integration.setTargetClusterIdentifier(clusterIdentifier);
         integration.setLandingTableName("floci_zetl_" + integrationId.replace('-', '_'));
         integration.setRetryCount(0);
@@ -649,6 +679,13 @@ public class RedshiftService implements ManagedSecretRotator {
         LOG.infov("Created Redshift zero-ETL integration: {0}", integration.getIntegrationArn());
         queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.SYNCHRONIZING, integration);
         return integration;
+    }
+
+    private RedshiftZeroEtlEndpoints requireZeroEtlEndpoints() {
+        if (zeroEtlEndpoints == null) {
+            throw new AwsException("InternalFailure", "Zero-ETL endpoint resolution is unavailable.", 500);
+        }
+        return zeroEtlEndpoints;
     }
 
     private static AwsArnUtils.Arn parseZeroEtlArn(String arn, String resourceType) {
@@ -711,7 +748,9 @@ public class RedshiftService implements ManagedSecretRotator {
 
     public List<Integration> listDynamoDbZeroEtlIntegrations() {
         return integrations.scanAllAccountEntries(key -> true).stream()
-                .filter(entry -> entry.value().getSourceStreamArn() != null
+                // A table source without a stream still has its backfill to run.
+                .filter(entry -> "dynamodb".equals(sourceType(entry.value().getSourceArn()))
+                        || entry.value().getSourceStreamArn() != null
                         && !entry.value().getSourceStreamArn().isBlank())
                 .map(entry -> {
                     Integration integration = entry.value();
@@ -769,6 +808,23 @@ public class RedshiftService implements ManagedSecretRotator {
             }
             integrations.putForAccount(accountId, key, integration);
             queueStatusChange(integration, previousStatus);
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
+    /** Records that the integration now reads {@code sourceStreamArn}, from its trim horizon. */
+    public synchronized void updateIntegrationSourceStream(String accountId, String integrationArn,
+                                                           String sourceStreamArn) {
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            integration.setSourceStreamArn(sourceStreamArn);
+            integration.setShardSequenceNumbers(null);
+            integrations.putForAccount(accountId, key, integration);
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);

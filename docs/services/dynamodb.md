@@ -118,7 +118,7 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 | `GetRecords` | Read stream records from a shard |
 
 Redshift zero-ETL integrations can consume these stream records directly. See the
-[Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported target,
+[Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported sources and targets,
 landing table, checkpoint, and retry behavior.
 
 Stream records are held in memory. `POST /_floci/state/reset` removes every stream along with the
