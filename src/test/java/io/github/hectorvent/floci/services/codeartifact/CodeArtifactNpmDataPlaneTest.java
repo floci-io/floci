@@ -47,6 +47,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -464,6 +465,115 @@ class CodeArtifactNpmDataPlaneTest {
 
         assertEquals(409, response.statusCode());
         assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    /**
+     * Issue #7439: a scoped publish may name its package with a literal slash ({@code PUT
+     * /@scope/name}, the shape VerdaccioSidecarClient itself publishes with) instead of {@code
+     * %2F}. It is the same publish, so a blocked package refuses it the same way.
+     */
+    @Test
+    void aLiteralSlashScopedPublishToABlockedPackageIsRefused() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = blockedPublishService("scope", "my-pkg");
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@scope/my-pkg", "good-token",
+                publishEnvelope("@scope/my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "fresh bytes".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    /**
+     * Issue #7439: the literal slash form reaches the Archived/Disposed guard too.
+     */
+    @Test
+    void aLiteralSlashScopedPublishToAnArchivedVersionIsRefused() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        doThrow(new AwsException("ConflictException", "Package version '1.0.0' of package 'my-pkg' is Archived "
+                + "and cannot be republished.", 409))
+                .when(service).requireContainerBackedVersionNotArchivedOrDisposed(eq("us-east-1"), eq(DOMAIN),
+                        eq("000000000000"), eq(REPOSITORY), eq("npm"), eq("scope"), eq("my-pkg"), eq("1.0.0"));
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@scope/my-pkg", "good-token",
+                publishEnvelope("@scope/my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "fresh bytes".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    /**
+     * An allowed literal slash publish still reaches Verdaccio at the path the client sent, and
+     * its bytes are counted under the scope and name that path carries.
+     */
+    @Test
+    void aLiteralSlashScopedPublishIsForwardedAsSentAndAccountedUnderItsScope() throws Exception {
+        AtomicReference<String> upstreamPutPath = new AtomicReference<>();
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.PUT) {
+                        upstreamPutPath.set(request.path());
+                    }
+                    request.response().setStatusCode(201).end();
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@scope/my-pkg", "good-token",
+                publishEnvelope("@scope/my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "fresh bytes".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals(201, response.statusCode());
+        assertEquals("/@scope/my-pkg", upstreamPutPath.get());
+        verify(service, timeout(2000)).recordContainerBackedAssetBytes(eq("us-east-1"), eq(DOMAIN),
+                eq("000000000000"), eq(REPOSITORY), eq("npm"), eq("scope"), eq("my-pkg"), anyLong(), anyLong());
+    }
+
+    /**
+     * Only the bare scoped package path is a publish: a dist-tag update to a blocked package is a
+     * multi-segment {@code /-/package/...} PUT and is still proxied as before.
+     */
+    @Test
+    void aDistTagPutToABlockedPackageIsStillProxied() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = blockedPublishService("scope", "my-pkg");
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY
+                + "/-/package/@scope%2fmy-pkg/dist-tags/latest", "good-token", "\"1.0.0\"");
+
+        assertEquals(201, response.statusCode());
+        assertEquals(true, upstreamReceivedPut.get());
     }
 
     private HttpServer startUpstreamRecordingPuts(AtomicReference<Boolean> receivedPut) throws Exception {

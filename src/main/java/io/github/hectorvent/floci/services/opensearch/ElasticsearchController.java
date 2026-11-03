@@ -20,6 +20,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.io.IOException;
+import java.util.List;
 
 /**
  * Legacy Amazon Elasticsearch Service API ({@code 2015-01-01}), still used by
@@ -182,10 +183,12 @@ public class ElasticsearchController {
      * way in and out.
      */
     private static void swapInstanceTypeSuffix(JsonNode cluster, String from, String to) {
-        // Only InstanceType: the store keeps no DedicatedMasterType or WarmType to respell.
-        String type = cluster.path("InstanceType").asText("");
-        if (cluster instanceof ObjectNode node && type.endsWith(from)) {
-            node.put("InstanceType", type.substring(0, type.length() - from.length()) + to);
+        // The store keeps no WarmType to respell.
+        for (String member : List.of("InstanceType", "DedicatedMasterType")) {
+            String type = cluster.path(member).asText("");
+            if (cluster instanceof ObjectNode node && type.endsWith(from)) {
+                node.put(member, type.substring(0, type.length() - from.length()) + to);
+            }
         }
     }
 

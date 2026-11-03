@@ -348,7 +348,11 @@ public class CodeArtifactNpmDataPlane {
     /**
      * A real {@code npm publish} is a {@code PUT} to the bare package path (no further path
      * segments): {@code /<name>} unscoped, or {@code /@scope%2Fname} scoped, still one segment
-     * since the slash between scope and name arrives URL-encoded. {@code npm deprecate} is a
+     * since the slash between scope and name arrives URL-encoded. A scoped package may also be
+     * sent with a literal slash, {@code /@scope/name} (the shape {@code VerdaccioSidecarClient}
+     * itself publishes with, and one Verdaccio accepts): two segments, the first an {@code @}
+     * scope, which is the same publish and must take the same guarded route (issue #7439).
+     * {@code npm deprecate} is a
      * {@code PUT} at this same bare-package shape (a dist-tag update is not: that always goes to
      * {@code /-/package/<name>/dist-tags/<tag>}, a different, multi-segment path {@link #isPublish}
      * already excludes), but {@link #confirmedRepublish} only ever short-circuits when it can
@@ -357,7 +361,14 @@ public class CodeArtifactNpmDataPlane {
      * proxy path unaffected.
      */
     private static boolean isPublish(HttpMethod method, String rest) {
-        return method == HttpMethod.PUT && rest.length() > 1 && rest.indexOf('/', 1) < 0;
+        if (method != HttpMethod.PUT || rest.length() <= 1) {
+            return false;
+        }
+        int slash = rest.indexOf('/', 1);
+        if (slash < 0) {
+            return true;
+        }
+        return rest.startsWith("/@") && slash > 2 && slash < rest.length() - 1 && rest.indexOf('/', slash + 1) < 0;
     }
 
     /**
@@ -927,9 +938,9 @@ public class CodeArtifactNpmDataPlane {
     /**
      * {@code namespace} is the npm scope without its leading {@code @}, or {@code null} for an
      * unscoped package, the same shape {@link RepositorySidecarManager#fetchPackageVersionAsset}
-     * takes everywhere else. {@code rest} is a bare-package publish path, exactly one segment
-     * ({@link #isPublish} already confirmed that): {@code /<name>} unscoped, or {@code
-     * /@scope%2Fname} scoped, with the scope separator arriving percent-encoded since Netty
+     * takes everywhere else. {@code rest} is a bare-package publish path ({@link #isPublish}
+     * already confirmed that): {@code /<name>} unscoped, or {@code /@scope/name} scoped, or
+     * {@code /@scope%2Fname}, with the scope separator arriving percent-encoded since Netty
      * leaves a {@code %2F} undecoded in {@link HttpServerRequest#path()}
      * specifically so it is never confused with a real path separator. The one, targeted decode
      * here undoes exactly that, and only that: every other npm package-name character is already
