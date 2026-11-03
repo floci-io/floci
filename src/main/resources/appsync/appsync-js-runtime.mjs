@@ -745,8 +745,12 @@ function validateAppSyncSubset(code) {
   const literals = blankLiterals(code);
   const lineNumber = (index) => code.slice(0, index).split(/\r\n|[\r\n\u2028\u2029]/).length;
   for (const [pattern, description] of BANNED_CONSTRUCTS) {
-    const match = pattern.exec(literals.scanned);
-    if (match) {
+    for (const match of literals.scanned.matchAll(new RegExp(pattern.source, 'g'))) {
+      const before = literals.scanned.slice(0, match.index).trimEnd();
+      const after = literals.scanned.slice(match.index + match[0].length);
+      if (/^[\w$]+$/.test(match[0]) && /[,{]$/.test(before) && /^\s*:/.test(after)) {
+        continue;
+      }
       return unsupportedConstruct(description, lineNumber(match.index));
     }
   }

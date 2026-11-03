@@ -58,6 +58,9 @@ class AppSyncJsResolverDockerIntegrationTest {
               misplacedYield: String
               malformedSyntax: String
               keywordsInText: String
+              templateHole: String
+              keywordObjectKey: String
+              conditionalThis: String
               regexLiteral: String
               regexKeyword: String
               regexClassThenUnsupported: String
@@ -217,6 +220,34 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             export function response(ctx) {
               return ctx.result.value;
+            }
+            """;
+
+    private static final String TEMPLATE_HOLE_RESOLVER = """
+            export function request(ctx) {
+              const prefix = `${"value"}-`;
+              return { payload: { value: `its class: ${prefix}` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String KEYWORD_OBJECT_KEY_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { class: "allowed" } };
+            }
+            export function response(ctx) {
+              return ctx.result.class;
+            }
+            """;
+
+    private static final String CONDITIONAL_THIS_RESOLVER = """
+            export function request(ctx) {
+              return { payload: ctx.args.flag ? this : null };
+            }
+            export function response(ctx) {
+              return ctx.result;
             }
             """;
 
@@ -381,6 +412,9 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "misplacedYield", "local", YIELD_RESOLVER);
         createUnitResolver(apiId, "Query", "malformedSyntax", "local", MALFORMED_RESOLVER);
         createUnitResolver(apiId, "Query", "keywordsInText", "local", KEYWORDS_IN_TEXT_RESOLVER);
+        createUnitResolver(apiId, "Query", "templateHole", "local", TEMPLATE_HOLE_RESOLVER);
+        createUnitResolver(apiId, "Query", "keywordObjectKey", "local", KEYWORD_OBJECT_KEY_RESOLVER);
+        createUnitResolver(apiId, "Query", "conditionalThis", "local", CONDITIONAL_THIS_RESOLVER);
         createUnitResolver(apiId, "Query", "regexLiteral", "local", REGEX_LITERAL_RESOLVER);
         createUnitResolver(apiId, "Query", "regexKeyword", "local", REGEX_KEYWORD_RESOLVER);
         createUnitResolver(apiId, "Query", "regexClassThenUnsupported", "local",
@@ -595,6 +629,31 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.keywordsInText", equalTo("try catch class while ok"));
+    }
+
+    @Test
+    void aTemplateLiteralResumesAfterItsExpression() {
+        query("{ templateHole }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.templateHole", equalTo("its class: value-"));
+    }
+
+    @Test
+    void aKeywordUsedAsAnObjectKeyIsNotReadAsADeclaration() {
+        query("{ keywordObjectKey }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.keywordObjectKey", equalTo("allowed"));
+    }
+
+    @Test
+    void aConditionalThisBeforeAColonIsStillRefused() {
+        query("{ conditionalThis }")
+            .statusCode(200)
+            .body("data.conditionalThis", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
     }
 
     @Test
