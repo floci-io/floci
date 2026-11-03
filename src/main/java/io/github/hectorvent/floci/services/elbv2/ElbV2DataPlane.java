@@ -110,6 +110,8 @@ public class ElbV2DataPlane {
     static final int TCP_IDLE_TIMEOUT_SECONDS = 350;
     static final int MIN_TCP_IDLE_TIMEOUT_SECONDS = 60;
     static final int MAX_TCP_IDLE_TIMEOUT_SECONDS = 6000;
+    private static final long INITIAL_BIND_RETRY_MILLIS = 100;
+    private static final long MAX_BIND_RETRY_MILLIS = 5000;
 
     @Inject
     Vertx vertx;
@@ -147,6 +149,8 @@ public class ElbV2DataPlane {
         private int depth;
         private int closing;
         private long generation;
+        private long bindRetryTimer = -1;
+        private long bindRetryDelay = INITIAL_BIND_RETRY_MILLIS;
         private ReloadingKeyManager tlsKeyManager;
         private volatile RoutingView routing = new RoutingView(Map.of(), Map.of());
     }
@@ -200,6 +204,7 @@ public class ElbV2DataPlane {
     private void retirePortState(int port, PortState state) {
         if (state.depth == 0 && state.closing == 0 && !servers.containsKey(port) && !tcpServers.containsKey(port)
                 && !listenersByHostAndPort.containsKey(port)) {
+            cancelBindRetry(state);
             portStates.remove(port, state);
         }
     }
@@ -248,6 +253,7 @@ public class ElbV2DataPlane {
         stopping = true;
         for (Map.Entry<Integer, PortState> entry : portStates.entrySet()) {
             synchronized (entry.getValue()) {
+                cancelBindRetry(entry.getValue());
                 HttpServer server = servers.remove(entry.getKey());
                 if (server != null) {
                     server.close();
@@ -552,7 +558,8 @@ public class ElbV2DataPlane {
 
     private void ensurePortServer(int port) {
         PortState state = portStates.get(port);
-        if (!stopping && state != null && state.closing == 0 && !servers.containsKey(port) && !tcpServers.containsKey(port)
+        if (!stopping && state != null && state.closing == 0 && state.bindRetryTimer == -1
+                && !servers.containsKey(port) && !tcpServers.containsKey(port)
                 && listenersByHostAndPort.containsKey(port)) {
             startPortServer(port, state);
         }
@@ -592,11 +599,10 @@ public class ElbV2DataPlane {
         try {
             server.requestHandler(req -> handleRequest(req, port));
             server.listen()
-                    .onSuccess(s -> LOG.infov("ELBv2 {0} listener port started on {1}",
-                            secure ? "HTTPS" : "HTTP", String.valueOf(port)))
+                    .onSuccess(s -> portStarted(port, state, generation, secure ? "HTTPS" : "HTTP"))
                     .onFailure(err -> onCurrentPort(port, state, () -> {
                         if (state.generation == generation && servers.remove(port, server)) {
-                            clearPortBindings(port);
+                            scheduleBindRetry(port, state);
                             closeOwnedServer(port, state, server);
                         } else {
                             server.close();
@@ -624,10 +630,10 @@ public class ElbV2DataPlane {
         tcpServers.put(port, server);
         try {
             server.connectHandler(socket -> handleTcpConnection(socket, state));
-            server.listen().onSuccess(ignored -> LOG.infov("ELBv2 TCP listener port started on {0}", String.valueOf(port)))
+            server.listen().onSuccess(ignored -> portStarted(port, state, generation, "TCP"))
                     .onFailure(err -> onCurrentPort(port, state, () -> {
                         if (state.generation == generation && tcpServers.remove(port, server)) {
-                            clearPortBindings(port);
+                            scheduleBindRetry(port, state);
                             closeOwnedServer(port, state, server::close);
                         } else {
                             server.close();
@@ -645,6 +651,37 @@ public class ElbV2DataPlane {
                 }
             }
             throw failure;
+        }
+    }
+
+    private void portStarted(int port, PortState state, long generation, String protocol) {
+        onCurrentPort(port, state, () -> {
+            if (state.generation == generation) {
+                state.bindRetryDelay = INITIAL_BIND_RETRY_MILLIS;
+                LOG.infov("ELBv2 {0} listener port started on {1}", protocol, String.valueOf(port));
+            }
+        });
+    }
+
+    private void scheduleBindRetry(int port, PortState state) {
+        if (state.bindRetryTimer != -1) {
+            return;
+        }
+        long delay = state.bindRetryDelay;
+        state.bindRetryDelay = Math.min(delay * 2, MAX_BIND_RETRY_MILLIS);
+        state.bindRetryTimer = vertx.setTimer(delay, timer -> onCurrentPort(port, state, () -> {
+            if (state.bindRetryTimer == timer) {
+                state.bindRetryTimer = -1;
+                ensurePortServer(port);
+            }
+        }));
+    }
+
+    private void cancelBindRetry(PortState state) {
+        if (state.bindRetryTimer != -1) {
+            long timer = state.bindRetryTimer;
+            state.bindRetryTimer = -1;
+            vertx.cancelTimer(timer);
         }
     }
 
@@ -700,6 +737,10 @@ public class ElbV2DataPlane {
         }
         if (listenersByHost != null) {
             listenersByHostAndPort.remove(port, listenersByHost);
+        }
+        PortState state = portStates.get(port);
+        if (state != null) {
+            cancelBindRetry(state);
         }
         restartPortServer(port);
     }
@@ -881,7 +922,10 @@ public class ElbV2DataPlane {
             state.closing--;
             throw failure;
         }
-        closed.onComplete(ignored -> onCurrentPort(port, state, () -> {
+        closed.onComplete(result -> onCurrentPort(port, state, () -> {
+            if (result.failed()) {
+                LOG.warnv(result.cause(), "ELBv2 server close failed on port {0}", String.valueOf(port));
+            }
             state.closing--;
             if (state.generation == generation) {
                 ensurePortServer(port);
