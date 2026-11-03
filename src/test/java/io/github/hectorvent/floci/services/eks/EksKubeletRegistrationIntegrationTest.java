@@ -16,11 +16,13 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -63,8 +65,9 @@ class EksKubeletRegistrationIntegrationTest {
         doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
                 .execInContainerForResult(anyString(), any(), anyInt());
         String script = "#!/bin/bash\n/etc/eks/bootstrap.sh " + clusterName;
+        String instanceId = null;
         try {
-            String instanceId = given()
+            instanceId = given()
                     .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account + "/20260101/" + region
                             + "/ec2/aws4_request, SignedHeaders=host, Signature=abc")
                     .formParam("Action", "RunInstances")
@@ -86,8 +89,16 @@ class EksKubeletRegistrationIntegrationTest {
             manager.registerAllJoinedNodes(cluster, "recreated-control-plane");
             verify(manager, never()).execInContainerForResult(anyString(), any(), anyInt());
         } finally {
-            manager.unregisterMetadataEndpoint(cluster);
-            RequestScopes.runAs(account, region, () -> eksService.deleteCluster(clusterName));
+            String launchedId = instanceId;
+            RequestScopes.runAs(account, region, () -> assertAll("Clean up worker and cluster independently",
+                    () -> manager.unregisterMetadataEndpoint(cluster),
+                    () -> {
+                        if (launchedId != null) {
+                            ec2Service.terminateInstances(region, List.of(launchedId));
+                            assertEquals("terminated", ec2Service.getInstance(region, launchedId).orElseThrow().getState().getName());
+                        }
+                    },
+                    () -> eksService.deleteCluster(clusterName)));
         }
     }
 }
