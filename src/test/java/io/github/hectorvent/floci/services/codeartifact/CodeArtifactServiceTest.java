@@ -53,6 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -607,7 +608,7 @@ class CodeArtifactServiceTest {
     }
 
     @Test
-    void listNugetPackageVersionsKeepsResultWhenDeferredSidecarStopFails() {
+    void listNugetPackageVersionsPropagatesInvalidLeaseCompletion() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         String repoId = created.getSidecarContainerIds().get("nuget");
@@ -615,12 +616,11 @@ class CodeArtifactServiceTest {
                 .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
         when(bagetterClient.preferredDisplayVersion(repoId, "dom", "repo", null, "demo"))
                 .thenReturn(Optional.empty());
-        doThrow(new IllegalStateException("Sidecar removal failed")).when(bagetterClient).endUse(repoId);
+        IllegalStateException invalidLease = new IllegalStateException("No active BaGetter sidecar use");
+        doThrow(invalidLease).when(bagetterClient).endUse(repoId);
 
-        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
-                "repo", "nuget", null, "demo", null, null, null, null, null);
-
-        assertEquals("1.0.0", result.versions().getFirst().version());
+        assertSame(invalidLease, assertThrows(IllegalStateException.class, () -> service.listPackageVersions(
+                REGION, "dom", null, "repo", "nuget", null, "demo", null, null, null, null, null)));
     }
 
     /**

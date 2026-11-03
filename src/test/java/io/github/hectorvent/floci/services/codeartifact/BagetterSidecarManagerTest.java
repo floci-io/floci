@@ -12,6 +12,7 @@ import java.lang.reflect.Field;
 import java.net.http.HttpClient;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -86,9 +87,10 @@ class BagetterSidecarManagerTest {
         doThrow(new IllegalStateException("Docker unavailable")).doNothing().when(lifecycleManager)
                 .stopAndRemoveStrict("tracked-bagetter-1", null);
 
-        assertThrows(IllegalStateException.class, () -> manager.endUse("nuget-repo-1"));
+        assertDoesNotThrow(() -> manager.endUse("nuget-repo-1"));
         assertTrue(manager.isRunning("nuget-repo-1"));
         assertThrows(IllegalStateException.class, () -> manager.beginUse("nuget-repo-1"));
+        assertThrows(IllegalStateException.class, () -> manager.endUse("nuget-repo-1"));
 
         manager.stopManagedContainers();
         assertFalse(manager.isRunning("nuget-repo-1"));

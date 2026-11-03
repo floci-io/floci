@@ -101,20 +101,11 @@ class CodeArtifactNuGetControllerLeaseTest {
     }
 
     @Test
-    void deferredRemovalFailureDoesNotReplaceACompletedResponse() {
-        doThrow(new IllegalStateException("Sidecar removal failed")).when(bagetter).endUse(REPO_ID);
+    void invalidLeaseCompletionIsNotHidden() {
+        IllegalStateException invalidLease = new IllegalStateException("No active BaGetter sidecar use");
+        doThrow(invalidLease).when(bagetter).endUse(REPO_ID);
 
-        assertEquals(200, controller.serviceIndex(headers, DOMAIN, REPOSITORY).getStatus());
-        verify(bagetter).endUse(REPO_ID);
-    }
-
-    @Test
-    void deferredRemovalFailureDoesNotMaskARequestFailure() {
-        IllegalStateException startupFailure = new IllegalStateException("Docker unavailable");
-        when(bagetter.ensureReady(REPO_ID, null)).thenThrow(startupFailure);
-        doThrow(new IllegalStateException("Sidecar removal failed")).when(bagetter).endUse(REPO_ID);
-
-        assertSame(startupFailure,
+        assertSame(invalidLease,
                 assertThrows(IllegalStateException.class, () -> controller.serviceIndex(headers, DOMAIN, REPOSITORY)));
         verify(bagetter).endUse(REPO_ID);
     }

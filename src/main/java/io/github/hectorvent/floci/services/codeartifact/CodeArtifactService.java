@@ -707,15 +707,8 @@ public class CodeArtifactService implements Resettable {
         return id;
     }
 
-    private void endSidecarUse(String format, RepositorySidecarManager manager, String repoId) {
-        try {
-            manager.endUse(repoId);
-        } catch (RuntimeException e) {
-            if (!"nuget".equals(format)) {
-                throw e;
-            }
-            LOG.warnv(e, "Could not end NuGet sidecar use for {0}; teardown can retry cleanup.", repoId);
-        }
+    private void endSidecarUse(RepositorySidecarManager manager, String repoId) {
+        manager.endUse(repoId);
     }
 
     public synchronized CodeArtifactRepository updateRepository(String region, String domain, String domainOwner,
@@ -1112,7 +1105,7 @@ public class CodeArtifactService implements Resettable {
                 revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
                         packageName, version, repoId).revision();
             } finally {
-                endSidecarUse(format, manager, repoId);
+                endSidecarUse(manager, repoId);
             }
         } else {
             String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
@@ -1223,7 +1216,7 @@ public class CodeArtifactService implements Resettable {
                 preferredDisplayVersion = manager.preferredDisplayVersion(repoId, domain, repository, namespace,
                         packageName).orElse(null);
             } finally {
-                endSidecarUse(format, manager, repoId);
+                endSidecarUse(manager, repoId);
             }
             Set<String> coveredVersions = raw.stream().map(RepositorySidecarManager.PackageVersionTimestamp::version)
                     .collect(Collectors.toSet());
@@ -2560,7 +2553,7 @@ public class CodeArtifactService implements Resettable {
                     version));
             return pv;
         } finally {
-            endSidecarUse(format, manager, repoId);
+            endSidecarUse(manager, repoId);
         }
     }
 
@@ -2669,7 +2662,7 @@ public class CodeArtifactService implements Resettable {
                 throw new AwsException("InternalServerException", "Listing " + format + " packages is not yet "
                         + "supported by this emulator.", 500);
             } finally {
-                endSidecarUse(format, manager, repoId);
+                endSidecarUse(manager, repoId);
             }
             // Raised by Greptile's review: disposing a container-backed package's last version
             // deletes its real sidecar content, so the sidecar's own listing above no longer names
@@ -3429,7 +3422,7 @@ public class CodeArtifactService implements Resettable {
         try {
             return manager.packageExists(repoId, domain, repository, namespace, packageName);
         } finally {
-            endSidecarUse(format, manager, repoId);
+            endSidecarUse(manager, repoId);
         }
     }
 
@@ -3721,7 +3714,7 @@ public class CodeArtifactService implements Resettable {
             asset.setHashes(computeHashes(content));
             return new PackageVersionAssetResult(asset, revision);
         } finally {
-            endSidecarUse(format, manager, repoId);
+            endSidecarUse(manager, repoId);
         }
     }
 
@@ -4549,7 +4542,7 @@ public class CodeArtifactService implements Resettable {
                                 + packageName + "' was not found.", version, "package-version"));
                 return new PackageVersionReadmeResult(format, namespace, packageName, version, revision, readme);
             } finally {
-                endSidecarUse(format, manager, repoId);
+                endSidecarUse(manager, repoId);
             }
         }
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);

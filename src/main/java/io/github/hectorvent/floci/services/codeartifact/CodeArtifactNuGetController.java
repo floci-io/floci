@@ -16,7 +16,6 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -63,7 +62,6 @@ import java.util.Optional;
  */
 @Path("/codeartifact/nuget/{domain}/{repository}")
 public class CodeArtifactNuGetController {
-    private static final Logger LOG = Logger.getLogger(CodeArtifactNuGetController.class);
 
     private final CodeArtifactService service;
     private final BagetterSidecarClient bagetter;
@@ -408,11 +406,7 @@ public class CodeArtifactNuGetController {
     }
 
     private void endUse(String repoId) {
-        try {
-            bagetter.endUse(repoId);
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Could not end NuGet sidecar use for {0}; teardown can retry cleanup.", repoId);
-        }
+        bagetter.endUse(repoId);
     }
 
     private RepositoryHandle readyRepository(AuthorizationTokenScope scope, String domain, String repository,

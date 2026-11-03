@@ -13,9 +13,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-
 /**
  * Starts and stops one BaGetter container per CodeArtifact repository backing the {@code nuget}
  * format, the same per-repository shape as Verdaccio (npm) and pypiserver (pypi) rather than
@@ -49,14 +46,7 @@ public class BagetterSidecarManager implements ContainerTeardown {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
-    private final ConcurrentHashMap<String, UseState> uses = new ConcurrentHashMap<>();
-
-    private static final class UseState {
-        private int active;
-        private boolean releasing;
-        private boolean stopping;
-        private boolean stopped;
-    }
+    private final SidecarRepositoryLease lease;
 
     @Inject
     public BagetterSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
@@ -65,6 +55,7 @@ public class BagetterSidecarManager implements ContainerTeardown {
         this.lifecycleManager = lifecycleManager;
         this.config = config;
         this.pool = new PerKeyContainerPool(lifecycleManager, HEALTH_PATH);
+        this.lease = new SidecarRepositoryLease("BaGetter", pool);
     }
 
     /**
@@ -81,68 +72,19 @@ public class BagetterSidecarManager implements ContainerTeardown {
 
     /** Stops and removes the container for one nuget repository, if one was ever started. */
     public void release(String nugetRepositoryId) {
-        UseState use = uses.computeIfAbsent(nugetRepositoryId, key -> new UseState());
-        synchronized (use) {
-            use.releasing = true;
-        }
-        stopIfUnused(nugetRepositoryId, use);
+        lease.release(nugetRepositoryId);
     }
 
     public void registerRepository(String nugetRepositoryId) {
-        uses.putIfAbsent(nugetRepositoryId, new UseState());
+        lease.registerRepository(nugetRepositoryId);
     }
 
     public void beginUse(String nugetRepositoryId) {
-        UseState use = uses.get(nugetRepositoryId);
-        if (use == null) {
-            throw new IllegalStateException("No BaGetter repository lease for " + nugetRepositoryId);
-        }
-        synchronized (use) {
-            if (use.releasing) {
-                throw new IllegalStateException("BaGetter sidecar is being released for repository "
-                        + nugetRepositoryId);
-            }
-            use.active++;
-        }
+        lease.beginUse(nugetRepositoryId);
     }
 
     public void endUse(String nugetRepositoryId) {
-        UseState use = uses.get(nugetRepositoryId);
-        if (use == null) {
-            throw new IllegalStateException("No BaGetter sidecar use for repository " + nugetRepositoryId);
-        }
-        synchronized (use) {
-            if (use.active == 0) {
-                throw new IllegalStateException("No active BaGetter sidecar use for repository "
-                        + nugetRepositoryId);
-            }
-            use.active--;
-        }
-        stopIfUnused(nugetRepositoryId, use);
-    }
-
-    private void stopIfUnused(String nugetRepositoryId, UseState use) {
-        synchronized (use) {
-            if (!use.releasing || use.active != 0 || use.stopping || use.stopped) {
-                return;
-            }
-            use.stopping = true;
-        }
-        boolean stopped = false;
-        try {
-            if (pool.isTracked(nugetRepositoryId)) {
-                pool.stopContainerStrict(nugetRepositoryId);
-            }
-            stopped = true;
-        } finally {
-            synchronized (use) {
-                use.stopped = stopped;
-                use.stopping = false;
-                if (stopped) {
-                    uses.remove(nugetRepositoryId, use);
-                }
-            }
-        }
+        lease.endUse(nugetRepositoryId);
     }
 
     /**
@@ -201,32 +143,6 @@ public class BagetterSidecarManager implements ContainerTeardown {
 
     @Override
     public void stopManagedContainers() {
-        RuntimeException[] failure = new RuntimeException[1];
-        uses.forEach((id, use) -> {
-            synchronized (use) {
-                use.releasing = true;
-            }
-            try {
-                stopIfUnused(id, use);
-            } catch (RuntimeException e) {
-                if (failure[0] == null) {
-                    failure[0] = e;
-                } else {
-                    failure[0].addSuppressed(e);
-                }
-            }
-        });
-        try {
-            pool.stopAllStrictExcept(Set.copyOf(uses.keySet()));
-        } catch (RuntimeException e) {
-            if (failure[0] == null) {
-                failure[0] = e;
-            } else {
-                failure[0].addSuppressed(e);
-            }
-        }
-        if (failure[0] != null) {
-            throw failure[0];
-        }
+        lease.stopManagedContainers();
     }
 }
