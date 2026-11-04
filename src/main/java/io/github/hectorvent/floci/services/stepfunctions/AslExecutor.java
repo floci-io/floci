@@ -43,6 +43,8 @@ import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeInvoker;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeInvoker.ConnectionHttpParameters;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
@@ -267,6 +269,7 @@ public class AslExecutor {
     private final EcsService ecsService;
     private final EcsJsonHandler ecsJsonHandler;
     private final EventBridgeHandler eventBridgeHandler;
+    private final EventBridgeInvoker eventBridgeInvoker;
     private final SchedulerService schedulerService;
     private final SchedulerController schedulerController;
     private final RdsDataService rdsDataService;
@@ -317,7 +320,7 @@ public class AslExecutor {
                        ServiceRegistry serviceRegistry, NestedTaskCredentials nestedTaskCredentials,
                        LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker,
                        EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker,
-                       SdkManagementTaskInvoker sdkManagementTaskInvoker) {
+                       SdkManagementTaskInvoker sdkManagementTaskInvoker, EventBridgeInvoker eventBridgeInvoker) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
@@ -325,7 +328,7 @@ public class AslExecutor {
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
                 nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker,
-                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null);
+                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null, eventBridgeInvoker);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -345,7 +348,7 @@ public class AslExecutor {
                 Duration expressMaxExecutionTimeOverride, LongSupplier nanoTimeOverride,
                 ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker,
                 EmrServerlessTaskInvoker emrServerlessTaskInvoker, SdkManagementTaskInvoker sdkManagementTaskInvoker,
-                NestedWaiter nestedWaiter) {
+                NestedWaiter nestedWaiter, EventBridgeInvoker eventBridgeInvoker) {
         this.apiGatewayTaskInvoker = apiGatewayTaskInvoker;
         this.emrTaskInvoker = emrTaskInvoker;
         this.emrServerlessTaskInvoker = emrServerlessTaskInvoker;
@@ -367,6 +370,7 @@ public class AslExecutor {
         this.ecsService = ecsService;
         this.ecsJsonHandler = ecsJsonHandler;
         this.eventBridgeHandler = eventBridgeHandler;
+        this.eventBridgeInvoker = eventBridgeInvoker;
         this.schedulerService = schedulerService;
         this.schedulerController = schedulerController;
         this.rdsDataService = rdsDataService;
@@ -414,7 +418,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null,
-                null, null, null);
+                null, null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -436,7 +440,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null,
-                null);
+                null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -5115,12 +5119,10 @@ public class AslExecutor {
     }
 
     /**
-     * Implements the Step Functions HTTP Task request flow for direct task-provided
-     * fields. EventBridge connection lookup and connection-level header, query
-     * parameter, and body merging are intentionally not implemented yet.
-     *
-     * TODO: Resolve Authentication/InvocationConfig ConnectionArn through the
-     * EventBridge connection store and merge connection credentials/parameters.
+     * Implements the Step Functions HTTP Task request flow. The EventBridge connection's
+     * authorization, headers, query parameters and body parameters are merged over the
+     * task's, the connection's value winning on a conflict, as
+     * <a href="https://docs.aws.amazon.com/step-functions/latest/dg/call-https-apis.html#http-task-data-merge">documented</a>.
      *
      * TODO: Add HTTP retry support. This can be done via Mutiny's retry mechanism
      * but most likely better to be done at a higher level to support other tasks.
@@ -5148,13 +5150,17 @@ public class AslExecutor {
         }
 
         validateHttpMethod(method);
-        validateConnectionArn(input);
+        String connectionArn = connectionArn(input);
         validateHttpHeaders(headers);
+        ConnectionHttpParameters connection = connectionHttpParameters(connectionArn, region);
 
-        HttpRequestPayload requestPayload = requestPayload(requestBody, requestBodyEncoding,
+        HttpRequestPayload requestPayload = requestPayload(
+                mergeConnectionBody(requestBody, connection.bodyParameters()), requestBodyEncoding,
                 input.path("Transform").path("RequestEncodingOptions"));
         MultiMap requestHeaders = requestHeaders(headers, requestPayload.contentType());
+        connection.headers().forEach(requestHeaders::set);
         MultiMap requestQueryParameters = queryParameters(queryParameters);
+        connection.queryStringParameters().forEach(requestQueryParameters::set);
 
         try {
             HttpRequest<Buffer> request = webClient.requestAbs(HttpMethod.valueOf(method), rawUri)
@@ -5323,7 +5329,7 @@ public class AslExecutor {
         }
     }
 
-    private void validateConnectionArn(JsonNode input) {
+    private String connectionArn(JsonNode input) {
         String connectionArn = input.path("InvocationConfig").path("ConnectionArn").asText(null);
         if (connectionArn == null || connectionArn.isBlank()) {
             connectionArn = input.path("Authentication").path("ConnectionArn").asText(null);
@@ -5332,6 +5338,36 @@ public class AslExecutor {
             throw new FailStateException("States.Runtime",
                     "ConnectionArn is required for HTTP task Authentication or InvocationConfig");
         }
+        return connectionArn;
+    }
+
+    private ConnectionHttpParameters connectionHttpParameters(String connectionArn, String region) {
+        try {
+            return eventBridgeInvoker.connectionHttpParameters(connectionArn, region);
+        } catch (AwsException e) {
+            String error = "ResourceNotFoundException".equals(e.getErrorCode())
+                    ? "Events.ConnectionResource.ResourceNotFound"
+                    : "Events.ConnectionResource.InternalError";
+            throw new FailStateException(error, e.getMessage());
+        }
+    }
+
+    // A string body cannot take the connection's body parameters; AWS fails the task rather than drop them
+    private JsonNode mergeConnectionBody(JsonNode requestBody, Map<String, String> bodyParameters) {
+        if (bodyParameters.isEmpty()) {
+            return requestBody;
+        }
+        ObjectNode merged;
+        if (requestBody.isMissingNode() || requestBody.isNull()) {
+            merged = objectMapper.createObjectNode();
+        } else if (requestBody instanceof ObjectNode objectBody) {
+            merged = objectBody.deepCopy();
+        } else {
+            throw new FailStateException("States.Runtime",
+                    "The RequestBody cannot be merged with the connection's body parameters: it is not a JSON object");
+        }
+        bodyParameters.forEach(merged::put);
+        return merged;
     }
 
     /**
