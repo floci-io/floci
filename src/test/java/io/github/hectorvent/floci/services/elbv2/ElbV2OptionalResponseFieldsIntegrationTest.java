@@ -99,6 +99,23 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
     }
 
     @Test
+    void certificateListsOmitAbsentCertificatesAndRetainConfiguredCertificates() {
+        Listener http = createListener("HTTP", 80);
+        assertAll("HTTP listener has no certificate list",
+                () -> assertFalse(elb.describeListenerCertificates(request -> request.listenerArn(http.listenerArn()))
+                        .hasCertificates()),
+                () -> assertFalse(rawDescribe("DescribeListenerCertificates", Map.of("ListenerArn", http.listenerArn()))
+                        .contains("<Certificates")));
+
+        Listener https = createListener("HTTPS", 443);
+        assertEquals(List.of(certificate), elb.describeListenerCertificates(request -> request.listenerArn(https.listenerArn()))
+                .certificates().stream().map(Certificate::certificateArn).toList());
+        String xml = rawDescribe("DescribeListenerCertificates", Map.of("ListenerArn", https.listenerArn()));
+        assertTrue(xml.contains("<Certificates>"));
+        assertTrue(xml.contains(certificate));
+    }
+
+    @Test
     void everyDescribeResponseOmitsTerminalMarker() {
         assertTrue(elb.describeListeners(request -> request.loadBalancerArn(loadBalancer)).listeners().isEmpty());
         assertNull(elb.describeListeners(request -> request.loadBalancerArn(loadBalancer)).nextMarker());

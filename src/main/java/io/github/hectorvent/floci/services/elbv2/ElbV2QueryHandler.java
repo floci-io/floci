@@ -804,13 +804,15 @@ public class ElbV2QueryHandler {
 
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeListenerCertificatesResponse", AwsNamespaces.ELB_V2)
-                .start("DescribeListenerCertificatesResult")
-                  .start("Certificates");
-        for (String c : certs) {
-            xml.start("member").elem("CertificateArn", c).end("member");
+                .start("DescribeListenerCertificatesResult");
+        if (!certs.isEmpty()) {
+            xml.start("Certificates");
+            for (String c : certs) {
+                xml.start("member").elem("CertificateArn", c).end("member");
+            }
+            xml.end("Certificates");
         }
-        xml.end("Certificates")
-           .end("DescribeListenerCertificatesResult")
+        xml.end("DescribeListenerCertificatesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeListenerCertificatesResponse");
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
