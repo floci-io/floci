@@ -124,18 +124,20 @@ class CloudFormationStackPolicyIntegrationTest {
 
     @Test
     void setReadsAPolicyUrlFromS3() {
-        String bucket = "cfn-stack-policy-" + Long.toString(System.nanoTime(), 36);
-        given().when().put("/" + bucket).then().statusCode(200);
-        given().contentType("application/json").body(POLICY).when().put("/" + bucket + "/policy.json")
-                .then().statusCode(200);
         String stackName = createdStack();
+        String bucket = "cfn-stack-policy-" + Long.toString(System.nanoTime(), 36);
         try {
+            given().when().put("/" + bucket).then().statusCode(200);
+            given().contentType("application/json").body(POLICY).when().put("/" + bucket + "/policy.json")
+                    .then().statusCode(200);
             cfn("SetStackPolicy", stackName,
                     "StackPolicyURL", "https://s3.us-east-1.amazonaws.com/" + bucket + "/policy.json")
                     .then().statusCode(200);
             assertEquals(POLICY, storedPolicy(stackName));
         } finally {
             CfnStackWaits.deleteStack(stackName);
+            given().when().delete("/" + bucket + "/policy.json");
+            given().when().delete("/" + bucket);
         }
     }
 
