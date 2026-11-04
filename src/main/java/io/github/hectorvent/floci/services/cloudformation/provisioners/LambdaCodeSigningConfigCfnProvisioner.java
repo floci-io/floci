@@ -43,13 +43,15 @@ public class LambdaCodeSigningConfigCfnProvisioner implements CfnResourceProvisi
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         r.getAttributes().remove(CfnRollback.CODE_SIGNING_CONFIG_UPDATE_SNAPSHOT_ATTR);
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
-        String description = Objects.requireNonNullElse(ctx.resolveOptional(props, "Description"), "");
+        JsonNode properties = props == null ? MAPPER.missingNode() : props;
+        String description = Objects.requireNonNullElse(ctx.resolveOptional(properties, "Description"), "");
         CodeSigningConfig.AllowedPublishers publishers = new CodeSigningConfig.AllowedPublishers();
         publishers.setSigningProfileVersionArns(ctx.resolveStringList(
-                ctx.engine().resolveNode(props.path("AllowedPublishers")), "SigningProfileVersionArns"));
+                ctx.engine().resolveNode(properties.path("AllowedPublishers")), "SigningProfileVersionArns"));
         CodeSigningConfig.CodeSigningPolicies policies = new CodeSigningConfig.CodeSigningPolicies();
         policies.setUntrustedArtifactOnDeployment(Objects.requireNonNullElse(ctx.resolveOptional(
-                ctx.engine().resolveNode(props.path("CodeSigningPolicies")), "UntrustedArtifactOnDeployment"), "Warn"));
+                ctx.engine().resolveNode(properties.path("CodeSigningPolicies")), "UntrustedArtifactOnDeployment"),
+                "Warn"));
 
         // A dispatcher stub from before this provisioner existed is not an ARN and names no config.
         String prior = ctx.priorPhysicalId();

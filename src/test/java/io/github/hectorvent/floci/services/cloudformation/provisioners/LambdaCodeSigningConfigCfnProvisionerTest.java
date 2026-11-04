@@ -112,6 +112,18 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
     }
 
     @Test
+    void absentPropertiesLeaveTheMissingPublishersForLambdaToReject() {
+        when(configs.create(eq(REGION), eq(ACCOUNT), any(), any(), any())).thenReturn(stored());
+        ArgumentCaptor<CodeSigningConfig.AllowedPublishers> publishers =
+                ArgumentCaptor.forClass(CodeSigningConfig.AllowedPublishers.class);
+
+        provisioner.provision(config(), null, ctx(null));
+
+        verify(configs).create(eq(REGION), eq(ACCOUNT), eq(""), publishers.capture(), any());
+        assertEquals(List.of(), publishers.getValue().getSigningProfileVersionArns());
+    }
+
+    @Test
     void updateAppliesTheTemplateInPlace() {
         when(configs.get(REGION, CSC_ARN)).thenReturn(stored());
         when(configs.update(eq(REGION), eq(CSC_ARN), any(), any(), any())).thenReturn(stored());
