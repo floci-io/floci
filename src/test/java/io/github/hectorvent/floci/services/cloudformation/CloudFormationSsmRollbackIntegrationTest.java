@@ -10,7 +10,6 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -226,7 +225,7 @@ class CloudFormationSsmRollbackIntegrationTest {
         assertTrue(failed.reason().contains("Parameter"), failed.reason());
         assertEquals("after", value(name));
 
-        continueUpdateRollback(stack, null);
+        CfnStackWaits.continueUpdateRollback(stack, null);
 
         CfnStackWaits.StackState retried = CfnStackWaits.awaitTerminal(stack);
         assertEquals("UPDATE_ROLLBACK_COMPLETE", retried.status(), retried.reason());
@@ -254,7 +253,7 @@ class CloudFormationSsmRollbackIntegrationTest {
             Mockito.doCallRealMethod().when(ssmService).deleteParameter(eq(target), anyString());
         }
 
-        continueUpdateRollback(stack, null);
+        CfnStackWaits.continueUpdateRollback(stack, null);
 
         CfnStackWaits.StackState retried = CfnStackWaits.awaitTerminal(stack);
         assertEquals("UPDATE_ROLLBACK_COMPLETE", retried.status(), retried.reason());
@@ -278,7 +277,7 @@ class CloudFormationSsmRollbackIntegrationTest {
         deploy("UpdateStack", stack, template(true, new Param("Parameter", name, "two")));
         assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack).status());
 
-        continueUpdateRollback(stack, "Parameter");
+        CfnStackWaits.continueUpdateRollback(stack, null, "Parameter");
 
         CfnStackWaits.StackState skipped = CfnStackWaits.awaitTerminal(stack);
         assertEquals("UPDATE_ROLLBACK_COMPLETE", skipped.status(), skipped.reason());
@@ -307,7 +306,7 @@ class CloudFormationSsmRollbackIntegrationTest {
         try {
             deploy("UpdateStack", stack, template(true, new Param("Parameter", target, "two")));
             assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack).status());
-            continueUpdateRollback(stack, "Parameter");
+            CfnStackWaits.continueUpdateRollback(stack, null, "Parameter");
             CfnStackWaits.StackState skipped = CfnStackWaits.awaitTerminal(stack);
             assertEquals("UPDATE_ROLLBACK_COMPLETE", skipped.status(), skipped.reason());
         } finally {
@@ -467,7 +466,7 @@ class CloudFormationSsmRollbackIntegrationTest {
         }
         assertEquals("after", value(name));
 
-        continueUpdateRollback(stack, null);
+        CfnStackWaits.continueUpdateRollback(stack, null);
 
         CfnStackWaits.StackState retried = CfnStackWaits.awaitTerminal(stack);
         assertEquals("UPDATE_ROLLBACK_COMPLETE", retried.status(), retried.reason());
@@ -522,14 +521,6 @@ class CloudFormationSsmRollbackIntegrationTest {
 
     private static void deploy(String action, String stack, String template) {
         cfn(action, stack).formParam("TemplateBody", template).post("/").then().statusCode(200);
-    }
-
-    private static void continueUpdateRollback(String stack, String skip) {
-        RequestSpecification request = cfn("ContinueUpdateRollback", stack);
-        if (skip != null) {
-            request.formParam("ResourcesToSkip.member.1", skip);
-        }
-        request.post("/").then().statusCode(200);
     }
 
     private static void deleteStack(String stack) {

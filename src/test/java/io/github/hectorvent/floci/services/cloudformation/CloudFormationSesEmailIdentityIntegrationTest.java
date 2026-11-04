@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.ses.SesIdentityService;
 import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -595,7 +596,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             assertEquals(false, sesIdentity(identityName).jsonPath().getBoolean("FeedbackForwardingStatus"));
             assertEquals("new", sesIdentity(identityName).jsonPath()
                     .getString("Tags.find { it.Key == 'purpose' }.Value"));
-            cfn("ContinueUpdateRollback", null).then().statusCode(200);
+            CfnStackWaits.continueUpdateRollback(stack, stackAuth);
             awaitStatus("UPDATE_ROLLBACK_COMPLETE");
             String nextIdentity = replacing ? "replacement-" + identityName : identityName;
             ObjectNode secondAttempt = (ObjectNode) MAPPER.readTree(template(nextIdentity, false));
@@ -649,7 +650,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         try {
             cfn("UpdateStack", failed.toString()).then().statusCode(200);
             awaitStatus("UPDATE_ROLLBACK_FAILED");
-            continueUpdateRollbackSkipping("Identity").then().statusCode(200);
+            CfnStackWaits.continueUpdateRollback(stack, stackAuth, "Identity");
             awaitStatus("UPDATE_ROLLBACK_COMPLETE");
             doThrow(new AwsException("ServiceUnavailableException", "replacement unavailable", 503))
                     .when(sesService).createEmailIdentity(eq(replacement), isNull(), any(), eq("us-east-1"));
@@ -708,7 +709,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             ObjectNode outputsOnly = (ObjectNode) MAPPER.readTree(template(identityName, true));
             outputsOnly.withObject("/Outputs").set("Marker", MAPPER.valueToTree(Map.of("Value", "cleanup")));
             cfn("UpdateStack", outputsOnly.toString()).then().statusCode(400);
-            cfn("ContinueUpdateRollback", null).then().statusCode(200);
+            CfnStackWaits.continueUpdateRollback(stack, stackAuth);
             String failedAgain = awaitStatus("UPDATE_ROLLBACK_FAILED");
             assertEquals(null, XmlParser.extractPairs(failedAgain,
                     "Outputs", "OutputKey", "OutputValue").get("Marker"));
@@ -761,7 +762,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         try {
             cfn("UpdateStack", failed.toString()).then().statusCode(200);
             awaitStatus("UPDATE_ROLLBACK_FAILED");
-            cfn("ContinueUpdateRollback", null).then().statusCode(200);
+            CfnStackWaits.continueUpdateRollback(stack, stackAuth);
             awaitStatus("UPDATE_ROLLBACK_COMPLETE");
 
             ObjectNode outputsOnly = (ObjectNode) MAPPER.readTree(template(identityName, true));
@@ -800,7 +801,7 @@ class CloudFormationSesEmailIdentityIntegrationTest {
         try {
             cfn("UpdateStack", firstFailure.toString()).then().statusCode(200);
             awaitStatus("UPDATE_ROLLBACK_FAILED");
-            cfn("ContinueUpdateRollback", null).then().statusCode(200);
+            CfnStackWaits.continueUpdateRollback(stack, stackAuth);
             awaitStatus("UPDATE_ROLLBACK_COMPLETE");
 
             ObjectNode secondFailure = (ObjectNode) MAPPER.readTree(template(identityName, true));
@@ -1083,15 +1084,6 @@ class CloudFormationSesEmailIdentityIntegrationTest {
             request.formParam("TemplateBody", template);
         }
         return request.post("/");
-    }
-
-    private Response continueUpdateRollbackSkipping(String logicalId) {
-        return given().contentType("application/x-www-form-urlencoded")
-                .header("Authorization", stackAuth)
-                .formParam("Action", "ContinueUpdateRollback")
-                .formParam("StackName", stack)
-                .formParam("ResourcesToSkip.member.1", logicalId)
-                .post("/");
     }
 
     private Response sesIdentity(String identity) {

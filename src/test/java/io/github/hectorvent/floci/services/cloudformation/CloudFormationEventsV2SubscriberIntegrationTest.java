@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.github.hectorvent.floci.testing.CfnStackWaits.awaitStackDeleted;
 import static io.github.hectorvent.floci.testing.CfnStackWaits.awaitStatus;
+import static io.github.hectorvent.floci.testing.CfnStackWaits.continueUpdateRollback;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -162,7 +163,7 @@ class CloudFormationEventsV2SubscriberIntegrationTest {
                     () -> events.describeSubscriber(request -> request.subscriberArn(subscriberArn)));
 
             restoresFail.set(false);
-            cfn("ContinueUpdateRollback", stack).post("/").then().statusCode(200);
+            continueUpdateRollback(stack, null);
             awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
 
             assertEquals("UNORDERED", events.describeSubscriber(request -> request.subscriberArn(subscriberArn))
