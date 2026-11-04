@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
@@ -122,7 +123,7 @@ class EcsContainerInsightsIntegrationTest {
         }
         assertInsightsSetting(cluster, "enabled");
 
-        cloudFormation("ContinueUpdateRollback", cluster, null);
+        CfnStackWaits.continueUpdateRollback(cluster, null);
         awaitStackStatus(cluster, "UPDATE_ROLLBACK_COMPLETE");
         assertInsightsSetting(cluster, "disabled");
     }
