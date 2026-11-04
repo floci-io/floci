@@ -1843,10 +1843,22 @@ class S3CopySimulatorTest {
     }
 
     @Test
-    void copyBackendSql_asksTheBackendToSkipConversionErrorsUpToMaxErrorMinusOne() {
-        assertTrue(backendCopy(10, false).endsWith(", ON_ERROR ignore, REJECT_LIMIT 9)"), backendCopy(10, false));
-        assertTrue(backendCopy(2, true).contains("FORMAT csv"), backendCopy(2, true));
-        assertTrue(backendCopy(2, true).endsWith(", ON_ERROR ignore, REJECT_LIMIT 1)"), backendCopy(2, true));
+    void corruptGzipInputIsACopyErrorRatherThanATransportFailure() {
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t FROM 's3://bucket/broken' GZIP");
+        when(s3.objectExists("bucket", "broken")).thenReturn(true);
+        when(s3.getObject("bucket", "broken")).thenReturn(new S3Object("bucket", "broken",
+                "not-gzip".getBytes(StandardCharsets.UTF_8), "application/gzip"));
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, null);
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream()));
+        assertEquals("58030", error.sqlState());
+    }
+
+    @Test
+    void copyBackendSqlUsesPostgres15SyntaxWhenMaxErrorIsHandledByTheLoader() {
+        assertEquals("COPY t FROM STDIN WITH (FORMAT text, DELIMITER '|')", backendCopy(10, false));
+        assertEquals("COPY t FROM STDIN WITH (FORMAT csv, DELIMITER '|')", backendCopy(2, true));
     }
 
     @Test
@@ -1854,8 +1866,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3Statement parsed = CopyStatementParser.parse(
                 "COPY t FROM 's3://wh/k' DELIMITER '|' NULL AS 'x' GZIP IGNOREHEADER 1 MAXERROR AS 10");
 
-        assertEquals("COPY t FROM STDIN WITH (FORMAT text, DELIMITER '|', NULL 'x', ON_ERROR ignore, "
-                        + "REJECT_LIMIT 9)",
+        assertEquals("COPY t FROM STDIN WITH (FORMAT text, DELIMITER '|', NULL 'x')",
                 S3CopySimulator.copyBackendSql((CopyStatementParser.S3CopyFrom) parsed, null));
     }
 

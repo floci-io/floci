@@ -81,6 +81,7 @@ public class RedshiftInterceptingBridge {
     private final Map<String, SpectrumInterceptor.Plan> spectrumPortals = new HashMap<>();
     private final Map<String, ExtendedSpectrumExchange.PortalCursor> spectrumCursors = new HashMap<>();
     private final BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
+    private final CopyBackendSession copyBackend;
 
     private final ReentrantLock backendLock;
     /** Budget of {@link #runWithBackendOwned} only; the Extended Query paths keep {@link #PUMP_PARK_WAIT_MS}. */
@@ -167,6 +168,8 @@ public class RedshiftInterceptingBridge {
         this.auditLogPublisher = auditLogPublisher;
         this.databaseUser = databaseUser;
         this.relationalBackend = new PostgresExtendedBackendSession(backend);
+        this.copyBackend = new CopyBackendSession(backend,
+                response -> write(client.getOutputStream(), response.toPacketBytes()));
         this.backendLock = backendLock;
         this.ownershipWaitMillis = ownershipWaitMillis;
     }
@@ -230,6 +233,9 @@ public class RedshiftInterceptingBridge {
                 if (extendedSpectrumError && msg.type() != 'S' && msg.type() != 'X') {
                     continue;
                 }
+                if (coordinator.isDiscardingUntilSync() && msg.type() != 'S' && msg.type() != 'X') {
+                    continue;
+                }
                 switch (msg.type()) {
                     case 'Q' -> handleSimpleQuery(msg, backendOut);
                     case 'P' -> handleParse(decoder, msg, backendOut);
@@ -239,7 +245,11 @@ public class RedshiftInterceptingBridge {
                     case 'C' -> handleClose(decoder, msg, backendOut);
                     case 'S' -> {
                         extendedSpectrumError = false;
-                        coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
+                        BackendResponseCoordinator.Ticket sync = coordinator.register(
+                                BackendResponseCoordinator.Operation.SYNC, null);
+                        if (copyBackend.requiresCompletion()) {
+                            finishCopyCycle(sync, backendOut);
+                        }
                         write(backendOut, msg.toPacketBytes());
                     }
                     default -> write(backendOut, msg.toPacketBytes());
@@ -261,6 +271,10 @@ public class RedshiftInterceptingBridge {
 
     private void handleSimpleQuery(PostgresWireDecoder.FrontendMessage message, OutputStream backendOut)
             throws IOException {
+        if (copyBackend.requiresCompletion()) {
+            BackendResponseCoordinator.Ticket sync = coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
+            finishCopyCycle(sync, backendOut, true);
+        }
         String sql = message.getSql();
         publishActivity(sql);
         if (spectrumInterceptor != null) {
@@ -379,7 +393,7 @@ public class RedshiftInterceptingBridge {
 
         String rewritten = parse.sql();
         if (statement instanceof CopyStatementParser.S3CopyFrom copy) {
-            rewritten = S3CopySimulator.copyBackendSql(copy);
+            rewritten = "DO $$BEGIN NULL; END$$";
         } else if (statement instanceof CopyStatementParser.S3Unload unload) {
             rewritten = S3CopySimulator.unloadBackendSql(unload);
         } else {
@@ -646,6 +660,7 @@ public class RedshiftInterceptingBridge {
 
     private void runExtendedWithBackendOwned(PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3Statement statement, BackendResponseCoordinator.Ticket ticket) throws IOException {
+        write(backend.getOutputStream(), new byte[]{'H', 0, 0, 0, 4});
         BackendResponseCoordinator.GateResult gate;
         try {
             gate = coordinator.awaitExtendedExecuteTurn(ticket);
@@ -686,7 +701,7 @@ public class RedshiftInterceptingBridge {
         try {
             backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
             ExtendedS3Exchange.execute(client, backend, executeFrame, statement, s3Service, iamService,
-                    clusterAccountId, iamRoleArns, coordinator, ticket);
+                    clusterAccountId, iamRoleArns, coordinator, ticket, copyBackend);
         } finally {
             try {
                 backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
@@ -694,6 +709,54 @@ public class RedshiftInterceptingBridge {
                 LOG.debugv(e, "could not restore backend read timeout (socket closing)");
             }
             backendLock.unlock();
+        }
+    }
+
+    private void finishCopyCycle(BackendResponseCoordinator.Ticket sync, OutputStream output) throws IOException {
+        finishCopyCycle(sync, output, false);
+    }
+
+    private void finishCopyCycle(BackendResponseCoordinator.Ticket sync, OutputStream output, boolean consumeSync)
+            throws IOException {
+        write(output, new byte[]{'H', 0, 0, 0, 4});
+        try {
+            if (!coordinator.awaitSyncTurn(sync, EXCHANGE_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                throw new IOException("Timed out awaiting prior COPY cycle responses");
+            }
+            long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(EXCHANGE_READ_TIMEOUT_MS);
+            while (true) {
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0 || !backendLock.tryLock(remaining, TimeUnit.NANOSECONDS)) {
+                    throw new IOException("Timed out awaiting COPY transaction completion");
+                }
+                if (pumpBetweenMessages) {
+                    break;
+                }
+                backendLock.unlock();
+                LockSupport.parkNanos(BUSY_BACKOFF_NANOS);
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted awaiting COPY transaction completion", exception);
+        }
+        try {
+            backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
+            boolean failed = coordinator.isDiscardingUntilSync();
+            copyBackend.finish(failed);
+            if (consumeSync) {
+                copyBackend.synchronize();
+                byte[] status = new byte[]{(byte) copyBackend.readyStatus()};
+                coordinator.onBackendFrame('Z', status);
+                copyBackend.onClientReady((char) status[0]);
+                relationalBackend.onSync();
+                completeUserChanges(status);
+            }
+        } finally {
+            try {
+                backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);
+            } finally {
+                backendLock.unlock();
+            }
         }
     }
 
@@ -891,10 +954,14 @@ public class RedshiftInterceptingBridge {
             }
             if (type == 'E') {
                 auditCycleFailed = true;
+                copyBackend.onBackendError();
             }
             coordinator.onBackendFrame(type, body);
             if (type == 'Z') {
                 relationalBackend.onSync();
+                if (body.length > 0) {
+                    copyBackend.onClientReady((char) body[0]);
+                }
                 completeUserChanges(body);
             }
         });
@@ -928,6 +995,7 @@ public class RedshiftInterceptingBridge {
             Thread.currentThread().interrupt();
         } finally {
             pumpFinished = true;
+            coordinator.close();
             closeQuietly(client, "client");
             closeQuietly(backend, "backend");
         }
@@ -944,7 +1012,7 @@ public class RedshiftInterceptingBridge {
     private BiConsumer<Character, byte[]> auditResponses(String sql) {
         ArrayDeque<String> commands = new ArrayDeque<>(RedshiftAuditSql.statements(sql));
         return (type, body) -> {
-            if (type != 'C' || auditLogPublisher == null) {
+            if (type != 'C') {
                 return;
             }
             String command = commands.pollFirst();
@@ -952,8 +1020,14 @@ public class RedshiftInterceptingBridge {
                 return;
             }
             String tag = new String(body, StandardCharsets.UTF_8).replace("\0", "");
-            auditUserChanges.complete(command, tag);
-            publishCompletedUserChanges();
+            copyBackend.onClientCommand(command, tag);
+            if (tag.equals("ROLLBACK") && RedshiftAuditSql.savepoint(command) == null) {
+                coordinator.transactionEnded();
+            }
+            if (auditLogPublisher != null) {
+                auditUserChanges.complete(command, tag);
+                publishCompletedUserChanges();
+            }
         };
     }
 

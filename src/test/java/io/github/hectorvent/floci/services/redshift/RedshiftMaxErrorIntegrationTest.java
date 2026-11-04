@@ -4,8 +4,6 @@ import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.DockerAvailability;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
-import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
@@ -26,19 +24,11 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(RedshiftMaxErrorPostgres18IntegrationTest.Postgres18Profile.class)
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class RedshiftMaxErrorPostgres18IntegrationTest {
+class RedshiftMaxErrorIntegrationTest {
 
-    public static class Postgres18Profile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.redshift.image-version", "postgres:18-alpine");
-        }
-    }
-
-    private static final String CLUSTER_ID = "it-maxerror-pg18";
-    private static final String BUCKET = "it-maxerror-pg18-bucket";
+    private static final String CLUSTER_ID = "it-maxerror-pg15";
+    private static final String BUCKET = "it-maxerror-pg15-bucket";
 
     @Inject
     RedshiftService service;
@@ -79,7 +69,7 @@ class RedshiftMaxErrorPostgres18IntegrationTest {
                 Statement stmt = connection.createStatement()) {
             stmt.execute("CREATE TABLE t_maxerror_two (id int, name text)");
 
-            // MAXERROR 2 tolerates 1 conversion error (REJECT_LIMIT 1) and loads the good rows past it
+            // MAXERROR 2 tolerates one bad record on the default PostgreSQL 15 backend.
             stmt.execute("COPY t_maxerror_two (id, name) FROM 's3://" + BUCKET + "/one-error.txt' "
                     + "DELIMITER '|' MAXERROR 2");
 

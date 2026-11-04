@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshiftdata;
 
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -24,8 +25,10 @@ import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementRespon
 import software.amazon.awssdk.services.redshiftdata.model.ResourceNotFoundException;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.hamcrest.Matchers.containsString;
@@ -45,6 +48,9 @@ class RedshiftDataApiIntegrationTest {
 
     @Inject
     RedshiftService redshift;
+
+    @Inject
+    S3Service s3;
 
     @TestHTTPResource("/")
     URI endpoint;
@@ -103,6 +109,49 @@ class RedshiftDataApiIntegrationTest {
 
     private static int asInt(Object value) {
         return ((Number) value).intValue();
+    }
+
+    @Test
+    void sdkCopyEtlWorksInRetainedSessionsAndRollsBackAFailedBatch() {
+        String bucket = "data-copy-etl-" + UUID.randomUUID().toString().substring(0, 8);
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "data", "1|31/10/2026|abcdef\n2|bad-date|skip\n3|01/11/2026\n"
+                .getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        String copy = "COPY data_copy_etl FROM 's3://" + bucket
+                + "/data' DATEFORMAT 'DD/MM/YYYY' FILLRECORD TRUNCATECOLUMNS MAXERROR 2";
+        try (RedshiftDataClient data = RedshiftDataClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"))).build()) {
+            ExecuteStatementResponse created = data.executeStatement(request -> request.clusterIdentifier(clusterId)
+                    .dbUser("admin").database("dev").sessionKeepAliveSeconds(60)
+                    .sql("CREATE TEMP TABLE data_copy_etl(id int, day date, label varchar(3))"));
+            awaitFinished(created.id());
+            String session = created.sessionId();
+            String loaded = data.executeStatement(request -> request.sessionId(session).sql(copy)).id();
+            awaitFinished(loaded);
+            assertEquals(2L, data.describeStatement(request -> request.id(loaded)).resultRows());
+            String values = data.executeStatement(request -> request.sessionId(session)
+                    .sql("SELECT day, label FROM data_copy_etl ORDER BY id")).id();
+            awaitFinished(values);
+            assertEquals("2026-10-31", data.getStatementResult(request -> request.id(values))
+                    .records().getFirst().getFirst().stringValue());
+            assertEquals("abc", data.getStatementResult(request -> request.id(values))
+                    .records().getFirst().get(1).stringValue());
+            String failed = data.batchExecuteStatement(request -> request.sessionId(session)
+                    .sqls(copy, "INSERT INTO data_copy_etl(id) VALUES ('invalid')")).id();
+            Awaitility.await().atMost(Duration.ofSeconds(30)).until(() ->
+                    "FAILED".equals(data.describeStatement(request -> request.id(failed)).statusAsString()));
+            awaitFinished(data.executeStatement(request -> request.sessionId(session).sql("BEGIN")).id());
+            awaitFinished(data.executeStatement(request -> request.sessionId(session).sql(copy)).id());
+            awaitFinished(data.executeStatement(request -> request.sessionId(session).sql("ROLLBACK")).id());
+            String count = data.executeStatement(request -> request.sessionId(session).sessionKeepAliveSeconds(0)
+                    .sql("SELECT count(*) FROM data_copy_etl")).id();
+            awaitFinished(count);
+            assertEquals(2L, data.getStatementResult(request -> request.id(count))
+                    .records().getFirst().getFirst().longValue());
+        } finally {
+            s3.deleteObject(bucket, "data");
+            s3.deleteBucket(bucket);
+        }
     }
 
     @Test

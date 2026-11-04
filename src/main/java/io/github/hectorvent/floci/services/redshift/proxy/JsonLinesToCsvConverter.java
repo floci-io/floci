@@ -15,7 +15,7 @@ import java.util.Map;
 
 final class JsonLinesToCsvConverter {
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String SQLSTATE_INTERNAL = "XX000";
+    private static final String SQLSTATE_INTERNAL = "22P04";
 
     private JsonLinesToCsvConverter() {
     }

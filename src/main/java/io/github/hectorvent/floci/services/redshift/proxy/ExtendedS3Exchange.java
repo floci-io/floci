@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 final class ExtendedS3Exchange {
@@ -28,6 +30,15 @@ final class ExtendedS3Exchange {
             CopyStatementParser.S3Statement statement, S3Service s3Service, IamService iamService,
             String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator,
             BackendResponseCoordinator.Ticket ticket) throws IOException {
+        execute(client, backend, executeFrame, statement, s3Service, iamService, clusterAccountId, iamRoleArns,
+                coordinator, ticket, null);
+    }
+
+    static void execute(Socket client, Socket backend,
+            PostgresWireDecoder.FrontendMessage executeFrame,
+            CopyStatementParser.S3Statement statement, S3Service s3Service, IamService iamService,
+            String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator,
+            BackendResponseCoordinator.Ticket ticket, CopyBackendSession copyBackend) throws IOException {
         BackendResponseCoordinator.GateResult gate;
         try {
             gate = coordinator.awaitExtendedExecuteTurn(ticket);
@@ -44,14 +55,20 @@ final class ExtendedS3Exchange {
         try {
             switch (statement) {
                 case CopyStatementParser.S3CopyFrom copy -> {
-                    CopyResult result = runCopy(client, backend, executeFrame, copy, s3Service, iamService,
-                            clusterAccountId, iamRoleArns, coordinator);
+                    CopyResult result = copyBackend != null
+                            ? runEtlCopy(client, backend, executeFrame, copy, s3Service, iamService,
+                                    clusterAccountId, iamRoleArns, coordinator, copyBackend)
+                            : runCopy(client, backend, executeFrame, copy, s3Service, iamService,
+                                    clusterAccountId, iamRoleArns, coordinator);
                     failed = !result.succeeded();
                     deferredReadyForQuery = result.deferredReadyForQuery();
                 }
                 case CopyStatementParser.S3Unload unload -> {
-                    CopyResult result = runUnload(client, backend, executeFrame, unload, s3Service, iamService,
-                            clusterAccountId, iamRoleArns, coordinator);
+                    CopyResult result = copyBackend == null
+                            ? runUnload(client, backend, executeFrame, unload, s3Service, iamService,
+                                    clusterAccountId, iamRoleArns, coordinator)
+                            : runOwnedUnload(client, backend, executeFrame, unload, s3Service, iamService,
+                                    clusterAccountId, iamRoleArns, coordinator, copyBackend);
                     failed = !result.succeeded();
                     deferredReadyForQuery = result.deferredReadyForQuery();
                 }
@@ -65,6 +82,109 @@ final class ExtendedS3Exchange {
         }
         if (deferredReadyForQuery != null) {
             coordinator.onBackendFrame('Z', deferredReadyForQuery);
+        }
+    }
+
+    private static CopyResult runOwnedUnload(Socket client, Socket backend,
+            PostgresWireDecoder.FrontendMessage executeFrame, CopyStatementParser.S3Unload spec,
+            S3Service s3, IamService iam, String account, List<String> roles,
+            BackendResponseCoordinator coordinator, CopyBackendSession copyBackend) throws IOException {
+        OutputStream output = backend.getOutputStream();
+        output.write(executeFrame.toPacketBytes());
+        output.write(new byte[]{'H', 0, 0, 0, 4});
+        output.flush();
+        PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
+        PostgresWireDecoder.FrontendMessage first = nextOwnedFrame(client, decoder, coordinator);
+        if (first.type() == 'E') {
+            copyBackend.onBackendError();
+            forward(client, first);
+            return new CopyResult(false, null);
+        }
+        if (first.type() != 'H') {
+            throw unexpected(first, "CopyOutResponse");
+        }
+        S3CopySimulator.UnloadCollector collector = null;
+        S3CopySimulator.S3TransferException failure = null;
+        try {
+            try {
+                collector = S3CopySimulator.prepareUnload(spec, s3, iam, account, roles);
+            } catch (S3CopySimulator.S3TransferException exception) {
+                failure = exception;
+            }
+            while (true) {
+                PostgresWireDecoder.FrontendMessage response = nextOwnedFrame(client, decoder, coordinator);
+                if (response.type() == 'd' && failure == null && collector != null) {
+                    try {
+                        collector.accept(response.body());
+                    } catch (S3CopySimulator.S3TransferException exception) {
+                        failure = exception;
+                        collector.abort();
+                    }
+                } else if (response.type() == 'E') {
+                    copyBackend.onBackendError();
+                    forward(client, response);
+                    return new CopyResult(false, null);
+                } else if (response.type() == 'C') {
+                    if (failure == null && collector != null) {
+                        try {
+                            collector.complete();
+                        } catch (S3CopySimulator.S3TransferException exception) {
+                            failure = exception;
+                        }
+                    }
+                    if (failure == null) {
+                        forward(client, response);
+                        return new CopyResult(true, null);
+                    }
+                    copyBackend.begin(coordinator.lastReadyStatus() != 'I');
+                    copyBackend.failTransaction();
+                    sendError(client, failure.sqlState(), failure.getMessage());
+                    return new CopyResult(false, null);
+                }
+            }
+        } finally {
+            if (collector != null) {
+                if (failure != null) {
+                    collector.abort();
+                }
+                collector.close();
+            }
+        }
+    }
+
+    private static CopyResult runEtlCopy(Socket client, Socket backend,
+            PostgresWireDecoder.FrontendMessage executeFrame, CopyStatementParser.S3CopyFrom spec,
+            S3Service s3, IamService iam, String account, List<String> roles,
+            BackendResponseCoordinator coordinator, CopyBackendSession copyBackend) throws IOException {
+        OutputStream output = backend.getOutputStream();
+        output.write(executeFrame.toPacketBytes());
+        output.write(new byte[]{'H', 0, 0, 0, 4});
+        output.flush();
+        PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
+        PostgresWireDecoder.FrontendMessage response = nextOwnedFrame(client, decoder, coordinator);
+        if (response.type() == 'E') {
+            copyBackend.onBackendError();
+            forward(client, response);
+            return new CopyResult(false, null);
+        }
+        if (response.type() != 'C') {
+            throw unexpected(response, "COPY execution placeholder completion");
+        }
+        try {
+            long count = CopyEtlLoader.execute(copyBackend, spec, s3, iam, account, roles,
+                    coordinator.lastReadyStatus() != 'I');
+            forward(client, new PostgresWireDecoder.FrontendMessage('C',
+                    ("COPY " + count + "\0").getBytes(StandardCharsets.UTF_8)));
+            return new CopyResult(true, null);
+        } catch (S3CopySimulator.S3TransferException exception) {
+            sendError(client, exception.sqlState(), exception.getMessage());
+            return new CopyResult(false, null);
+        } catch (AwsException exception) {
+            sendError(client, "42501", "S3 COPY access denied");
+            return new CopyResult(false, null);
+        } catch (RuntimeException exception) {
+            sendError(client, "XX000", "S3 COPY execution failed");
+            return new CopyResult(false, null);
         }
     }
 

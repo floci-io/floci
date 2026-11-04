@@ -26,7 +26,6 @@ import java.util.function.Function;
 import java.util.function.IntConsumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -228,7 +227,7 @@ public final class S3CopySimulator {
     }
 
     /** Null when no key is in play, which {@link RequestScopes} reads as "stay in the current account". */
-    private static String keyAccount(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService) {
+    static String keyAccount(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService) {
         if (spec.iamRoleArn() != null || spec.accessKeys() == null || !s3.isAuthEnforced()) {
             return null;
         }
@@ -389,6 +388,10 @@ public final class S3CopySimulator {
                                       CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
                                       String clusterAccountId, List<String> associatedRoleArns,
                                       char txStatus, IntConsumer onStatusChange) throws IOException {
+        if (spec.transforms().toleratesErrors()) {
+            return CopyEtlLoader.runSimple(client, backend, spec, s3, iamService, clusterAccountId,
+                    associatedRoleArns, txStatus, onStatusChange);
+        }
         CopyInput input;
         try {
             input = prepareCopy(spec, s3, iamService, clusterAccountId, associatedRoleArns);
@@ -529,11 +532,6 @@ public final class S3CopySimulator {
         if (spec.nullAs() != null) {
             sql.append(", NULL '").append(quoteLiteral(spec.nullAs())).append("'");
         }
-        if (spec.transforms().toleratesErrors()) {
-            // MAXERROR fails the load at the error_count-th error; REJECT_LIMIT tolerates that many errors, not
-            // more. Both options need a PostgreSQL 18 backend, which an older one rejects as an unknown option.
-            sql.append(", ON_ERROR ignore, REJECT_LIMIT ").append(spec.transforms().maxError() - 1);
-        }
         sql.append(")");
         return sql.toString();
     }
@@ -583,7 +581,7 @@ public final class S3CopySimulator {
             S3Object object = s3.getObject(spec.bucket(), keys.get(i));
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
             InputStream rawIn = new ByteArrayInputStream(data);
-            try (InputStream in = spec.gzip() ? new GZIPInputStream(rawIn) : rawIn) {
+            try (InputStream in = CopySourceInputStream.open(rawIn, spec.gzip())) {
                 if (spec.jsonAuto()) {
                     List<String> targetCols = (discoveredColumns != null && !discoveredColumns.isEmpty())
                             ? discoveredColumns
@@ -736,7 +734,7 @@ public final class S3CopySimulator {
         return CopyRecordTransformer.ColumnKind.OTHER;
     }
 
-    private static List<String> parseDataRow(byte[] body) {
+    static List<String> parseDataRow(byte[] body) {
         int count = ((body[0] & 0xFF) << 8) | (body[1] & 0xFF);
         List<String> values = new ArrayList<>(count);
         int offset = 2;
@@ -852,7 +850,7 @@ public final class S3CopySimulator {
         }
     }
 
-    private static void skipLines(InputStream in, int lines) throws IOException {
+    static void skipLines(InputStream in, int lines) throws IOException {
         int seen = 0;
         int b;
         while (seen < lines && (b = in.read()) != -1) {
@@ -862,7 +860,7 @@ public final class S3CopySimulator {
         }
     }
 
-    private static void writeCopyData(OutputStream out, byte[] buf, int len) throws IOException {
+    static void writeCopyData(OutputStream out, byte[] buf, int len) throws IOException {
         out.write('d');
         out.write(intBytes(4 + len));
         out.write(buf, 0, len);
