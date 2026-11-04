@@ -123,8 +123,7 @@ public class CloudFormationQueryHandler {
         boolean terminationProtection = Boolean.parseBoolean(params.getFirst("EnableTerminationProtection"));
         ChangeSet initial = cfnService.createChangeSetForCreateStack(stackName, "initial-create",
                 templateBody, templateUrl, parameters, capabilities, tags, region,
-                terminationProtection);
-        initial.setStackPolicyBody(stackPolicy);
+                terminationProtection, stackPolicy);
         try {
             cfnService.executeChangeSet(initial.getStackId(), initial.getChangeSetId(), region);
         } catch (AwsException e) {
@@ -163,24 +162,15 @@ public class CloudFormationQueryHandler {
         String changeSetName = "update-" + UUID.randomUUID().toString().substring(0, 8);
         ChangeSet cs = usePreviousTemplate
                 ? cfnService.createChangeSetFromPreviousTemplate(stackName, changeSetName,
-                        parameters, capabilities, tags, region)
-                : cfnService.createChangeSet(stackName, changeSetName,
-                        "UPDATE", templateBody, templateUrl, parameters, capabilities, tags, region);
+                        parameters, capabilities, tags, region, stackPolicy)
+                : cfnService.createChangeSetForUpdateStack(stackName, changeSetName,
+                        templateBody, templateUrl, parameters, capabilities, tags, region, stackPolicy);
         // An update that submits what the stack already has is refused, and leaves no change set
-        // behind, as UpdateStack does on AWS. A new stack policy alone is still an update.
-        boolean newPolicy = stackPolicy != null
-                && !stackPolicy.equals(cfnService.getStackPolicy(stackName, region));
+        // behind, as UpdateStack does on AWS.
         if (CloudFormationService.NO_CHANGES_REASON.equals(cs.getStatusReason())) {
-            if (!newPolicy) {
-                cfnService.deleteChangeSet(stackName, cs.getChangeSetName(), region);
-                return xmlError("ValidationError", "No updates are to be performed.", 400);
-            }
-            // The template is unchanged, so the update carries the policy alone.
-            cs.setStatus("CREATE_COMPLETE");
-            cs.setExecutionStatus("AVAILABLE");
-            cs.setStatusReason(null);
+            cfnService.deleteChangeSet(stackName, cs.getChangeSetName(), region);
+            return xmlError("ValidationError", "No updates are to be performed.", 400);
         }
-        cs.setStackPolicyBody(stackPolicy);
         cfnService.executeChangeSet(cs.getStackId(), cs.getChangeSetId(), region);
 
         String xml = new XmlBuilder()
@@ -307,7 +297,7 @@ public class CloudFormationQueryHandler {
         // internally, may attach a CREATE change set to a stack still in REVIEW_IN_PROGRESS.
         ChangeSet cs = usePreviousTemplate
                 ? cfnService.createChangeSetFromPreviousTemplate(stackName, changeSetName,
-                        parameters, capabilities, tags, region)
+                        parameters, capabilities, tags, region, null)
                 : cfnService.createChangeSetForRequest(stackName, changeSetName, changeSetType,
                         templateBody, templateUrl, parameters, capabilities, tags, region);
 

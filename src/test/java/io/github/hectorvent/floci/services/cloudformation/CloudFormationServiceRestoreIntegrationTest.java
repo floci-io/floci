@@ -212,7 +212,7 @@ class CloudFormationServiceRestoreIntegrationTest {
     void rejectedCreateCleanupDoesNotUnprotectAnExecutingStack() throws Exception {
         String targetStack = uniqueStackName("executing");
         ChangeSet initial = service.createChangeSetForCreateStack(targetStack, "initial-create",
-                TEMPLATE, null, Map.of(), List.of(), Map.of(), REGION, true);
+                TEMPLATE, null, Map.of(), List.of(), Map.of(), REGION, true, null);
         Future<?> execution = service.executeChangeSet(targetStack, "initial-create", REGION);
         try {
             service.clearProtectionAfterRejectedCreate(targetStack, initial, REGION);

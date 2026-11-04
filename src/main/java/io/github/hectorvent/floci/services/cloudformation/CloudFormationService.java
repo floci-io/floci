@@ -476,7 +476,8 @@ public class CloudFormationService implements ResourceProvider {
     public ChangeSet createChangeSetFromPreviousTemplate(String stackName, String changeSetName,
                                                          Map<String, String> parameters,
                                                          List<String> capabilities,
-                                                         Map<String, String> tags, String region) {
+                                                         Map<String, String> tags, String region,
+                                                         String stackPolicy) {
         ChangeSet created = null;
         while (created == null) {
             Stack stack = resolveStack(stackName, region);
@@ -486,7 +487,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             String previousTemplate = previousTemplateOf(stack);
             created = createChangeSet(stackName, changeSetName, "UPDATE", previousTemplate, null,
-                    parameters, capabilities, tags, region, currentAccount(), false, true, false);
+                    parameters, capabilities, tags, region, currentAccount(), false, true, false, stackPolicy);
         }
         return created;
     }
@@ -504,17 +505,26 @@ public class CloudFormationService implements ResourceProvider {
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, regionResolver.getAccountId(), false, false, false);
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), false, false, false, null);
     }
 
     public ChangeSet createChangeSetForCreateStack(String stackName, String changeSetName,
                                                    String templateBody, String templateUrl,
                                                    Map<String, String> parameters, List<String> capabilities,
                                                    Map<String, String> tags, String region,
-                                                   boolean enableTerminationProtection) {
+                                                   boolean enableTerminationProtection, String stackPolicy) {
         return createChangeSet(stackName, changeSetName, "CREATE", templateBody, templateUrl,
                 parameters, capabilities, tags, region, regionResolver.getAccountId(), false, false,
-                enableTerminationProtection);
+                enableTerminationProtection, stackPolicy);
+    }
+
+    public ChangeSet createChangeSetForUpdateStack(String stackName, String changeSetName,
+                                                   String templateBody, String templateUrl,
+                                                   Map<String, String> parameters, List<String> capabilities,
+                                                   Map<String, String> tags, String region, String stackPolicy) {
+        return createChangeSet(stackName, changeSetName, "UPDATE", templateBody, templateUrl,
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), false, false, false,
+                stackPolicy);
     }
 
     /**
@@ -538,7 +548,7 @@ public class CloudFormationService implements ResourceProvider {
                                                Map<String, String> parameters, List<String> capabilities,
                                                Map<String, String> tags, String region) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, regionResolver.getAccountId(), true, false, false);
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), true, false, false, null);
     }
 
     /**
@@ -556,7 +566,7 @@ public class CloudFormationService implements ResourceProvider {
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region, String accountId) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, accountId, false, false, false);
+                parameters, capabilities, tags, region, accountId, false, false, false, null);
     }
 
     private ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
@@ -564,7 +574,7 @@ public class CloudFormationService implements ResourceProvider {
                                       Map<String, String> parameters, List<String> capabilities,
                                       Map<String, String> tags, String region, String accountId,
                                       boolean attachToReviewInProgressStack, boolean fromPreviousTemplate,
-                                      boolean enableTerminationProtection) {
+                                      boolean enableTerminationProtection, String stackPolicy) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
         requireValidTemplate(resolvedTemplate);
         boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
@@ -709,11 +719,14 @@ public class CloudFormationService implements ResourceProvider {
             cs.setParameters(parameters);
             cs.setCapabilities(capabilities);
             cs.setTags(tags);
+            cs.setStackPolicyBody(stackPolicy);
+            // A new stack policy alone is still an update.
+            boolean newPolicy = stackPolicy != null && !stackPolicy.equals(target.getStackPolicyBody());
             if (samTransformFailureReason != null) {
                 cs.setStatus("FAILED");
                 cs.setExecutionStatus("UNAVAILABLE");
                 cs.setStatusReason(samTransformFailureReason);
-            } else if (unchanged[0]) {
+            } else if (unchanged[0] && !newPolicy) {
                 cs.setStatus("FAILED");
                 cs.setExecutionStatus("UNAVAILABLE");
                 cs.setStatusReason(NO_CHANGES_REASON);

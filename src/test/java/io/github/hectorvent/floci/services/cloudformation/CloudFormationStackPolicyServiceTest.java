@@ -118,6 +118,36 @@ class CloudFormationStackPolicyServiceTest {
     }
 
     @Test
+    void createStackChangeSetCarriesItsPolicyWhenItIsCreated() {
+        ChangeSet changeSet = service.createChangeSetForCreateStack("policy-initial", "initial-create", TEMPLATE,
+                null, Map.of(), List.of(), Map.of(), REGION, false, POLICY);
+
+        assertEquals(POLICY, changeSet.getStackPolicyBody());
+        assertEquals(POLICY,
+                service.describeChangeSet("policy-initial", "initial-create", REGION).getStackPolicyBody());
+    }
+
+    @Test
+    void updateStackChangeSetWithOnlyANewPolicyIsExecutable() throws Exception {
+        createStack("policy-only");
+
+        ChangeSet newPolicy = service.createChangeSetForUpdateStack("policy-only", "new-policy", TEMPLATE, null,
+                Map.of(), List.of(), Map.of(), REGION, POLICY);
+
+        assertEquals("CREATE_COMPLETE", newPolicy.getStatus());
+        assertEquals("AVAILABLE", newPolicy.getExecutionStatus());
+        assertNull(newPolicy.getStatusReason());
+        assertEquals(POLICY, newPolicy.getStackPolicyBody());
+
+        service.setStackPolicy("policy-only", POLICY, null, REGION);
+        ChangeSet samePolicy = service.createChangeSetForUpdateStack("policy-only", "same-policy", TEMPLATE, null,
+                Map.of(), List.of(), Map.of(), REGION, POLICY);
+
+        assertEquals("FAILED", samePolicy.getStatus());
+        assertEquals(CloudFormationService.NO_CHANGES_REASON, samePolicy.getStatusReason());
+    }
+
+    @Test
     void setStackPolicy_refusesAStackAnUpdateClaimedWhileItsPolicyWasRead() throws Exception {
         createStack("policy-race");
         Stack stack = service.describeStacks("policy-race", REGION, ACCOUNT).getFirst();
