@@ -28,7 +28,7 @@ import java.util.UUID;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.QueryRequests.request;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -38,8 +38,6 @@ class AutoScalingTagPropagationIntegrationTest {
 
     private static final String ACCOUNT = "585858585858";
     private static final String REGION = "us-east-1";
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20261028/" + REGION + "/autoscaling/aws4_request";
     private static final String GROUP =
             "DescribeAutoScalingGroupsResponse.DescribeAutoScalingGroupsResult.AutoScalingGroups.member";
     private static final String TAGS = "DescribeTagsResponse.DescribeTagsResult.Tags.member";
@@ -154,14 +152,14 @@ class AutoScalingTagPropagationIntegrationTest {
         if (propagateStack) {
             expectedTags.put("stack", "test");
         }
-        request("CreateLaunchConfiguration")
+        request(ACCOUNT, "autoscaling", "CreateLaunchConfiguration")
                 .formParam("LaunchConfigurationName", name)
                 .formParam("ImageId", "ami-12345678")
                 .formParam("InstanceType", "t3.micro")
                 .post("/").then().statusCode(200);
         boolean groupCreated = false;
         try {
-            RequestSpecification create = request("CreateAutoScalingGroup")
+            RequestSpecification create = request(ACCOUNT, "autoscaling", "CreateAutoScalingGroup")
                     .formParam("AutoScalingGroupName", name)
                     .formParam("LaunchConfigurationName", name)
                     .formParam("MinSize", 0).formParam("MaxSize", 1).formParam("DesiredCapacity", 0)
@@ -175,15 +173,15 @@ class AutoScalingTagPropagationIntegrationTest {
             create.post("/").then().statusCode(200);
             groupCreated = true;
             if (update) {
-                addTags(request("CreateOrUpdateTags"), name, esFlag, stackFlag, true)
+                addTags(request(ACCOUNT, "autoscaling", "CreateOrUpdateTags"), name, esFlag, stackFlag, true)
                         .post("/").then().statusCode(200);
             }
-            request("SetDesiredCapacity").formParam("AutoScalingGroupName", name)
+            request(ACCOUNT, "autoscaling", "SetDesiredCapacity").formParam("AutoScalingGroupName", name)
                     .formParam("DesiredCapacity", 1).post("/").then().statusCode(200);
             RequestScopes.runAs(ACCOUNT, REGION, () -> reconciler.reconcile(
                     service.describeAutoScalingGroups(REGION, List.of(name)).getFirst()));
 
-            XmlPath group = request("DescribeAutoScalingGroups")
+            XmlPath group = request(ACCOUNT, "autoscaling", "DescribeAutoScalingGroups")
                     .formParam("AutoScalingGroupNames.member.1", name)
                     .post("/").then().statusCode(200).extract().xmlPath();
             List<String> instanceIds = group.getList(GROUP + ".Instances.member.InstanceId");
@@ -194,14 +192,14 @@ class AutoScalingTagPropagationIntegrationTest {
                     group.getString(GROUP + ".Tags.member.find { it.Key == 'es' }.PropagateAtLaunch"));
             assertEquals(String.valueOf(propagateStack),
                     group.getString(GROUP + ".Tags.member.find { it.Key == 'stack' }.PropagateAtLaunch"));
-            XmlPath tags = request("DescribeTags")
+            XmlPath tags = request(ACCOUNT, "autoscaling", "DescribeTags")
                     .formParam("Filters.member.1.Name", "auto-scaling-group")
                     .formParam("Filters.member.1.Values.member.1", name)
                     .post("/").then().statusCode(200).extract().xmlPath();
             assertEquals(List.of("es", "stack"), tags.getList(TAGS + ".Key"));
             assertEquals(List.of(String.valueOf(propagateEs), String.valueOf(propagateStack)),
                     tags.getList(TAGS + ".PropagateAtLaunch"));
-            XmlPath filtered = request("DescribeTags")
+            XmlPath filtered = request(ACCOUNT, "autoscaling", "DescribeTags")
                     .formParam("Filters.member.1.Name", "auto-scaling-group")
                     .formParam("Filters.member.1.Values.member.1", name)
                     .formParam("Filters.member.2.Name", "propagate-at-launch")
@@ -211,11 +209,11 @@ class AutoScalingTagPropagationIntegrationTest {
         } finally {
             try {
                 if (groupCreated) {
-                    request("DeleteAutoScalingGroup").formParam("AutoScalingGroupName", name)
+                    request(ACCOUNT, "autoscaling", "DeleteAutoScalingGroup").formParam("AutoScalingGroupName", name)
                             .formParam("ForceDelete", true).post("/").then().statusCode(200);
                 }
             } finally {
-                request("DeleteLaunchConfiguration").formParam("LaunchConfigurationName", name)
+                request(ACCOUNT, "autoscaling", "DeleteLaunchConfiguration").formParam("LaunchConfigurationName", name)
                         .post("/").then().statusCode(200);
             }
         }
@@ -257,9 +255,5 @@ class AutoScalingTagPropagationIntegrationTest {
                     .map(Instance::instanceId).toList();
             assertEquals(expectedTags.size() == 2 ? List.of(instanceId) : List.of(), discovered);
         }
-    }
-
-    private static RequestSpecification request(String action) {
-        return given().header("Authorization", AUTH).formParam("Action", action);
     }
 }
