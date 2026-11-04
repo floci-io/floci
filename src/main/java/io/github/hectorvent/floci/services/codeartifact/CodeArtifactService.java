@@ -2601,8 +2601,9 @@ public class CodeArtifactService implements Resettable {
      * records' own {@code format}/{@code namespace}/{@code packageName} fields (the same technique
      * {@link #genericPackageVersions} already uses for one known package, here scanned
      * repository-wide instead of by one package's own prefix), plus any origin-config-only
-     * package's own matching fields on {@link PackageOriginConfig}, never by parsing a scanned key
-     * back into parts, which {@link #escapeKeySegment}'s own javadoc explains is lossy. Every
+     * package's own matching fields on {@link PackageOriginConfig}. Historical NuGet and PyPI
+     * origin records without those fields are first repaired from their scoped keys; these formats
+     * have no namespace, and {@link #escapeKeySegment}'s escapes recover the package name. Every
      * container-backed format's own new {@link RepositorySidecarManager#listPackages} answers the
      * same for real sidecar content, plus the same origin-config-only union. {@code domainOwner}
      * is threaded through (rather than just the already-resolved {@code owner}) only because
