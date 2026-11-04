@@ -298,6 +298,25 @@ public class EcrRegistryManager {
     }
 
     /**
+     * Retries catalog reconciliation when the attempt at {@link #ensureStarted()} failed
+     * or was deferred because the registry was not ready. No-op once reconciliation has
+     * succeeded, when no hook is registered, or when the registry is not yet started.
+     * Data-plane lookups call this so a transient catalog failure does not leave legacy
+     * namespaces permanently unreachable.
+     */
+    public void ensureCatalogReconciled() {
+        if (reconciled || reconcileHook == null || !started) {
+            return;
+        }
+        runReconcileOnce();
+    }
+
+    /** Returns whether catalog reconciliation has completed successfully. */
+    public boolean isCatalogReconciled() {
+        return reconciled;
+    }
+
+    /**
      * Attempts {@link #ensureStarted()} and reports whether the backing registry is
      * usable, instead of propagating the failure. Callers that only need repository
      * metadata (ARN, URI, tags) use this so ECR's control plane keeps working when
@@ -500,9 +519,13 @@ public class EcrRegistryManager {
             return;
         }
         try {
-            // Give the registry a moment to be ready on first start
+            // Give the registry a moment to be ready on first start. A not-yet-ready
+            // registry must not mark reconciliation done with an empty catalog: that
+            // would skip legacy namespace recovery and refuse storage that still exists.
+            boolean ready = false;
             for (int i = 0; i < 10; i++) {
                 if (httpClient().ping()) {
+                    ready = true;
                     break;
                 }
                 try {
@@ -512,7 +535,13 @@ public class EcrRegistryManager {
                     return;
                 }
             }
-            List<String> repos = httpClient().catalog();
+            if (!ready) {
+                LOG.warnv("ECR reconcile-on-startup deferred: registry not ready");
+                return;
+            }
+            // catalogStrict distinguishes "no repositories" from a registry failure so a
+            // failed attempt can be retried by {@link #ensureCatalogReconciled}.
+            List<String> repos = httpClient().catalogStrict();
             reconcileHook.accept(repos);
             reconciled = true;
         } catch (Exception e) {

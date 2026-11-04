@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ecr.registry;
 
+import com.sun.net.httpserver.HttpServer;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmd;
@@ -32,10 +33,13 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -791,5 +795,58 @@ class EcrRegistryManagerTest {
             assertEquals(Optional.empty(), EcrRegistryManager.imageRegion(image), image);
         }
         assertEquals(Optional.empty(), EcrRegistryManager.imageRegion(null));
+    }
+
+    @Test
+    void ensureCatalogReconciledRetriesAfterAFailedStartupReconcile() throws Exception {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        AtomicInteger catalogCalls = new AtomicInteger();
+        AtomicReference<List<String>> reconciled = new AtomicReference<>();
+        HttpServer registry = HttpServer.create(new InetSocketAddress("127.0.0.1", BASE_PORT), 0);
+        registry.createContext("/v2/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            if ("/v2/".equals(path) || "/v2".equals(path)) {
+                exchange.sendResponseHeaders(200, -1);
+                exchange.close();
+                return;
+            }
+            if (path.startsWith("/v2/_catalog")) {
+                int call = catalogCalls.incrementAndGet();
+                if (call == 1) {
+                    byte[] body = "{\"errors\":[{\"code\":\"UNAVAILABLE\"}]}".getBytes();
+                    exchange.sendResponseHeaders(500, body.length);
+                    exchange.getResponseBody().write(body);
+                } else {
+                    byte[] body = "{\"repositories\":[\"legacy/service\"]}".getBytes();
+                    exchange.sendResponseHeaders(200, body.length);
+                    exchange.getResponseBody().write(body);
+                }
+                exchange.close();
+                return;
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+        registry.start();
+        try {
+            manager.setReconcileHook(repos -> reconciled.set(List.copyOf(repos)));
+
+            manager.ensureStarted();
+            assertFalse(manager.isCatalogReconciled(),
+                    "a 500 catalog response must not mark reconciliation done");
+            assertNull(reconciled.get());
+
+            manager.ensureCatalogReconciled();
+            assertTrue(manager.isCatalogReconciled());
+            assertEquals(List.of("legacy/service"), reconciled.get());
+
+            // A second call is a no-op once reconciliation succeeded.
+            manager.ensureCatalogReconciled();
+            assertEquals(2, catalogCalls.get(), "successful reconcile must not hit the catalog again");
+        } finally {
+            registry.stop(0);
+        }
     }
 }

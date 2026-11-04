@@ -1643,12 +1643,19 @@ public class EcrService implements ResourceProvider {
                 .isPresent();
     }
 
-    /** Returns the physical registry namespace selected for an ECR repository. */
+    /**
+     * Returns the physical registry namespace selected for an ECR repository.
+     * Resolves only from repository metadata after a successful catalog reconciliation
+     * attempt, preserving legacy mappings and account scope. A name with no metadata
+     * answers {@code RepositoryNotFoundException} so the data plane can map it to OCI
+     * {@code NAME_UNKNOWN}, matching AWS ECR for repositories nobody created.
+     */
     public String registryRepositoryName(String repositoryName, String registryId, String region) {
         String account = effectiveAccount(registryId);
+        registryManager.ensureCatalogReconciled();
         return repoStore.get(key(region, account, repositoryName))
                 .map(repo -> registryRepositoryName(repo, region))
-                .orElseGet(() -> registryManager.internalRepoName(account, region, repositoryName));
+                .orElseThrow(() -> notFound(repositoryName, account));
     }
 
     public void tagResource(String repoName, String registryId, Map<String, String> tags, String region) {

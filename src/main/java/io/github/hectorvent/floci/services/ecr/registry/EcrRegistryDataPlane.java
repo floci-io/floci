@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecr.registry;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.NetworkExposureGuard;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -84,10 +85,48 @@ public class EcrRegistryDataPlane {
 
         RegistryRequest registryRequest = request.get();
         if (!registryRequest.repositoryName().isEmpty()) {
-            registryRequest = registryRequest.withStorageRepositoryName(
-                    ecrService.registryRepositoryName(
-                            registryRequest.repositoryName(), registryRequest.accountId(), registryRequest.region()));
+            resolveStorageThenContinue(context, registryRequest);
+            return;
         }
+        continueWithResolved(context, registryRequest);
+    }
+
+    /**
+     * Starts the backing registry, retries a catalog reconcile that failed at startup, then
+     * resolves the storage namespace from metadata. A repository nobody created answers
+     * {@code 404 NAME_UNKNOWN} before any byte reaches the registry.
+     */
+    private void resolveStorageThenContinue(RoutingContext context, RegistryRequest registryRequest) {
+        vertx.<RegistryRequest>executeBlocking(promise -> {
+            try {
+                registryManager.ensureStarted();
+                registryManager.ensureCatalogReconciled();
+                String storage = ecrService.registryRepositoryName(
+                        registryRequest.repositoryName(),
+                        registryRequest.accountId(),
+                        registryRequest.region());
+                promise.complete(registryRequest.withStorageRepositoryName(storage));
+            } catch (Exception e) {
+                promise.fail(e);
+            }
+        }).onComplete(result -> {
+            if (result.failed()) {
+                context.request().resume();
+                Throwable cause = result.cause();
+                if (cause instanceof AwsException aws
+                        && "RepositoryNotFoundException".equals(aws.getErrorCode())) {
+                    context.response().putHeader("Docker-Distribution-API-Version", "registry/2.0");
+                    registryError(context, 404, "NAME_UNKNOWN", aws.getMessage());
+                    return;
+                }
+                registryUnavailable(context);
+                return;
+            }
+            continueWithResolved(context, result.result());
+        });
+    }
+
+    private void continueWithResolved(RoutingContext context, RegistryRequest registryRequest) {
         String immutableTag = immutableTag(context, registryRequest);
         if (immutableTag != null && !ecrService.claimImmutableTag(immutableTag)) {
             context.request().resume();
