@@ -8,11 +8,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * Tag reconciliation shared by the EC2 provisioners ({@code Ec2InstanceCfnProvisioner},
- * {@code Ec2SecurityGroupCfnProvisioner} and {@code Ec2VpcCfnProvisioner}). They drive it from the
- * desired tags resolved via {@link ProvisionContext#resolveTags}; the reconcile itself is identical.
+ * {@code Ec2SecurityGroupCfnProvisioner}, {@code Ec2VpcCfnProvisioner} and
+ * {@code Ec2FlowLogCfnProvisioner}). They drive it from the desired tags resolved via
+ * {@link ProvisionContext#resolveTags}; the reconcile itself is identical.
  */
 final class Ec2Tags {
 
@@ -65,5 +67,29 @@ final class Ec2Tags {
             ec2Service.createTags(region, List.of(resourceId), add);
         }
         return changed;
+    }
+
+    /**
+     * Brings the keys a template owns to {@code desired} and leaves every other tag alone, as AWS
+     * keeps a tag added outside the stack: removes the {@code owned} keys {@code desired} no longer
+     * declares, then creates or overwrites the declared ones. {@code owned} is the key set the
+     * previous template declared, or the keys an update touched when a rollback restores them.
+     */
+    static void reconcileOwned(Ec2Service ec2Service, String region, String resourceId, Set<String> owned,
+                               Map<String, String> desired) {
+        List<Tag> add = validatedTags(desired);
+        Map<String, String> current = current(ec2Service, region, resourceId);
+        List<Tag> remove = new ArrayList<>();
+        for (String key : owned) {
+            if (!desired.containsKey(key) && current.containsKey(key)) {
+                remove.add(new Tag(key, current.get(key)));
+            }
+        }
+        if (!remove.isEmpty()) {
+            ec2Service.deleteTags(region, List.of(resourceId), remove);
+        }
+        if (!add.isEmpty()) {
+            ec2Service.createTags(region, List.of(resourceId), add);
+        }
     }
 }

@@ -167,6 +167,14 @@ public final class CfnRollback {
     public static final String LAMBDA_WEB_UPDATE_SNAPSHOT_ATTR = "__FlociLambdaWebUpdateSnapshot";
 
     /**
+     * Holds what an update did to an EC2 flow log, so a failed stack update can undo it: the tag
+     * keys it touched on the reused log with the values they had, or the log it created because
+     * the stack's own was gone. Written by {@code Ec2FlowLogCfnProvisioner} before its tag write or
+     * right after that creation, and spent by its {@code rollbackUpdate}.
+     */
+    public static final String FLOW_LOG_UPDATE_SNAPSHOT_ATTR = "__FlociEc2FlowLogUpdateSnapshot";
+
+    /**
      * Holds the function ARN, status, caching flag, token settings and tags an IoT authorizer
      * carried before an in-place update changed them, so a failed stack update can put them back.
      * Written by {@code IotAuthorizerCfnProvisioner} before its update call and spent by its

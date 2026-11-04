@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -43,13 +44,27 @@ class Ec2FlowLogCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
+        return new ProvisionContext(engine(), "us-east-1", "000000000000", "my-stack");
+    }
+
+    /** An update of the stack resource at {@code priorId} whose previous template declared {@code priorTagKeys}. */
+    private ProvisionContext updateCtx(String priorId, String... priorTagKeys) {
+        ObjectNode priorProps = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        for (String key : priorTagKeys) {
+            priorProps.withArray("Tags").addObject().put("Key", key).put("Value", "prior");
+        }
+        return new ProvisionContext(engine(), "us-east-1", "000000000000", "my-stack", priorId, event -> { },
+                priorProps);
+    }
+
+    private CloudFormationTemplateEngine engine() {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+        return engine;
     }
 
     /** Tag has no equals, so a tag list is matched on its one key and value. */
@@ -264,23 +279,28 @@ class Ec2FlowLogCfnProvisionerTest {
     }
 
     @Test
-    void updateReconcilesTheTagsOfTheReusedFlowLog() {
-        StackResource r = resource();
-        r.setPhysicalId("fl-0abc");
-        FlowLog existing = flowLog("fl-0abc");
-        existing.setResourceId("vpc-123");
-        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
-        when(ec2.describeTags("us-east-1", Map.of("resource-id", List.of("fl-0abc"))))
-                .thenReturn(List.of(Map.of("key", "old", "value", "gone")));
+    void updateReplacesTheTemplatesKeysAndKeepsATagAddedOutsideTheStack() {
+        StackResource r = reusedFlowLogWithTags(Map.of("old", "gone", "external", "preserve"));
         ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
         props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
 
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(r, props, updateCtx("fl-0abc", "old"));
 
         // Tags are the one property an update changes in place, so the log is kept, not replaced.
         verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+        // Only the key the previous template owned goes; AWS keeps one added through EC2.
         verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("old", "gone"));
         verify(ec2).createTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("team", "core"));
+    }
+
+    @Test
+    void droppingTheTemplatesTagsKeepsATagAddedOutsideTheStack() {
+        StackResource r = reusedFlowLogWithTags(Map.of("team", "core", "external", "preserve"));
+
+        provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), updateCtx("fl-0abc", "team"));
+
+        verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("team", "core"));
+        verify(ec2, never()).createTags(anyString(), any(), any());
     }
 
     @Test
@@ -320,52 +340,73 @@ class Ec2FlowLogCfnProvisionerTest {
 
     @Test
     void rollbackPutsBackTheTagsAnUpdateChanged() {
-        StackResource r = reusedFlowLogWithTag("old", "gone");
+        StackResource r = reusedFlowLogWithTags(Map.of("old", "gone", "external", "preserve"));
         ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
         props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
-        provisioner.provision(r, props, ctx());
-        assertTrue(r.getAttributes().containsKey(Ec2FlowLogCfnProvisioner.PRIOR_TAGS_ATTR));
+        provisioner.provision(r, props, updateCtx("fl-0abc", "old"));
+        assertTrue(r.getAttributes().containsKey(CfnRollback.FLOW_LOG_UPDATE_SNAPSHOT_ATTR));
 
         // A later resource failed the update, so the stack rolls this one back.
         assertTrue(provisioner.rollbackUpdate(r));
 
+        // The touched keys go back; the external tag was never touched, so it is not rewritten.
         verify(ec2).createTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("old", "gone"));
-        assertFalse(r.getAttributes().containsKey(Ec2FlowLogCfnProvisioner.PRIOR_TAGS_ATTR));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.FLOW_LOG_UPDATE_SNAPSHOT_ATTR));
     }
 
     @Test
     void anUnchangedReuseLeavesNoTagSnapshot() {
-        StackResource r = reusedFlowLogWithTag("team", "core");
+        StackResource r = reusedFlowLogWithTags(Map.of("team", "core", "external", "preserve"));
         ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
         props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
 
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(r, props, updateCtx("fl-0abc", "team"));
 
-        assertFalse(r.getAttributes().containsKey(Ec2FlowLogCfnProvisioner.PRIOR_TAGS_ATTR));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.FLOW_LOG_UPDATE_SNAPSHOT_ATTR));
         assertTrue(provisioner.rollbackUpdate(r));
     }
 
     @Test
     void aCommittedUpdateDropsTheTagSnapshot() {
-        StackResource r = reusedFlowLogWithTag("old", "gone");
+        StackResource r = reusedFlowLogWithTags(Map.of("old", "gone", "external", "preserve"));
         ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
         props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(r, props, updateCtx("fl-0abc", "old"));
 
         provisioner.completeUpdate(r);
 
-        assertFalse(r.getAttributes().containsKey(Ec2FlowLogCfnProvisioner.PRIOR_TAGS_ATTR));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.FLOW_LOG_UPDATE_SNAPSHOT_ATTR));
     }
 
-    /** A stack resource pointing at a stored flow log that EC2 reports one tag on. */
-    private StackResource reusedFlowLogWithTag(String key, String value) {
+    @Test
+    void rollbackDeletesAFlowLogTheUpdateRecreated() {
+        StackResource r = resource();
+        r.setPhysicalId("fl-gone");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-gone"))).thenReturn(List.of());
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
+                .thenReturn(flowLog("fl-new"));
+        provisioner.provision(r, mapper.createObjectNode().put("ResourceId", "vpc-123"), updateCtx("fl-gone"));
+        assertEquals("fl-new", r.getPhysicalId());
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        // Otherwise the rolled-back stack keeps the failed update's log.
+        verify(flowLogs).deleteFlowLogs("us-east-1", List.of("fl-new"));
+        assertEquals("fl-gone", r.getPhysicalId());
+        assertEquals("fl-gone", r.getAttributes().get("Id"));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.FLOW_LOG_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    /** A stack resource pointing at a stored flow log that EC2 reports {@code tags} on. */
+    private StackResource reusedFlowLogWithTags(Map<String, String> tags) {
         StackResource r = resource();
         r.setPhysicalId("fl-0abc");
         FlowLog existing = flowLog("fl-0abc");
         existing.setResourceId("vpc-123");
         when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
         when(ec2.describeTags("us-east-1", Map.of("resource-id", List.of("fl-0abc"))))
-                .thenReturn(List.of(Map.of("key", key, "value", value)));
+                .thenReturn(new TreeMap<>(tags).entrySet().stream()
+                        .map(tag -> Map.of("key", tag.getKey(), "value", tag.getValue())).toList());
         return r;
     }
 

@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -13,6 +12,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -22,8 +22,10 @@ import java.util.Set;
  * CloudFormation provisioning for {@code AWS::EC2::FlowLog}, backed by {@link FlowLogService}.
  * Ref and {@code Fn::GetAtt [Flow, Id]} both yield the {@code fl-} id, matching AWS. {@code Tags}
  * live in the EC2 tag store, as a {@code CreateFlowLogs} TagSpecification's do, and an update
- * reconciles them on the reused log. The reused log's tags are snapshotted before they change, so a
- * stack update that fails on a later resource puts them back.
+ * reconciles the keys the template owns on the reused log, keeping tags added outside the stack, as
+ * AWS does. What an update changes is recorded in {@link CfnRollback#FLOW_LOG_UPDATE_SNAPSHOT_ATTR},
+ * so a stack update that fails on a later resource puts the touched keys back, or deletes a log the
+ * update recreated because the stack's own was gone.
  */
 @ApplicationScoped
 public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
@@ -35,12 +37,7 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
     private static final String DEFAULT_RESOURCE_TYPE = "VPC";
     private static final String DEFAULT_TRAFFIC_TYPE = "ALL";
     private static final ObjectMapper MAPPER = new ObjectMapper();
-
-    /**
-     * The tags a reused flow log had before an update changed them, recorded so a stack rollback
-     * can put them back. Internal, like the other {@code __Floci} attributes.
-     */
-    static final String PRIOR_TAGS_ATTR = "__FlociEc2FlowLogPriorTags";
+    private static final String SNAPSHOT_ATTR = CfnRollback.FLOW_LOG_UPDATE_SNAPSHOT_ATTR;
 
     private final FlowLogService flowLogService;
     private final Ec2Service ec2Service;
@@ -76,9 +73,11 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
                 // report the stack complete while DescribeFlowLogs kept serving the old config.
                 requireUnchanged(existing, props, ctx);
                 r.getAttributes().put("Id", existingId);
+                // Only the keys the previous template declared are the stack's to remove.
+                Set<String> owned = ctx.resolveTags(ctx.priorProperties(), "Tags").keySet();
                 CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
-                    snapshotTags(r, region, existingId, desiredTags);
-                    Ec2Tags.reconcile(ec2Service, region, existingId, desiredTags);
+                    snapshotTags(r, region, existingId, owned, desiredTags);
+                    Ec2Tags.reconcileOwned(ec2Service, region, existingId, owned, desiredTags);
                 });
                 return;
             }
@@ -100,65 +99,81 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
         // A tag write that still fails deletes the new log rather than leaving it outside the stack.
         CfnRollback.guarded(r, ctx, true, () -> flowLogService.deleteFlowLogs(region, List.of(flowLogId)),
                 () -> { }, () -> Ec2Tags.reconcile(ec2Service, region, flowLogId, desiredTags));
+        if (ctx.isUpdate()) {
+            // The stack's log was removed outside it, so a rollback deletes this one and names the
+            // prior id again rather than keeping the failed update's log.
+            CfnRollback.recordCreatedByUpdate(r, ctx, SNAPSHOT_ATTR);
+        }
     }
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
-        resource.getAttributes().remove(PRIOR_TAGS_ATTR);
+        resource.getAttributes().remove(SNAPSHOT_ATTR);
         return UpdateCleanupResult.notApplicable();
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
-        resource.getAttributes().remove(PRIOR_TAGS_ATTR);
+        resource.getAttributes().remove(SNAPSHOT_ATTR);
     }
 
     /**
-     * Tags are the only thing an update changes on a reused flow log, so putting back the snapshot
-     * taken before the change restores it. Without a snapshot the update changed nothing.
+     * Undoes what the failed update recorded: deletes a log it recreated, or puts back the tag keys
+     * it touched on the reused one. Without a snapshot the update changed nothing.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, SNAPSHOT_ATTR);
+        if (snapshot != null && CfnRollback.undoCreatedByUpdate(resource, snapshot, SNAPSHOT_ATTR, "Id",
+                (id, region) -> flowLogService.deleteFlowLogs(region, List.of(id)))) {
+            return true;
+        }
         undoInPlace(resource);
         return true;
     }
 
     /**
-     * Records the reused log's tags before the update changes them, only when they differ from
-     * the template's, so an unchanged reuse leaves no snapshot.
+     * Records the values the touched keys (the owned ones and the declared ones) had before the
+     * update changes them, only when one of them is about to change, so an unchanged reuse leaves
+     * no snapshot. Tags outside that set are never written, so they are not recorded either.
      */
-    private void snapshotTags(StackResource r, String region, String flowLogId, Map<String, String> desiredTags) {
+    private void snapshotTags(StackResource r, String region, String flowLogId, Set<String> owned,
+                              Map<String, String> desiredTags) {
         Map<String, String> currentTags = Ec2Tags.current(ec2Service, region, flowLogId);
-        if (currentTags.equals(desiredTags)) {
+        Set<String> touched = new LinkedHashSet<>(owned);
+        touched.addAll(desiredTags.keySet());
+        boolean changes = touched.stream().anyMatch(key -> desiredTags.containsKey(key)
+                ? !desiredTags.get(key).equals(currentTags.get(key))
+                : currentTags.containsKey(key));
+        if (!changes) {
             return;
         }
         ObjectNode prior = MAPPER.createObjectNode();
         prior.put("region", region);
         prior.put("flowLogId", flowLogId);
+        touched.forEach(prior.putArray("touched")::add);
         ObjectNode tags = prior.putObject("tags");
-        currentTags.forEach(tags::put);
-        r.getAttributes().put(PRIOR_TAGS_ATTR, prior.toString());
+        touched.stream().filter(currentTags::containsKey).forEach(key -> tags.put(key, currentTags.get(key)));
+        r.getAttributes().put(SNAPSHOT_ATTR, prior.toString());
     }
 
     /**
-     * Puts a reused log's tags back from the snapshot. The snapshot is removed only after the
-     * restore succeeds, so a failed one keeps it for the rollback walker's retry.
+     * Puts the touched keys of a reused log back from the snapshot: a key it had gets its value
+     * again, and a key the update added is removed. The snapshot is removed only after the restore
+     * succeeds, so a failed one keeps it for the rollback walker's retry.
      */
     private void undoInPlace(StackResource r) {
-        String snapshot = r.getAttributes().get(PRIOR_TAGS_ATTR);
-        if (snapshot == null) {
+        JsonNode prior = CfnRollback.updateSnapshot(r, SNAPSHOT_ATTR);
+        if (prior == null) {
             return;
         }
-        JsonNode prior;
-        try {
-            prior = MAPPER.readTree(snapshot);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Unreadable tag snapshot on " + r.getLogicalId(), e);
-        }
+        Set<String> touched = new LinkedHashSet<>();
+        prior.path("touched").forEach(key -> touched.add(key.asText()));
         Map<String, String> priorTags = new LinkedHashMap<>();
         prior.path("tags").properties().forEach(f -> priorTags.put(f.getKey(), f.getValue().asText()));
-        Ec2Tags.reconcile(ec2Service, prior.path("region").asText(), prior.path("flowLogId").asText(), priorTags);
-        r.getAttributes().remove(PRIOR_TAGS_ATTR);
+        Ec2Tags.reconcileOwned(ec2Service, prior.path("region").asText(), prior.path("flowLogId").asText(),
+                touched, priorTags);
+        r.getAttributes().remove(SNAPSHOT_ATTR);
     }
 
     /**
