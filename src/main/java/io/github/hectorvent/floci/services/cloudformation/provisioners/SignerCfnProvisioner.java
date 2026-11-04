@@ -52,7 +52,7 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
                     TYPE + " ProfileName must be 2 to 64 characters from [0-9a-zA-Z_], got " + explicitName, 400);
         }
         JsonNode period = ctx.engine().resolveNodeOmittingNoValue(props.path("SignatureValidityPeriod"));
-        validatePeriod(period);
+        validatePeriod(period, ctx);
         String createOnly = platformId + "|" + Objects.toString(explicitName, "") + "|"
                 + period.path("Type").asText() + "|" + period.path("Value").asText();
         if (!createOnly.equals(r.getAttributes().get(CREATE_ONLY_ATTR))) {
@@ -67,16 +67,16 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /** Signer's limits on a validity period, with its messages: a known unit, above zero, at most the unit's cap. */
-    private static void validatePeriod(JsonNode period) {
+    private static void validatePeriod(JsonNode period, ProvisionContext ctx) {
         String type = period.path("Type").asText(null);
         if (type != null && !MAX_VALIDITY.containsKey(type)) {
             throw new AwsException("ValidationError",
                     TYPE + " SignatureValidityPeriod Type must be DAYS, MONTHS or YEARS, got " + type, 400);
         }
-        if (!period.hasNonNull("Value")) {
+        Integer value = ctx.resolveOptionalInt(period, "Value");
+        if (value == null) {
             return;
         }
-        int value = period.get("Value").asInt();
         if (value < 1) {
             throw new AwsException("ValidationError", "Signature validity period value must be greater than 0.", 400);
         }

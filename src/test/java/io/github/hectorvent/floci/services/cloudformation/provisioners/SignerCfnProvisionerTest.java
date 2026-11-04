@@ -2,6 +2,9 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.BooleanNode;
+import com.fasterxml.jackson.databind.node.DoubleNode;
+import com.fasterxml.jackson.databind.node.LongNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -240,6 +243,20 @@ class SignerCfnProvisionerTest {
                     period);
 
             assertEquals("ValidationError", e.getErrorCode(), period);
+        }
+    }
+
+    @Test
+    void validityPeriodValueThatIsNotAnIntegerIsRejected() {
+        for (JsonNode value : List.<JsonNode>of(DoubleNode.valueOf(11.5), BooleanNode.TRUE,
+                LongNode.valueOf(99_999_999_999L))) {
+            ObjectNode props = props(null);
+            props.putObject("SignatureValidityPeriod").put("Type", "YEARS").set("Value", value);
+
+            AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(profile(), props, ctx(null)),
+                    value.toString());
+
+            assertEquals("ValidationError", e.getErrorCode(), value.toString());
         }
     }
 
