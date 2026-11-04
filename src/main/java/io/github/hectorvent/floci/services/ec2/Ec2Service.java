@@ -13194,7 +13194,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public Address associateAddress(String region, String allocationId, String instanceId,
-                                    String networkInterfaceId, String privateIpAddress) {
+                                   String networkInterfaceId, String privateIpAddress) {
         if (!isSet(networkInterfaceId)) {
             if (!isSet(instanceId)) {
                 throw new AwsException("MissingParameter",

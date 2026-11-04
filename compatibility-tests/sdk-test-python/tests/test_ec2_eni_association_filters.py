@@ -1,4 +1,4 @@
-"""Primary ENI filters and VPC-dependent EIP release verified against live EC2."""
+"""Network interface association filters and Elastic IP lifecycle."""
 
 import uuid
 from contextlib import ExitStack
@@ -67,11 +67,14 @@ def test_network_interface_association_filters(
         instances = ec2_client.run_instances(
             ImageId=image, InstanceType="t3.nano", MinCount=1, MaxCount=1,
             **placement)["Instances"]
-        instances += ec2_client.run_instances(
+        cleanup.callback(terminate_and_wait, ec2_client,
+                         [instance["InstanceId"] for instance in instances])
+        other_instances = ec2_client.run_instances(
             ImageId=image, InstanceType="t3.nano", MinCount=1, MaxCount=1,
             SubnetId=subnet)["Instances"]
         cleanup.callback(terminate_and_wait, ec2_client,
-                         [instance["InstanceId"] for instance in instances])
+                         [instance["InstanceId"] for instance in other_instances])
+        instances += other_instances
         eni_ids = [instance["NetworkInterfaces"][0]["NetworkInterfaceId"]
                    for instance in instances]
         allocation = ec2_client.allocate_address(Domain="vpc")["AllocationId"]
@@ -146,9 +149,11 @@ def test_detached_interface_address_association(ec2_client, secondary):
         cleanup.callback(ec2_client.delete_network_interface, NetworkInterfaceId=eni_id)
         private_ip = next(ip["PrivateIpAddress"] for ip in interface["PrivateIpAddresses"]
                           if ip["Primary"] != secondary)
-        allocations = [ec2_client.allocate_address(Domain="vpc")["AllocationId"] for _ in range(2)]
-        for allocation in allocations:
+        allocations = []
+        for _ in range(2):
+            allocation = ec2_client.allocate_address(Domain="vpc")["AllocationId"]
             cleanup.callback(_release_address, ec2_client, allocation)
+            allocations.append(allocation)
 
         def read_interface():
             return ec2_client.describe_network_interfaces(NetworkInterfaceIds=[eni_id])["NetworkInterfaces"][0]
