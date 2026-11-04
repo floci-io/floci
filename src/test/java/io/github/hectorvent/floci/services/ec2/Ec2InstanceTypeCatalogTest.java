@@ -4,6 +4,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -27,7 +28,7 @@ class Ec2InstanceTypeCatalogTest {
                 .map(instanceType -> instanceType.instanceType)
                 .collect(Collectors.toSet());
 
-        assertEquals(Set.of(
+        Set<String> expected = new HashSet<>(Set.of(
                 "t2.nano",
                 "t2.micro",
                 "t2.small",
@@ -52,7 +53,14 @@ class Ec2InstanceTypeCatalogTest {
                 "m7gd.2xlarge",
                 "m8gd.medium",
                 "m8gd.large",
-                "m8gd.2xlarge"), instanceTypes);
+                "m8gd.2xlarge"));
+        for (String family : List.of("c6g", "c6gn", "c7g", "c8g", "m6g", "m7g", "m8g")) {
+            for (String size : List.of("medium", "large", "xlarge", "2xlarge", "4xlarge", "8xlarge", "12xlarge", "16xlarge")) {
+                expected.add(family + "." + size);
+            }
+        }
+        expected.addAll(List.of("c8g.24xlarge", "c8g.48xlarge", "m8g.24xlarge", "m8g.48xlarge"));
+        assertEquals(expected, instanceTypes);
     }
 
     @Test

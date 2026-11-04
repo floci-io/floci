@@ -30,6 +30,26 @@ EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addre
 interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
 `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
 
+### Graviton instance-type metadata
+
+The full catalog includes the virtual sizes of `c6g`, `c6gn`, `c7g`, `c8g`,
+`m6g`, `m7g` and `m8g`: medium, large, xlarge, 2xlarge, 4xlarge, 8xlarge,
+12xlarge and 16xlarge, plus 24xlarge and 48xlarge for C8g/M8g.
+`DescribeInstanceTypes` and the emulator's `DescribeInstanceTypeOfferings` use
+these same entries. Catalog consumers also use their ARM64 architecture and
+CPU/memory capacity for launch validation and container resource limits.
+
+The values were captured from AWS `DescribeInstanceTypes` in `us-east-1` on
+2026-11-04, including each size's network-card/interface limits and each family's
+generation and encryption-in-transit flags. The capture reports C6gn as previous
+generation. All these sizes are EBS-only. See the AWS
+[compute-optimized specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/co.html)
+and [general-purpose specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html).
+
+This is a bounded metadata catalog, not a live regional-availability feed.
+Offerings retain Floci's synthetic region/availability-zone behavior; a catalog
+entry does not establish that AWS offers the type in every region or zone.
+
 ## Standard On-Demand admission
 
 Quota admission is opt-in. Set `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS=true` to
