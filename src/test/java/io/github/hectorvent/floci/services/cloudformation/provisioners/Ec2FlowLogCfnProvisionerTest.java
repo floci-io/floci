@@ -310,6 +310,51 @@ class Ec2FlowLogCfnProvisionerTest {
     }
 
     @Test
+    void rollbackPutsBackTheTagOwnershipRecord() {
+        StackResource r = reusedFlowLogWithTags(Map.of("team", "core"));
+        r.getAttributes().put(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR, "[\"team\"]");
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "owner").put("Value", "core");
+        provisioner.provision(r, props, updateCtx("fl-0abc", "owner"));
+        assertEquals("[\"owner\"]", r.getAttributes().get(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR));
+
+        provisioner.rollbackUpdate(r);
+
+        // The walker keeps the attempted resource, so the record has to be put back here, or a
+        // later update that drops Tags would remove owner and leave team behind.
+        assertEquals("[\"team\"]", r.getAttributes().get(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR));
+    }
+
+    @Test
+    void takingOverAKeyWithoutChangingItsValueIsRolledBack() {
+        // owner=core was added outside the stack; declaring it changes no live tag, only ownership.
+        StackResource r = reusedFlowLogWithTags(Map.of("team", "core", "owner", "core"));
+        r.getAttributes().put(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR, "[\"team\"]");
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
+        props.withArray("Tags").addObject().put("Key", "owner").put("Value", "core");
+        provisioner.provision(r, props, updateCtx("fl-0abc", "team", "owner"));
+        assertTrue(r.getAttributes().containsKey(CfnRollback.FLOW_LOG_UPDATE_SNAPSHOT_ATTR));
+
+        provisioner.rollbackUpdate(r);
+
+        assertEquals("[\"team\"]", r.getAttributes().get(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR));
+    }
+
+    @Test
+    void rollingBackALogFromBeforeTheRecordLeavesNoRecord() {
+        StackResource r = reusedFlowLogWithTags(Map.of("team", "core"));
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "owner").put("Value", "core");
+        provisioner.provision(r, props, updateCtx("fl-0abc", "team"));
+
+        provisioner.rollbackUpdate(r);
+
+        // Without a record the next update falls back to the previous template, as before.
+        assertFalse(r.getAttributes().containsKey(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR));
+    }
+
+    @Test
     void createRecordsTheTagKeysItWrote() {
         when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
                 .thenReturn(flowLog("fl-0abc"));
@@ -411,6 +456,7 @@ class Ec2FlowLogCfnProvisionerTest {
     void rollbackDeletesAFlowLogTheUpdateRecreated() {
         StackResource r = resource();
         r.setPhysicalId("fl-gone");
+        r.getAttributes().put(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR, "[\"team\"]");
         when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-gone"))).thenReturn(List.of());
         when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
                 .thenReturn(flowLog("fl-new"));
@@ -422,6 +468,7 @@ class Ec2FlowLogCfnProvisionerTest {
         // Otherwise the rolled-back stack keeps the failed update's log.
         verify(flowLogs).deleteFlowLogs("us-east-1", List.of("fl-new"));
         assertEquals("fl-gone", r.getPhysicalId());
+        assertEquals("[\"team\"]", r.getAttributes().get(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR));
         assertEquals("fl-gone", r.getAttributes().get("Id"));
         assertFalse(r.getAttributes().containsKey(CfnRollback.FLOW_LOG_UPDATE_SNAPSHOT_ATTR));
     }
