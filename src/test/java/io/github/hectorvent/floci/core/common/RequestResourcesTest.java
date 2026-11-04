@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
@@ -824,6 +827,49 @@ class RequestResourcesTest {
 
     private static ContainerRequestContext json(String body) {
         return request("application/x-amz-json-1.1", body);
+    }
+
+    /**
+     * A REST request's member the table locates in its path is read from the labels of the route it was routed by,
+     * one it locates in its query from the query, and one in its body from the body beside them: OpenSearch's
+     * {@code DescribeDomain} names its domain in the path, {@code ListTags} its ARN in {@code ?arn}, and
+     * {@code UpdateDomainConfig} its domain in the path under a JSON body. With no label given, the path member names
+     * nothing, so the request is checked on {@code *}; and a located member is read from where it is alone, a body
+     * giving it under its name naming nothing: {@code GetCompatibleVersions} with a domain in its body and none in its
+     * query, which its handler answers with every domain's versions, names no domain.
+     */
+    @Test
+    void aRestRequestsPathAndQueryMembersAreReadWhereTheTableLocatesThem() {
+        String domain = "arn:aws:es:us-east-1:111111111111:domain/logs";
+        assertEquals(List.of(domain), RequestResources.of("es:DescribeDomain", rest("GET", null, Map.of()), "aws",
+                "us-east-1", "111111111111", null, Map.of("DomainName", "logs")));
+        assertEquals(List.of(), RequestResources.of("es:DescribeDomain", rest("GET", null, Map.of()), "aws",
+                "us-east-1", "111111111111", null, Map.of()));
+        assertEquals(List.of(domain), RequestResources.of("es:ListTags", rest("GET", null, Map.of("arn", domain)), "aws",
+                "us-east-1", "111111111111", null, Map.of()));
+        assertEquals(List.of(domain), RequestResources.of("es:UpdateDomainConfig",
+                rest("POST", "{\"EngineVersion\":\"OpenSearch_2.11\"}", Map.of()), "aws", "us-east-1", "111111111111",
+                null, Map.of("DomainName", "logs")));
+        assertEquals(List.of(), RequestResources.of("es:GetCompatibleVersions",
+                rest("GET", "{\"DomainName\":\"logs\"}", Map.of()), "aws", "us-east-1", "111111111111", null, Map.of()));
+        assertEquals(List.of(domain), RequestResources.of("es:GetCompatibleVersions",
+                rest("GET", "{\"DomainName\":\"other\"}", Map.of("domainName", "logs")), "aws", "us-east-1",
+                "111111111111", null, Map.of()));
+        assertEquals(List.of(domain), RequestResources.of("es:DescribeDomain",
+                rest("GET", "{\"DomainName\":\"other\"}", Map.of()), "aws", "us-east-1", "111111111111", null,
+                Map.of("DomainName", "logs")));
+    }
+
+    private static ContainerRequestContext rest(String method, String body, Map<String, String> query) {
+        ContainerRequestContext request = body == null ? mock(ContainerRequestContext.class)
+                : request("application/json", body);
+        when(request.getMethod()).thenReturn(method);
+        UriInfo uriInfo = mock(UriInfo.class);
+        MultivaluedMap<String, String> parameters = new MultivaluedHashMap<>();
+        query.forEach(parameters::add);
+        when(uriInfo.getQueryParameters()).thenReturn(parameters);
+        when(request.getUriInfo()).thenReturn(uriInfo);
+        return request;
     }
 
     private static ContainerRequestContext form(String body) {

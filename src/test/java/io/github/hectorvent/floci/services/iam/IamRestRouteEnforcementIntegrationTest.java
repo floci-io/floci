@@ -494,8 +494,8 @@ class IamRestRouteEnforcementIntegrationTest {
 
     /**
      * A route no rule maps is checked as the operation of its vendored route when AWS authorizes that operation's
-     * action on no resource type, in both OpenSearch API versions and for Access Analyzer; one AWS checks on a domain
-     * stays unchecked, so a grant scoped to the domain is not refused for want of reading it.
+     * action on no resource type, in both OpenSearch API versions and for Access Analyzer; one AWS checks on an
+     * analyzer stays unchecked, so a grant scoped to the analyzer is not refused for want of reading it.
      */
     @Test
     void aVendoredRouteIsCheckedWhenAwsAuthorizesItsActionOnNoResourceType() {
@@ -506,12 +506,42 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "es").get("/2015-01-01/domain").then(), "es:ListDomainNames");
         refused(as(user, "es").get("/2021-01-01/opensearch/versions").then(), "es:ListVersions");
         refused(as(user, "access-analyzer").get("/analyzer").then(), "access-analyzer:ListAnalyzers");
-        as(user, "es").get("/2021-01-01/opensearch/domain/route-missing-" + suffix()).then().statusCode(409)
+        as(user, "access-analyzer").get("/analyzer/route-missing-" + suffix()).then().statusCode(404)
                 .body(containsString("ResourceNotFoundException"));
 
         policy(user, allow("es:ListDomainNames", "*"));
         as(user, "es").get("/2021-01-01/domain").then().statusCode(200);
         as(user, "es").get("/2015-01-01/domain").then().statusCode(200);
+    }
+
+    /**
+     * An OpenSearch request naming its domain in its path, or its ARN in its query, is checked on that domain, in
+     * both API versions: a grant scoped to the domain lets the request reach OpenSearch, which has no such domain, a
+     * request naming another domain is refused, and a deny on the domain holds under an allow on everything. A domain
+     * a request's body gives where OpenSearch reads it from the query names nothing: {@code GetCompatibleVersions}
+     * with the domain in its body alone, which OpenSearch answers with every version, is checked on {@code *}.
+     */
+    @Test
+    void anOpenSearchRequestIsCheckedOnTheDomainItsPathOrQueryNames() {
+        String user = user("route-domain");
+        String domain = "route-domain-" + suffix();
+        String arn = "arn:aws:es:us-east-1:" + ACCOUNT + ":domain/" + domain;
+        policy(user, allow("es:DescribeDomain", arn) + "," + allow("es:DescribeElasticsearchDomain", arn) + ","
+                + allow("es:ListTags", arn) + "," + allow("es:GetCompatibleVersions", arn));
+        as(user, "es").queryParam("domainName", domain).get("/2021-01-01/opensearch/compatibleVersions").then()
+                .statusCode(409);
+        refused(as(user, "es").body("{\"DomainName\":\"" + domain + "\"}").get("/2021-01-01/opensearch/compatibleVersions")
+                .then(), "es:GetCompatibleVersions");
+        as(user, "es").get("/2021-01-01/opensearch/domain/" + domain).then().statusCode(409);
+        as(user, "es").get("/2015-01-01/es/domain/" + domain).then().statusCode(409);
+        as(user, "es").queryParam("arn", arn).get("/2021-01-01/tags/").then().statusCode(not(403));
+        refused(as(user, "es").get("/2021-01-01/opensearch/domain/other-" + domain).then(), "es:DescribeDomain");
+        refused(as(user, "es").get("/2015-01-01/es/domain/other-" + domain).then(), "es:DescribeElasticsearchDomain");
+        refused(as(user, "es").queryParam("arn", arn + "-other").get("/2021-01-01/tags/").then(), "es:ListTags");
+
+        policy(user, allow("es:*", "*") + "," + deny("es:DescribeDomain", arn));
+        refused(as(user, "es").get("/2021-01-01/opensearch/domain/" + domain).then(), "es:DescribeDomain");
+        as(user, "es").get("/2021-01-01/opensearch/domain/other-" + domain).then().statusCode(409);
     }
 
     /**

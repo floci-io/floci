@@ -1,7 +1,10 @@
 package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -79,6 +82,16 @@ public final class RequestResources {
      */
     public static List<String> of(String operation, ContainerRequestContext ctx, String partition, String region,
                                   String accountId, StoredResourceArns stored) {
+        return of(operation, ctx, partition, region, accountId, stored, Map.of());
+    }
+
+    /**
+     * As {@link #of(String, ContainerRequestContext, String, String, String, StoredResourceArns)}, a member the table
+     * locates in a REST request's path read from {@code labels}, the value the request's path gives each label of the
+     * route it was routed by, and one it locates in its query from the request's query parameters.
+     */
+    public static List<String> of(String operation, ContainerRequestContext ctx, String partition, String region,
+                                  String accountId, StoredResourceArns stored, Map<String, String> labels) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         List<RequestResourceMembers.Resource> resources = operation == null ? null
                 : served(table.operations().get(operation), ctx);
@@ -86,7 +99,7 @@ public final class RequestResources {
             return List.of();
         }
         Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        JsonNode body = form.isEmpty() ? PassedRoles.jsonBody(ctx) : null;
+        JsonNode body = form.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
         return named(resources, formats(table, operation), form, body, partition, region, accountId, stored);
     }
 
@@ -128,6 +141,15 @@ public final class RequestResources {
      */
     public static List<String> created(String operation, ContainerRequestContext ctx, String partition, String region,
                                        String accountId) {
+        return created(operation, ctx, partition, region, accountId, Map.of());
+    }
+
+    /**
+     * As {@link #created(String, ContainerRequestContext, String, String, String)}, with the path's labels as for
+     * {@link #of(String, ContainerRequestContext, String, String, String, StoredResourceArns, Map)}.
+     */
+    public static List<String> created(String operation, ContainerRequestContext ctx, String partition, String region,
+                                       String accountId, Map<String, String> labels) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         List<RequestResourceMembers.Created> creates = operation == null ? null : table.creates().get(operation);
         List<RequestResourceMembers.Resource> made = operation == null || creates != null ? List.of()
@@ -137,7 +159,7 @@ public final class RequestResources {
             return List.of();
         }
         Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        JsonNode body = form.isEmpty() ? PassedRoles.jsonBody(ctx) : null;
+        JsonNode body = form.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
         Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, operation);
         if (creates == null) {
             return named(made, formats, form, body, partition, region, accountId, null);
@@ -161,6 +183,32 @@ public final class RequestResources {
             }
         }
         return List.copyOf(arns);
+    }
+
+    /**
+     * The request's body with each member the table locates in a REST request's path or query laid over it under the
+     * member's name, so a resource reads it as it reads a member of the body: a path label's value from {@code labels},
+     * a query parameter's first value; the body itself when the operation locates none. A located member is read from
+     * where it is alone, as its handler reads it: one the body also gives is dropped, so a body naming a domain the
+     * query does not name names nothing.
+     */
+    private static JsonNode located(RequestResourceMembers.Table table, String operation, JsonNode body,
+                                    ContainerRequestContext ctx, Map<String, String> labels) {
+        Map<String, String> located = table.located().getOrDefault(operation, Map.of());
+        if (located.isEmpty()) {
+            return body;
+        }
+        ObjectNode overlaid = body instanceof ObjectNode object ? object.deepCopy() : JsonNodeFactory.instance.objectNode();
+        MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
+        located.forEach((member, where) -> {
+            overlaid.remove(member);
+            String value = where.startsWith("{") ? labels.get(where.substring(1, where.length() - 1))
+                    : query == null ? null : query.getFirst(where.substring(1));
+            if (value != null) {
+                overlaid.put(member, value);
+            }
+        });
+        return overlaid;
     }
 
     /**

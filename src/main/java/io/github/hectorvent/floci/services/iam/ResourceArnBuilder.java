@@ -229,7 +229,8 @@ public class ResourceArnBuilder {
     private List<String> namedResources(String credentialScope, String operation, ContainerRequestContext ctx,
                                         String region, String accountId, String partition) {
         List<String> named = operation == null || !operation.startsWith(credentialScope + ":") ? List.of()
-                : RequestResources.of(operation, ctx, partition, region, accountId, storedResourceArns(credentialScope));
+                : RequestResources.of(operation, ctx, partition, region, accountId, storedResourceArns(credentialScope),
+                        IamActionRegistry.pathLabels(credentialScope, ctx));
         return named.isEmpty() ? List.of("*") : named;
     }
 
