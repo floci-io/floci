@@ -98,6 +98,18 @@ class RedshiftDataResourceResolverTest {
 
         assertEquals("127.0.0.1", copyTarget.host());
         assertEquals(5439, copyTarget.port());
+
+        ObjectNode commentedCopy = mapper.createObjectNode();
+        commentedCopy.put("ClusterIdentifier", "wh");
+        commentedCopy.put("DbUser", "admin");
+        commentedCopy.put("Database", "dev");
+        commentedCopy.put("Sql", "/* leading comment */ COPY tbl FROM 's3://bucket/key' IAM_ROLE 'arn:aws:iam::000000000000:role/Role'");
+
+        RedshiftDataResourceResolver.DatabaseTarget commentedTarget =
+                resolver(redshift, mock(SecretsManagerService.class)).resolve(commentedCopy, REGION);
+
+        assertEquals("127.0.0.1", commentedTarget.host());
+        assertEquals(5439, commentedTarget.port());
     }
 
     @Test

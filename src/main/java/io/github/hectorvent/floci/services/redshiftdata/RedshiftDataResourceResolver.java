@@ -222,12 +222,7 @@ class RedshiftDataResourceResolver {
         if (sql == null || sql.isBlank()) {
             return false;
         }
-        String trimmed = sql.stripLeading();
-        if (trimmed.regionMatches(true, 0, "COPY", 0, 4)
-                || trimmed.regionMatches(true, 0, "UNLOAD", 0, 6)) {
-            return CopyStatementParser.parse(sql) != null;
-        }
-        return false;
+        return CopyStatementParser.parse(sql) != null;
     }
 
     private String clusterArn(String clusterId, String region) {
