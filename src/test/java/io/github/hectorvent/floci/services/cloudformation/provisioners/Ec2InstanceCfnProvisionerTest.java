@@ -80,7 +80,8 @@ class Ec2InstanceCfnProvisionerTest {
 
         assertEquals("i-1", r.getPhysicalId());
         assertEquals(Set.of("InstanceId", "PrivateIp", "PublicIp", "PrivateDnsName", "PublicDnsName",
-                "AvailabilityZone", "VpcId", "State.Code", "State.Name"), r.getAttributes().keySet());
+                "AvailabilityZone", "VpcId", "State.Code", "State.Name",
+                Ec2InstanceCfnProvisioner.DECLARED_TAG_KEYS_ATTR), r.getAttributes().keySet());
         assertEquals("10.0.0.5", r.getAttributes().get("PrivateIp"));
         assertEquals("us-east-1a", r.getAttributes().get("AvailabilityZone"));
         assertEquals("vpc-1", r.getAttributes().get("VpcId"));
@@ -119,7 +120,8 @@ class Ec2InstanceCfnProvisionerTest {
 
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx());
 
-        assertEquals(Set.of("InstanceId"), r.getAttributes().keySet());
+        assertEquals(Set.of("InstanceId", Ec2InstanceCfnProvisioner.DECLARED_TAG_KEYS_ATTR),
+                r.getAttributes().keySet());
     }
 
     @Test
@@ -702,7 +704,7 @@ class Ec2InstanceCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r));
 
         assertEquals("i-1", r.getPhysicalId());
-        assertEquals(Map.of("__FlociDeclaredMetadataOptions", "HttpTokens"), declarations(r));
+        assertEquals(Map.of("__FlociDeclaredMetadataOptions", "HttpTokens", "__FlociDeclaredTagKeys", "[]"), declarations(r));
         assertFalse(r.getAttributes().containsKey("__FlociPriorDeclarations"));
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
         assertEquals("i-1", r.getPhysicalId());
@@ -726,7 +728,7 @@ class Ec2InstanceCfnProvisionerTest {
         assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
 
         assertEquals("i-1", r.getPhysicalId());
-        assertEquals(Map.of("__FlociDeclaredMetadataOptions", "HttpTokens"), declarations(r));
+        assertEquals(Map.of("__FlociDeclaredMetadataOptions", "HttpTokens", "__FlociDeclaredTagKeys", "[]"), declarations(r));
         assertFalse(r.getAttributes().containsKey("__FlociPriorDeclarations"));
     }
 
@@ -742,7 +744,7 @@ class Ec2InstanceCfnProvisionerTest {
                 .thenThrow(new AwsException("InternalError", "terminate failed", 500))
                 .thenThrow(new AwsException("InternalError", "terminate failed", 500))
                 .thenReturn(List.of());
-        Map<String, String> declared = Map.of("__FlociDeclaredMetadataOptions", "HttpTokens");
+        Map<String, String> declared = Map.of("__FlociDeclaredMetadataOptions", "HttpTokens", "__FlociDeclaredTagKeys", "[]");
         assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
 
         assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
@@ -1032,7 +1034,7 @@ class Ec2InstanceCfnProvisionerTest {
         first.setMetadataOptions(applied);
         provisioner.provision(r, props("{\"ImageId\": \"ami-2\"}"), ctx(first.getInstanceId()));
         assertTrue(provisioner.hasReplacementUpdate(r));
-        assertEquals(Map.of(), declarations(r));
+        assertEquals(Map.of(Ec2InstanceCfnProvisioner.DECLARED_TAG_KEYS_ATTR, "[]"), declarations(r));
         return r;
     }
 

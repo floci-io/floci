@@ -102,14 +102,11 @@ final class Ec2Tags {
 
     /**
      * Records the keys this deployment resolved and wrote, as a JSON array: the keys the stack owns.
-     * A deployment that declares none leaves no record, which {@link #ownedKeys} reads the same way,
-     * since the previous template then declared no tags either.
+     * An empty array is recorded too: re-resolving the previous template could read keys this
+     * deployment never wrote (an {@code Fn::If} over the next update's conditions), so only a
+     * resource provisioned before records were kept falls back to that.
      */
     static void recordKeys(StackResource r, String recordAttr, Map<String, String> desired) {
-        if (desired.isEmpty()) {
-            r.getAttributes().remove(recordAttr);
-            return;
-        }
         ArrayNode keys = MAPPER.createArrayNode();
         desired.keySet().forEach(keys::add);
         r.getAttributes().put(recordAttr, keys.toString());
