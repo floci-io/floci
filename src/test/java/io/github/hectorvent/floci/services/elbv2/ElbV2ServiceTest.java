@@ -767,6 +767,28 @@ class ElbV2ServiceTest {
     }
 
     @Test
+    void describeRulesRequiresEveryExplicitArn() {
+        String tgArn = createTargetGroup("rule-lookup-tg");
+        String listener = createListener("rule-lookup-lb", tgArn);
+        Rule retained = service.createRule(REGION, listener, List.of(pathPattern("/a/*")),
+                100, List.of(forwardAction(tgArn)), Map.of());
+        Rule removed = service.createRule(REGION, listener, List.of(pathPattern("/b/*")),
+                110, List.of(forwardAction(tgArn)), Map.of());
+        service.deleteRule(REGION, removed.getRuleArn());
+
+        for (List<String> requested : List.of(List.of(removed.getRuleArn()),
+                List.of(retained.getRuleArn(), removed.getRuleArn()),
+                List.of(removed.getRuleArn(), retained.getRuleArn()))) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.describeRules(REGION, null, requested));
+            assertEquals("RuleNotFound", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        }
+        assertEquals(List.of(retained), service.describeRules(REGION, null, List.of(retained.getRuleArn())));
+        assertEquals(2, service.describeRules(REGION, listener, List.of()).size());
+    }
+
+    @Test
     void setRulePrioritiesChecksEachListenerOnlyAgainstItsOwnRules() {
         String tgArn = createTargetGroup("sample-tg");
         String firstListener = createListener("first-lb", tgArn);
