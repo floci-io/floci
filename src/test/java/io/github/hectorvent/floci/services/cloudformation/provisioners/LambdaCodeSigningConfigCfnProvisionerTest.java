@@ -20,6 +20,7 @@ import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -112,6 +113,7 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
 
     @Test
     void updateAppliesTheTemplateInPlace() {
+        when(configs.get(REGION, CSC_ARN)).thenReturn(stored());
         when(configs.update(eq(REGION), eq(CSC_ARN), any(), any(), any())).thenReturn(stored());
         ObjectNode props = props().put("Description", "signed");
         props.putObject("CodeSigningPolicies").put("UntrustedArtifactOnDeployment", "Enforce");
@@ -122,10 +124,56 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
 
         provisioner.provision(r, props, ctx(CSC_ARN));
 
+        verify(configs).withConfigLock(eq(CSC_ARN), any());
         verify(configs).update(eq(REGION), eq(CSC_ARN), eq("signed"), any(), policies.capture());
         verify(configs, never()).create(any(), any(), any(), any(), any());
         assertEquals("Enforce", policies.getValue().getUntrustedArtifactOnDeployment());
         assertEquals(CSC_ARN, r.getPhysicalId());
+    }
+
+    @Test
+    void rollbackRestoresWhatTheUpdateChanged() {
+        CodeSigningConfig before = stored();
+        before.setDescription("before");
+        CodeSigningConfig.AllowedPublishers publishers = new CodeSigningConfig.AllowedPublishers();
+        publishers.setSigningProfileVersionArns(List.of(PROFILE_VERSION_ARN));
+        before.setAllowedPublishers(publishers);
+        CodeSigningConfig.CodeSigningPolicies policies = new CodeSigningConfig.CodeSigningPolicies();
+        policies.setUntrustedArtifactOnDeployment("Warn");
+        before.setCodeSigningPolicies(policies);
+        when(configs.get(REGION, CSC_ARN)).thenReturn(before);
+        when(configs.update(eq(REGION), eq(CSC_ARN), any(), any(), any())).thenReturn(stored());
+        StackResource r = config();
+        r.setPhysicalId(CSC_ARN);
+        provisioner.provision(r, props().put("Description", "signed"), ctx(CSC_ARN));
+        ArgumentCaptor<CodeSigningConfig.AllowedPublishers> restoredPublishers =
+                ArgumentCaptor.forClass(CodeSigningConfig.AllowedPublishers.class);
+        ArgumentCaptor<CodeSigningConfig.CodeSigningPolicies> restoredPolicies =
+                ArgumentCaptor.forClass(CodeSigningConfig.CodeSigningPolicies.class);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(configs).update(eq(REGION), eq(CSC_ARN), eq("before"), restoredPublishers.capture(),
+                restoredPolicies.capture());
+        assertEquals(List.of(PROFILE_VERSION_ARN), restoredPublishers.getValue().getSigningProfileVersionArns());
+        assertEquals("Warn", restoredPolicies.getValue().getUntrustedArtifactOnDeployment());
+        assertEquals(CSC_ARN, r.getPhysicalId());
+    }
+
+    @Test
+    void rollbackOfAStubMigrationDeletesTheCreatedConfig() {
+        when(configs.create(eq(REGION), eq(ACCOUNT), any(), any(), any())).thenReturn(stored());
+        when(lambda.listFunctionsByCodeSigningConfig(REGION, ACCOUNT, CSC_ARN, 1, null))
+                .thenReturn(new PaginatedResult<>(List.of(), null));
+        StackResource r = config();
+        r.setPhysicalId("Csc-0a1b2c3d");
+        r.getAttributes().put("Arn", "arn:aws:stub:::Csc");
+        provisioner.provision(r, props(), ctx("Csc-0a1b2c3d"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(configs).delete(REGION, CSC_ARN);
+        assertEquals("Csc-0a1b2c3d", r.getPhysicalId());
     }
 
     @Test
@@ -164,6 +212,17 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
         doThrow(new AwsException("ResourceNotFoundException", "gone", 404)).when(configs).delete(REGION, CSC_ARN);
 
         provisioner.delete("AWS::Lambda::CodeSigningConfig", CSC_ARN, REGION);
+    }
+
+    @Test
+    void deleteOfAnotherAccountsArnLeavesTheLocalConfig() {
+        String foreign = "arn:aws:lambda:eu-west-1:111111111111:code-signing-config:csc-0123456789abcdef0";
+        when(configs.get(REGION, "111111111111", foreign))
+                .thenThrow(new AwsException("ResourceNotFoundException", "not found", 404));
+
+        provisioner.delete("AWS::Lambda::CodeSigningConfig", foreign, REGION);
+
+        verify(configs, never()).delete(any(), any());
     }
 
     @Test

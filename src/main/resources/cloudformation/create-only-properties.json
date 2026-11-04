@@ -785,6 +785,11 @@
   "AWS::SecretsManager::SecretTargetAttachment": [
     "SecretId"
   ],
+  "AWS::Signer::SigningProfile": [
+    "ProfileName",
+    "PlatformId",
+    "SignatureValidityPeriod"
+  ],
   "AWS::SNS::Subscription": [
     "Endpoint",
     "Protocol",

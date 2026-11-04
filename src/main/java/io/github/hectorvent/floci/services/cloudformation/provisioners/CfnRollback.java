@@ -101,6 +101,9 @@ public final class CfnRollback {
      */
     public static final String EVENT_INVOKE_CONFIG_SNAPSHOT_ATTR = "__FlociEventInvokeConfigSnapshot";
 
+    /** The code signing config an in-place update changed, as stored, so a failed stack update can put it back. */
+    public static final String CODE_SIGNING_CONFIG_UPDATE_SNAPSHOT_ATTR = "__FlociCodeSigningConfigUpdateSnapshot";
+
     /** The prior WAFv2 logging configuration for an in-place update that may need rollback. */
     public static final String WAF_LOGGING_UPDATE_SNAPSHOT_ATTR = "__FlociWafLoggingUpdateSnapshot";
 

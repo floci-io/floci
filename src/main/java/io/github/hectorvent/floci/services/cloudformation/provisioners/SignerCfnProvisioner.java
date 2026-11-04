@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
@@ -18,7 +19,8 @@ import java.util.regex.Pattern;
  * carry the name, a version and the version ARN a code signing config lists. Every property but
  * {@code Tags} is create-only: an update that keeps them keeps the profile, one that changes them
  * mints a new one, and one that would keep an explicit name is refused, as CloudFormation refuses
- * replacing any custom-named resource. A deleted stack leaves nothing behind to clean up.
+ * replacing any custom-named resource. A replaced or deleted profile leaves nothing behind to clean
+ * up, and a rolled-back replacement points the resource back to the prior profile.
  */
 @ApplicationScoped
 public class SignerCfnProvisioner implements CfnResourceProvisioner {
@@ -37,6 +39,7 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         String platformId = ctx.resolveOptional(props, "PlatformId");
         if (platformId == null || !PLATFORMS.contains(platformId)) {
             throw new AwsException("ValidationError",
@@ -47,18 +50,21 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationError",
                     TYPE + " ProfileName must be 2 to 64 characters from [0-9a-zA-Z_], got " + explicitName, 400);
         }
+        JsonNode period = ctx.engine().resolveNode(props.path("SignatureValidityPeriod"));
         String createOnly = platformId + "|" + Objects.toString(explicitName, "") + "|"
-                + ctx.engine().resolveNode(props.path("SignatureValidityPeriod"));
-        if (ctx.isUpdate()) {
-            if (createOnly.equals(r.getAttributes().get(CREATE_ONLY_ATTR))) {
-                return;
-            }
-            if (explicitName != null && explicitName.equals(r.getAttributes().get("ProfileName"))) {
+                + period.path("Type").asText() + "|" + period.path("Value").asText();
+        if (!createOnly.equals(r.getAttributes().get(CREATE_ONLY_ATTR))) {
+            if (ctx.isUpdate() && explicitName != null && explicitName.equals(r.getAttributes().get("ProfileName"))) {
                 throw new AwsException("ValidationError",
                         "CloudFormation cannot update a stack when a custom-named resource requires "
                                 + "replacing. Rename " + explicitName + " and update the stack again.", 400);
             }
+            mint(r, ctx, explicitName, createOnly);
         }
+        ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    private static void mint(StackResource r, ProvisionContext ctx, String explicitName, String createOnly) {
         String name = explicitName != null ? explicitName
                 : r.getLogicalId().substring(0, Math.min(r.getLogicalId().length(), 51)) + "_" + random(12);
         String arn = AwsArnUtils.Arn.of("signer", ctx.region(), ctx.accountId(), "/signing-profiles/" + name)
@@ -70,6 +76,33 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("ProfileVersion", version);
         r.getAttributes().put("ProfileVersionArn", arn + "/" + version);
         r.getAttributes().put(CREATE_ONLY_ATTR, createOnly);
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
+    }
+
+    /** A replacement points back to the prior profile; a tags-only update changed nothing Floci holds. */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        ReplacementCleanup.rollback(resource, this::delete);
+        return true;
     }
 
     private static String random(int length) {

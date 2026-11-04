@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -128,6 +129,65 @@ class SignerCfnProvisionerTest {
         provisioner.provision(r, changed, ctx(physicalId));
 
         assertNotEquals(physicalId, r.getPhysicalId());
+    }
+
+    @Test
+    void reorderedValidityPeriodKeysKeepTheProfile() {
+        StackResource r = profile();
+        ObjectNode created = props(null);
+        created.putObject("SignatureValidityPeriod").put("Type", "DAYS").put("Value", 30);
+        provisioner.provision(r, created, ctx(null));
+        String physicalId = r.getPhysicalId();
+
+        ObjectNode reordered = props(null);
+        reordered.putObject("SignatureValidityPeriod").put("Value", 30).put("Type", "DAYS");
+        reordered.putArray("Tags").addObject().put("Key", "team").put("Value", "a");
+        provisioner.provision(r, reordered, ctx(physicalId));
+
+        assertEquals(physicalId, r.getPhysicalId());
+    }
+
+    @Test
+    void rollbackOfAReplacementRestoresThePriorProfile() {
+        StackResource r = profile();
+        provisioner.provision(r, props(null), ctx(null));
+        Map<String, String> created = new HashMap<>(r.getAttributes());
+        String physicalId = r.getPhysicalId();
+        provisioner.provision(r, props(null).put("PlatformId", "Notation-OCI-SHA384-ECDSA"), ctx(physicalId));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(physicalId, r.getPhysicalId());
+        assertEquals(created, r.getAttributes());
+    }
+
+    @Test
+    void rollbackOfAnInPlaceUpdateKeepsTheProfile() {
+        StackResource r = profile();
+        provisioner.provision(r, props(null), ctx(null));
+        String physicalId = r.getPhysicalId();
+        ObjectNode tagged = props(null);
+        tagged.putArray("Tags").addObject().put("Key", "team").put("Value", "a");
+        provisioner.provision(r, tagged, ctx(physicalId));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(physicalId, r.getPhysicalId());
+    }
+
+    @Test
+    void committedReplacementCleansUpTheDisplacedProfile() {
+        StackResource r = profile();
+        provisioner.provision(r, props(null), ctx(null));
+        String physicalId = r.getPhysicalId();
+        provisioner.provision(r, props(null).put("PlatformId", "Notation-OCI-SHA384-ECDSA"), ctx(physicalId));
+
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(physicalId, provisioner.updateCleanupPhysicalId(r));
+        assertTrue(provisioner.completeUpdate(r).complete());
+        provisioner.clearUpdate(r);
+
+        assertFalse(provisioner.hasReplacementUpdate(r));
     }
 
     @Test
