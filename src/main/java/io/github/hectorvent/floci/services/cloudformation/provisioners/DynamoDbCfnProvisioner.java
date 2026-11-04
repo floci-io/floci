@@ -449,11 +449,17 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
      * updated in place, as CloudFormation does with one UpdateKinesisStreamingDestination call. The
      * active list is copied first: the service may hand back the stored table, whose destination list
      * the calls below change.
-     * {@code fromTemplate} checks a newly declared {@code StreamArn} as the AWS handler does; a
-     * rollback restores destinations the table already had and enables them as they were.
+     * {@code fromTemplate} checks every declared {@code StreamArn} as the AWS handler does, whether
+     * or not the table already forwards to it; a rollback restores destinations the table already had
+     * and enables them as they were.
      */
     private TableDefinition reconcileKinesisDestinations(Scope scope, String tableName, TableDefinition table,
                                                          List<KinesisDestinationSpec> desired, boolean fromTemplate) {
+        if (fromTemplate) {
+            for (KinesisDestinationSpec destination : desired) {
+                requireUsableStreamArn(tableName, destination.streamArn());
+            }
+        }
         List<KinesisDestinationSpec> active = activeKinesisDestinations(table);
         for (KinesisDestinationSpec destination : active) {
             if (!containsStream(desired, destination.streamArn())) {
@@ -481,12 +487,10 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     /**
      * Fails the way the AWS handler does. A {@code StreamArn} outside the API's 37 to 1024 characters
      * fails EnableKinesisStreamingDestination's own validation. Any other value that is not a Kinesis
-     * stream ARN, such as a stream's name from {@code Ref}, or one naming a stream that does not
-     * exist, never becomes active, so the table does not stabilize.
+     * stream ARN, such as a stream's name from {@code Ref}, never becomes active, so the table does
+     * not stabilize.
      */
-    private TableDefinition enableKinesisDestination(Scope scope, String tableName,
-                                                     KinesisDestinationSpec destination) {
-        String streamArn = destination.streamArn();
+    private static void requireUsableStreamArn(String tableName, String streamArn) {
         String violation = SmithyValidationErrors.lengthOutOfRange("streamArn", streamArn,
                 STREAM_ARN_MIN_LENGTH, STREAM_ARN_MAX_LENGTH);
         if (violation != null) {
@@ -495,8 +499,13 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         if (!AwsArnUtils.isArnFor(streamArn, "kinesis")) {
             throw notStabilized(tableName);
         }
+    }
+
+    /** A stream that does not exist, as the table's account and region see it, never becomes active either. */
+    private TableDefinition enableKinesisDestination(Scope scope, String tableName,
+                                                     KinesisDestinationSpec destination) {
         try {
-            return dynamoDb.tables().enableKinesisStreamingDestination(scope, tableName, streamArn,
+            return dynamoDb.tables().enableKinesisStreamingDestination(scope, tableName, destination.streamArn(),
                     destination.precision());
         } catch (AwsException e) {
             if ("ResourceNotFoundException".equals(e.getErrorCode())) {

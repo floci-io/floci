@@ -347,7 +347,7 @@ class NativeDynamoDbTableServiceTest {
         assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
                 resolved.approximateCreationDateTimePrecision(),
                 "the snapshot carries the precision the response echoes");
-        verify(kinesisService).describeStream(STREAM_NAME, REGION);
+        verify(kinesisService).describeStreamByArn(STREAM_ARN, REGION);
         KinesisStreamingDestination enabled = reloadFromDisk().findKinesisStreamingDestination(STREAM_ARN)
                 .orElseThrow();
         assertEquals("ACTIVE", enabled.getDestinationStatus());
@@ -428,7 +428,7 @@ class NativeDynamoDbTableServiceTest {
     void unknownKinesisStreamIsReportedAsNotFound() {
         tableService.createTable(createRequest(null, NO_SETTINGS), "ACTIVE", REGION);
         String missingArn = "arn:aws:kinesis:us-east-1:000000000000:stream/missing";
-        when(kinesisService.describeStream("missing", REGION))
+        when(kinesisService.describeStreamByArn(missingArn, REGION))
                 .thenThrow(new AwsException("ResourceNotFoundException", "Stream missing not found", 400));
 
         AwsException ex = assertThrows(AwsException.class, () -> tableService.enableKinesisStreamingDestination(

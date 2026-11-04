@@ -275,6 +275,20 @@ class DynamoDbKinesisStreamSpecificationCfnProvisionerTest {
         verifyNoInteractions(tableService);
     }
 
+    /** A destination set through the API with a stream name does not let a template declare that name. */
+    @Test
+    void updateDeclaringAStreamArnTheTableAlreadyForwardsToStillChecksIt() throws Exception {
+        existingTable(table(active("events", MILLISECOND)));
+        StackResource r = existingResource();
+        JsonNode props = props("{\"TableName\":\"orders\",\"KinesisStreamSpecification\":{\"StreamArn\":\"events\"}}");
+        ProvisionContext ctx = updateCtx(UNDECLARED);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("InvalidRequest", e.getErrorCode());
+        verifyNoInteractions(tableService);
+    }
+
     @Test
     void updateThatRemovesTheBlockDisablesTheDestination() throws Exception {
         existingTable(table(active(STREAM_ARN, MILLISECOND)));

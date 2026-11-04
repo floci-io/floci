@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -23,6 +24,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Typed;
 import jakarta.inject.Inject;
@@ -66,24 +68,27 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
 
     private final DynamoDbLocalClient client;
     private final AccountAwareStorageBackend<Map<String, String>> tags;
+    private final KinesisService kinesisService;
     private final ObjectMapper objectMapper;
     private final ObjectMapper aws;
     private final Duration readiness;
 
     @Inject
-    public DynamoDbLocalBackend(EmulatorConfig config, StorageFactory storageFactory, ObjectMapper objectMapper) {
+    public DynamoDbLocalBackend(EmulatorConfig config, StorageFactory storageFactory, KinesisService kinesisService,
+                                ObjectMapper objectMapper) {
         this(new DynamoDbLocalClient(validatedEndpoint(config.services().dynamodb().localEndpoint()),
                         Duration.ofSeconds(config.services().dynamodb().localConnectTimeoutSeconds()),
                         Duration.ofSeconds(config.services().dynamodb().localRequestTimeoutSeconds()), objectMapper),
                 storageFactory.create("dynamodb", "dynamodb-local-tags.json",
                         new TypeReference<Map<String, Map<String, String>>>() {}),
-                objectMapper, READINESS_BUDGET);
+                kinesisService, objectMapper, READINESS_BUDGET);
     }
 
     DynamoDbLocalBackend(DynamoDbLocalClient client, AccountAwareStorageBackend<Map<String, String>> tags,
-                         ObjectMapper objectMapper, Duration readiness) {
+                         KinesisService kinesisService, ObjectMapper objectMapper, Duration readiness) {
         this.client = client;
         this.tags = tags;
+        this.kinesisService = kinesisService;
         this.objectMapper = objectMapper;
         this.aws = objectMapper.copy().setPropertyNamingStrategy(PropertyNamingStrategies.UPPER_CAMEL_CASE);
         this.readiness = readiness;
@@ -541,11 +546,16 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     /**
      * DynamoDB Local has no Kinesis forwarding. The three destination calls leave the table as it is
      * and log a warning, so a template declaring {@code KinesisStreamSpecification} deploys on this
-     * backend without forwarding.
+     * backend without forwarding. Enabling still needs the stream to exist, as on AWS.
      */
     @Override
     public TableDefinition enableKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
                                                              String precision) {
+        try {
+            RequestScopes.runAs(scope.accountId(), () -> kinesisService.describeStreamByArn(streamArn, scope.region()));
+        } catch (AwsException e) {
+            throw new AwsException("ResourceNotFoundException", "Kinesis stream not found: " + streamArn, 400);
+        }
         return ignoredKinesisDestinationCall(scope, tableName, streamArn);
     }
 

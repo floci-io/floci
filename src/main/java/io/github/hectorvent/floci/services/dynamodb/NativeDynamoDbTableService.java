@@ -529,9 +529,8 @@ public class NativeDynamoDbTableService {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         String resolvedTableName = table.getTableName();
 
-        String streamName = streamArn.substring(streamArn.lastIndexOf('/') + 1);
         try {
-            kinesisService.describeStream(streamName, region);
+            kinesisService.describeStreamByArn(streamArn, region);
         } catch (AwsException e) {
             throw new AwsException("ResourceNotFoundException",
                     "Kinesis stream not found: " + streamArn, 400);
