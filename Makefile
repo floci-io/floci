@@ -37,8 +37,10 @@
 # src/main/resources/aws/emr-serverless-shapes.json, the shapes the Step Functions emr-serverless
 # integrations recase against, is generated from botocore's EMR Serverless model by
 # tools/aws/regen_emr_serverless_shapes.py.
-# src/main/resources/aws/rest-routes.json, the routes read by runtime IAM authorization and
-# IamRestRouteCoverageTest, is generated from botocore's models by tools/aws/regen_rest_routes.py.
+# src/main/resources/aws/rest-routes.json, the REST routes IamActionRegistry checks a request no rule
+# maps by, and IamRestRouteCoverageTest checks the rules against, is generated from botocore's models
+# by tools/aws/regen_rest_routes.py. A model it adds also needs make iam-authorized-actions-sync, whose
+# check fails until the actions of no resource type list the model's scope.
 # src/main/resources/aws/iam-paginators.json, what each paged IAM list pages by, is generated
 # from botocore's IAM model and paginators by tools/aws/regen_iam_paginators.py.
 
@@ -478,7 +480,8 @@ IAM_NAMESPACES_PATHS := src/main/resources/aws/iam-service-namespaces.json \
 IAM_ACTION_RESOURCES_PATHS := src/main/resources/aws/iam-action-resources.json \
 	tools/aws/regen_iam_action_resources.py tools/aws/test_regen_iam_action_resources.py
 IAM_AUTHORIZED_ACTIONS_PATHS := src/main/resources/aws/iam-authorized-actions.json \
-	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py
+	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py \
+	src/main/resources/aws/rest-routes.json
 IAM_PASSED_ROLES_PATHS := src/main/resources/aws/iam-passed-roles.json $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_passed_roles.py
 IAM_PASSED_NETWORK_CONNECTORS_PATHS := src/main/resources/aws/iam-passed-network-connectors.json \
