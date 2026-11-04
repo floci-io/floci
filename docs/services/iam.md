@@ -1858,8 +1858,9 @@ Service, the one REST service the table reads, a member its path carries, the `D
 `/2021-01-01/opensearch/domain/{DomainName}`, is read from the route the request matches in the
 vendored routes below, and one its query carries, the `arn` of `ListTags`, from the query, as members of
 the body are: `DescribeDomain` is checked on `domain/<DomainName>` and `ListTags` on the ARN it gives.
-A member its path or query carries is read from there alone, as OpenSearch reads it: a
-`GetCompatibleVersions` naming a domain in its body and none in its query names no domain.
+A member its path or query carries is read from there alone, as OpenSearch reads it, never from a
+JSON body or a form: a `GetCompatibleVersions` naming a domain in its body and none in its query
+names no domain.
 The table reads both API versions' operations, `2015-01-01` and `2021-01-01`, the Service Reference
 listing the first's alone, each the action of its own name. A request of an operation whose resource
 the table does not find, an outbound connection's or an OpenSearch application's, is checked on `*`;
