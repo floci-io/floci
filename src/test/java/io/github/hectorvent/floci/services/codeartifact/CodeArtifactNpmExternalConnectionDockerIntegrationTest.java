@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.github.hectorvent.floci.testing.CodeArtifactRequests.putPackageOriginConfiguration;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -139,11 +140,7 @@ class CodeArtifactNpmExternalConnectionDockerIntegrationTest {
     @Test
     @Order(4)
     void upstreamBlockPreventsBothTheMergeAndTheRetention() {
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"restrictions\":{\"publish\":\"ALLOW\",\"upstream\":\"BLOCK\"}}")
-                .post("/v1/package?domain=" + DOMAIN + "&repository=" + BLOCKED_REPO + "&format=npm"
-                        + "&package=" + PACKAGE_NAME)
-                .then().statusCode(200);
+        putPackageOriginConfiguration(AUTH, DOMAIN, BLOCKED_REPO, "npm", null, PACKAGE_NAME, "ALLOW", "BLOCK");
 
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/npm/" + DOMAIN + "/" + BLOCKED_REPO + "/" + PACKAGE_NAME)

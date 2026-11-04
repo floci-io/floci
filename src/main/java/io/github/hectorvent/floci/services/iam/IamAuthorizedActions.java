@@ -6,7 +6,9 @@ import io.github.hectorvent.floci.core.common.VendoredResources;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -34,6 +36,10 @@ import java.util.Set;
  * authorizes under a name other than the IAM namespace matches nothing here, and its operations keep
  * their own names.
  *
+ * <p>The file also lists, for each credential scope whose REST routes {@code aws/rest-routes.json} reads, the
+ * actions the Service Reference gives no resource type ({@link #actsOnNoResourceType}): AWS authorizes them on
+ * {@code *}, which is what Floci checks a REST request on until it reads the resources in its path.
+ *
  * <p>A missing or malformed resource is a build defect, not a runtime condition, so loading fails
  * with {@link IllegalStateException} rather than degrading to an empty map, which would silently put
  * every operation back on its own name.
@@ -56,9 +62,16 @@ public final class IamAuthorizedActions {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /**
+     * The file: the action of each operation it names, keyed by {@code <namespace>:<Operation>}, and the actions of
+     * no resource type, as {@code <namespace>:<Action>} in lower case.
+     */
+    record Table(Map<String, String> actions, Set<String> withoutResourceTypes) {
+    }
+
     private static final class Holder {
-        static final Map<String, String> ACTIONS = VendoredResources.read(RESOURCE_NAME,
-                "IAM authorized action map", IamAuthorizedActions::parse);
+        static final Table TABLE = VendoredResources.read(RESOURCE_NAME, "IAM authorized action map",
+                IamAuthorizedActions::parse);
     }
 
     private IamAuthorizedActions() {
@@ -73,12 +86,22 @@ public final class IamAuthorizedActions {
         if (KEPT_FOR_ITEM_CHECKS.contains(own)) {
             return own;
         }
-        return Holder.ACTIONS.getOrDefault(own, own);
+        return Holder.TABLE.actions().getOrDefault(own, own);
     }
 
-    /** The file's entries, keyed by {@code <namespace>:<Operation>}. */
-    static Map<String, String> parse(InputStream in) throws IOException {
-        JsonNode namespaces = MAPPER.readTree(in).path("authorizedActions");
+    /**
+     * Whether AWS authorizes {@code action}, as {@code <namespace>:<Action>}, on no resource type: one the file lists
+     * for a credential scope whose REST routes are read, matched without regard to case, as IAM matches action
+     * names. An action of any other scope is not known here, so is not one.
+     */
+    public static boolean actsOnNoResourceType(String action) {
+        return action != null && Holder.TABLE.withoutResourceTypes().contains(action.toLowerCase(Locale.ROOT));
+    }
+
+    /** The file's entries. */
+    static Table parse(InputStream in) throws IOException {
+        JsonNode document = MAPPER.readTree(in);
+        JsonNode namespaces = document.path("authorizedActions");
         if (!namespaces.isObject() || namespaces.isEmpty()) {
             throw new IllegalStateException(RESOURCE_NAME + " carries no authorizedActions");
         }
@@ -99,6 +122,28 @@ public final class IamAuthorizedActions {
                 actions.put(namespace.getKey() + ":" + operation.getKey(), action);
             });
         });
-        return Map.copyOf(actions);
+        return new Table(Map.copyOf(actions), withoutResourceTypes(document.path("actionsWithoutResourceTypes")));
+    }
+
+    /** The actions of no resource type, each scope's a list of action names. */
+    private static Set<String> withoutResourceTypes(JsonNode scopes) {
+        if (!scopes.isObject()) {
+            throw new IllegalStateException(RESOURCE_NAME + " carries no actionsWithoutResourceTypes");
+        }
+        Set<String> actions = new HashSet<>();
+        scopes.properties().forEach(scope -> {
+            if (!scope.getValue().isArray()) {
+                throw new IllegalStateException(RESOURCE_NAME + " has actionsWithoutResourceTypes."
+                        + scope.getKey() + " as something other than a list");
+            }
+            scope.getValue().forEach(action -> {
+                if (!action.isTextual() || action.textValue().isBlank()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " lists " + action + " among "
+                            + scope.getKey() + "'s actions without resource types");
+                }
+                actions.add((scope.getKey() + ":" + action.textValue()).toLowerCase(Locale.ROOT));
+            });
+        });
+        return Set.copyOf(actions);
     }
 }

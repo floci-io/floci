@@ -93,8 +93,9 @@ public class ApiGatewayService implements ResourceProvider {
     private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
 
     /**
-     * The regional hosted zone a custom domain reports in a region with no published one. Only
-     * the two GovCloud regions have a sourced zone ({@link AwsRegionFacts#apiGatewayRegionalHostedZoneId}).
+     * The regional hosted zone a custom domain reports in a region the General Reference does not
+     * list ({@link AwsRegionFacts#apiGatewayRegionalHostedZoneId}). The id is invented and is no
+     * AWS zone: a Route 53 alias to it resolves to nothing on AWS.
      */
     private static final String UNSOURCED_REGIONAL_HOSTED_ZONE_ID = "Z2FDTNDATAQYL2"; // partition-literal: placeholder kept where no per-region source exists
 

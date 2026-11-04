@@ -317,9 +317,9 @@ class EmrServiceContainerStepsTest {
 
     @Test
     void aStepFlociDoesNotRunFailsWithoutRunning() {
-        EmrStep hive = sparkStep("query", "CONTINUE");
-        hive.setArgs(List.of("hive-script", "--run-hive-script", "--args", "-f", "s3://bucket/query.q"));
-        EmrCluster cluster = service.runJobFlow(cluster("hive", true, hive), REGION);
+        EmrStep pig = sparkStep("query", "CONTINUE");
+        pig.setArgs(List.of("pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/query.pig"));
+        EmrCluster cluster = service.runJobFlow(cluster("pig", true, pig), REGION);
 
         fixture.runStepThread();
 
@@ -545,7 +545,8 @@ class EmrServiceContainerStepsTest {
 
             new EmrService(new InMemoryStorageFactory(ACCOUNT), config, regionResolver,
                     new EmrEventPublisher(mock(EventBridgeService.class), new ObjectMapper(), regionResolver),
-                    sparkRunner, bootstrapRunner, clusterStorage, mock(IamService.class)).shutdown();
+                    sparkRunner, bootstrapRunner, clusterStorage, mock(EmrReleaseImages.class), mock(IamService.class))
+                    .shutdown();
 
             verify(sparkRunner, times(reconcile ? 1 : 0)).removeLeftoverDrivers("emr");
             verify(bootstrapRunner, times(reconcile ? 1 : 0)).removeImages(Set.of());
@@ -587,6 +588,8 @@ class EmrServiceContainerStepsTest {
         bootstrapping.runStepThread();
 
         assertEquals(IMAGE, runner.jobs.get(0).imageTemplate());
+        // A cluster without Hive runs in the release's EMR Serverless image, which none makes.
+        assertEquals(List.of(), bootstrapping.releaseImages.asked);
         assertEquals("COMPLETED", bootstrapping.service.describeStep(cluster.getId(), stepId).getState());
         assertEquals(List.of("STARTING", "PENDING report", "RUNNING report", "COMPLETED report", "WAITING"),
                 bootstrapping.states());
@@ -603,6 +606,126 @@ class EmrServiceContainerStepsTest {
 
         assertTrue(bootstrap.bootstraps.isEmpty());
         assertNull(runner.jobs.get(0).imageTemplate());
+    }
+
+    @Test
+    void aHiveStepOnAClusterWithHiveRunsHiveScriptsHiveOnTheClustersStorage() {
+        EmrStep query = hiveStep("report", "-f", "s3://bucket/queries/report.q", "-d", "INPUT=s3://bucket/in/");
+        EmrCluster requested = cluster("hive", true, query);
+        requested.setApplications("[{\"Name\": \"Hive\"}, {\"Name\": \"Spark\"}]");
+        requested.setLogUri("s3://logs/emr/");
+        requested.setConfigurations("""
+                [{"Classification": "hive-site", "Properties": {"hive.exec.reducers.max": "8"}},
+                 {"Classification": "hive-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"HADOOP_HEAPSIZE": "2048"}}]},
+                 {"Classification": "spark-defaults", "Properties": {"spark.executor.cores": "2"}},
+                 {"Classification": "spark-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"PYSPARK_PYTHON": "/usr/bin/python3.11"}}]}]""");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+
+        fixture.runStepThread();
+
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(SparkJobRunner.Engine.HIVE, job.engine());
+        assertEquals(stepId, job.runId());
+        // The release's EMR Serverless image with its EMR Serverless Hive image's Hive, made on the step's thread.
+        assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest")), fixture.releaseImages.asked);
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
+        assertNull(job.customImage());
+        assertEquals(List.of("hive-script", "--run-hive-script", "--args"), job.command());
+        assertEquals(List.of("--hiveconf", "hive.exec.reducers.max=8", "-f", "s3://bucket/queries/report.q", "-d",
+                "INPUT=s3://bucket/in/"), job.application());
+        // Its cluster's Spark settings are not Hive's.
+        assertEquals(Map.of(), job.sparkDefaults());
+        assertEquals(Map.of("HADOOP_HEAPSIZE", "2048"), job.environment());
+        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt"), job.storage());
+        assertEquals("s3://logs/emr/" + cluster.getId() + "/steps/" + stepId + "/", job.logFolder());
+        assertEquals(List.of(cluster.getId()), fixture.clusterStorage.created);
+        assertEquals("COMPLETED", service.describeStep(cluster.getId(), stepId).getState());
+    }
+
+    @Test
+    void aClusterWithHivesImageIsMadeOfTheImagesTheTemplatesNameAndItsSparkStepsRunInItToo() {
+        EmrService templated = fixture.withHiveImageTemplate("registry.internal/emr-serverless/hive/%s:20250425");
+        EmrCluster requested = cluster("templated", true, sparkStep("report", "CONTINUE"));
+        requested.setApplications("[{\"Name\": \"Hive\"}, {\"Name\": \"Spark\"}]");
+        templated.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                "registry.internal/emr-serverless/hive/emr-7.5.0:20250425")), fixture.releaseImages.asked);
+        assertEquals(SparkJobRunner.Engine.SPARK, runner.jobs.get(0).engine());
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, runner.jobs.get(0).imageTemplate());
+    }
+
+    @Test
+    void aBootstrappedClusterWithHiveBootstrapsInItsImageAndItsStepsRunInTheImageTheBootstrapLeft() {
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        EmrCluster requested = bootstrapped(cluster("bootstrapped-hive", true, hiveStep("report", "-e", "select 1")));
+        requested.setApplications("[{\"Name\": \"Hive\"}]");
+        bootstrapping.service.runJobFlow(requested, REGION);
+
+        bootstrapping.runStepThread();
+        bootstrapping.runStepThread();
+
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, bootstrap.bootstraps.get(0).imageTemplate());
+        assertEquals(SparkJobRunner.Engine.HIVE, runner.jobs.get(0).engine());
+        assertEquals(IMAGE, runner.jobs.get(0).imageTemplate());
+        // Made once, for the bootstrap: the image it left holds it.
+        assertEquals(1, bootstrapping.releaseImages.asked.size());
+    }
+
+    @Test
+    void aClusterWithHiveThatEndsBeforeItsBootstrapOrStepRunsMakesNoImage() {
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        EmrCluster unbooted = bootstrapped(cluster("ended-bootstrapping", true));
+        unbooted.setApplications("[{\"Name\": \"Hive\"}]");
+        String unbootedId = bootstrapping.service.runJobFlow(unbooted, REGION).getId();
+        EmrCluster unrun = cluster("ended-running", true, hiveStep("report", "-e", "select 1"));
+        unrun.setApplications("[{\"Name\": \"Hive\"}]");
+        String unrunId = service.runJobFlow(unrun, REGION).getId();
+
+        bootstrapping.service.terminateJobFlows(List.of(unbootedId));
+        service.terminateJobFlows(List.of(unrunId));
+        bootstrapping.runStepThread();
+        fixture.runStepThread();
+
+        // Each image would be pulled, several GB, and made: a thread that comes after the cluster's end makes none.
+        assertEquals(List.of(), bootstrapping.releaseImages.asked);
+        assertEquals(List.of(), fixture.releaseImages.asked);
+    }
+
+    @Test
+    void anImageWithHiveThatCannotBeMadeFailsTheStepOrEndsTheBootstrappingCluster() {
+        fixture.releaseImages.failure = new IllegalStateException("Could not pull the Hive image");
+        EmrCluster requested = cluster("unmade", true, hiveStep("report", "-e", "select 1"));
+        requested.setApplications("[{\"Name\": \"Hive\"}]");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        EmrStep failed = service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId());
+        assertEquals("FAILED", failed.getState());
+        assertEquals("The step could not start: Could not pull the Hive image", failed.getFailureMessage());
+        assertEquals(List.of(), runner.jobs);
+
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        bootstrapping.releaseImages.failure = new IllegalStateException("Could not pull the Hive image");
+        EmrCluster unbooted = bootstrapped(cluster("unbooted", true));
+        unbooted.setApplications("[{\"Name\": \"Hive\"}]");
+        String unbootedId = bootstrapping.service.runJobFlow(unbooted, REGION).getId();
+
+        bootstrapping.runStepThread();
+
+        EmrCluster ended = bootstrapping.service.describeCluster(unbootedId);
+        assertEquals("TERMINATED_WITH_ERRORS", ended.getState());
+        assertEquals(List.of("INTERNAL_ERROR",
+                "Floci could not run the bootstrap actions: Could not pull the Hive image"),
+                List.of(ended.getStateChangeReasonCode(), ended.getStateChangeMessage()));
+        assertEquals(List.of(), bootstrap.bootstraps);
     }
 
     @Test
@@ -789,7 +912,7 @@ class EmrServiceContainerStepsTest {
     @Test
     void aClusterWhoseStepsNoContainerRanHasNoStorage() {
         EmrStep query = sparkStep("query", "CONTINUE");
-        query.setArgs(new ArrayList<>(List.of("hive-script", "--run-hive-script", "--args", "-f", "s3://bucket/q.q")));
+        query.setArgs(new ArrayList<>(List.of("pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/q.pig")));
         EmrCluster cluster = service.runJobFlow(cluster("unrun", true, query), REGION);
         fixture.runStepThread();
 
@@ -863,6 +986,18 @@ class EmrServiceContainerStepsTest {
     }
 
     // A spark-submit step through command-runner.jar, written for a cluster with YARN.
+    // The AWS CLI's Hive step: command-runner.jar running hive-script with the step's arguments after its --args.
+    private static EmrStep hiveStep(String name, String... args) {
+        EmrStep step = new EmrStep();
+        step.setName(name);
+        step.setActionOnFailure("CONTINUE");
+        step.setJar("command-runner.jar");
+        List<String> command = new ArrayList<>(List.of("hive-script", "--run-hive-script", "--args"));
+        command.addAll(List.of(args));
+        step.setArgs(command);
+        return step;
+    }
+
     private static EmrStep sparkStep(String name, String actionOnFailure) {
         EmrStep step = new EmrStep();
         step.setName(name);

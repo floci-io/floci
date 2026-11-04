@@ -1,6 +1,6 @@
 {
   "source": "https://servicereference.us-east-1.amazonaws.com/v1/dynamodb/dynamodb.json",
-  "botocore": "botocore 1.43.113 (installed package)",
+  "botocore": "botocore 1.43.118 (installed package)",
   "actions": {
     "dynamodb:AssociateTableReplica": [
       "aws:ResourceTag/${TagKey}"

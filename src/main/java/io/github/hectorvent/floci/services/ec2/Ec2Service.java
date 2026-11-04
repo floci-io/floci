@@ -9664,26 +9664,43 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion) {
+        return modifyLaunchTemplate(region, id, name, defaultVersion, false);
+    }
+
+    public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion, boolean dryRun) {
+        boolean hasId = id != null && !id.isBlank();
+        boolean hasName = name != null && !name.isBlank();
+        if (hasId == hasName) {
+            throw new AwsException(hasId ? "InvalidParameterCombination" : "MissingParameter",
+                    "Specify either LaunchTemplateId or LaunchTemplateName, but not both.", 400);
+        }
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
-        ensureLaunchTemplateVersions(launchTemplate);
-        if (defaultVersion != null && !defaultVersion.isBlank()) {
-            String resolved = switch (defaultVersion) {
-                case "$Latest" -> launchTemplate.getLatestVersionNumber();
-                case "$Default" -> launchTemplate.getDefaultVersionNumber();
-                default -> defaultVersion;
-            };
-            int requested = parseLaunchTemplateVersion(resolved);
-            int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
-            if (requested < 1 || requested > latest
-                    || !launchTemplate.getVersions().containsKey(String.valueOf(requested))) {
-                throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
-                        "The specified launch template version does not exist.", 400);
+        synchronized (launchTemplate) {
+            ensureLaunchTemplateVersions(launchTemplate);
+            String nextDefault = launchTemplate.getDefaultVersionNumber();
+            if (defaultVersion != null && !defaultVersion.isBlank()) {
+                String resolved = switch (defaultVersion) {
+                    case "$Latest" -> launchTemplate.getLatestVersionNumber();
+                    case "$Default" -> launchTemplate.getDefaultVersionNumber();
+                    default -> defaultVersion;
+                };
+                int requested = parseLaunchTemplateVersion(resolved);
+                int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
+                if (requested < 1 || requested > latest
+                        || !launchTemplate.getVersions().containsKey(String.valueOf(requested))) {
+                    throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
+                            "The specified launch template version does not exist.", 400);
+                }
+                nextDefault = String.valueOf(requested);
             }
-            launchTemplate.setDefaultVersionNumber(String.valueOf(requested));
+            if (dryRun) {
+                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            }
+            launchTemplate.setDefaultVersionNumber(nextDefault);
+            launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
+            return launchTemplate;
         }
-        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
-        return launchTemplate;
     }
 
     /**
@@ -13176,6 +13193,71 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return associateAddress(region, allocationId, instanceId, null);
     }
 
+    public Address associateAddress(String region, String allocationId, String instanceId,
+                                   String networkInterfaceId, String privateIpAddress) {
+        if (!isSet(networkInterfaceId)) {
+            if (!isSet(instanceId)) {
+                throw new AwsException("MissingParameter",
+                        "Specify either InstanceId or NetworkInterfaceId.", 400);
+            }
+            return associateAddress(region, allocationId, instanceId, privateIpAddress);
+        }
+        if (isSet(instanceId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Specify either InstanceId or NetworkInterfaceId, but not both.", 400);
+        }
+        ensureDefaultResources(region);
+        synchronized (privateIpAllocationLock) {
+            NetworkInterface networkInterface = networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
+            if (networkInterface == null) {
+                networkInterface = describeNetworkInterfaces(region, List.of(networkInterfaceId), Map.of())
+                        .networkInterfaces().getFirst();
+            }
+            networkInterface = releaseIfHostIsGone(region, networkInterface);
+            NetworkInterfaceAttachment attachment = networkInterface.getAttachment();
+            if (attachment != null) {
+                if (attachment.getDeviceIndex() != 0) {
+                    throw new AwsException("Unsupported",
+                            "Elastic IP association to a non-primary attached interface is not supported.", 400);
+                }
+                return associateAddress(region, allocationId, attachment.getInstanceId(), privateIpAddress);
+            }
+            if (!"available".equals(networkInterface.getStatus())) {
+                throw new AwsException("Unsupported",
+                        "Elastic IP association to a service-managed interface is not supported.", 400);
+            }
+            String selectedPrivateIp = isSet(privateIpAddress)
+                    ? privateIpAddress : networkInterface.getPrivateIpAddress();
+            if (networkInterface.getPrivateIpAddresses().stream()
+                    .noneMatch(ip -> selectedPrivateIp.equals(ip.getPrivateIpAddress()))) {
+                throw new AwsException("InvalidParameterValue",
+                        "The private IP address is not assigned to the selected network interface.", 400);
+            }
+            Address address = getRequiredAddress(region, allocationId);
+            if (isHeldByNatGateway(region, allocationId)) {
+                throw new AwsException("Resource.AlreadyAssociated",
+                        "The Elastic IP address is already associated with a NAT gateway.", 400);
+            }
+            if (address.getAssociationId() != null) {
+                disassociateAddress(region, address.getAssociationId());
+            }
+            for (Address previous : addresses.scan(k -> k.startsWith(region + "::"))) {
+                if (previous.getAssociationId() != null
+                        && networkInterfaceId.equals(previous.getNetworkInterfaceId())
+                        && selectedPrivateIp.equals(previous.getPrivateIpAddress())) {
+                    disassociateAddress(region, previous.getAssociationId());
+                }
+            }
+            address.setInstanceId(null);
+            address.setNetworkInterfaceId(networkInterfaceId);
+            address.setPrivateIpAddress(selectedPrivateIp);
+            address.setAssociationId("eipassoc-" + randomHex(17));
+            updateStoredAddressAssociation(address);
+            addresses.put(key(region, allocationId), address);
+            return address;
+        }
+    }
+
     /**
      * Associates the Elastic IP with one private address of the instance.
      *
@@ -15165,13 +15247,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * behind, so the status is what says the interface is spoken for.
      */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
-        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
-        if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
-            throw new AwsException("InvalidParameterValue",
-                    "Network interface '" + networkInterfaceId + "' is currently in use", 400);
+        synchronized (privateIpAllocationLock) {
+            NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+            if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
+                throw new AwsException("InvalidParameterValue",
+                        "Network interface '" + networkInterfaceId + "' is currently in use", 400);
+            }
+            releaseInterfaceAddresses(region, networkInterfaceId, true);
+            networkInterfaces.delete(key(region, networkInterfaceId));
         }
-        releaseInterfaceAddresses(region, networkInterfaceId, true);
-        networkInterfaces.delete(key(region, networkInterfaceId));
     }
 
     /**

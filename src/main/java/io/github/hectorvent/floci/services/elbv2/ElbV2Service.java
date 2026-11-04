@@ -951,8 +951,7 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
         if (ruleArns != null && !ruleArns.isEmpty()) {
             return ruleArns.stream()
-                    .map(regionRules::get)
-                    .filter(Objects::nonNull)
+                    .map(arn -> requireRule(region, arn))
                     .collect(Collectors.toList());
         }
         if (listenerArn != null && !listenerArn.isEmpty()) {

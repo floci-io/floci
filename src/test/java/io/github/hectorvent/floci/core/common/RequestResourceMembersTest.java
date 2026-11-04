@@ -7,6 +7,9 @@ import io.github.hectorvent.floci.core.common.RequestResourceMembers.Member;
 import io.github.hectorvent.floci.core.common.RequestResourceMembers.Resource;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
@@ -279,7 +282,8 @@ class RequestResourceMembersTest {
      * account member names when it has one, with those sharing its explicit member selector, those the operation
      * always names, such as a create's new resource (Cloud Map's {@code CreateService}), and those filled from the ARN
      * it is read from (a permission set made in an instance); one named through another resource of its service's
-     * own, the ARN its service gives for that.
+     * own, the ARN its service gives for that. A member the table locates in a REST request's path or query is given
+     * there, a body giving it naming nothing, and such a request is not checked as a form.
      */
     @TestFactory
     Stream<DynamicTest> everyResourceOfTheTableIsReadFromAJsonBodyAndAForm() {
@@ -308,8 +312,20 @@ class RequestResourceMembersTest {
                             given.put(new Member(member, false), allowed.getFirst());
                         }
                     });
+                    // A member the table locates in a REST request's path or query goes there, where the reader takes it
+                    // from; a REST request has no form, so the form is checked for an operation locating none.
+                    Map<String, String> located = table.located().getOrDefault(operation.getKey(), Map.of());
+                    Map<String, String> labels = new LinkedHashMap<>();
+                    MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
                     given.forEach((member, value) -> {
-                        put(body, member, value);
+                        String where = member.field() == null && !member.list() ? located.get(member.name()) : null;
+                        if (where == null) {
+                            put(body, member, value);
+                        } else if (where.startsWith("{")) {
+                            labels.put(where.substring(1, where.length() - 1), value);
+                        } else {
+                            query.add(where.substring(1), value);
+                        }
                         form.append('&').append(parameter(member)).append('=').append(encoded(value));
                     });
                     List<String> named = operation.getValue().stream()
@@ -323,12 +339,17 @@ class RequestResourceMembersTest {
                                     "000000000000"))
                             .distinct().toList();
                     StoredResourceArns stored = runningOn(namespace, arn);
-                    assertEquals(named, RequestResources.of(operation.getKey(),
-                            servedBy(json(body.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000",
-                            stored), body.toString());
-                    assertEquals(named, RequestResources.of(operation.getKey(),
-                            servedBy(form(form.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000",
-                            stored), form.toString());
+                    ContainerRequestContext request = servedBy(json(body.toString()), resource.endpoint());
+                    UriInfo uriInfo = mock(UriInfo.class);
+                    when(uriInfo.getQueryParameters()).thenReturn(query);
+                    when(request.getUriInfo()).thenReturn(uriInfo);
+                    assertEquals(named, RequestResources.of(operation.getKey(), request, "aws", "us-east-1",
+                            "000000000000", stored, labels), body + " " + labels + " " + query);
+                    if (given.keySet().stream().noneMatch(member -> located.containsKey(member.name()))) {
+                        assertEquals(named, RequestResources.of(operation.getKey(),
+                                servedBy(form(form.toString()), resource.endpoint()), "aws", "us-east-1",
+                                "000000000000", stored), form.toString());
+                    }
                 })));
     }
 

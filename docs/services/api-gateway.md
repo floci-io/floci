@@ -223,7 +223,11 @@ A domain created with `CreateDomainName` is `AVAILABLE` at once. Its `regionalDo
 `<domain>.regional.local`, and a request whose `Host` header is either that name or the domain
 itself is routed through the domain's base path mappings to the mapped REST API stage. An
 `EDGE` domain also reports a `distributionDomainName` under `cloudfront.net` and the fixed
-CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. Moving a
+CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. The
+`regionalHostedZoneId` is the zone the [General Reference](https://docs.aws.amazon.com/general/latest/gr/apigateway.html)
+publishes for the domain's region, or the placeholder `Z2FDTNDATAQYL2`, which is no AWS zone, in a
+region the table does not list. The id is set at creation, so a stored domain keeps the one it
+was created with. Moving a
 domain between the two types with `UpdateDomainName` creates or drops the distribution. A
 domain created with no endpoint type is `EDGE`, as on AWS; it is `REGIONAL` when the request
 carries a regional certificate (`regionalCertificateArn` or `regionalCertificateName`) or the

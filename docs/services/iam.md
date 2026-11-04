@@ -159,11 +159,14 @@ violation at once, the map's own length ahead of its entries. An entry's values 
 member being present rather than by what it holds, the list's members publishing no constraint of
 their own, so a replacement value sent empty is a value.
 
-The message for a broken entry names it by its key, as `replacementValues.Department.values`, which
-is how IAM reports a bad value in its account properties map. No recorded AWS violation on a map
-member is on hand to confirm that spelling, so it is Floci's reading of it: a capture would either
-keep it or replace it with the nested form, where the path is the map itself and the constraint
-reads "Map value must satisfy constraint".
+The message for a broken entry names it by its key and then the field under `.member`, as
+`replacementValues.Department.member.values`. The key half is how IAM reports a bad value in its
+account properties map; the `.member` half comes from an AWS-validated recording of the same
+protocol, SNS answering a missing `DataType` inside its `MessageAttributes` map as `Value null at
+'messageAttributes.attr1.member.dataType'`, and inside a list's member as
+`publishBatchRequestEntries.1.member.messageAttributes.attr1.member.dataType`. So a map of
+structures is named the way a list of structures is, the entry's key standing where a list's index
+stands.
 
 ### Policies
 
@@ -222,15 +225,24 @@ breaking a minimum of 1. A structure member arrives as `TaskPolicyArn.Arn` and i
 A map is read the same way, from the entries the protocol numbers under its name:
 `ReplacementValues.entry.1.key` and `.entry.1.value`, which is the form `AcquireRole`'s own sample
 publishes, or the bare `ReplacementValues.1.key`. An entry's value is named under the key that
-entry carries, `replacementValues.Department.values` and `properties.Team/Owner`, which is how both
-maps this service answered by hand already named one and how the JSON protocols name a map's value
-here. An entry is read off its key, so one numbered with a value and no key is not an entry the map
-could hold: it is neither counted nor answered. The count is held to the map's own bounds with the
-value left out of the message, and a map the request names nowhere is how an absent map arrives, so
-a required one reads as null. A key outside its shape's rules is answered with the whole set that
-shape declares, nested under the map's own name, `Value at 'properties' failed to satisfy
-constraint: Map keys must satisfy constraint: [...]`, which is the form every map key recorded here
-carries and what this service already answered for an account property key.
+entry carries, `replacementValues.Department.member.values` and `properties.Team/Owner`, which is
+how both maps this service answered by hand already named one and how the JSON protocols name a
+map's value here. A value that is a structure carries `.member` between the key and the field, as
+AWS writes it on this protocol and as a list of structures already reads here. A scalar value is
+named at the key itself: nothing recorded covers one on this protocol, and the only recording of a
+scalar-valued map anywhere, Lambda's `routingConfig.additionalVersionWeights` on REST-JSON,
+answers the map rather than the entry, `Value '{2=-1.0}' at
+'routingConfig.additionalVersionWeights' failed to satisfy constraint: Map value must satisfy
+constraint: [...]`. That is a different protocol and a different service, so
+`properties.Team/Owner` keeps the answer this service already gave, and a recording of a
+scalar-valued map on the Query protocol is what would move it. An entry is read off its key, so
+one numbered with a value and no key is not an entry the map could hold: it is neither counted nor
+answered. The count is held to the map's own bounds with the value left out of the message, and a
+map the request names nowhere is how an absent map arrives, so a required one reads as null. A key
+outside its shape's rules is answered with the whole set that shape declares, nested under the
+map's own name, `Value at 'properties' failed to satisfy constraint: Map keys must satisfy
+constraint: [...]`, which is the form every map key recorded here carries and what this service
+already answered for an account property key.
 
 The two maps answered by hand are answered from the model now, and `AcquireRole`'s answers do not
 move at all: its count of 30, each entry's required `Values` and the 20 values one entry admits read
@@ -1664,7 +1676,7 @@ Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kine
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
 Timestream for InfluxDB, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
-Amazon Rekognition and IAM Identity Center they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Amazon Rekognition, IAM Identity Center and Amazon OpenSearch Service they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1720,7 +1732,9 @@ gives. IAM Identity Center's `CreateAccountAssignment`, `DeleteAccountAssignment
 `ProvisionPermissionSet` are checked on the account their `TargetId` names, `account/<id>`, beside the
 instance and the permission set, and a `ProvisionPermissionSet` for `ALL_PROVISIONED_ACCOUNTS` on each
 account the permission set is provisioned to. AWS does not document which accounts such a request is
-authorized on, so checking each one it provisions is Floci's reading. A permission set, an application or a trusted token issuer
+authorized on, so checking each one it provisions is Floci's reading, and it provisions to the accounts it was
+checked on: one another request provisions the permission set to while it runs is left as that request
+left it. A permission set, an application or a trusted token issuer
 a create makes has the id of the instance its `InstanceArn` names, `permissionSet/<instance id>/*`.
 Cost Explorer's `GetAnomalyMonitors` and `GetAnomalySubscriptions` are checked on each ARN their
 `MonitorArnList` or `SubscriptionArnList` gives, and Timestream for InfluxDB's `RebootDbCluster` on the
@@ -1839,8 +1853,38 @@ it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
 `resourceArn` query parameter on the other bare routes.
 
-A route no rule maps is not checked, as an unsigned REST request is not; the other REST services'
-routes are not mapped yet.
+A REST request names its resources in its path and its query as well as its body. For OpenSearch
+Service, the one REST service the table reads, a member its path carries, the `DomainName` of
+`/2021-01-01/opensearch/domain/{DomainName}`, is read from the route the request matches in the
+vendored routes below, and one its query carries, the `arn` of `ListTags`, from the query, as members of
+the body are: `DescribeDomain` is checked on `domain/<DomainName>` and `ListTags` on the ARN it gives.
+A member its path or query carries is read from there alone, as OpenSearch reads it: a
+`GetCompatibleVersions` naming a domain in its body and none in its query names no domain.
+The table reads both API versions' operations, `2015-01-01` and `2021-01-01`, the Service Reference
+listing the first's alone, each the action of its own name. A request of an operation whose resource
+the table does not find, an outbound connection's or an OpenSearch application's, is checked on `*`;
+Floci serves neither.
+
+A route no rule maps is the operation whose route it matches in botocore's model of its service,
+vendored in `src/main/resources/aws/rest-routes.json` (`make aws-data-sync` regenerates it): of the
+routes it matches, the most specific, segment by segment from the left a literal before a label and a
+label before a greedy one, then the route naming more of the query. It is checked as that operation's
+action, the way a request naming its operation is, when Floci checks it on the resources AWS does:
+those its request names, which Floci builds for the service itself or reads from the request, or none,
+when the Service Reference gives the action no resource type, as AWS authorizes such an action on `*`.
+The actions of no resource type are vendored in `src/main/resources/aws/iam-authorized-actions.json`
+for each scope whose routes are read (`make iam-authorized-actions-sync` regenerates them). So
+OpenSearch Service's `ListDomainNames`, `ListVersions` and VPC endpoint operations, in both API
+versions, and Access Analyzer's `ListAnalyzers` and `ValidatePolicy` are checked by their routes, and
+so are OpenSearch Service's domain operations, the table of request resources reading the domain they
+name. A route whose action AWS checks on a resource Floci neither builds nor reads, Access Analyzer's
+analyzer operations among them, is not checked: checked on `*`, a grant scoped to the analyzer would
+be refused. The routes of
+Lambda, EKS, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL are all mapped by their rules,
+so none is checked differently. S3 and API Gateway are routed by their rules alone: S3 tells apart the
+operations of one route by their query and headers, and API Gateway is checked by HTTP method. A route
+matching nothing is not checked, as an unsigned REST request is not; the other REST services' routes
+are not vendored yet.
 
 An S3 `CreateBucket` is checked as `s3:CreateBucket`, and also needs one action for each header
 that configures the new bucket, as the CreateBucket API reference lists them:

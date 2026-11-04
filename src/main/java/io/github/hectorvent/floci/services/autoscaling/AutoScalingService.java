@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
@@ -422,7 +423,7 @@ public class AutoScalingService implements PassedRoleLookup {
         asg.setMaxSize(maxSize);
         asg.setDesiredCapacity(desiredCapacity);
         asg.setDefaultCooldown(defaultCooldown > 0 ? defaultCooldown : 300);
-        asg.setAvailabilityZones(availabilityZones != null ? new ArrayList<>(availabilityZones) : new ArrayList<>());
+        asg.setAvailabilityZones(new ArrayList<>(resolveAvailabilityZones(region, availabilityZones, subnetIds)));
         asg.setSubnetIds(subnetIds != null ? new ArrayList<>(subnetIds) : new ArrayList<>());
         asg.setTargetGroupARNs(targetGroupArns != null ? new ArrayList<>(targetGroupArns) : new ArrayList<>());
         asg.setLoadBalancerNames(lbNames != null ? new ArrayList<>(lbNames) : new ArrayList<>());
@@ -479,6 +480,10 @@ public class AutoScalingService implements PassedRoleLookup {
             validateDesiredCapacityType(
                     effectiveDesiredCapacityType(asg, optionalFields),
                     effectiveIdentity.mixedInstancesPolicy());
+            List<String> updatedZones = availabilityZones;
+            if (subnetIds != null && !subnetIds.isEmpty()) {
+                updatedZones = resolveAvailabilityZones(region, availabilityZones, subnetIds);
+            }
             if (launchConfigName != null) {
                 asg.setLaunchConfigurationName(launchConfigName);
                 asg.setLaunchTemplateId(null);
@@ -504,7 +509,7 @@ public class AutoScalingService implements PassedRoleLookup {
             if (maxSize != null) { asg.setMaxSize(maxSize); }
             if (desiredCapacity != null) { asg.setDesiredCapacity(desiredCapacity); }
             if (defaultCooldown != null) { asg.setDefaultCooldown(defaultCooldown); }
-            if (availabilityZones != null) { asg.setAvailabilityZones(new ArrayList<>(availabilityZones)); }
+            if (updatedZones != null) { asg.setAvailabilityZones(new ArrayList<>(updatedZones)); }
             if (subnetIds != null) { asg.setSubnetIds(new ArrayList<>(subnetIds)); }
             if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
             if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
@@ -514,6 +519,20 @@ public class AutoScalingService implements PassedRoleLookup {
             }
             groups.put(key, asg);
         }
+    }
+
+    private List<String> resolveAvailabilityZones(String region, List<String> availabilityZones, List<String> subnetIds) {
+        if ((availabilityZones == null || availabilityZones.isEmpty()) && subnetIds != null && !subnetIds.isEmpty()) {
+            List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, null);
+            Set<String> foundIds = subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toSet());
+            for (String subnetId : subnetIds) {
+                if (!foundIds.contains(subnetId)) {
+                    throw new AwsException("ValidationError", "The subnet ID '" + subnetId + "' does not exist", 400);
+                }
+            }
+            return subnets.stream().map(Subnet::getAvailabilityZone).distinct().toList();
+        }
+        return availabilityZones != null ? availabilityZones : List.of();
     }
 
     /**

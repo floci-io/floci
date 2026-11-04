@@ -615,7 +615,87 @@ public class NativeDynamoDbJsonHandler {
         throwValidationErrors(validationErrors);
     }
 
+    // DynamoDB's newer validator gives up on an attribute value with a member it does not know.
+    // It leaves the other unknown members out when it measures how deep a request nests.
+    private static boolean readByOlderValidator(JsonNode request, String target) {
+        if (!request.hasNonNull(target)) {
+            return true;
+        }
+        List<JsonNode> values = new ArrayList<>();
+        request.path(target).forEach(values::add);
+        request.path("ExpressionAttributeValues").forEach(values::add);
+        int deepest = Math.max(jsonDepth(request.path(target)), jsonDepth(request.path("ExpressionAttributeValues")));
+        for (JsonNode condition : request.path("Expected")) {
+            values.add(condition.path("Value"));
+            condition.path("AttributeValueList").forEach(values::add);
+            int known = Math.max(jsonDepth(condition.path("Value")), jsonDepth(condition.path("AttributeValueList")));
+            // Expected and the condition hold these members.
+            deepest = Math.max(deepest, known + 2);
+        }
+        // The request holds these members.
+        return deepest + 1 >= OLDER_VALIDATOR_DEPTH
+                || values.stream().anyMatch(DynamoDbAttributeValueValidator::hasUnknownMember);
+    }
+
+    private static final List<String> OLDER_RETURN_VALUES =
+            List.of("ALL_NEW", "UPDATED_OLD", "ALL_OLD", "NONE", "UPDATED_NEW");
+    private static final List<String> OLDER_CONDITIONAL_OPERATORS = List.of("OR", "AND");
+
+    // The older validator lists the members in this order and leaves out a missing table name.
+    private void requireValidOlderItemWrite(JsonNode request, String target) {
+        String tableName = textOrNull(request, "TableName");
+        String returnValues = textOrNull(request, "ReturnValues");
+        List<String> validationErrors = new ArrayList<>();
+        if (returnValues != null && !OLDER_RETURN_VALUES.contains(returnValues)) {
+            validationErrors.add(SmithyValidationErrors.notInEnum(returnValues, "returnValues", OLDER_RETURN_VALUES));
+        }
+        String conditionalOperator = textOrNull(request, "ConditionalOperator");
+        if (conditionalOperator != null && !OLDER_CONDITIONAL_OPERATORS.contains(conditionalOperator)) {
+            validationErrors.add(SmithyValidationErrors.notInEnum(conditionalOperator, "conditionalOperator",
+                    OLDER_CONDITIONAL_OPERATORS));
+        }
+        if ("Item".equals(target) && !request.hasNonNull(target)) {
+            validationErrors.add(SmithyValidationErrors.notNull("item"));
+        }
+        addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
+        addReturnConsumedCapacityError(request, validationErrors);
+        addIfPresent(validationErrors, returnItemCollectionMetricsError(request));
+        if ("Key".equals(target) && !request.hasNonNull(target)) {
+            validationErrors.add(SmithyValidationErrors.notNull("key"));
+        }
+        if ("".equals(tableName)) {
+            validationErrors.add(SmithyValidationErrors.lengthTooShort("tableName", "", 1));
+        }
+        throwValidationErrors(validationErrors);
+
+        if (AwsArnUtils.looksLikeArn(tableName)) {
+            DynamoDbTableNames.resolve(tableName);
+        } else if (tableName != null) {
+            throwValidationErrors(DynamoDbTableNames.nameViolations(tableName));
+        }
+        if (returnValues != null && !VALID_RETURN_VALUES_ITEM_WRITE.contains(returnValues)) {
+            throw new AwsException("ValidationException", "ReturnValues can only be ALL_OLD or NONE", 400);
+        }
+        rejectMixedParameters(request, List.of("Expected"), List.of("ConditionExpression"));
+        // Only the ExpressionAttributeValues message names the missing expression.
+        if (!request.has("ConditionExpression")) {
+            requireAbsentWithoutExpression(request.get("ExpressionAttributeNames"), "ExpressionAttributeNames");
+        }
+        rejectExprAttrsWithoutExpression(null, request.get("ExpressionAttributeValues"),
+                request.has("ConditionExpression"), "ConditionExpression is null");
+        JsonNode values = request.get(target);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(values, false);
+        requireReadableValues(values, "");
+        DynamoDbAttributeValueValidator.requireNonEmptyNames(values);
+        DynamoDbAttributeValueValidator.requireNonEmptyMemberNames(values);
+        requireNamedExpressionValues(request.get("ExpressionAttributeValues"));
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(request.get("Expected")), false);
+    }
+
     private Response handlePutItem(JsonNode request, String region) {
+        if (readByOlderValidator(request, "Item")) {
+            requireValidOlderItemWrite(request, "Item");
+        }
         String tableName = request.has("TableName") ? request.path("TableName").asText() : null;
         requireValidItemWriteMembers(request, tableName);
         JsonNode item = request.path("Item");
@@ -629,34 +709,12 @@ public class NativeDynamoDbJsonHandler {
                 ? request.get("ExpressionAttributeValues") : null;
 
         requireReadableValues(item, VALIDATION_ENVELOPE);
-        DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
 
         JsonNode expected = request.has("Expected") ? request.get("Expected") : null;
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(expected));
         String conditionalOperator = request.has("ConditionalOperator")
                 ? request.get("ConditionalOperator").asText() : "AND";
-
-        if (conditionExpression != null && expected != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
-        }
-        requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
-
-        // EAN/EAV with no expression to reference them: AWS reports "can only be specified
-        // when using expressions", not the "unused in expressions" wording (#2893).
-        rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
-                conditionExpression != null, "ConditionExpression is null");
-
-        ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
-        requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
-        ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
-
-        // Reject ExpressionAttributeNames/Values entries not referenced by ConditionExpression (AWS parity, #2893)
-        checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
-        checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
+        requireValidConditionMembers(request, conditionExpression, exprAttrNames, exprAttrValues);
 
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, item, false, expected,
                 conditionalOperator, returnValuesOnConditionCheckFailure);
@@ -670,6 +728,50 @@ public class NativeDynamoDbJsonHandler {
         addItemCollectionMetrics(response, request, tableName, item, region);
         addWriteConsumedCapacity(response, request, tableName, region, previousItem, item);
         return Response.ok(response).build();
+    }
+
+    // DynamoDB checks these after the item or key in this order, each inside the validation envelope.
+    private void requireValidConditionMembers(JsonNode request, String conditionExpression, JsonNode exprAttrNames,
+            JsonNode exprAttrValues) {
+        try {
+            rejectMixedParameters(request, List.of("Expected", "ConditionalOperator"), List.of("ConditionExpression"));
+            requireNonEmptyMap(exprAttrNames, "ExpressionAttributeNames");
+            requireNonEmptyMap(exprAttrValues, "ExpressionAttributeValues");
+            DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues, false);
+            requireReadableValues(exprAttrValues, "");
+            if (conditionExpression == null) {
+                requireAbsentWithoutExpression(exprAttrNames, "ExpressionAttributeNames");
+                requireAbsentWithoutExpression(exprAttrValues, "ExpressionAttributeValues");
+            }
+            requireNonEmptyExpression(conditionExpression, "ConditionExpression");
+            DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(request.get("Expected")), false);
+            DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
+            ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
+            requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+            ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
+                    exprAttrNames, exprAttrValues);
+            checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
+            checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
+        } catch (AwsException e) {
+            // The size check and a BETWEEN error add the envelope themselves.
+            if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(VALIDATION_ENVELOPE)) {
+                throw e;
+            }
+            throw SmithyValidationErrors.validationException(e.getMessage());
+        }
+    }
+
+    private static void requireNonEmptyMap(JsonNode map, String member) {
+        if (map != null && map.isObject() && map.isEmpty()) {
+            throw new AwsException("ValidationException", member + " must not be empty", 400);
+        }
+    }
+
+    private static void requireAbsentWithoutExpression(JsonNode map, String member) {
+        if (map != null) {
+            throw new AwsException("ValidationException",
+                    member + " can only be specified when using expressions", 400);
+        }
     }
 
     private Response handleGetItem(JsonNode request, String region) {
@@ -722,6 +824,9 @@ public class NativeDynamoDbJsonHandler {
             Set.of("NONE", "ALL_OLD", "ALL_NEW", "UPDATED_OLD", "UPDATED_NEW");
 
     private Response handleDeleteItem(JsonNode request, String region) {
+        if (readByOlderValidator(request, "Key")) {
+            requireValidOlderItemWrite(request, "Key");
+        }
         String tableName = request.path("TableName").asText();
         requireValidItemWriteMembers(request, tableName);
         JsonNode key = request.path("Key");
@@ -735,30 +840,9 @@ public class NativeDynamoDbJsonHandler {
                 ? request.get("ExpressionAttributeValues") : null;
 
         requireReadableValues(key, VALIDATION_ENVELOPE);
-        DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(key);
         JsonNode expectedDel = request.has("Expected") ? request.get("Expected") : null;
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(expectedDel));
-
-        if (conditionExpression != null && expectedDel != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
-        }
-        requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
-
-        // EAN/EAV with no expression to reference them: AWS reports "can only be specified
-        // when using expressions", not the "unused in expressions" wording (#2893).
-        rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
-                conditionExpression != null, "ConditionExpression is null");
-
-        ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
-        requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
-        ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
-
-        // Reject ExpressionAttributeNames/Values entries not referenced by ConditionExpression (AWS parity, #2893)
-        checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
-        checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
+        requireValidConditionMembers(request, conditionExpression, exprAttrNames, exprAttrValues);
 
         String condOpDel = request.has("ConditionalOperator")
                 ? request.get("ConditionalOperator").asText() : "AND";
@@ -822,7 +906,7 @@ public class NativeDynamoDbJsonHandler {
         }
         requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
 
-        // EAN/EAV with no expression to reference them, mirroring the PutItem guard.
+        // EAN/EAV with no expression to reference them.
         rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
                 updateExpression != null || conditionExpression != null,
                 "UpdateExpression is null, ConditionExpression is null");
@@ -3346,7 +3430,6 @@ public class NativeDynamoDbJsonHandler {
      * expressions: &lt;nullExpressionParams&gt;" rather than the "unused in expressions" wording used
      * once an alias is merely unreferenced (#2893). {@code nullExpressionParams} must spell the absent
      * expression parameter(s) exactly as AWS reports them for the operation, e.g. "ConditionExpression is null".
-     * EAV is checked before EAN to match the pre-existing PutItem guard.
      */
     private static void rejectExprAttrsWithoutExpression(JsonNode exprAttrNames, JsonNode exprAttrValues,
             boolean hasAnyExpression, String nullExpressionParams) {

@@ -21,6 +21,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EmrSparkStepsTest {
 
+    // A cluster's Applications, as RunJobFlow stores them, in a case of their own.
+    private static final String HIVE_AND_SPARK = "[{\"Name\": \"Spark\"}, {\"Name\": \"hive\"}]";
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -149,12 +152,79 @@ class EmrSparkStepsTest {
 
     @Test
     void toolsTheImageDoesNotHaveAreNotRun() {
-        for (String tool : List.of("hive-script", "pig-script")) {
-            assertNull(EmrSparkSteps.command(step("command-runner.jar", null, tool, "--src", "s3://bucket/in/")));
-        }
+        assertNull(EmrSparkSteps.command(step("command-runner.jar", null, "pig-script", "--run-pig-script")));
         assertNull(EmrSparkSteps.command(step("command-runner.jar", null)));
         assertNull(EmrSparkSteps.command(step("script-runner.jar", null)));
         assertNull(EmrSparkSteps.command(step("s3://bucket/jars/app.jar", null, "1")));
+    }
+
+    @Test
+    void aHiveStepsHiveGetsTheClustersHiveClassificationsThenTheArgumentsAfterHiveScriptsArgs() {
+        // The AWS CLI's Hive step, Type=Hive,Args=[-f,...,-d,...], on a cluster with Hive.
+        String configurations = """
+                [{"Classification": "hive-site", "Properties": {"hive.exec.reducers.max": "8"}},
+                 {"Classification": "spark-defaults", "Properties": {"spark.executor.cores": "2"}},
+                 {"Classification": "tez-site", "Properties": {"tez.grouping.max-size": "268435456"}},
+                 {"Classification": "core-site", "Properties": {"fs.s3a.connection.maximum": "50"}},
+                 {"Classification": "hive-site", "Properties": {"hive.metastore.client.factory.class":
+                   "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"}}]""";
+        EmrSparkSteps.HiveCommand hive = EmrSparkSteps.hive(step("command-runner.jar", null, "hive-script",
+                "--run-hive-script", "--args", "-f", "s3://bucket/queries/report.q", "-d", "INPUT=s3://bucket/in/",
+                "--hiveconf", "hive.exec.reducers.max=4"), HIVE_AND_SPARK, configurations, objectMapper);
+
+        assertEquals(List.of("hive-script", "--run-hive-script", "--args"), hive.runner());
+        // core-site, then tez-site, then hive-site, as Hive reads them, and the step's own --hiveconf last.
+        assertEquals(List.of("--hiveconf", "fs.s3a.connection.maximum=50",
+                "--hiveconf", "tez.grouping.max-size=268435456",
+                "--hiveconf", "hive.exec.reducers.max=8",
+                "--hiveconf", "hive.metastore.client.factory.class="
+                        + "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory",
+                "-f", "s3://bucket/queries/report.q", "-d", "INPUT=s3://bucket/in/",
+                "--hiveconf", "hive.exec.reducers.max=4"), hive.arguments());
+    }
+
+    @Test
+    void aHiveScriptStepWithoutArgsGetsThemAtItsEndAndAStepCanRunHiveItself() {
+        EmrSparkSteps.HiveCommand script = EmrSparkSteps.hive(step("command-runner.jar", null, "hive-script",
+                "--run-hive-script"), HIVE_AND_SPARK, null, objectMapper);
+        EmrSparkSteps.HiveCommand hive = EmrSparkSteps.hive(step("command-runner.jar", null, "/usr/bin/hive",
+                "-e", "select 1"), HIVE_AND_SPARK, null, objectMapper);
+
+        assertEquals(List.of("hive-script", "--run-hive-script", "--args"), script.runner());
+        assertEquals(List.of(), script.arguments());
+        assertEquals(List.of("/usr/bin/hive-script", "--run-hive-script", "--args"), EmrSparkSteps.hive(step(
+                "command-runner.jar", null, "/usr/bin/hive-script", "--run-hive-script", "--args", "-e", "select 1"),
+                HIVE_AND_SPARK, null, objectMapper).runner());
+        assertEquals(List.of("/usr/bin/hive"), hive.runner());
+        assertEquals(List.of("-e", "select 1"), hive.arguments());
+    }
+
+    @Test
+    void aStepRunsHiveOnlyWhenItsClustersApplicationsNameHive() {
+        EmrStep query = step("command-runner.jar", null, "hive-script", "--run-hive-script", "--args", "-f",
+                "s3://bucket/queries/report.q");
+        for (String applications : new String[]{"[{\"Name\": \"Spark\"}]", "[]", null, "[{"}) {
+            assertNull(EmrSparkSteps.hive(query, applications, null, objectMapper));
+        }
+        // Where hive-script then runs, it says what EMR's says without Hive: "Hive isn't installed."
+        assertEquals(query.getArgs(), EmrSparkSteps.command(query));
+        for (EmrStep other : List.of(step("command-runner.jar", null, "spark-submit", "s3://bucket/app.py"),
+                step("command-runner.jar", null, "hive-scripts"),
+                step("script-runner.jar", null, "s3://bucket/hive.sh"),
+                step("s3://bucket/jars/hive.jar", null, "hive"))) {
+            assertNull(EmrSparkSteps.hive(other, HIVE_AND_SPARK, null, objectMapper));
+        }
+    }
+
+    @Test
+    void theClustersHiveEnvExportsAreItsHiveStepsEnvironment() {
+        String configurations = """
+                [{"Classification": "hive-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"HADOOP_HEAPSIZE": "2048"}}]},
+                 {"Classification": "spark-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"PYSPARK_PYTHON": "/usr/bin/python3"}}]}]""";
+
+        assertEquals(Map.of("HADOOP_HEAPSIZE", "2048"), EmrSparkSteps.hiveEnvironment(configurations, objectMapper));
     }
 
     @Test

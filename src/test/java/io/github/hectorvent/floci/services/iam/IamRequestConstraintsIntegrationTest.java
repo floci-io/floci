@@ -348,7 +348,8 @@ class IamRequestConstraintsIntegrationTest {
      * deepest request this service models: {@code AcquireRole} numbers its replacement values as
      * entries and each entry's structure carries a list of its own. An entry the request numbered
      * with a key is an entry, so what the structure under it requires is answered inside it, named
-     * under that key, which is the answer the hand-written check this replaces already gave.
+     * under that key with {@code .member} after it, which is the form AWS writes for a map of
+     * structures on this protocol.
      */
     @Test
     void aMapValuesStructureAndTheListInsideItAreRead() {
@@ -358,8 +359,8 @@ class IamRequestConstraintsIntegrationTest {
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
             .body(MESSAGE, equalTo("1 validation error detected: Value at"
-                    + " 'replacementValues.Department.values' failed to satisfy constraint: Member"
-                    + " must not be null"));
+                    + " 'replacementValues.Department.member.values' failed to satisfy constraint:"
+                    + " Member must not be null"));
     }
 
     /**

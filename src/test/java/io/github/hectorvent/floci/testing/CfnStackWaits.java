@@ -179,6 +179,25 @@ public final class CfnStackWaits {
     }
 
     /**
+     * Sends ContinueUpdateRollback and checks it was accepted; the caller waits for the outcome.
+     * {@code authorization} may be null, and each of {@code resourcesToSkip} is sent as a
+     * ResourcesToSkip member.
+     */
+    public static void continueUpdateRollback(String stackName, String authorization, String... resourcesToSkip) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ContinueUpdateRollback")
+            .formParam("StackName", stackName);
+        if (authorization != null) {
+            request.header("Authorization", authorization);
+        }
+        for (int i = 0; i < resourcesToSkip.length; i++) {
+            request.formParam("ResourcesToSkip.member." + (i + 1), resourcesToSkip[i]);
+        }
+        request.when().post("/").then().statusCode(200);
+    }
+
+    /**
      * Waits until DescribeStacks answers 400, which is how a missing stack is reported. Fails on
      * DELETE_FAILED or after ten seconds.
      */

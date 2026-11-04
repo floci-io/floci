@@ -22,7 +22,7 @@ Analyzer state is account and Region scoped and persisted through `StorageFactor
 
 ## Policy validation
 
-`ValidatePolicy` accepts a JSON policy string at `POST /policy/validation`. It does not require an analyzer, persist the submitted policy, or change permissions. It supports `IDENTITY_POLICY`, `RESOURCE_POLICY`, `SERVICE_CONTROL_POLICY`, and `RESOURCE_CONTROL_POLICY` requests. With IAM enforcement enabled, callers need `access-analyzer:ValidatePolicy` on `Resource: "*"`.
+`ValidatePolicy` accepts a JSON policy string at `POST /policy/validation`. It does not require an analyzer, persist the submitted policy, or change permissions. It supports `IDENTITY_POLICY`, `RESOURCE_POLICY`, `SERVICE_CONTROL_POLICY`, and `RESOURCE_CONTROL_POLICY` requests. With IAM enforcement enabled, callers need `access-analyzer:ValidatePolicy` on `Resource: "*"`, and `ListAnalyzers` needs `access-analyzer:ListAnalyzers` the same way, both actions AWS authorizes on no resource. The analyzer operations, which AWS authorizes on the analyzer, are not checked yet.
 
 The local checks cover malformed JSON, repeated object keys, document and statement shapes, required elements, mutually exclusive elements, policy versions, duplicate statement identifiers, principal key names, condition operator names, and selected empty-value suggestions. Resource policies accept the API's supported `validatePolicyResourceType` values; the IAM trust-policy type permits statements without a resource element. Generic resource policies containing trust actions use the same trust-policy context. `BinaryEquals` is recognized as policy syntax, but Floci's IAM evaluator does not execute it.
 

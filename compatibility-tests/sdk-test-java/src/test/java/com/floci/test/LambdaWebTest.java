@@ -269,7 +269,8 @@ class LambdaWebTest {
                 .hasMessageContaining("Policy has syntax errors.");
 
         String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":"
-                + "{\"AWS\":\"arn:aws:iam::000000000000:root\"},\"Action\":\"lambda:InvokeWebFunctionEndpoint\","
+                + "{\"AWS\":\"" + TestFixtures.globalArn("iam", "000000000000", "root")
+                + "\"},\"Action\":\"lambda:InvokeWebFunctionEndpoint\","
                 + "\"Resource\":\"" + functionArn + "/endpoint/*\"}]}";
         PutResourcePolicyResponse put = lambdaWeb.putResourcePolicy(r -> r.resourceArn(functionArn).policy(policy));
         assertThat(put.policy()).isEqualTo(policy);

@@ -50,10 +50,16 @@ import java.util.regex.Pattern;
  * {@code Properties.entry.1.value}, or bare as {@code Properties.1.key}. An entry's value is named
  * under the key the entry carries, {@code properties.Team/Owner}, which is how the hand-written
  * checks these waves replace already named one and how {@link RequestConstraintCheck} names a map's
- * value on the JSON protocols. An entry numbered with no key of its own is no entry the map could
- * hold, so it is neither counted nor answered. A key outside its shape's rules is answered with the
- * whole set the shape declares, nested under the map's own name, which is the form AWS answers for
- * a map key everywhere this repository has one recorded.
+ * value on the JSON protocols. A value that is a structure carries {@code .member} between the key
+ * and the field, {@code replacementValues.Department.member.values}: that is the form AWS writes on
+ * this protocol, recorded against SNS as {@code messageAttributes.attr1.member.dataType}, and a
+ * list of structures already reads the same way, its index standing where the key stands. A scalar
+ * value is named at the key itself, which nothing recorded covers here: the one recording of a
+ * scalar-valued map, on another protocol, answers the map rather than the entry. An entry numbered
+ * with no key of its own is no entry the map could hold, so it is neither counted nor answered. A
+ * key outside its shape's rules is answered with the whole set the shape declares, nested under the
+ * map's own name, which is the form AWS answers for a map key everywhere this repository has one
+ * recorded.
  *
  * <p>Every one of those may hold any of the others: a structure's field may be a list, a list's
  * member a map, a map's value a structure. A shape of some other type is one this walk would pass
@@ -242,10 +248,11 @@ public final class QueryConstraintCheck {
 
     /**
      * A map's entries, held to the map's own bounds and then each key and value to its shape. An
-     * entry arrives as {@code Properties.entry.1.key} and {@code Properties.entry.1.value}, and
-     * the value is named under the key the entry carries. An entry is read off that key, as the
-     * count of one has always been here, so one numbered with no key is not an entry the map could
-     * hold: it is neither counted nor answered.
+     * entry arrives as {@code Properties.entry.1.key} and {@code Properties.entry.1.value}, and the
+     * value is named under the key the entry carries, with {@code .member} after it where that
+     * value is a structure and the field inside it is what broke. An entry is read off that key, as
+     * the count of one has always been here, so one numbered with no key is not an entry the map
+     * could hold: it is neither counted nor answered.
      */
     private List<String> mapViolations(JsonNode shape, String param, String path, boolean required,
                                        MultivaluedMap<String, String> params) {
@@ -270,8 +277,9 @@ public final class QueryConstraintCheck {
             if (structure) {
                 // An entry the request numbered with a key is an entry, so what the structure
                 // under it requires is answered inside it rather than the value reading as absent.
+                // The field sits under `.member` after the key, which is how AWS names one.
                 violations.addAll(structureViolations(shapes.path(valueShape), valueParam + ".",
-                        valuePath + ".", params, Map.of()));
+                        valuePath + ".member.", params, Map.of()));
             } else {
                 violations.addAll(memberViolations(valueShape, valueParam, valuePath, true, params));
             }

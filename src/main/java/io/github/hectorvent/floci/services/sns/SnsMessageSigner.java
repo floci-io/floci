@@ -24,6 +24,7 @@ import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.cert.X509Certificate;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -100,10 +101,18 @@ public class SnsMessageSigner implements Resettable {
      * {@code SigningCertURL} for HTTP and SQS envelopes, {@code SigningCertUrl} in Lambda records.
      */
     public void sign(ObjectNode node, String signatureVersion, String certUrlField) {
+        sign(node, signatureVersion, certUrlField, new HashMap<>());
+    }
+
+    /** Like the three-argument form, reusing a signature already made for the same canonical string. */
+    public void sign(ObjectNode node, String signatureVersion, String certUrlField,
+                     Map<String, String> signatures) {
         String version = normalizeSignatureVersion(signatureVersion);
         Material current = material();
+        String canonical = canonicalString(node);
         node.put("SignatureVersion", version);
-        node.put("Signature", signature(canonicalString(node), version, current.privateKey()));
+        node.put("Signature", signatures.computeIfAbsent(current.fileName() + "\n" + version + "\n" + canonical,
+                key -> signature(canonical, version, current.privateKey())));
         node.put(certUrlField, baseUrl + CERTIFICATE_PATH + current.fileName());
     }
 
