@@ -2779,16 +2779,11 @@ public class CodeArtifactService implements Resettable {
             // under its caller's original, un-normalized spelling.
             Optional<PackageOriginConfig> config = Optional.ofNullable(
                     packages.originConfigsByCoordinate().get(coordinate));
-            // Raised by Greptile's review: a PackageOriginConfig persisted before format/namespace/
-            // packageName existed on it (see that model's own javadoc) has none of the three, so
-            // allPackagesInRepository's own scan can never resolve it into this map at all, even
-            // though the package it configures is still found here through its real version record
-            // or sidecar listing. Falling back to the original key-based lookup, exactly like
-            // describePackage's own, is what keeps that package's real restriction (not the ALLOW/
-            // BLOCK default) resolving for it too.
+            // The discovery pass already migrated NuGet/PyPI aliases. Read remaining metadata-free
+            // records directly without rescanning every origin key for each unconfigured package.
             if (config.isEmpty()) {
-                config = packageOriginConfig(owner, packageKey(region, domain, repository,
-                        coordinate.format(), coordinate.namespace(), coordinate.packageName()), coordinate.format());
+                config = packageOriginConfigs.getForAccount(owner, packageKey(region, domain, repository,
+                        coordinate.format(), coordinate.namespace(), coordinate.packageName()));
             }
             String publishRestriction = config.map(PackageOriginConfig::getPublishRestriction).orElse("ALLOW");
             String upstreamRestriction = config.map(PackageOriginConfig::getUpstreamRestriction).orElse("BLOCK");

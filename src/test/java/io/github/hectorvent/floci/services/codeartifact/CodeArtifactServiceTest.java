@@ -20,6 +20,8 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
 import java.io.ByteArrayOutputStream;
@@ -6409,6 +6411,36 @@ class CodeArtifactServiceTest {
         assertTrue(result.packages().stream().anyMatch(p -> "maven".equals(p.format()) && "a".equals(p.packageName())
                 && "com.example".equals(p.namespace())));
         assertEquals(3, result.packages().stream().filter(p -> "my-pkg".equals(p.packageName())).count());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void listPackagesDoesNotRescanOriginKeysForUnconfiguredPackages(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService listingService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                origins, regionResolver, mock(EmulatorConfig.class), true, null,
+                new CodeArtifactSidecarRegistry(List.of(pypiserverClient, bagetterClient)));
+        listingService.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository repository = listingService.createRepository(REGION, "dom", null, "repo",
+                null, null, Map.of());
+        origins.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::" + format + "::::configured",
+                new PackageOriginConfig("BLOCK", "ALLOW", format, null, "configured"));
+        RepositorySidecarManager manager = "nuget".equals(format) ? bagetterClient : pypiserverClient;
+        when(manager.listPackages(eq(repository.getSidecarContainerIds().get(format)), eq("dom"), eq("repo")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageIdentifier(null, "first"),
+                        new RepositorySidecarManager.PackageIdentifier(null, "second")));
+        clearInvocations(origins);
+
+        CodeArtifactService.ListPackagesResult result = listingService.listPackages(REGION, "dom", null, "repo",
+                format, null, null, null, null, null, null);
+
+        assertEquals(3, result.packages().size());
+        assertEquals(2, result.packages().stream().filter(entry -> "ALLOW".equals(entry.publishRestriction())
+                && "BLOCK".equals(entry.upstreamRestriction())).count());
+        assertTrue(result.packages().stream().anyMatch(entry -> "configured".equals(entry.packageName())
+                && "BLOCK".equals(entry.publishRestriction()) && "ALLOW".equals(entry.upstreamRestriction())));
+        verify(origins, times(1)).keysForAccount(ACCOUNT_ID);
     }
 
     @Test
