@@ -177,6 +177,11 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return delegate.scan(k -> true);
     }
 
+    /** Whether no account holds a value. */
+    public boolean isEmptyInAllAccounts() {
+        return delegate.isEmpty();
+    }
+
     /** Removes matching values using their actual stored keys, including unprefixed legacy keys. */
     public int deleteAllAccountsMatching(Predicate<V> valueFilter) {
         int removed = 0;
