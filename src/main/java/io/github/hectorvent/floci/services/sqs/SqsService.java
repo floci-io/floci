@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsEndpoints;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -37,8 +38,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -47,7 +46,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -112,7 +110,6 @@ public class SqsService implements Resettable, ResourceProvider {
                 return t;
             });
     private final AtomicLong sequenceCounter = new AtomicLong(0);
-    private static final HexFormat HEX = HexFormat.of();
 
     private record RedrivePolicy(int maxReceiveCount, String deadLetterTargetArn) {
     }
@@ -1071,7 +1068,7 @@ public class SqsService implements Resettable, ResourceProvider {
             String dedupId = messageDeduplicationId;
             if (dedupId == null || dedupId.isEmpty()) {
                 if ("true".equalsIgnoreCase(queue.getAttributes().get("ContentBasedDeduplication"))) {
-                    dedupId = computeMd5(body);
+                    dedupId = Digests.md5Hex(body.getBytes(StandardCharsets.UTF_8));
                 } else {
                     throw new AwsException("InvalidParameterValue",
                             "The queue should either have ContentBasedDeduplication enabled or " +
@@ -1443,17 +1440,6 @@ public class SqsService implements Resettable, ResourceProvider {
             if (removed) {
                 persistDedupIdentities(queueUrl);
             }
-        }
-    }
-
-    private static String computeMd5(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
-            return HEX.formatHex(digest);
-        } catch (NoSuchAlgorithmException ignored) {
-            // MD5 is guaranteed to be available in the standard JDK runtime
-            return "";
         }
     }
 
