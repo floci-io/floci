@@ -24,7 +24,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Manages backend Docker container lifecycle for MemoryDB clusters.
@@ -50,6 +53,8 @@ public class MemoryDbContainerManager {
     private final RegionResolver regionResolver;
     private final Map<String, MemoryDbContainerHandle> activeContainers = new ConcurrentHashMap<>();
     private volatile boolean dockerUnavailableLogged;
+    private final ReentrantReadWriteLock runtimeAdmission = new ReentrantReadWriteLock();
+    private volatile boolean stopping;
 
     @Inject
     public MemoryDbContainerManager(ContainerBuilder containerBuilder,
@@ -76,12 +81,22 @@ public class MemoryDbContainerManager {
      * @return the container handle, or {@code null} when no Docker daemon is reachable
      */
     public MemoryDbContainerHandle tryStart(String clusterName, String image) {
+        return tryStart(clusterName, image, null, regionResolver.getAccountId(), resolvedRegion());
+    }
+
+    public MemoryDbContainerHandle tryStart(String clusterName, String image, String volumeId,
+                                            String accountId, String region) {
+        return tryStart(clusterName, image, volumeId, accountId, region, clusterName);
+    }
+
+    public MemoryDbContainerHandle tryStart(String runtimeIdentity, String image, String volumeId,
+                                            String accountId, String region, String logicalName) {
         try {
-            MemoryDbContainerHandle handle = start(clusterName, image);
+            MemoryDbContainerHandle handle = start(runtimeIdentity, image, volumeId, accountId, region, logicalName);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
-            if (isDockerReachable()) {
+            if (stopping || isDockerReachable()) {
                 throw e;
             }
             if (!dockerUnavailableLogged) {
@@ -110,18 +125,53 @@ public class MemoryDbContainerManager {
     }
 
     public MemoryDbContainerHandle start(String clusterName, String image) {
+        return start(clusterName, image, null, regionResolver.getAccountId(), resolvedRegion());
+    }
+
+    public MemoryDbContainerHandle start(String clusterName, String image, String volumeId,
+                                         String accountId, String region) {
+        return start(clusterName, image, volumeId, accountId, region, clusterName);
+    }
+
+    public MemoryDbContainerHandle start(String runtimeIdentity, String image, String volumeId,
+                                         String accountId, String region, String logicalName) {
+        runtimeAdmission.readLock().lock();
+        try {
+            if (stopping) {
+                throw new IllegalStateException("MemoryDB is shutting down");
+            }
+            return startAdmitted(runtimeIdentity, image, volumeId, accountId, region, logicalName);
+        } finally {
+            runtimeAdmission.readLock().unlock();
+        }
+    }
+
+    private MemoryDbContainerHandle startAdmitted(String clusterName, String image, String volumeId,
+                                                   String accountId, String region, String logicalName) {
         LOG.infov("Starting MemoryDB backend container for cluster: {0}", clusterName);
 
-        String containerName = containerName(clusterName);
+        String containerName = containerName(accountId, region, logicalName);
 
-        lifecycleManager.removeIfExists(containerName);
+        lifecycleManager.removeIfExistsStrict(containerName, true);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withDockerNetwork(config.services().memorydb().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                        "memorydb", clusterName, regionResolver.getAccountId(), resolvedRegion()));
+                        "memorydb", clusterName, accountId, region));
+
+        if (volumeId != null) {
+            String volumeName = ContainerStorageHelper.resourceName(config, "memorydb", volumeId, clusterName);
+            if (ContainerStorageHelper.isNamedVolumeMode(config)) {
+                ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager, volumeName, "/data");
+            } else {
+                String path = ContainerStorageHelper.hostResourcePath(config, "memorydb", volumeId).toString();
+                ContainerStorageHelper.ensureHostDir(path);
+                specBuilder.withBind(path, "/data");
+            }
+            specBuilder.withCmd(List.of("--appendonly", "yes", "--appendfsync", "always"));
+        }
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);
@@ -131,7 +181,7 @@ public class MemoryDbContainerManager {
 
         ContainerSpec spec = specBuilder.build();
 
-        ContainerInfo info = lifecycleManager.createAndStart(spec);
+        ContainerInfo info = lifecycleManager.createAndStartEphemeral(spec);
         EndpointInfo endpoint = info.getEndpoint(BACKEND_PORT);
 
         LOG.infov("MemoryDB backend for cluster {0}: {1}", clusterName, endpoint);
@@ -143,17 +193,27 @@ public class MemoryDbContainerManager {
         String shortId = info.containerId().length() >= 8
                 ? info.containerId().substring(0, 8)
                 : info.containerId();
-        String logGroup = "/aws/memorydb/cluster/" + clusterName + "/engine-log";
+        String logName = isDefaultScope(accountId, region) ? logicalName : clusterName;
+        String logGroup = "/aws/memorydb/cluster/" + logName + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
-        String region = resolvedRegion();
-
         Closeable logHandle = logStreamer.attach(
                 info.containerId(), logGroup, logStream, region, "memorydb:" + clusterName);
         handle.setLogStream(logHandle);
 
         waitForBackendReady(clusterName, endpoint.host(), endpoint.port());
+        if (stopping) {
+            stop(handle);
+            throw new IllegalStateException("MemoryDB shut down while the backend was starting");
+        }
 
         return handle;
+    }
+
+    public void removeStorage(String clusterName, String volumeId) {
+        if (volumeId != null && ContainerStorageHelper.isNamedVolumeMode(config)) {
+            ContainerStorageHelper.removeNamedVolumeStrict(config, lifecycleManager,
+                    ContainerStorageHelper.resourceName(config, "memorydb", volumeId, clusterName));
+        }
     }
 
     private static void waitForBackendReady(String clusterName, String host, int port) {
@@ -199,8 +259,8 @@ public class MemoryDbContainerManager {
         if (handle == null) {
             return;
         }
-        activeContainers.remove(handle.getClusterName());
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+        lifecycleManager.stopAndRemoveStrict(handle.getContainerId(), handle.getLogStream(), 5, true);
+        activeContainers.remove(handle.getClusterName(), handle);
     }
 
     /**
@@ -213,16 +273,26 @@ public class MemoryDbContainerManager {
      * registered. Idempotent — a no-op when nothing is running for the name.
      */
     public void stopByClusterName(String clusterName) {
+        stopByClusterName(clusterName, regionResolver.getAccountId(), resolvedRegion(), clusterName);
+    }
+
+    public void stopByClusterName(String clusterName, String accountId, String region, String logicalName) {
         MemoryDbContainerHandle handle = activeContainers.get(clusterName);
         if (handle != null) {
             stop(handle);
             return;
         }
-        lifecycleManager.removeIfExists(containerName(clusterName));
+        lifecycleManager.removeIfExistsStrict(containerName(accountId, region, logicalName), true);
     }
 
-    private String containerName(String clusterName) {
-        return ContainerStorageHelper.resourceName(config, "memorydb", null, clusterName);
+    private String containerName(String accountId, String region, String logicalName) {
+        String name = isDefaultScope(accountId, region) ? logicalName : accountId + "_" + region + "_" + logicalName;
+        return ContainerStorageHelper.resourceName(config, "memorydb", null, name);
+    }
+
+    private boolean isDefaultScope(String accountId, String region) {
+        return Objects.equals(accountId, regionResolver.getDefaultAccountId())
+                && Objects.equals(region, regionResolver.getDefaultRegion());
     }
 
     private String resolvedRegion() {
@@ -231,12 +301,43 @@ public class MemoryDbContainerManager {
     }
 
     public void stopAll() {
+        stopping = true;
+        boolean admitted;
+        try {
+            admitted = runtimeAdmission.writeLock().tryLock(BACKEND_READY_DEADLINE_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while awaiting MemoryDB backend startup", e);
+        }
+        if (!admitted) {
+            throw new IllegalStateException("MemoryDB backend startup did not finish before shutdown deadline");
+        }
+        try {
+            stopAdmittedContainers();
+        } finally {
+            runtimeAdmission.writeLock().unlock();
+        }
+    }
+
+    private void stopAdmittedContainers() {
         List<MemoryDbContainerHandle> handles = new ArrayList<>(activeContainers.values());
         if (!handles.isEmpty()) {
             LOG.infov("Stopping {0} MemoryDB container(s) on shutdown", handles.size());
         }
+        RuntimeException failure = null;
         for (MemoryDbContainerHandle handle : handles) {
-            stop(handle);
+            try {
+                stop(handle);
+            } catch (RuntimeException e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 }

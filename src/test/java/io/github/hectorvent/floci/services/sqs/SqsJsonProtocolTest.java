@@ -419,7 +419,7 @@ class SqsJsonProtocolTest {
                 .body("Messages[0].MessageAttributes", not(hasKey("secret")))
                 .body("Messages[0].MD5OfMessageAttributes", equalTo("46db9885b8f221ea04082f03e3a63d14"));
 
-            for (String allSelector : new String[]{"All", ".*"}) {
+            for (String allSelector : new String[]{"All", ".*", "*"}) {
                 given()
                     .contentType(CONTENT_TYPE)
                     .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")

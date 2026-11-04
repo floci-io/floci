@@ -748,14 +748,15 @@ client-credentials flow:
 
 ### Managed login
 
-Managed login signs in the pool's own users with authorization code and, optionally, PKCE.
-The client needs `COGNITO` in `SupportedIdentityProviders`, `AllowedOAuthFlows=["code"]` and
+Managed login offers the client's identity providers with authorization code and, optionally, PKCE.
+Native sign-in needs `COGNITO` in `SupportedIdentityProviders`; a federated-only client gets provider
+links without a native sign-in form. The client needs `AllowedOAuthFlows=["code"]` and
 the callback in `CallbackURLs`. No domain is needed; on a custom domain the same flow runs at
 `/oauth2/authorize`, `/login` and `/logout`.
 
 1. `GET /cognito-idp/oauth2/authorize` redirects to `/cognito-idp/login` with the request's
    parameters, `login_hint` included. If the browser already has a managed login session in the
-   pool, it skips the form and redirects straight to the callback with a code, as AWS does; the
+   pool and the client allows `COGNITO`, it skips the form and redirects straight to the callback with a code; the
    code's tokens carry the `auth_time` of the session's sign-in, not of this request. A
    `scope` the client's `AllowedOAuthScopes` does not include is refused first, as on AWS, with a
    redirect to the callback carrying `error=invalid_request`, `error_description=invalid_scope`
@@ -763,7 +764,9 @@ the callback in `CallbackURLs`. No domain is needed; on a custom domain the same
 2. `GET /cognito-idp/login` renders a plain username and password form, with the username filled
    in from `login_hint` when the request has one. The form carries the request in hidden fields and
    a CSRF token that must match the `XSRF-TOKEN` cookie set with it. With choice-based sign-in
-   (below), it asks for the username alone.
+   (below), it asks for the username alone. Links for the client's external providers retain the
+   authorization request, including state, nonce and PKCE. A client without `COGNITO` gets only
+   these links; native credential submission and explicit `identity_provider=COGNITO` are refused.
 3. `POST /cognito-idp/login` checks the password as `USER_PASSWORD_AUTH` does, including
    sign-in aliases and the pre and post authentication and user migration triggers, but
    without the client's `ExplicitAuthFlows`. On success it sets a `cognito` session cookie

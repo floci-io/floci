@@ -7,6 +7,8 @@ import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -52,8 +54,15 @@ final class IamRestRoutes {
     private static final int ONE_SEGMENT = 1;
     private static final int REST_OF_PATH = 0;
 
-    /** A route: its operation, its path as a pattern, each segment's rank, and the query it names. */
-    private record Route(String operation, Pattern path, int[] ranks, Map<String, String> query) {
+    /** A route a request matched: its operation, and the value its path gives each of the route's labels, decoded. */
+    record Match(String operation, Map<String, String> labels) {
+    }
+
+    /**
+     * A route: its operation, its path as a pattern capturing each label in turn, the labels' names, each segment's
+     * rank, and the query it names.
+     */
+    private record Route(String operation, Pattern path, List<String> labels, int[] ranks, Map<String, String> query) {
 
         boolean matches(String requestPath, MultivaluedMap<String, String> parameters) {
             if (!path.matcher(requestPath).matches()) {
@@ -66,6 +75,20 @@ final class IamRestRoutes {
                 }
             }
             return true;
+        }
+
+        /** The value the path gives each label, decoded as the router decodes a path parameter. */
+        Map<String, String> labelValues(String requestPath) {
+            Matcher matcher = path.matcher(requestPath);
+            if (!matcher.matches()) {
+                return Map.of();
+            }
+            Map<String, String> values = new LinkedHashMap<>();
+            for (int i = 0; i < labels.size(); i++) {
+                values.put(labels.get(i), URLDecoder.decode(matcher.group(i + 1).replace("+", "%2B"),
+                        StandardCharsets.UTF_8));
+            }
+            return Map.copyOf(values);
         }
 
         /** Whether this route is more specific than the other, as {@link IamRestRoutes} orders them. */
@@ -97,6 +120,11 @@ final class IamRestRoutes {
      * matches several; empty when it matches none, or its scope is one the file does not route.
      */
     Optional<String> operation(String scope, String method, String path, MultivaluedMap<String, String> query) {
+        return match(scope, method, path, query).map(Match::operation);
+    }
+
+    /** As {@link #operation}, with the values the request's path gives the route's labels. */
+    Optional<Match> match(String scope, String method, String path, MultivaluedMap<String, String> query) {
         String requestPath = IamActionRegistry.withoutTrailingSlash(path);
         Route best = null;
         for (Route route : routes.getOrDefault(scope, Map.of()).getOrDefault(method, List.of())) {
@@ -104,7 +132,12 @@ final class IamRestRoutes {
                 best = route;
             }
         }
-        return best == null ? Optional.empty() : Optional.of(best.operation());
+        return best == null ? Optional.empty() : Optional.of(new Match(best.operation(), best.labelValues(requestPath)));
+    }
+
+    /** Whether the file routes any request of the credential scope. */
+    boolean routes(String scope) {
+        return routes.containsKey(scope);
     }
 
     static IamRestRoutes parse(InputStream in) throws IOException {
@@ -153,12 +186,14 @@ final class IamRestRoutes {
         String path = IamActionRegistry.withoutTrailingSlash(question < 0 ? requestUri : requestUri.substring(0, question));
         List<String> segments = path.equals("/") ? List.of() : List.of(path.substring(1).split("/", -1));
         StringBuilder pattern = new StringBuilder();
+        List<String> labels = new ArrayList<>();
         int[] ranks = new int[segments.size()];
         for (int i = 0; i < segments.size(); i++) {
             String segment = segments.get(i);
             pattern.append('/');
             if (GREEDY.matcher(segment).matches()) {
-                pattern.append(".+");
+                pattern.append("(.+)");
+                labels.add(segment.substring(1, segment.length() - 2));
                 ranks[i] = REST_OF_PATH;
                 continue;
             }
@@ -166,7 +201,8 @@ final class IamRestRoutes {
             int literalFrom = 0;
             boolean labelled = false;
             while (label.find()) {
-                pattern.append(Pattern.quote(segment.substring(literalFrom, label.start()))).append("[^/]+");
+                pattern.append(Pattern.quote(segment.substring(literalFrom, label.start()))).append("([^/]+)");
+                labels.add(segment.substring(label.start() + 1, label.end() - 1));
                 literalFrom = label.end();
                 labelled = true;
             }
@@ -181,7 +217,7 @@ final class IamRestRoutes {
                         equals < 0 ? "" : parameter.substring(equals + 1));
             }
         }
-        return new Route(operation, Pattern.compile(pattern.isEmpty() ? "/" : pattern.toString()), ranks,
-                Map.copyOf(query));
+        return new Route(operation, Pattern.compile(pattern.isEmpty() ? "/" : pattern.toString()), List.copyOf(labels),
+                ranks, Map.copyOf(query));
     }
 }

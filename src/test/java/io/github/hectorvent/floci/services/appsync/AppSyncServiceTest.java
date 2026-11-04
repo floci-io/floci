@@ -1,12 +1,7 @@
 package io.github.hectorvent.floci.services.appsync;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerCache;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerResult;
@@ -15,9 +10,8 @@ import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.DomainName;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
-import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
-import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
-import jakarta.enterprise.inject.Instance;
+import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -26,18 +20,24 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -152,7 +152,7 @@ class AppSyncServiceTest {
 
     @Test
     void validateApiKeyExpiresAtBoundaryFails() {
-        MutableClock clock = new MutableClock(NOW);
+        AppSyncServiceFixture.MutableClock clock = new AppSyncServiceFixture.MutableClock(NOW);
         AppSyncService svc = newService(clock);
         GraphqlApi api = svc.createGraphqlApi(Map.of("name", "b", "authenticationType", "API_KEY"), "us-east-1");
         long expires = NOW.getEpochSecond() + Duration.ofDays(1).getSeconds();
@@ -191,6 +191,89 @@ class AppSyncServiceTest {
         AwsException tooFar = assertThrows(AwsException.class,
                 () -> service.updateApiKey(api.getApiId(), created.getId(), Map.of("expires", tooLate)));
         assertEquals("ApiKeyValidityOutOfBoundsException", tooFar.getErrorCode());
+    }
+
+    @Test
+    void aRefusedApiKeyUpdateLeavesTheDescriptionAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-key", "authenticationType", "API_KEY"), "us-east-1");
+        ApiKey created = service.createApiKey(api.getApiId(), Map.of("description", "kept"));
+        long expires = created.getExpires();
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.updateApiKey(api.getApiId(),
+                created.getId(), Map.of("description", "changed", "expires", NOW.getEpochSecond())));
+
+        assertEquals("ApiKeyValidityOutOfBoundsException", refused.getErrorCode());
+        ApiKey stored = service.getApiKey(api.getApiId(), created.getId());
+        assertEquals("kept", stored.getDescription());
+        assertEquals(expires, stored.getExpires());
+    }
+
+    @Test
+    void aRefusedApiKeyDescriptionLeavesTheExpiryAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-desc", "authenticationType", "API_KEY"), "us-east-1");
+        long original = NOW.getEpochSecond() + Duration.ofDays(10).getSeconds();
+        ApiKey created = service.createApiKey(api.getApiId(), Map.of("description", "kept", "expires", original));
+        ApiKey before = service.getApiKey(api.getApiId(), created.getId());
+        Long expiresBefore = before.getExpires();
+        Long deletesBefore = before.getDeletes();
+        long newExpires = NOW.getEpochSecond() + Duration.ofDays(30).getSeconds();
+
+        assertThrows(RuntimeException.class, () -> service.updateApiKey(api.getApiId(), created.getId(),
+                Map.of("expires", newExpires, "description", 42)));
+
+        ApiKey stored = service.getApiKey(api.getApiId(), created.getId());
+        assertEquals(expiresBefore, stored.getExpires());
+        assertEquals(deletesBefore, stored.getDeletes());
+        assertEquals("kept", stored.getDescription());
+    }
+
+    @Test
+    void aRefusedDataSourceUpdateLeavesTheDescriptionAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-ds", "authenticationType", "API_KEY"), "us-east-1");
+        service.createDataSource(api.getApiId(), Map.of("name", "ds", "type", "NONE", "description", "kept"), "us-east-1");
+
+        assertThrows(AwsException.class, () -> service.updateDataSource(api.getApiId(), "ds",
+                Map.of("description", "changed", "type", "NOT_A_TYPE")));
+
+        assertEquals("kept", service.getDataSource(api.getApiId(), "ds").getDescription());
+    }
+
+    @Test
+    void aRefusedFunctionUpdateLeavesTheNameAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-fn", "authenticationType", "API_KEY"), "us-east-1");
+        FunctionConfiguration created = service.createFunction(api.getApiId(), Map.of("name", "kept"), "us-east-1");
+
+        assertThrows(AwsException.class, () -> service.updateFunction(api.getApiId(), created.getFunctionId(),
+                Map.of("name", "changed", "runtime", Map.of("name", "NOT_A_RUNTIME"))));
+
+        assertEquals("kept", service.getFunction(api.getApiId(), created.getFunctionId()).getName());
+    }
+
+    @Test
+    void aRefusedResolverUpdateLeavesTheDataSourceAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-rs", "authenticationType", "API_KEY"), "us-east-1");
+        service.createDataSource(api.getApiId(), Map.of("name", "ds", "type", "NONE"), "us-east-1");
+        service.createResolver(api.getApiId(), Map.of("typeName", "Query", "fieldName", "hello",
+                "dataSourceName", "ds"), "us-east-1");
+
+        assertThrows(AwsException.class, () -> service.updateResolver(api.getApiId(), "Query", "hello",
+                Map.of("dataSourceName", "other", "kind", "NOT_A_KIND")));
+
+        assertEquals("ds", service.getResolver(api.getApiId(), "Query", "hello").getDataSourceName());
+    }
+
+    @Test
+    void aRefusedGraphqlApiUpdateLeavesTheNameAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "kept", "authenticationType", "API_KEY"), "us-east-1");
+        Map<String, Object> pool = Map.of("userPoolId", "pool-1", "awsRegion", "us-east-1");
+        Map<String, Object> provider = Map.of("authenticationType", "AMAZON_COGNITO_USER_POOLS",
+                "userPoolConfig", pool);
+
+        assertThrows(AwsException.class, () -> service.updateGraphqlApi(api.getApiId(),
+                Map.of("name", "changed", "additionalAuthenticationProviders", List.of(provider, provider)),
+                "us-east-1"));
+
+        assertEquals("kept", service.getGraphqlApi(api.getApiId()).getName());
     }
 
     @Test
@@ -364,7 +447,9 @@ class AppSyncServiceTest {
                 apiId, Map.of("name", "updated-api"), "us-east-1");
         assertEquals("updated-api", updated.getName());
         assertEquals(expectedUris, updated.getUris());
-        verify(apiStore, times(2)).put(apiId, api);
+        // The URI repair on read stores the persisted instance; the update then stores its own copy.
+        verify(apiStore).put(apiId, api);
+        verify(apiStore, times(2)).put(eq(apiId), any(GraphqlApi.class));
     }
 
     @Test
@@ -408,60 +493,12 @@ class AppSyncServiceTest {
         return newService(clock, baseUrl, AccountAwareStorageBackend.inMemory("000000000000"));
     }
 
-    @SuppressWarnings("unchecked")
     private AppSyncService newService(Clock clock, String baseUrl,
             AccountAwareStorageBackend<GraphqlApi> apiStore) {
-        InMemoryStorageFactory storageFactory = new InMemoryStorageFactory("000000000000")
-                .withStore("appsync-apis.json", apiStore);
-        if (apiKeyStoreOverride != null) {
-            storageFactory.withStore("appsync-apikeys.json", apiKeyStoreOverride);
-        }
-        Instance<RequestContext> requestContext = mock(Instance.class);
         schemaRegistry = mock(SchemaRegistry.class);
         lambdaAuthorizerCache = new LambdaAuthorizerCache();
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.effectiveBaseUrl()).thenReturn(baseUrl);
-        when(config.services().cloudfront().domainSuffix()).thenReturn(Optional.empty());
-        return new AppSyncService(
-                storageFactory,
-                config,
-                partition == null ? new RegionResolver(region, "000000000000")
-                        : new RegionResolver(region, "000000000000", partition),
-                schemaRegistry,
-                mock(SchemaCreationWorker.class),
-                requestContext,
-                new ObjectMapper(),
-                AccountAwareStorageBackend.inMemory("000000000000"),
-                AccountAwareStorageBackend.inMemory("000000000000"),
-                clock,
-                lambdaAuthorizerCache);
-    }
-
-    private static final class MutableClock extends Clock {
-        private Instant instant;
-
-        private MutableClock(Instant instant) {
-            this.instant = instant;
-        }
-
-        void set(Instant instant) {
-            this.instant = instant;
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return instant;
-        }
+        return AppSyncServiceFixture.create(clock, baseUrl, region, partition, apiStore,
+                apiKeyStoreOverride, schemaRegistry, lambdaAuthorizerCache);
     }
 
     /**
@@ -523,5 +560,149 @@ class AppSyncServiceTest {
                 "arn:aws:sqs:us-east-1:000000000000:apis/abcdefghijklmnopqrstuvwxyz", Map.of()));
         assertThrows(AwsException.class, () -> service.tagResource("apis/abc", Map.of()));
         assertThrows(AwsException.class, () -> service.tagResource(null, Map.of()));
+    }
+
+    /**
+     * Parks {@code first} in its next write to {@code store}, starts {@code second} on another
+     * thread, waits until it is blocked behind the first or done, then lets the first go and waits
+     * for both. The second can only be blocked if a lock covers the first's read, change and write;
+     * the callers assert the final state.
+     */
+    private static void secondWriterRunsAroundTheFirst(ParkingStore<?> store, Runnable first, Runnable second)
+            throws Exception {
+        secondCallRunsAroundTheFirst(store, store::parkNextWrite, first, second);
+    }
+
+    /** As above, with the caller choosing which store call of the first one is parked. */
+    private static void secondCallRunsAroundTheFirst(ParkingStore<?> store, Runnable arm, Runnable first,
+            Runnable second) throws Exception {
+        arm.run();
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> firstWrite = pool.submit(first);
+            assertTrue(store.awaitParked(), "the first write must reach the store");
+            AtomicReference<Thread> secondThread = new AtomicReference<>();
+            Future<?> secondWrite = pool.submit(() -> {
+                secondThread.set(Thread.currentThread());
+                second.run();
+            });
+            awaitBlockedOrDone(secondThread, secondWrite);
+
+            store.release();
+            firstWrite.get(2, TimeUnit.SECONDS);
+            secondWrite.get(2, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            throw new AssertionError(e.getCause());
+        } finally {
+            store.release();
+            pool.shutdownNow();
+        }
+    }
+
+    private AppSyncService serviceWithApiStore(ParkingStore<GraphqlApi> apiStore) {
+        return newService(Clock.fixed(NOW, ZoneOffset.UTC), "http://localhost:4566",
+                new AccountAwareStorageBackend<>(apiStore, null, "000000000000"));
+    }
+
+    private static String arnOf(GraphqlApi api) {
+        return "arn:aws:appsync:us-east-1:000000000000:apis/" + api.getApiId();
+    }
+
+    private static Map<String, Object> apiRequest(String name) {
+        return Map.of("name", name, "authenticationType", "API_KEY");
+    }
+
+    @Test
+    void aTagDuringAnApiUpdateSurvivesTheUpdate() throws Exception {
+        ParkingStore<GraphqlApi> store = new ParkingStore<>();
+        AppSyncService svc = serviceWithApiStore(store);
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("before"), "us-east-1");
+
+        secondWriterRunsAroundTheFirst(store,
+                () -> svc.updateGraphqlApi(api.getApiId(), apiRequest("after"), "us-east-1"),
+                () -> svc.tagResource(arnOf(api), Map.of("env", "test")));
+
+        assertEquals("after", svc.getGraphqlApi(api.getApiId()).getName());
+        assertEquals("test", svc.getTags(arnOf(api)).get("env"));
+    }
+
+    @Test
+    void anUntagDuringAnApiUpdateStaysRemoved() throws Exception {
+        ParkingStore<GraphqlApi> store = new ParkingStore<>();
+        AppSyncService svc = serviceWithApiStore(store);
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("before"), "us-east-1");
+        svc.tagResource(arnOf(api), Map.of("drop", "1", "keep", "2"));
+
+        secondWriterRunsAroundTheFirst(store,
+                () -> svc.updateGraphqlApi(api.getApiId(), apiRequest("after"), "us-east-1"),
+                () -> svc.untagResource(arnOf(api), List.of("drop")));
+
+        assertEquals("after", svc.getGraphqlApi(api.getApiId()).getName());
+        assertFalse(svc.getTags(arnOf(api)).containsKey("drop"), svc.getTags(arnOf(api)).toString());
+        assertEquals("2", svc.getTags(arnOf(api)).get("keep"));
+    }
+
+    @Test
+    void environmentVariablesWrittenDuringAnApiUpdateSurviveTheUpdate() throws Exception {
+        ParkingStore<GraphqlApi> store = new ParkingStore<>();
+        AppSyncService svc = serviceWithApiStore(store);
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("before"), "us-east-1");
+
+        secondWriterRunsAroundTheFirst(store,
+                () -> svc.updateGraphqlApi(api.getApiId(), apiRequest("after"), "us-east-1"),
+                () -> svc.putEnvironmentVariables(api.getApiId(), Map.of("TABLE_NAME", "my-table")));
+
+        assertEquals("after", svc.getGraphqlApi(api.getApiId()).getName());
+        assertEquals("my-table", svc.getEnvironmentVariables(api.getApiId()).get("TABLE_NAME"));
+    }
+
+    @Test
+    void twoUpdatesOfDifferentApiKeyMembersBothLand() throws Exception {
+        ParkingStore<ApiKey> keyStore = new ParkingStore<>();
+        apiKeyStoreOverride = new AccountAwareStorageBackend<>(keyStore, null, "000000000000");
+        AppSyncService svc = newService(Clock.fixed(NOW, ZoneOffset.UTC));
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("keys"), "us-east-1");
+        ApiKey created = svc.createApiKey(api.getApiId(), Map.of());
+        long expires = NOW.plus(Duration.ofDays(30)).getEpochSecond();
+
+        secondWriterRunsAroundTheFirst(keyStore,
+                () -> svc.updateApiKey(api.getApiId(), created.getId(), Map.of("description", "renewed")),
+                () -> svc.updateApiKey(api.getApiId(), created.getId(), Map.of("expires", expires)));
+
+        ApiKey result = svc.getApiKey(api.getApiId(), created.getId());
+        assertEquals("renewed", result.getDescription());
+        assertEquals(expires, result.getExpires());
+    }
+
+    /**
+     * StartSchemaCreation checks the API and writes its PROCESSING status as one step under the
+     * service monitor that DeleteGraphqlApi holds, so a delete arriving between the two waits. It
+     * then finds the schema busy and is refused with a 409, leaving the API and its PROCESSING
+     * status in place. Without the shared hold the delete would succeed and leave a PROCESSING
+     * status for a deleted API. The schema creation worker is the fixture's mock, so the status
+     * stays PROCESSING.
+     */
+    @Test
+    void anApiDeleteDuringSchemaStartIsRefusedAndKeepsTheApi() throws Exception {
+        ParkingStore<GraphqlApi> store = new ParkingStore<>();
+        AppSyncService svc = serviceWithApiStore(store);
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("kept"), "us-east-1");
+        AtomicReference<Throwable> deleteFailure = new AtomicReference<>();
+
+        secondCallRunsAroundTheFirst(store, store::parkNextRead,
+                () -> svc.startSchemaCreation(api.getApiId(), "type Query { a: String }"),
+                () -> {
+                    try {
+                        svc.deleteGraphqlApi(api.getApiId());
+                    } catch (AwsException e) {
+                        deleteFailure.set(e);
+                    }
+                });
+
+        assertTrue(deleteFailure.get() instanceof AwsException, "the delete must be refused: " + deleteFailure.get());
+        assertEquals(409, ((AwsException) deleteFailure.get()).getHttpStatus());
+        assertEquals("kept", svc.getGraphqlApi(api.getApiId()).getName());
+        assertEquals(SchemaCreationStatusType.PROCESSING,
+                svc.getSchemaCreationStatus(api.getApiId()).getStatus());
     }
 }

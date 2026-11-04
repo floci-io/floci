@@ -3,6 +3,14 @@
 **Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 **Endpoint:** `POST http://localhost:4566/`
 
+## Mapping values
+
+`Fn::FindInMap` preserves both string and list values from `Mappings`. Mapped lists
+can feed list properties or a conditional `Fn::If` branch. `Fn::Select` and
+`Fn::Join` preserve literal commas and empty list positions. This includes templates
+that choose between mapped Availability Zones and `Fn::GetAZs`. AWS documents
+both value types in the [Mappings syntax](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/mappings-section-structure.html).
+
 ## IAM role session duration
 
 `AWS::IAM::Role` applies `MaxSessionDuration` on creation and update, including
@@ -183,7 +191,8 @@ cross-resource references.
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
 | SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment), `ReceiptRule` (stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery) |
 | DynamoDB | `Table` (`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one. `KinesisStreamSpecification` applied on create and update; with the DynamoDB Local backend, `StreamArn` is checked as on AWS but nothing is forwarded), `GlobalTable` |
-| Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`, `WebFunction` (control plane only; the endpoint domain does not serve requests yet), `WebFunctionEndpoint`, `WebFunctionRevision` (every property is createOnly, so a change mints a new revision). Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
+| Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `CodeSigningConfig`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`, `WebFunction` (control plane only; the endpoint domain does not serve requests yet), `WebFunctionEndpoint`, `WebFunctionRevision` (every property is createOnly, so a change mints a new revision). Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
+| Signer | `SigningProfile` (identifiers only; Floci has no Signer API) |
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
 | Organizations | `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy` |
 | SSM | `Parameter` |
@@ -726,7 +735,13 @@ their create default (`XrayEnabled`, `AdditionalAuthenticationProviders`, a func
 a resolver's `Kind`). Not cleared: the identifiers, `Tags` and `EnvironmentVariables`, which the
 provisioner already drives to the template, required members (`AuthenticationType`, `Type`, a function's
 `DataSourceName`), create-only members, an API key's `Expires`, a GraphQL API's `ApiType` and
-`Visibility`, and a UNIT resolver's `DataSourceName`.
+`Visibility`, and a UNIT resolver's `DataSourceName`. When a later resource fails the update, the
+rollback puts each AppSync API, data source, function, resolver and API key that the update changed in
+place back to the members it had, including the ones the update cleared. An API that had no
+`AdditionalAuthenticationProviders` gets an empty list back, and an API key's `Expires` is sent again
+only when the update changed it, so one now less than a day away fails the rollback and the key stays as the update left it. A `GraphQLSchema`
+and a replaced AppSync resource (a changed `ApiId`, name, `TypeName` or `FieldName`) are not rolled back
+and end the stack in `UPDATE_ROLLBACK_FAILED`.
 
 On the EC2 networking types (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`),
 a `Tags` property the previous template declared and the new one drops is cleared on `UpdateStack`, and

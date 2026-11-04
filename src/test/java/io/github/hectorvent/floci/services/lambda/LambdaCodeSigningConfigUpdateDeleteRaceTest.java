@@ -53,8 +53,10 @@ class LambdaCodeSigningConfigUpdateDeleteRaceTest {
         String arn = configs.create(REGION, ACCOUNT, null, publishers, null).getCodeSigningConfigArn();
 
         LambdaFunctionStore functions = new LambdaFunctionStore(AccountAwareStorageBackend.inMemory(ACCOUNT));
-        LambdaService lambda = new LambdaService(functions, new WarmPool(), new CodeStore(codePath),
-                new ZipExtractor(), regions);
+        LambdaService lambda = new LambdaService(functions, null, new LambdaConcurrencyLimiter(),
+                new WarmPool(), new CodeStore(codePath), new ZipExtractor(), null, regions, null, null,
+                new LambdaTargetResolver(functions, null), null, null, null, null, null, factory,
+                null, null, null, null, new ObjectMapper(), configs);
         ObjectMapper mapper = new ObjectMapper();
         LambdaCodeSigningConfigFunctionsController controller =
                 new LambdaCodeSigningConfigFunctionsController(configs, lambda, regions, mapper);

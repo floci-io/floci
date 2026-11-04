@@ -10,6 +10,8 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
@@ -54,6 +56,7 @@ class AppSyncCfnIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260905/us-east-1/appsync/aws4_request";
     private static final String STACK = "appsync-cfn-it";
     private static final String REMOVAL_STACK = "appsync-cfn-removal-it";
+    private static final String ROLLBACK_STACK = "appsync-cfn-rollback-it";
 
     private static final String TEMPLATE = """
         {
@@ -185,6 +188,140 @@ class AppSyncCfnIntegrationTest {
         }
         """;
 
+    private static final String ROLLBACK_FIRST = """
+        {
+          "Resources": {
+            "GraphQlApi": {
+              "Type": "AWS::AppSync::GraphQLApi",
+              "Properties": {
+                "Name": "appsync-cfn-rollback-it-api",
+                "AuthenticationType": "API_KEY",
+                "OwnerContact": "platform-team",
+                "QueryDepthLimit": 10
+              }
+            },
+            "GraphQlDs": {
+              "Type": "AWS::AppSync::DataSource",
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "Name": "rollbackDs",
+                "Type": "NONE",
+                "Description": "first",
+                "ServiceRoleArn": "arn:aws:iam::000000000000:role/rollback-it"
+              }
+            },
+            "GraphQlFn": {
+              "Type": "AWS::AppSync::FunctionConfiguration",
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "Name": "rollbackFn",
+                "DataSourceName": {"Fn::GetAtt": ["GraphQlDs", "Name"]},
+                "FunctionVersion": "2018-05-29",
+                "RequestMappingTemplate": "first request",
+                "ResponseMappingTemplate": "first response"
+              }
+            },
+            "GraphQlResolver": {
+              "Type": "AWS::AppSync::Resolver",
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "TypeName": "Query",
+                "FieldName": "getMessages",
+                "DataSourceName": {"Fn::GetAtt": ["GraphQlDs", "Name"]},
+                "RequestMappingTemplate": "first request",
+                "ResponseMappingTemplate": "first response"
+              }
+            },
+            "GraphQlApiKey": {
+              "Type": "AWS::AppSync::ApiKey",
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "Description": "first"
+              }
+            }
+          },
+          "Outputs": {
+            "ApiId": {"Value": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]}},
+            "FunctionId": {"Value": {"Fn::GetAtt": ["GraphQlFn", "FunctionId"]}}
+          }
+        }
+        """;
+
+    /**
+     * Changes one member and drops another on every type, adds a data source, then fails on a
+     * resolver that names resolver code in S3, which the provisioner refuses. {@code %d} is the
+     * API key's new expiry.
+     */
+    private static final String ROLLBACK_SECOND = """
+        {
+          "Resources": {
+            "GraphQlApi": {
+              "Type": "AWS::AppSync::GraphQLApi",
+              "Properties": {
+                "Name": "appsync-cfn-rollback-it-api",
+                "AuthenticationType": "API_KEY",
+                "QueryDepthLimit": 20
+              }
+            },
+            "GraphQlDs": {
+              "Type": "AWS::AppSync::DataSource",
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "Name": "rollbackDs",
+                "Type": "NONE",
+                "Description": "second"
+              }
+            },
+            "GraphQlFn": {
+              "Type": "AWS::AppSync::FunctionConfiguration",
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "Name": "rollbackFn",
+                "DataSourceName": {"Fn::GetAtt": ["GraphQlDs", "Name"]},
+                "FunctionVersion": "2018-05-29",
+                "RequestMappingTemplate": "second request"
+              }
+            },
+            "GraphQlResolver": {
+              "Type": "AWS::AppSync::Resolver",
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "TypeName": "Query",
+                "FieldName": "getMessages",
+                "DataSourceName": {"Fn::GetAtt": ["GraphQlDs", "Name"]},
+                "RequestMappingTemplate": "second request"
+              }
+            },
+            "GraphQlApiKey": {
+              "Type": "AWS::AppSync::ApiKey",
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "Expires": %d
+              }
+            },
+            "GraphQlDsCreated": {
+              "Type": "AWS::AppSync::DataSource",
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "Name": "createdByTheUpdate",
+                "Type": "NONE"
+              }
+            },
+            "GraphQlResolverLater": {
+              "Type": "AWS::AppSync::Resolver",
+              "DependsOn": ["GraphQlResolver", "GraphQlApiKey", "GraphQlDsCreated"],
+              "Properties": {
+                "ApiId": {"Fn::GetAtt": ["GraphQlApi", "ApiId"]},
+                "TypeName": "Query",
+                "FieldName": "later",
+                "DataSourceName": {"Fn::GetAtt": ["GraphQlDs", "Name"]},
+                "CodeS3Location": "s3://rollback-it/resolver.js"
+              }
+            }
+          }
+        }
+        """;
+
     @Test
     void createUpdateAndDeleteAnAppSyncApi() {
         cloudFormation("CreateStack", STACK, TEMPLATE, Map.of("FieldLogLevel", "ERROR"));
@@ -303,6 +440,53 @@ class AppSyncCfnIntegrationTest {
 
         cloudFormation("DeleteStack", REMOVAL_STACK, null, Map.of());
         CfnStackWaits.awaitStackDeleted(REMOVAL_STACK);
+    }
+
+    /**
+     * A failing later resource rolls an AppSync stack back: each type gets back the member the
+     * update changed and the member it cleared, an API key its expiry and description, and the
+     * data source the update created is deleted.
+     */
+    @Test
+    void aFailingLaterResourceRestoresWhatTheUpdateChangedAndCleared() {
+        cloudFormation("CreateStack", ROLLBACK_STACK, ROLLBACK_FIRST, Map.of());
+        CfnStackWaits.awaitStatus(ROLLBACK_STACK, "CREATE_COMPLETE");
+        String created = describeStacks(ROLLBACK_STACK, "CREATE_COMPLETE");
+        String apiId = outputValue(created, "ApiId");
+        String functionId = outputValue(created, "FunctionId");
+        String keyId = appSync("/v1/apis/" + apiId + "/apikeys").extract().path("apiKeys[0].id");
+        long expires = ((Number) appSync("/v1/apis/" + apiId + "/apikeys").extract()
+                .path("apiKeys[0].expires")).longValue();
+
+        long newExpiry = Instant.now().plus(30, ChronoUnit.DAYS).getEpochSecond();
+        cloudFormation("UpdateStack", ROLLBACK_STACK, ROLLBACK_SECOND.formatted(newExpiry), Map.of());
+        CfnStackWaits.awaitStatus(ROLLBACK_STACK, "UPDATE_ROLLBACK_COMPLETE");
+
+        appSync("/v1/apis/" + apiId)
+            .statusCode(200)
+            .body("graphqlApi.queryDepthLimit", equalTo(10))
+            .body("graphqlApi.ownerContact", equalTo("platform-team"));
+        appSync("/v1/apis/" + apiId + "/datasources/rollbackDs")
+            .statusCode(200)
+            .body("dataSource.description", equalTo("first"))
+            .body("dataSource.serviceRoleArn", equalTo("arn:aws:iam::000000000000:role/rollback-it"));
+        appSync("/v1/apis/" + apiId + "/functions/" + functionId)
+            .statusCode(200)
+            .body("functionConfiguration.requestMappingTemplate", equalTo("first request"))
+            .body("functionConfiguration.responseMappingTemplate", equalTo("first response"));
+        appSync("/v1/apis/" + apiId + "/types/Query/resolvers/getMessages")
+            .statusCode(200)
+            .body("resolver.requestMappingTemplate", equalTo("first request"))
+            .body("resolver.responseMappingTemplate", equalTo("first response"));
+        appSync("/v1/apis/" + apiId + "/apikeys")
+            .statusCode(200)
+            .body("apiKeys[0].id", equalTo(keyId))
+            .body("apiKeys[0].description", equalTo("first"))
+            .body("apiKeys[0].expires", equalTo((int) expires));
+        appSync("/v1/apis/" + apiId + "/datasources/createdByTheUpdate").statusCode(404);
+
+        cloudFormation("DeleteStack", ROLLBACK_STACK, null, Map.of());
+        CfnStackWaits.awaitStackDeleted(ROLLBACK_STACK);
     }
 
     private static void cloudFormation(String action, String stackName, String template,

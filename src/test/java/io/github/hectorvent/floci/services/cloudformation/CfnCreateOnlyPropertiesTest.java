@@ -36,6 +36,14 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void signingProfileReplacesForEverythingButTags() {
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::Signer::SigningProfile", "ProfileName"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::Signer::SigningProfile", "PlatformId"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::Signer::SigningProfile", "SignatureValidityPeriod"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Signer::SigningProfile", "Tags"));
+    }
+
+    @Test
     void isCreateOnly_returnsFalseForMutableProperties() {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::SQS::Queue", "VisibilityTimeout"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Redshift::Cluster", "NumberOfNodes"));

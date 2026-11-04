@@ -46,6 +46,7 @@ public class DbCluster {
     private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private String engineMode;
     private boolean storageEncrypted;
+    private int backupRetentionPeriod = 1;
     private String kmsKeyId;
 
     private String dockerVolumeName;
@@ -201,6 +202,9 @@ public class DbCluster {
 
     public boolean isStorageEncrypted() { return storageEncrypted; }
     public void setStorageEncrypted(boolean storageEncrypted) { this.storageEncrypted = storageEncrypted; }
+
+    public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
+    public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
 
     public String getKmsKeyId() { return kmsKeyId; }
     public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }

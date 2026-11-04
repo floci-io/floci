@@ -141,6 +141,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         }
 
         applyLambdaReservedConcurrency(region, func, desired);
+        applyLambdaCodeSigningConfig(ctx, func, desired);
 
         r.setPhysicalId(desired.functionName());
         r.getAttributes().put("Arn", func.getFunctionArn());
@@ -280,6 +281,10 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         LambdaService.validateTagKeys(tags);
         if (!tags.isEmpty()) {
             createRequest.put("Tags", tags);
+        }
+        String codeSigningConfigArn = ctx.resolveOptional(props, "CodeSigningConfigArn");
+        if (codeSigningConfigArn != null) {
+            createRequest.put("CodeSigningConfigArn", codeSigningConfigArn);
         }
         Integer reservedConcurrentExecutions = null;
         String reserved = ctx.resolveOptional(props, "ReservedConcurrentExecutions");
@@ -456,6 +461,22 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         } else if (fn.getReservedConcurrentExecutions() != null) {
             lambdaService.deleteFunctionConcurrency(region, fn.getFunctionName());
+        }
+    }
+
+    /**
+     * Attaches or replaces the template's code signing config, and detaches one only when the previous
+     * template declared it: a config attached outside the stack stays, as CloudFormation leaves it.
+     */
+    private void applyLambdaCodeSigningConfig(ProvisionContext ctx, LambdaFunction fn, LambdaDesiredState desired) {
+        Object codeSigningConfigArn = desired.createRequest().get("CodeSigningConfigArn");
+        if (codeSigningConfigArn == null) {
+            if (ctx.previouslyDeclared("CodeSigningConfigArn") && fn.getCodeSigningConfigArn() != null) {
+                lambdaService.deleteFunctionCodeSigningConfig(ctx.region(), fn.getFunctionName());
+            }
+        } else if (!codeSigningConfigArn.equals(fn.getCodeSigningConfigArn())) {
+            lambdaService.attachFunctionCodeSigningConfig(ctx.region(), fn.getFunctionName(),
+                    codeSigningConfigArn.toString());
         }
     }
 

@@ -12,6 +12,7 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -879,10 +880,29 @@ public class MySqlProtocolHandler {
             return;
         }
 
-        Thread t1 = Thread.ofVirtual().name("rds-mysql-c2b")
-                .start(() -> relayClientCommands(clientIn, backendOut));
-        Thread t2 = Thread.ofVirtual().name("rds-mysql-b2c")
-                .start(() -> relay(backendIn, clientOut));
+        // Either side going away ends the session: a client that drops without COM_QUIT would
+        // otherwise leave the backend-to-client relay blocked on a backend that never speaks.
+        AtomicBoolean closed = new AtomicBoolean();
+        Runnable closeBoth = () -> {
+            if (closed.compareAndSet(false, true)) {
+                closeQuietly(client);
+                closeQuietly(backend);
+            }
+        };
+        Thread t1 = RelayThreads.start("rds-mysql-c2b", () -> {
+            try {
+                relayClientCommands(clientIn, backendOut);
+            } finally {
+                closeBoth.run();
+            }
+        });
+        Thread t2 = RelayThreads.start("rds-mysql-b2c", () -> {
+            try {
+                relay(backendIn, clientOut);
+            } finally {
+                closeBoth.run();
+            }
+        });
         try {
             t1.join();
             t2.join();

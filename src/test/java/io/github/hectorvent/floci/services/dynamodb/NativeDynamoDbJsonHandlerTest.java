@@ -2377,6 +2377,27 @@ class NativeDynamoDbJsonHandlerTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            DeleteItem | {"TableName":"Missing","Key":{"pk":{"S":"a"},"d":"DEEP"},"ConditionExpression":"attribute_exists(pk)","Expected":{"a":{"Exists":false}}} | 1 validation error detected: Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ConditionExpression":"","ExpressionAttributeValues":{},"Expected":{"a":{"Exists":false}}} | 1 validation error detected: Can not use both expression and non-expression parameters in the same request: Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}
+            DeleteItem | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"ConditionExpression":"attribute_exists(pk)","ConditionalOperator":"AND"} | 1 validation error detected: Can not use both expression and non-expression parameters in the same request: Non-expression parameters: {ConditionalOperator} Expression parameters: {ConditionExpression}
+            PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ConditionExpression":"a = = b","ExpressionAttributeNames":{},"ExpressionAttributeValues":{}} | 1 validation error detected: ExpressionAttributeNames must not be empty
+            DeleteItem | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"ExpressionAttributeNames":{"#a":"a"},"ExpressionAttributeValues":{}} | 1 validation error detected: ExpressionAttributeValues must not be empty
+            PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ConditionExpression":"attribute_exists(pk)","ExpressionAttributeNames":{},"ExpressionAttributeValues":{":w":"DEEP"}} | 1 validation error detected: ExpressionAttributeNames must not be empty
+            PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ExpressionAttributeNames":{"#a":"a"},"ExpressionAttributeValues":{":v":{"N":"x"}}} | 1 validation error detected: The parameter cannot be converted to a numeric value: x
+            DeleteItem | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"ExpressionAttributeValues":{":v":{"S":"x"}},"ExpressionAttributeNames":{"#a":"a"}} | 1 validation error detected: ExpressionAttributeNames can only be specified when using expressions
+            PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ConditionExpression":"","ExpressionAttributeValues":{":v":{"S":"x"}}} | 1 validation error detected: Invalid ConditionExpression: The expression can not be empty;
+            DeleteItem | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"ConditionExpression":"a = :v"} | 1 validation error detected: Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :v
+            PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ConditionExpression":"a BETWEEN :b AND :a","ExpressionAttributeValues":{":a":{"N":"1"},":b":{"N":"5"}}} | 1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound; lower bound operand: AttributeValue: {N:5}, upper bound operand: AttributeValue: {N:1}
+            """)
+    void aPutOrDeleteChecksItsConditionMembersInOrderInsideTheEnvelope(String operation, String request,
+            String message) throws Exception {
+        JsonNode body = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(40))));
+
+        assertEquals(message, expectValidationException(operation, body).getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             DeleteItem | 0  | {"TableName":"Tbl","ReturnValues":"BOGUS","ConditionalOperator":"XOR","ReturnValuesOnConditionCheckFailure":"BOGUS","ReturnConsumedCapacity":"BOGUS","ReturnItemCollectionMetrics":"BOGUS"} | 6 validation errors detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]; Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [OR, AND]; Value 'BOGUS' at 'returnValuesOnConditionCheckFailure' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value 'BOGUS' at 'returnItemCollectionMetrics' failed to satisfy constraint: Member must satisfy enum value set: [SIZE, NONE]; Value null at 'key' failed to satisfy constraint: Member must not be null
             PutItem    | 0  | {"TableName":"","ReturnValues":"BOGUS"} | 3 validation errors detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]; Value null at 'item' failed to satisfy constraint: Member must not be null; Value '' at 'tableName' failed to satisfy constraint: Member must have length greater than or equal to 1
             PutItem    | 0  | {"TableName":"bad!name","Item":null,"ReturnValues":"ALL_NEW"} | 1 validation error detected: Value null at 'item' failed to satisfy constraint: Member must not be null

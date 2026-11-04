@@ -30,6 +30,35 @@ EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addre
 interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
 `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
 
+### Processor manufacturer metadata
+
+`DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
+instance types. The values were captured from AWS in `us-east-1` on 2026-11-04:
+`AWS` for Graviton, `Intel` for the catalog's T2, T3, M5 and R5 types, and `AMD`
+for `t3a.nano`. The catalog stores these values explicitly; architecture alone
+cannot distinguish Intel from AMD. See the AWS
+[ProcessorInfo API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ProcessorInfo.html).
+
+### Graviton instance-type metadata
+
+The full catalog includes the virtual sizes of `c6g`, `c6gn`, `c7g`, `c8g`,
+`m6g`, `m7g` and `m8g`: medium, large, xlarge, 2xlarge, 4xlarge, 8xlarge,
+12xlarge and 16xlarge, plus 24xlarge and 48xlarge for C8g/M8g.
+`DescribeInstanceTypes` and the emulator's `DescribeInstanceTypeOfferings` use
+these same entries. Catalog consumers also use their ARM64 architecture and
+CPU/memory capacity for launch validation and container resource limits.
+
+The values were captured from AWS `DescribeInstanceTypes` in `us-east-1` on
+2026-11-04, including each size's network-card/interface limits and each family's
+generation and encryption-in-transit flags. The capture reports C6gn as previous
+generation. All these sizes are EBS-only. See the AWS
+[compute-optimized specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/co.html)
+and [general-purpose specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html).
+
+This is a bounded metadata catalog, not a live regional-availability feed.
+Offerings retain Floci's synthetic region/availability-zone behavior; a catalog
+entry does not establish that AWS offers the type in every region or zone.
+
 ## Standard On-Demand admission
 
 Quota admission is opt-in. Set `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS=true` to
@@ -290,6 +319,7 @@ naming different VPCs find nothing.
 | StopInstances | Stops running instances and updates their stored lifecycle state. |
 | RebootInstances | Reboots instances through the local EC2 service model. |
 | DescribeInstanceStatus | Returns status records for stored instances. |
+| GetConsoleOutput | Returns a console log carrying the guest's SSH host keys between the `-----BEGIN SSH HOST KEY KEYS-----` and `-----END SSH HOST KEY KEYS-----` markers cloud-init prints, read from the running instance container. An instance that is not running, or whose container cannot be read, returns an empty log, as a just-launched one does on AWS. An instance in another region is `InvalidInstanceID.NotFound`. `DryRun=true` returns `DryRunOperation` before the instance is looked up, as on AWS. |
 | DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. A named instance id reports the option the instance acquired at launch, either the explicit `CreditSpecification.CpuCredits` or the family default, `standard` for t2 and `unlimited` for t3, t3a and t4g. An id that is not a burstable performance instance reports `standard`, and only an unknown id is an error. Naming no id returns the instances on the unlimited option, including one that kept `unlimited` after a resize onto a non-burstable type. `Filter.N` supports the modeled `instance-id` and narrows whichever set the request selected. `MaxResults` accepts 5 through 1000 and cannot be combined with instance ids. `DryRun=true` returns `DryRunOperation`. |
 | DescribeInstanceAttribute | Returns a supported attribute for an instance. `ebsOptimized` reports what `RunInstances` (or its launch template) set; instances launched by CloudFormation, Auto Scaling or Fleet report `false`. |
 | ModifyInstanceAttribute | Updates supported mutable attributes for an instance. `UserData.Value` (base64) needs the instance stopped, as on AWS, and answers `IncorrectInstanceState` otherwise. |
@@ -914,9 +944,19 @@ any other `PrivateIpAddress` fails with `InvalidParameterValue` and changes no a
 exception is container mode without AWS-faithful private addresses: the instance reports its Docker
 bridge address there, so any value means its primary address.
 
+`AssociateAddress` accepts `NetworkInterfaceId` for a detached interface or an instance's
+primary interface. A detached interface records the association on its selected private
+address; omitting `PrivateIpAddress` selects the primary address. Supplying both
+`InstanceId` and `NetworkInterfaceId`, a missing interface, or a private address the
+interface does not own fails before changing an existing association. Association to a
+nonprimary attached interface or a service-managed interface, including NAT gateway
+and VPC endpoint interfaces, is not implemented and returns `Unsupported`.
+
 Deleting an interface, including deletion on instance termination, disassociates its
-Elastic IP without releasing the allocation. A retained interface keeps its association
-after termination; release still follows that interface's VPC rules.
+Elastic IP without releasing the allocation. Concurrent `AssociateAddress` and
+`DeleteNetworkInterface` requests cannot leave an association pointing to a deleted
+interface. A retained interface keeps its association after termination; release still
+follows that interface's VPC rules.
 
 AllocateAddress draws Elastic IPs from `203.0.113.0/24`, a range reserved for documentation that
 no host answers on, in every mode, so a client never reaches someone else's host through one. An
