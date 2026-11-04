@@ -14,6 +14,7 @@ on:
       - 'docker/healthcheck.sh'
       - 'docker/run-docker-tests.sh'
       - 'docker/test-run-docker-tests.sh'
+      - 'docker/test-compat-socket.sh'
       - 'compatibility-tests/**'
       - '.github/ci/compat-timing-report.py'
       - '.github/ci/compat-opentofu-drift-check.py'
@@ -93,6 +94,9 @@ jobs:
           docker logs compat-smoke 2>&1 | tail -20
           docker rm -f compat-smoke >/dev/null
           [ "$health" = healthy ] || { echo "::error::compat image did not become healthy: $health"; exit 1; }
+
+      - name: Compat image reaches a Docker socket owned by a non-root group
+        run: sh docker/test-compat-socket.sh floci-compat-shim-test
 
       - name: Unflagged aws sqs call routes to AWS_ENDPOINT_URL
         run: |

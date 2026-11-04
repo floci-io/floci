@@ -48,6 +48,8 @@ services:
 
 Use this only when the socket's permissions require root. Without the option, Floci retains its unprivileged default. The setting applies to the container entrypoint, not to `floci.docker` configuration.
 
+The entrypoint needs to start as root to read the socket's group and to honour this option. A container started as a non-root user, with `--user 1001` or a Kubernetes `runAsUser`, skips both, so give it the socket's group yourself: `--group-add "$(stat -c '%g' /var/run/docker.sock)"`.
+
 ## Connection Pool
 
 Every Docker call Floci makes goes through one shared client with a bounded connection pool. Some of those connections stay open for as long as a container runs: each Lambda container holds one (the watcher that notices its runtime exiting) plus one per Lambda extension. Log-follow streams use a second pool, described below. When those long-lived connections fill the pool, every other Docker call (create, start, stop, remove) waits for one to free up, and Floci stops making progress.
