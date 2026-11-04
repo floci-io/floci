@@ -169,7 +169,7 @@ class ApiGatewayUsagePlanCfnRollbackIntegrationTest {
             .body("name", equalTo("apigw-usageplan-retry-changed"))
             .body("quota.limit", equalTo(50));
 
-        cloudFormation(stack, "ContinueUpdateRollback", null);
+        CfnStackWaits.continueUpdateRollback(stack, CFN_AUTH);
         assertEquals(planId, outputValue(describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE"), "PlanRef"));
         getUsagePlan(planId)
             .statusCode(200)

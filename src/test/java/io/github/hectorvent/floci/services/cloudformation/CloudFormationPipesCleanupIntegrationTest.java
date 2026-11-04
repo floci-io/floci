@@ -399,15 +399,7 @@ class CloudFormationPipesCleanupIntegrationTest {
         // AWS refuses an update over UPDATE_ROLLBACK_FAILED. The pipe's rollback already restored
         // the prior pipe and only failed to delete the replacement, so skipping it finishes the
         // rollback and the stack takes updates again.
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "ContinueUpdateRollback")
-            .formParam("StackName", stackName)
-            .formParam("ResourcesToSkip.member.1", "MyPipe")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        CfnStackWaits.continueUpdateRollback(stackName, null, "MyPipe");
         assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
         Mockito.doCallRealMethod().when(pipesService).deletePipe(eq(replacementName), anyString());

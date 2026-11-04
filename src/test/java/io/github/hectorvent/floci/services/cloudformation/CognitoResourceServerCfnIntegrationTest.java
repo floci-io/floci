@@ -716,15 +716,7 @@ class CognitoResourceServerCfnIntegrationTest {
     }
 
     private void continueUpdateRollback(String expectedStatus, String... resourcesToSkip) {
-        RequestSpecification request = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "ContinueUpdateRollback")
-                .formParam("StackName", stack);
-        for (int i = 0; i < resourcesToSkip.length; i++) {
-            request.formParam("ResourcesToSkip.member." + (i + 1), resourcesToSkip[i]);
-        }
-        request.when().post("/").then().statusCode(200);
+        CfnStackWaits.continueUpdateRollback(stack, CFN_AUTH, resourcesToSkip);
         assertEquals(expectedStatus, CfnStackWaits.awaitTerminal(stack).status());
     }
 
