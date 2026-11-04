@@ -806,6 +806,24 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     @Test
+    void removedProvidersShowAnActionableErrorWithoutNativeFallback() throws Exception {
+        Pool pool = federatedPool(true);
+        cognitoJson("UpdateUserPoolClient", """
+                {"UserPoolId":"%s","ClientId":"%s","AllowedOAuthFlowsUserPoolClient":true,
+                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":["openid","email"],"CallbackURLs":["%s"],
+                 "SupportedIdentityProviders":[]}
+                """.formatted(pool.poolId(), pool.clientId(), CALLBACK));
+        Response page = loginPage(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId()));
+        assertTrue(page.asString().contains("<p role=\"alert\">No sign-in providers are enabled for this application."
+                + " Contact your administrator.</p>"), page.asString());
+        assertFalse(page.asString().contains("<form"));
+        assertFalse(page.asString().contains("Sign in with"));
+        given().redirects().follow(false).queryParams(authorizeRequest(pool.clientId()))
+                .formParam("username", "untrusted").formParam("password", PASSWORD).post("/cognito-idp/login")
+                .then().statusCode(400).body("error", equalTo("invalid_request"));
+    }
+
+    @Test
     void mixedClientKeepsItsNativeFormAndOffersFederation() throws Exception {
         Pool pool = federatedPool(true);
         Response page = loginPage(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId()));

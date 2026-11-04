@@ -948,6 +948,9 @@ public class CognitoOAuthController {
     private Response signInPage(ContainerRequestContext requestContext, AuthorizationRequest request,
                                 Response.Status status, String error, List<String> fields) {
         UserPoolClient client = cognitoService.findClientById(request.clientId());
+        if (client.getSupportedIdentityProviders().isEmpty() && error == null) {
+            error = "No sign-in providers are enabled for this application. Contact your administrator.";
+        }
         String authorizePath = requestContext.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY) != null
                 ? "/oauth2/authorize" : "/cognito-idp/oauth2/authorize";
         List<String> providerLinks = new ArrayList<>();
