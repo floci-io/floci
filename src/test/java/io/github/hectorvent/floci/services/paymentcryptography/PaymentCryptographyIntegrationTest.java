@@ -66,6 +66,36 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aDerivationKeySaysWhatItDerivesFor() {
+        // The usage a derivation key derives for sits beside the attributes, and it comes
+        // back with the key.
+        String arn = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_B0_BASE_DERIVATION_KEY\","
+                + "\"KeyModesOfUse\":{\"DeriveKey\":true}},"
+                + "\"DeriveKeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"Exportable\":true}")
+                .then().statusCode(200)
+                    .body("Key.DeriveKeyUsage", equalTo("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"))
+                    .extract().path("Key.KeyArn");
+
+        call("GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.DeriveKeyUsage", equalTo("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
+    }
+
+    @Test
+    void aKeyThatAsksForACheckValueOfAnotherKindIsRefused() {
+        // The kind follows the algorithm, so a request that names another is refused
+        // rather than answered with a value of another kind.
+        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},"
+                + "\"KeyCheckValueAlgorithm\":\"CMAC\"}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
     void theKeysOfARegionAreListed() {
         String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
                 .extract().path("Key.KeyArn");

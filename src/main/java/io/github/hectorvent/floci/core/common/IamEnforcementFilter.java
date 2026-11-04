@@ -535,6 +535,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
 
+        // A policy on the encryption keys would refuse this for keys it cannot have: the handler answers it.
+        if (conditionContextResolver.namesUploadNotHeld(action, ctx)) {
+            return;
+        }
+
         Map<String, List<String>> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
         // A request naming several resources is authorized once per resource, as on AWS, so a
         // permitted first target cannot carry later targets that the policy does not allow.
@@ -1289,7 +1294,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
             for (Map<String, List<String>> targetContext : resourceContexts) {
                 Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
-                        targetContext, resource, region, accountId, resourceOwnerAccountId);
+                        targetContext, resource, region, accountId, resourceOwnerAccountId, action);
                 ResourcePolicyDecision resourcePolicyDecision = evaluator.evaluateResourcePolicyFor(
                         effectiveResourcePolicies, principal, action, resource, effectiveContext);
                 Decision decision = evaluator.evaluateResolvedResourcePolicy(
@@ -1568,7 +1573,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String region = requestContext.getRegion() == null
                     ? config.defaultRegion() : requestContext.getRegion();
             Map<String, List<String>> effectiveContext = IamConditionContextResolver.withGlobalContext(
-                    conditionContext, resource, region, accountId, effectiveOwnerAccountId);
+                    conditionContext, resource, region, accountId, effectiveOwnerAccountId, action);
             if (effectiveDecision == null) {
                 effectiveDecision = evaluator.evaluateResourcePolicyFor(
                         policyDocs.isEmpty() ? null : policyDocs,

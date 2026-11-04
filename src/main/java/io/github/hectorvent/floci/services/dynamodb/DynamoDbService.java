@@ -1521,12 +1521,13 @@ public class DynamoDbService {
             // and resolving the account inside the lambda would fall back to the default account,
             // which is the ambient-account bug this commit exists to remove.
             String ownerAccountId = regionResolver.getAccountId();
+            String eventName = existing == null ? "INSERT" : "MODIFY";
             Runnable streamEvent = () -> {
                 if (streamService != null) {
-                    streamService.captureEvent("MODIFY", existing, item, table, region);
+                    streamService.captureEvent(eventName, existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
-                    kinesisForwarder.forward("MODIFY", existing, item, table, region, ownerAccountId);
+                    kinesisForwarder.forward(eventName, existing, item, table, region, ownerAccountId);
                 }
             };
             if (deferredStreamEvents != null) {

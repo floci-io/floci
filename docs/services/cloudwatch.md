@@ -30,9 +30,9 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `TagLogGroup` | Tag a log group |
 | `UntagLogGroup` | Remove tags |
 | `ListTagsLogGroup` | List tags |
-| `TagResource` | Tag a log group by ARN |
-| `UntagResource` | Remove tags from a log group by ARN |
-| `ListTagsForResource` | List tags for a log group ARN |
+| `TagResource` | Tag a log group, delivery source, delivery destination or delivery by ARN |
+| `UntagResource` | Remove tags from a log group, delivery source, delivery destination or delivery by ARN |
+| `ListTagsForResource` | List tags for a log group, delivery source, delivery destination or delivery ARN |
 | `PutSubscriptionFilter` | Create or update a subscription filter (see [Subscription filters](#subscription-filters)) |
 | `DescribeSubscriptionFilters` | List subscription filters on a log group |
 | `DeleteSubscriptionFilter` | Delete a subscription filter |
@@ -50,6 +50,19 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `StartQuery` | Start a Logs Insights query (see [Logs Insights](#logs-insights)) |
 | `GetQueryResults` | Get the status and results of a Logs Insights query |
 | `StopQuery` | Stop a query that has not completed yet |
+| `PutDeliverySource` | Create or replace a vended-log delivery source (see [Vended log delivery](#vended-log-delivery)) |
+| `GetDeliverySource` | Return a delivery source |
+| `DeleteDeliverySource` | Delete a delivery source no delivery uses |
+| `DescribeDeliverySources` | List delivery sources, optionally only those for given resource ARNs |
+| `PutDeliveryDestination` | Create or replace a delivery destination: a log group, S3 bucket, Firehose stream or X-Ray |
+| `GetDeliveryDestination` | Return a delivery destination |
+| `DeleteDeliveryDestination` | Delete a delivery destination no delivery uses |
+| `DescribeDeliveryDestinations` | List delivery destinations, optionally only those with given names |
+| `CreateDelivery` | Pair a delivery source with a delivery destination |
+| `GetDelivery` | Return a delivery, with its record fields and S3 configuration |
+| `UpdateDeliveryConfiguration` | Change a delivery's record fields, delimiter or S3 configuration |
+| `DeleteDelivery` | Delete a delivery |
+| `DescribeDeliveries` | List deliveries, optionally only those from given delivery sources |
 
 `DescribeLogGroups` returns names in ASCII order, with up to 50 groups per page by default.
 Set `limit` to an integer from 1 to 50 and pass the returned `nextToken` with the same region
@@ -76,6 +89,42 @@ metric filters and subscription filters use: terms, quoted phrases, `?` alternat
 exclusions, JSON and space-delimited patterns. An invalid pattern is refused with
 `InvalidParameterException`, and so is a request that names no log group by `logGroupName` or
 `logGroupIdentifier`.
+
+### Vended log delivery {#vended-log-delivery}
+
+Delivery sources, delivery destinations and the deliveries that pair them, which Terraform's
+`aws_cloudwatch_log_delivery_source`, `aws_cloudwatch_log_delivery_destination` and
+`aws_cloudwatch_log_delivery` manage, for example for an EventBridge bus's logs. Floci stores the
+configuration and does not deliver the source's logs.
+
+- `PutDeliverySource` and `PutDeliveryDestination` create the resource or replace every parameter
+  of an existing one. A source reports the service of its resource's ARN (`events` for an event
+  bus) and the `logType` it was given.
+- A destination's `deliveryDestinationType` follows from its resource's ARN: `CWL` for a log group,
+  `S3` for a bucket, `FH` for a Firehose stream. Only an X-Ray destination, which has no resource,
+  names its type.
+- `CreateDelivery` needs an existing source and destination, and one delivery per pair; a second is
+  `ConflictException`. Its id is 16 letters and digits. For an EventBridge event bus source,
+  `recordFields` defaults to the bus's ten template fields and `s3DeliveryConfiguration` to the
+  `{region}/{yyyy}/{MM}/{dd}/{HH}/` suffix path, as AWS reports them. `GetDelivery` returns those;
+  `DescribeDeliveries` leaves them out, as AWS does.
+- A source or destination a delivery uses cannot be deleted (`ConflictException`).
+- Tags are set on create and through `TagResource`, `UntagResource` and `ListTagsForResource` on the
+  resource's ARN; the Get and Describe responses carry none, as on AWS.
+- `DescribeDeliverySources` narrows to `resourceArns`, `DescribeDeliveryDestinations` to `names` and
+  `DescribeDeliveries` to `deliverySourceNames`; a name that matches nothing is left out, not an error.
+- Requests are checked against the Logs API model's lengths, patterns, enums and required members,
+  with AWS's `ValidationException` wording, for example "1 validation error detected: Value at
+  'limit' failed to satisfy constraint: Member must have value less than or equal to 50".
+- An unknown name or id is `ResourceNotFoundException`, "Requested Delivery Source does not exist in
+  this account." (likewise for a Delivery Destination and a Delivery).
+- With IAM enforcement on, each action is authorized on the resources the AWS Service Authorization
+  Reference lists for it: the source, destination or delivery it names, and for `CreateDelivery` the
+  source, the destination and the new delivery; `DeleteDeliverySource` on the source it deletes. The
+  Describe actions are authorized on `*`, as the reference lists no resource for them.
+
+Not modelled: delivery destination policies (`PutDeliveryDestinationPolicy` and its siblings), and
+record field defaults for sources other than an EventBridge event bus.
 
 ### Subscription filters {#subscription-filters}
 

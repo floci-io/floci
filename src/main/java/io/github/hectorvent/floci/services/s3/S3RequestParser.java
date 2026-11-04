@@ -35,11 +35,22 @@ final class S3RequestParser {
      * Package-private so unit tests in the same package can call it.
      */
     static boolean hasQueryParamInString(String query, String param) {
-        if (query == null) return false;
-        for (String pair : query.split("&")) {
-            int eq = pair.indexOf('=');
-            String name = eq >= 0 ? pair.substring(0, eq) : pair;
-            if (name.equals(param)) return true;
+        if (query == null) {
+            return false;
+        }
+        int length = query.length();
+        int start = 0;
+        while (start <= length) {
+            int end = query.indexOf('&', start);
+            if (end < 0) {
+                end = length;
+            }
+            int eq = query.indexOf('=', start, end);
+            int nameEnd = eq >= 0 ? eq : end;
+            if (nameEnd - start == param.length() && query.startsWith(param, start)) {
+                return true;
+            }
+            start = end + 1;
         }
         return false;
     }

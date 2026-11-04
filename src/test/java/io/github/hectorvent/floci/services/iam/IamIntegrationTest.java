@@ -562,8 +562,8 @@ class IamIntegrationTest {
      * simulated against a user named after its tail. IAM answers that minimum with a
      * {@code ValidationError} naming the length, which is what both principal readers answer now.
      *
-     * <p>A value that clears 20 characters and still parses as no ARN is deliberately untouched:
-     * the member publishes no pattern and nothing records what AWS answers for one.
+     * <p>What AWS answers for a value that clears 20 characters and parses as no ARN is
+     * {@link #aPolicySourceArnThatParsesAsNoArnIsInvalidInput} below, captured since.
      */
     @Test
     @Order(88)
@@ -595,6 +595,46 @@ class IamIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
             .body("ErrorResponse.Error.Message", equalTo(expected));
+    }
+
+    /**
+     * The other half of the member, captured from a real account: a value long enough to clear
+     * {@code arnType}'s minimum and malformed enough to parse as no ARN answers
+     * {@code InvalidInput} quoting it, where the simulator used to resolve the user its tail
+     * named. The length violation above is read first, since the shape runs before the operation.
+     */
+    @Test
+    @Order(89)
+    void aPolicySourceArnThatParsesAsNoArnIsInvalidInput() {
+        String malformed = "arn:aws:iam:user/simulate-user";
+
+        given()
+            .formParam("Action", "SimulatePrincipalPolicy")
+            .formParam("PolicySourceArn", malformed)
+            .formParam("ActionNames.member.1", "s3:GetObject")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"))
+            .body("ErrorResponse.Error.Type", equalTo("Sender"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("Invalid ARN provided in the request: " + malformed));
+
+        given()
+            .formParam("Action", "GetContextKeysForPrincipalPolicy")
+            .formParam("PolicySourceArn", malformed)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("Invalid ARN provided in the request: " + malformed));
     }
 
     @Test

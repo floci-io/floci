@@ -338,6 +338,9 @@ PUT, PATCH and DELETE).
 
 ## CLI Examples
 
+For an executable OAC example with direct-S3 and unrelated-distribution negative
+checks, see [Private S3 origin example](cloudfront-private-origin.md).
+
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566
 export AWS_DEFAULT_REGION=us-east-1

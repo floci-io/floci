@@ -16,6 +16,8 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -24,6 +26,19 @@ class RequestResourcesTest {
 
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
+
+    @Test
+    void listTablesCorrectionReadsTheCollectionAndLeavesOtherDynamoOperationsHandBuilt() {
+        assertTrue(RequestResources.reads("dynamodb:ListTables"));
+        assertFalse(RequestResources.reads("dynamodb:BatchWriteItem"));
+        assertFalse(RequestResources.reads("dynamodb:ExecuteStatement"));
+        assertFalse(RequestResources.reads(null));
+        for (String body : List.of("{}", "{\"TableName\":\"ignored\",\"ExclusiveStartTableName\":\"cursor\"}")) {
+            assertEquals(List.of("arn:aws-us-gov:dynamodb:us-gov-west-1:111122223333:table/*"),
+                    RequestResources.of("dynamodb:ListTables", json(body), "aws-us-gov", "us-gov-west-1",
+                            "111122223333"));
+        }
+    }
 
     @Test
     void aMemberHoldingAnArnOfATypeTheActionActsOnNamesThatResource() {
@@ -53,6 +68,21 @@ class RequestResourcesTest {
                 "arn:aws:ecr:us-east-1:111122223333:repository/web", "arn:aws:ecr:eu-west-1:000000000000:repository/web",
                 "arn:aws:ecr:us-east-1:000000000000:repository/web"), of("ecr:TagResource",
                 json("{\"resourceArn\":\"arn:aws:ecr:eu-west-1:111122223333:repository/web\",\"tags\":[]}")));
+    }
+
+    /**
+     * A resource of a type AWS owns, whose format's account is {@code aws} (an IAM Identity Center application
+     * provider), has no copy in the caller's account, so its ARN is checked as given alone; an ARN of any other type
+     * giving that account is still checked as the caller's own too.
+     */
+    @Test
+    void anArnOfATypeAwsOwnsIsCheckedInItsAccountAlone() {
+        String provider = "arn:aws:sso::aws:applicationProvider/custom";
+        assertEquals(List.of(provider), of("sso:DescribeApplicationProvider",
+                json("{\"ApplicationProviderArn\":\"" + provider + "\"}")));
+        String machine = "arn:aws:states:us-east-1:aws:stateMachine:orders";
+        assertEquals(List.of(machine, MACHINE), of("states:DescribeStateMachine",
+                json("{\"stateMachineArn\":\"" + machine + "\"}")));
     }
 
     @Test
@@ -562,9 +592,9 @@ class RequestResourcesTest {
             }
 
             @Override
-            public Optional<String> through(String member, String value, String region) {
+            public List<String> through(String member, String value, String region) {
                 return "SessionId".equals(member) && "us-east-1".equals(region)
-                        ? Optional.ofNullable(sessions.get(value)) : Optional.empty();
+                        ? Optional.ofNullable(sessions.get(value)).stream().toList() : List.of();
             }
         };
         String secret = ",\"SecretArn\":\"arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf\"";
@@ -596,6 +626,101 @@ class RequestResourcesTest {
         assertEquals(List.of(), RequestResources.of("redshift-data:ExecuteStatement",
                 json("{\"Sql\":\"select 1\",\"SessionId\":\"11111111-2222-4333-8444-555555555555\"}"), "aws",
                 "eu-west-1", "000000000000", stored));
+    }
+
+    /**
+     * An EMR request modifying instance groups without its {@code ClusterId} is on the cluster each group is in, as its
+     * service finds it, and none for a group in no cluster; with one, on that cluster alone, and with a null one as
+     * with none. A permission set provisioned to all the accounts it is provisioned to is on each of them, a null
+     * {@code TargetId} naming none, and one provisioned to an account on that account alone.
+     */
+    @Test
+    void aResourceIsNamedThroughEachValueOfAListAndOnlyWhenTheRequestNamesItNoOtherWay() {
+        String clusters = "arn:aws:elasticmapreduce:us-east-1:000000000000:cluster/";
+        Map<String, String> groups = Map.of("ig-A", clusters + "j-A", "ig-B", clusters + "j-B");
+        StoredResourceArns emr = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "elasticmapreduce";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public List<String> through(String member, String value, String region) {
+                return "InstanceGroups[].InstanceGroupId".equals(member)
+                        ? Optional.ofNullable(groups.get(value)).stream().toList() : List.of();
+            }
+        };
+        String modified = "\"InstanceGroups\":[{\"InstanceGroupId\":\"ig-A\",\"InstanceCount\":2},"
+                + "{\"InstanceGroupId\":\"ig-B\",\"InstanceCount\":2},{\"InstanceGroupId\":\"ig-none\"}]";
+        assertEquals(List.of(clusters + "j-A", clusters + "j-B"), RequestResources.of(
+                "elasticmapreduce:ModifyInstanceGroups", json("{" + modified + "}"), "aws", "us-east-1",
+                "000000000000", emr));
+        assertEquals(List.of(clusters + "j-A"), RequestResources.of("elasticmapreduce:ModifyInstanceGroups",
+                json("{\"ClusterId\":\"j-A\"," + modified + "}"), "aws", "us-east-1", "000000000000", emr));
+        // A null ClusterId names no cluster of its own, as the handler reads it; an InstanceGroups that is not a
+        // list names no group, which the handler refuses.
+        assertEquals(List.of(clusters + "j-A", clusters + "j-B"), RequestResources.of(
+                "elasticmapreduce:ModifyInstanceGroups", json("{\"ClusterId\":null," + modified + "}"), "aws",
+                "us-east-1", "000000000000", emr));
+        assertEquals(List.of(), RequestResources.of("elasticmapreduce:ModifyInstanceGroups",
+                json("{\"InstanceGroups\":{\"first\":{\"InstanceGroupId\":\"ig-A\"}}}"), "aws", "us-east-1",
+                "000000000000", emr));
+
+        String instance = "arn:aws:sso:::instance/ssoins-1111111111111111";
+        String permissionSet = "arn:aws:sso:::permissionSet/ssoins-1111111111111111/ps-2222222222222222";
+        StoredResourceArns sso = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "sso";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public List<String> through(String member, String value, String region) {
+                return "PermissionSetArn".equals(member) && permissionSet.equals(value)
+                        ? List.of("arn:aws:sso:::account/111111111111", "arn:aws:sso:::account/222222222222")
+                        : List.of();
+            }
+        };
+        String provisioned = "{\"InstanceArn\":\"" + instance + "\",\"PermissionSetArn\":\"" + permissionSet + "\",";
+        assertEquals(List.of(instance, permissionSet, "arn:aws:sso:::account/111111111111",
+                "arn:aws:sso:::account/222222222222"), RequestResources.of("sso:ProvisionPermissionSet",
+                json(provisioned + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\"}"), "aws", "us-east-1",
+                "000000000000", sso));
+        assertEquals(List.of(instance, permissionSet, "arn:aws:sso:::account/111111111111",
+                "arn:aws:sso:::account/222222222222"), RequestResources.of("sso:ProvisionPermissionSet",
+                json(provisioned + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\",\"TargetId\":null}"), "aws",
+                "us-east-1", "000000000000", sso));
+        assertEquals(List.of(instance, permissionSet, "arn:aws:sso:::account/333333333333"), RequestResources.of(
+                "sso:ProvisionPermissionSet", json(provisioned + "\"TargetType\":\"AWS_ACCOUNT\","
+                        + "\"TargetId\":\"333333333333\"}"), "aws", "us-east-1", "000000000000", sso));
+    }
+
+    /**
+     * A resource an IAM Identity Center create makes in an instance has the id of the instance its request names by
+     * its ARN, and its own id open, so a grant on the instance's permission sets covers it.
+     */
+    @Test
+    void aResourceMadeInAnInstanceHasTheInstancesId() {
+        String instance = "arn:aws:sso:::instance/ssoins-1111111111111111";
+        assertEquals(List.of(instance, "arn:aws:sso:::permissionSet/ssoins-1111111111111111/*"),
+                of("sso:CreatePermissionSet", json("{\"InstanceArn\":\"" + instance + "\",\"Name\":\"admins\"}")));
+        assertEquals(List.of("arn:aws:sso:::permissionSet/ssoins-1111111111111111/*"),
+                RequestResources.created("sso:CreatePermissionSet",
+                        json("{\"InstanceArn\":\"" + instance + "\",\"Name\":\"admins\"}"), "aws", "us-east-1",
+                        "000000000000"));
+        assertEquals(List.of(instance, "arn:aws:sso::000000000000:trustedTokenIssuer/ssoins-1111111111111111/*"),
+                of("sso:CreateTrustedTokenIssuer", json("{\"InstanceArn\":\"" + instance + "\",\"Name\":\"idp\","
+                        + "\"TrustedTokenIssuerType\":\"OIDC_JWT\"}")));
     }
 
     /** A request value is a name, so a {@code ${...}} in it is kept, not read as a variable of the format. */

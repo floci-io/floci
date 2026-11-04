@@ -186,7 +186,12 @@ public class ApiGatewayExecuteController {
     static final Pattern ELB_LISTENER_ARN = Pattern.compile(
             "^arn:" + AwsArnUtils.PARTITION_REGEX + ":elasticloadbalancing:([^:]+):[^:]*:listener/(?:app|net)/.+$");
 
-    private record AuthorizerResult(Response errorResponse, String principalId, Map<String, Object> context) {}
+    private record AuthorizerResult(Response errorResponse, String principalId, Map<String, Object> context,
+                                    String usageIdentifierKey) {
+        AuthorizerResult(Response errorResponse, String principalId, Map<String, Object> context) {
+            this(errorResponse, principalId, context, null);
+        }
+    }
 
     /**
      * What a gateway-generated error needs in order to render the REST API's gateway response for
@@ -472,8 +477,11 @@ public class ApiGatewayExecuteController {
         }
         scope = scope.withResource(matched);
 
-        // 1. Authorizer
-        ResolvedApiKey resolvedApiKey = resolveApiKeyForRequest(region, apiId, stageName, headers);
+        // 1. Authorizer. With apiKeySource AUTHORIZER the x-api-key header is not read: the key is
+        // the usageIdentifierKey the Lambda authorizer returns, resolved once it has run.
+        boolean keyFromAuthorizer = apiGatewayService.getRestApi(region, apiId).readsApiKeyFromAuthorizer();
+        ResolvedApiKey resolvedApiKey = keyFromAuthorizer ? null
+                : resolveApiKey(region, apiId, stageName, headers.getHeaderString("x-api-key"));
 
         // AWS_IAM is verified before the CUSTOM authorizer path because it gates the request on the
         // caller's signature rather than on a Lambda's verdict, and a method carries one
@@ -491,9 +499,13 @@ public class ApiGatewayExecuteController {
         scope = scope.withIdentity(resolvedApiKey, iamIdentity);
         AuthorizerResult authorizerResult = invokeAuthorizer(scope, region, apiId, stageName, httpMethod, path, matched.getPath(), matched.getId(), stage, method, headers, uriInfo, resolvedApiKey);
         if (authorizerResult.errorResponse() != null) return authorizerResult.errorResponse();
+        if (keyFromAuthorizer) {
+            resolvedApiKey = resolveApiKey(region, apiId, stageName, authorizerResult.usageIdentifierKey());
+            scope = scope.withIdentity(resolvedApiKey, iamIdentity);
+        }
 
         // API Gateway checks the API key requirement after authorization but before request
-        // validation and throttling. resolvedApiKey is null when the header is missing or matches
+        // validation and throttling. resolvedApiKey is null when the key is missing or matches
         // no enabled key linked to this (apiId, stage) through a usage plan.
         if (method.isApiKeyRequired() && resolvedApiKey == null) {
             return gatewayResponse(scope, GatewayResponseType.INVALID_API_KEY, 403, "Forbidden");
@@ -1116,7 +1128,8 @@ public class ApiGatewayExecuteController {
             if (!restLambdaAuthorizer.permits(verified, methodArn, conditions)) {
                 return authorizerError(scope, GatewayResponseType.ACCESS_DENIED, 403);
             }
-            return new AuthorizerResult(null, verified.principalId(), verified.context());
+            return new AuthorizerResult(null, verified.principalId(), verified.context(),
+                    verified.usageIdentifierKey());
         } catch (Exception exception) {
             LOG.warnv("Authorizer failure: {0}", exception.getMessage());
             return authorizerError(scope, GatewayResponseType.AUTHORIZER_FAILURE, 500);
@@ -1376,15 +1389,15 @@ public class ApiGatewayExecuteController {
     }
 
     /**
-     * Resolves the API key id and value for a request by matching the {@code x-api-key} header
-     * against usage plan keys linked to this (apiId, stageName) pair.
+     * Resolves the API key id and value for a request by matching the key value it carries (the
+     * {@code x-api-key} header, or a Lambda authorizer's {@code usageIdentifierKey}) against usage
+     * plan keys linked to this (apiId, stageName) pair.
      *
-     * <p>Returns {@code null} when the header is missing or does not match any enabled key linked
+     * <p>Returns {@code null} when the value is missing or does not match any enabled key linked
      * to this (apiId, stage) through a usage plan.
      */
-    private ResolvedApiKey resolveApiKeyForRequest(String region, String apiId, String stageName, HttpHeaders headers) {
-        String keyHeader = headers.getHeaderString("x-api-key");
-        if (keyHeader == null || keyHeader.isBlank()) {
+    private ResolvedApiKey resolveApiKey(String region, String apiId, String stageName, String keyValue) {
+        if (keyValue == null || keyValue.isBlank()) {
             return null;
         }
         // Find all usage plans that include this (apiId, stage) pair
@@ -1395,7 +1408,7 @@ public class ApiGatewayExecuteController {
             // Check if any key in this plan matches the header value. The usage plan key holds a copy
             // of the value, so the key itself must still exist and be enabled for the match to count.
             for (UsagePlanKey planKey : apiGatewayService.getUsagePlanKeys(region, plan.getId())) {
-                if (!keyHeader.equals(planKey.getValue())) {
+                if (!keyValue.equals(planKey.getValue())) {
                     continue;
                 }
                 if (apiGatewayService.findApiKey(region, planKey.getId())

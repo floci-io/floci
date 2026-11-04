@@ -12,7 +12,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -106,9 +105,9 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", user.getArn());
         r.getAttributes().put(USER_ID_ATTR, user.getUserId());
 
-        Set<String> previousInlineNames = readTrackedSet(r, INLINE_NAMES_ATTR);
-        Set<String> previousManagedArns = readTrackedSet(r, MANAGED_ARNS_ATTR);
-        Set<String> previousGroups = readTrackedSet(r, GROUPS_ATTR);
+        Set<String> previousInlineNames = CfnTrackedSets.read(r, INLINE_NAMES_ATTR);
+        Set<String> previousManagedArns = CfnTrackedSets.read(r, MANAGED_ARNS_ATTR);
+        Set<String> previousGroups = CfnTrackedSets.read(r, GROUPS_ATTR);
 
         Set<String> originalGroups = new HashSet<>(user.getGroupNames());
         Set<String> originalPolicyArns = new HashSet<>(user.getAttachedPolicyArns());
@@ -323,25 +322,9 @@ public class IamUserCfnProvisioner implements CfnResourceProvisioner {
             throw failure;
         }
 
-        writeTrackedSet(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
-        writeTrackedSet(r, MANAGED_ARNS_ATTR, managedPolicyArns);
-        writeTrackedSet(r, GROUPS_ATTR, groups);
-    }
-
-    private static Set<String> readTrackedSet(StackResource r, String attribute) {
-        String raw = r.getAttributes().get(attribute);
-        if (raw == null || raw.isEmpty()) {
-            return Set.of();
-        }
-        return new LinkedHashSet<>(List.of(raw.split("\n")));
-    }
-
-    private static void writeTrackedSet(StackResource r, String attribute, Collection<String> values) {
-        if (values.isEmpty()) {
-            r.getAttributes().remove(attribute);
-            return;
-        }
-        r.getAttributes().put(attribute, String.join("\n", values));
+        CfnTrackedSets.write(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
+        CfnTrackedSets.write(r, MANAGED_ARNS_ATTR, managedPolicyArns);
+        CfnTrackedSets.write(r, GROUPS_ATTR, groups);
     }
 
     @Override

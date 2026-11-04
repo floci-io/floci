@@ -14,8 +14,10 @@ import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
  * whole carries the list. A required member the request leaves out used to read
  * {@code Value null at '<member>'} for want of a capture either way; one arrived on 2026-10-31,
  * answering an omitted {@code Status} as {@code Value at 'status' failed to satisfy constraint:
- * Member must not be null}, so the word {@code null} comes out with every other value this service
- * leaves out and {@link #notNull} is where that is decided.
+ * Member must not be null}. That capture covers {@code Status} alone. Dropping the word for every
+ * other member this service leaves out is Floci's reading of it rather than a recorded answer, on
+ * the grounds that an absent member has no value to carry, and {@link #notNull} is where that is
+ * decided, so a capture that ever splits the two moves one place.
  */
 final class IamValidationErrors {
 
@@ -29,7 +31,8 @@ final class IamValidationErrors {
     /**
      * The 400 {@code ValidationError} for a required member the request leaves out, named with no
      * value and no {@code null} beside it. Captured from a real account on 2026-10-31 against the
-     * {@code Status} the four credential operations share.
+     * {@code Status} the four credential operations share, and read here as the form every other
+     * omitted member takes, which nothing captured covers.
      */
     static AwsException notNull(String path) {
         return SmithyValidationErrors.validationError(MESSAGES.notNull(path));

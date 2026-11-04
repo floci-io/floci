@@ -707,6 +707,10 @@ public class CodeArtifactService implements Resettable {
         return id;
     }
 
+    private void endSidecarUse(RepositorySidecarManager manager, String repoId) {
+        manager.endUse(repoId);
+    }
+
     public synchronized CodeArtifactRepository updateRepository(String region, String domain, String domainOwner,
                                                                   String repository, String description,
                                                                   List<String> upstreams) {
@@ -901,19 +905,8 @@ public class CodeArtifactService implements Resettable {
         // operation before any idempotency check below, the same way a real prerequisite failure
         // would: a retry of already-published bytes is still a PublishPackageVersion call, and
         // AWS's own documented behavior ("version 1.2 cannot be published" once Publish is set to
-        // Block) draws no bytes-already-match exception to it. accountingPackageName, not the raw
-        // packageName, so this sees the same config PutPackageOriginConfiguration/
-        // isUpstreamRetentionBlocked now key by for a format (nuget, pypi) whose names are
-        // case/punctuation normalized.
-        String originKey = packageKey(region, domain, repository, format, namespace,
-                accountingPackageName(format, packageName));
-        String publishRestriction = packageOriginConfigs.getForAccount(owner, originKey)
-                .map(PackageOriginConfig::getPublishRestriction)
-                .orElse("ALLOW");
-        if ("BLOCK".equals(publishRestriction)) {
-            throw conflict("Package '" + packageName + "' cannot be published because its origin configuration "
-                    + "blocks direct publish.", packageName, "package");
-        }
+        // Block) draws no bytes-already-match exception to it.
+        requireDirectPublishAllowed(owner, region, domain, repository, format, namespace, packageName);
         String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
 
         CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key).orElse(null);
@@ -1112,7 +1105,7 @@ public class CodeArtifactService implements Resettable {
                 revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
                         packageName, version, repoId).revision();
             } finally {
-                manager.endUse(repoId);
+                endSidecarUse(manager, repoId);
             }
         } else {
             String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
@@ -1223,7 +1216,7 @@ public class CodeArtifactService implements Resettable {
                 preferredDisplayVersion = manager.preferredDisplayVersion(repoId, domain, repository, namespace,
                         packageName).orElse(null);
             } finally {
-                manager.endUse(repoId);
+                endSidecarUse(manager, repoId);
             }
             Set<String> coveredVersions = raw.stream().map(RepositorySidecarManager.PackageVersionTimestamp::version)
                     .collect(Collectors.toSet());
@@ -2249,6 +2242,44 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
+     * The native publish paths' counterpart to the publish:BLOCK check {@link
+     * #publishPackageVersion} runs for the generic format: {@code mvn deploy}, {@code npm publish},
+     * {@code twine upload} and {@code dotnet nuget push} each reach their own controller rather
+     * than {@code PublishPackageVersion}, so each controller calls this before its real sidecar
+     * write and before its own byte-identical republish shortcut. The restriction is per package,
+     * not per version, so it applies whether or not the request names a version at all.
+     *
+     * <p>Covers a restriction set through {@link #putPackageOriginConfiguration} and the
+     * publish:BLOCK default {@link #ensureRetainedPackageOriginDefault} writes for a package first
+     * retained from an external connection. Retention itself never passes through here: each
+     * external connection importer writes to its sidecar directly.
+     */
+    public synchronized void requireContainerBackedPackagePublishAllowed(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName) {
+        requireDirectPublishAllowed(effectiveOwner(domainOwner), region, domain, repository, format, namespace,
+                packageName);
+    }
+
+    /**
+     * Keyed through {@link #accountingPackageName}, not the raw {@code packageName}, so this sees
+     * the same config {@link #putPackageOriginConfiguration} and {@link
+     * #isUpstreamRetentionBlocked} key by for a format (nuget, pypi) whose names are
+     * case/punctuation normalized.
+     */
+    private void requireDirectPublishAllowed(String owner, String region, String domain, String repository,
+            String format, String namespace, String packageName) {
+        String originKey = packageKey(region, domain, repository, format, namespace,
+                accountingPackageName(format, packageName));
+        String publishRestriction = packageOriginConfigs.getForAccount(owner, originKey)
+                .map(PackageOriginConfig::getPublishRestriction)
+                .orElse("ALLOW");
+        if ("BLOCK".equals(publishRestriction)) {
+            throw conflict("Package '" + packageName + "' cannot be published because its origin configuration "
+                    + "blocks direct publish.", packageName, "package");
+        }
+    }
+
+    /**
      * Raised by hectorvent's review of this same PR: {@link #forgetContainerBackedStatusOverride}
      * only ever ran <em>after</em> each native proxy controller's real sidecar write already
      * succeeded, which cleared an Archived/Disposed override once Reposilite/Verdaccio/pypiserver/
@@ -2522,7 +2553,7 @@ public class CodeArtifactService implements Resettable {
                     version));
             return pv;
         } finally {
-            manager.endUse(repoId);
+            endSidecarUse(manager, repoId);
         }
     }
 
@@ -2631,7 +2662,7 @@ public class CodeArtifactService implements Resettable {
                 throw new AwsException("InternalServerException", "Listing " + format + " packages is not yet "
                         + "supported by this emulator.", 500);
             } finally {
-                manager.endUse(repoId);
+                endSidecarUse(manager, repoId);
             }
             // Raised by Greptile's review: disposing a container-backed package's last version
             // deletes its real sidecar content, so the sidecar's own listing above no longer names
@@ -2922,8 +2953,9 @@ public class CodeArtifactService implements Resettable {
      * #recordContainerBackedAssetBytes} already does: {@code DeleteRepository} removes a
      * repository's {@code packageOriginConfigs} entries directly rather than through this fence,
      * so the package-level fence check below cannot by itself catch an import finishing after
-     * the repository was deleted. Without this, a repository recreated under the same name would
-     * see a stale default written back for a package it never had any version of.
+     * the repository was deleted and remains absent. A sidecar importer also checks the original
+     * container id through {@link #ensureRetainedPackageOriginDefaultIfCurrentRepository}, since
+     * an existence check alone cannot distinguish a same-name replacement.
      */
     public synchronized void ensureRetainedPackageOriginDefault(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, long packageFenceSnapshot) {
@@ -2954,6 +2986,28 @@ public class CodeArtifactService implements Resettable {
         }
         packageOriginConfigs.putForAccount(owner, key,
                 new PackageOriginConfig("BLOCK", "ALLOW", format, namespace, packageName));
+    }
+
+    private boolean isCurrentRepositorySidecar(String owner, String region, String domain, String repository,
+            String format, String repositoryContainerId) {
+        if (repositoryContainerId == null) {
+            return false;
+        }
+        return repositories.getForAccount(owner, repositoryKey(region, domain, repository))
+                .map(current -> repositoryContainerId.equals(current.getSidecarContainerIds().get(format)))
+                .orElse(false);
+    }
+
+    /** Checks the repository generation and writes the default under the same deletion monitor. */
+    public synchronized void ensureRetainedPackageOriginDefaultIfCurrentRepository(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            long packageFenceSnapshot, String repositoryContainerId) {
+        String owner = effectiveOwner(domainOwner);
+        if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repositoryContainerId)) {
+            return;
+        }
+        ensureRetainedPackageOriginDefault(region, domain, owner, repository, format, namespace, packageName,
+                packageFenceSnapshot);
     }
 
     /**
@@ -3230,11 +3284,16 @@ public class CodeArtifactService implements Resettable {
     private boolean retentionWriteStillAllowed(String region, String domain, String domainOwner, String repository,
             String format, String namespace, String packageName, String version, String repoId,
             long versionFenceSnapshot, long episodeId) {
+        String owner = effectiveOwner(domainOwner);
+        if ("nuget".equals(format)) {
+            if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repoId)) {
+                return false;
+            }
+        }
         if (currentContainerBackedVersionFence(region, domain, domainOwner, repository, format, namespace,
                 packageName, version) != versionFenceSnapshot) {
             return false;
         }
-        String owner = effectiveOwner(domainOwner);
         String status = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
                 packageName, version, repoId).status();
         if ("Disposed".equals(status) || "Archived".equals(status)) {
@@ -3368,7 +3427,7 @@ public class CodeArtifactService implements Resettable {
         try {
             return manager.packageExists(repoId, domain, repository, namespace, packageName);
         } finally {
-            manager.endUse(repoId);
+            endSidecarUse(manager, repoId);
         }
     }
 
@@ -3660,7 +3719,7 @@ public class CodeArtifactService implements Resettable {
             asset.setHashes(computeHashes(content));
             return new PackageVersionAssetResult(asset, revision);
         } finally {
-            manager.endUse(repoId);
+            endSidecarUse(manager, repoId);
         }
     }
 
@@ -4475,17 +4534,25 @@ public class CodeArtifactService implements Resettable {
         validatePackageCoordinates(format, namespace, packageName, "reading the readme of");
         String owner = effectiveOwner(domainOwner);
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
+        if ("nuget".equals(format)) {
+            RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                    .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
+                            + "' was not found.", version, "package-version"));
+            String repoId = resolveContainerIdAndBeginUse(format, region, domain, owner, repository, manager);
+            try {
+                String revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format,
+                        namespace, packageName, version, repoId).revision();
+                String readme = manager.fetchPackageVersionReadme(repoId, domain, repository, namespace, packageName,
+                        version).orElseThrow(() -> notFound("Package version '" + version + "' of package '"
+                                + packageName + "' was not found.", version, "package-version"));
+                return new PackageVersionReadmeResult(format, namespace, packageName, version, revision, readme);
+            } finally {
+                endSidecarUse(manager, repoId);
+            }
+        }
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
         String revision = currentContainerBackedVersionStatus(owner, region, domain, repository, format, namespace,
                 packageName, version, repoId).revision();
-        if ("nuget".equals(format)) {
-            String readme = sidecarRegistry.forFormat(format)
-                    .flatMap(manager -> manager.fetchPackageVersionReadme(repoId, domain, repository, namespace,
-                            packageName, version))
-                    .orElseThrow(() -> notFound("Package version '" + version + "' of package '" + packageName
-                            + "' was not found.", version, "package-version"));
-            return new PackageVersionReadmeResult(format, namespace, packageName, version, revision, readme);
-        }
         // npm and pypi: neither can be answered live (see this method's own javadoc), so a
         // version that was never captured here means it was never published.
         String key = packageVersionKey(region, domain, repository, format, namespace,
@@ -4904,6 +4971,30 @@ public class CodeArtifactService implements Resettable {
         containerBackedAssetBytes.put(ownerScopedKey, existing + bytes);
     }
 
+    /** Completes a sidecar publish only while its lease belongs to the same repository creation. */
+    public synchronized void completeContainerBackedPublishIfCurrentRepository(String region, String domain,
+            String domainOwner, String repository, String repositoryContainerId, String format, String packageName,
+            String version, long bytes, long packageFenceSnapshot, String expectedRevisionOrNull, String readme,
+            long readmeFenceSnapshot) {
+        String owner = effectiveOwner(domainOwner);
+        if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repositoryContainerId)) {
+            LOG.warnv("Skipping {0} publish bookkeeping for {1}/{2}: the repository was replaced while its "
+                    + "sidecar request was in flight.", format, domain, repository);
+            return;
+        }
+        recordContainerBackedAssetBytes(region, domain, owner, repository, format, null, packageName, bytes,
+                packageFenceSnapshot);
+        boolean hasVersion = version != null && !version.isBlank();
+        if ("nuget".equals(format) || hasVersion) {
+            forgetContainerBackedStatusOverrideIfUnchanged(region, domain, owner, repository, format, null,
+                    packageName, version, expectedRevisionOrNull);
+        }
+        if ("pypi".equals(format) && hasVersion) {
+            recordPublishedPackageVersionReadme(region, domain, owner, repository, format, null, packageName,
+                    version, readme, readmeFenceSnapshot);
+        }
+    }
+
     /**
      * Cleans up this service's own byte accounting, deletion fence, and captured readmes for one
      * container-backed package after something other than {@link #deletePackage} removed it
@@ -4931,9 +5022,7 @@ public class CodeArtifactService implements Resettable {
             return;
         }
         String owner = effectiveOwner(domainOwner);
-        CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain, repository))
-                .orElse(null);
-        if (current == null || !repositoryContainerId.equals(current.getSidecarContainerIds().get(format))) {
+        if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repositoryContainerId)) {
             return;
         }
         String key = packageKey(region, domain, repository, format, namespace, accountingPackageName(format,

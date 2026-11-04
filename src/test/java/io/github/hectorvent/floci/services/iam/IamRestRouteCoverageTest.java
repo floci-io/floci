@@ -85,6 +85,23 @@ class IamRestRouteCoverageTest {
     private final IamActionRegistry registry = new IamActionRegistry();
 
     @TestFactory
+    Stream<DynamicTest> servedAccessAnalyzerOperationsUseTheirModeledRoutes() throws IOException {
+        JsonNode model = load("/aws/rest-routes.json").path("models").path("accessanalyzer");
+        assertFalse(model.isMissingNode(), "Access Analyzer's routes must be vendored from the AWS model");
+        String scope = model.path("credentialScope").asText();
+        List<DynamicTest> tests = new ArrayList<>();
+        for (String operation : Set.of("ValidatePolicy")) {
+            JsonNode http = model.path("operations").path(operation);
+            assertFalse(http.isMissingNode(), "no model route for " + operation);
+            Route route = new Route(scope, "accessanalyzer", operation,
+                    http.path("method").asText(), http.path("requestUri").asText());
+            tests.add(DynamicTest.dynamicTest("accessanalyzer " + operation,
+                    () -> assertEquals("access-analyzer:" + operation, resolve(route), route.toString())));
+        }
+        return tests.stream();
+    }
+
+    @TestFactory
     Stream<DynamicTest> eachVendoredActionOfARestServiceIsWhatItsRouteResolvesTo() throws IOException {
         JsonNode models = load("/aws/rest-routes.json").path("models");
         JsonNode authorized = load("/aws/iam-authorized-actions.json").path("authorizedActions");

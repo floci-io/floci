@@ -9,6 +9,11 @@ import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryp
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import javax.crypto.Cipher;
+import javax.crypto.spec.SecretKeySpec;
+
+import java.security.GeneralSecurityException;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,6 +21,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -32,6 +38,16 @@ class PaymentCryptographyServiceTest {
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
                 new PaymentCryptographyRequestContext());
+    }
+
+    /** A key of the given algorithm and class, for the tests that need one. */
+    private PaymentCryptographyKey createKey(String region, String algorithm, String keyClass,
+                                             String usage, Map<String, Boolean> modes) {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", algorithm);
+        attributes.put("KeyClass", keyClass);
+        attributes.put("KeyUsage", usage);
+        return service.createKey(region, attributes, modes, true, true, Map.of());
     }
 
     private PaymentCryptographyKey createKey(String region) {
@@ -55,6 +71,141 @@ class PaymentCryptographyServiceTest {
         assertEquals(64, key.getKeyMaterialHex().length());
         assertNotNull(key.getKeyCheckValue());
         assertEquals(6, key.getKeyCheckValue().length());
+    }
+
+    @Test
+    void aTdesKeyCarriesTheAnsiCheckValueOfItsAlgorithm() {
+        // The ANSI X9.24 check value is the leftmost three bytes of the encrypted zeroes
+        // under the key, so it is the same for the two algorithms of different length only
+        // when the keys are the same.
+        PaymentCryptographyKey two = createKey("us-east-1", "TDES_2KEY", "SYMMETRIC_KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY", Map.of("Encrypt", Boolean.TRUE,
+                        "Decrypt", Boolean.TRUE));
+        assertEquals("ANSI_X9_24", two.getKeyCheckValueAlgorithm());
+        assertEquals(32, two.getKeyMaterialHex().length());
+
+        PaymentCryptographyKey three = createKey("us-east-1", "TDES_3KEY", "SYMMETRIC_KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY", Map.of("Encrypt", Boolean.TRUE,
+                        "Decrypt", Boolean.TRUE));
+        assertEquals("ANSI_X9_24", three.getKeyCheckValueAlgorithm());
+        assertEquals(48, three.getKeyMaterialHex().length());
+    }
+
+    @Test
+    void theCheckValueOfATdesKeyIsTheOneTheStandardGives() {
+        // The key of the vector, so the check value is the one of the standard.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "TDES_2KEY");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = service.createKey("us-east-1", attributes,
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        // The check value is the one the standard gives for the material the key carries.
+        assertEquals("ANSI_X9_24", key.getKeyCheckValueAlgorithm());
+        assertEquals(6, key.getKeyCheckValue().length());
+        assertEquals(checkValueOf(key.getKeyMaterialHex()), key.getKeyCheckValue());
+        // And the standard gives this value for the material of the vector.
+        assertEquals("08D7B4", checkValueOf("0123456789ABCDEFFEDCBA9876543210"));
+    }
+
+    @Test
+    void anEllipticCurveKeyIsAKeyPair() {
+        PaymentCryptographyKey key = createKey("us-east-1", "ECC_NIST_P256", "ASYMMETRIC_KEY_PAIR",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE,
+                        "Verify", Boolean.TRUE));
+
+        assertEquals("ASYMMETRIC_KEY_PAIR", key.getKeyClass());
+        assertNotNull(key.getKeyPublicKeyBase64());
+        assertNotNull(key.getKeyPrivateKeyBase64());
+        // An asymmetric key has no material a check value could be computed from, so it
+        // reports the fixed placeholder.
+        assertEquals("000000", key.getKeyCheckValue());
+        assertEquals("ANSI_X9_24", key.getKeyCheckValueAlgorithm());
+    }
+
+    @Test
+    void aUsageThatTheAlgorithmCannotServeIsRefused() {
+        // A key pair has no material a symmetric usage would bind it to, and a symmetric
+        // key has no pair a key pair's usage would bind it to.
+        assertValidation(() -> createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                "TR31_M1_ISO_9797_1_MAC_KEY", Map.of("Generate", Boolean.TRUE)),
+                "may not be made of");
+        assertValidation(() -> createKey("us-east-1", "AES_256", "SYMMETRIC_KEY",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Sign", Boolean.TRUE)),
+                "may not be made of");
+    }
+
+    @Test
+    void aKeyPairCarriesItsOwnHalves() {
+        // An RSA key is made of a pair, and the halves are kept with it.
+        PaymentCryptographyKey rsa = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
+                Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE));
+        assertNotNull(rsa.getKeyPublicKeyBase64());
+        assertNotNull(rsa.getKeyPrivateKeyBase64());
+        assertTrue(rsa.getKeyPublicKeyBase64().length() > 256,
+                "the public half of an RSA-2048 key is a long DER encoding");
+
+        // And an EC one is made of a pair on the curve the algorithm names.
+        PaymentCryptographyKey ec = createKey("us-east-1", "ECC_NIST_P256", "ASYMMETRIC_KEY_PAIR",
+                "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT",
+                Map.of("DeriveKey", Boolean.TRUE));
+        assertNotNull(ec.getKeyPublicKeyBase64());
+        assertNotNull(ec.getKeyPrivateKeyBase64());
+        assertNotEquals(rsa.getKeyPublicKeyBase64(), ec.getKeyPublicKeyBase64(),
+                "the two pairs are different");
+    }
+
+    @Test
+    void everyAsymmetricUsageTakesAKeyPair() {
+        // The usages the model names for a key pair, each of which is made.
+        for (String usage : List.of("TR31_D1_ASYMMETRIC_KEY_FOR_DATA_ENCRYPTION",
+                "TR31_K2_TR34_ASYMMETRIC_KEY",
+                "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE")) {
+            PaymentCryptographyKey key = createKey("us-east-1", "RSA_2048", "ASYMMETRIC_KEY_PAIR",
+                    usage, Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE));
+            assertEquals("RSA_2048", key.getKeyAlgorithm());
+            assertEquals(usage, key.getKeyUsage());
+        }
+        // And the key agreement one takes a curve as well.
+        PaymentCryptographyKey agreed = createKey("us-east-1", "ECC_NIST_P256",
+                "ASYMMETRIC_KEY_PAIR", "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT",
+                Map.of("DeriveKey", Boolean.TRUE));
+        assertEquals("ECC_NIST_P256", agreed.getKeyAlgorithm());
+    }
+
+    @Test
+    void aClassThatContradictsTheAlgorithmIsRefused() {
+        assertValidation(() -> createKey("us-east-1", "AES_256", "ASYMMETRIC_KEY_PAIR",
+                "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", Map.of("Verify", Boolean.TRUE)),
+                "a symmetric algorithm");
+        assertValidation(() -> createKey("us-east-1", "RSA_2048", "SYMMETRIC_KEY",
+                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY", Map.of("Encrypt", Boolean.TRUE)),
+                "an asymmetric algorithm");
+    }
+
+    /** The ANSI X9.24 check value of a key's material, computed the way the standard says. */
+    private static String checkValueOf(String materialHex) {
+        byte[] material = HexFormat.of().parseHex(materialHex);
+        byte[] wide = new byte[24];
+        System.arraycopy(material, 0, wide, 0, 16);
+        System.arraycopy(material, 0, wide, 16, 8);
+        try {
+            Cipher cipher = Cipher.getInstance("DESede/ECB/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(wide, "DESede"));
+            return HexFormat.of().withUpperCase().formatHex(cipher.doFinal(new byte[8]))
+                    .substring(0, 6);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("the Triple DES key could not be used", e);
+        }
+    }
+
+    private void assertValidation(Runnable refused, String message) {
+        AwsException failure = assertThrows(AwsException.class, refused::run);
+        assertEquals("ValidationException", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains(message), failure.getMessage());
     }
 
     @Test
@@ -94,6 +245,39 @@ class PaymentCryptographyServiceTest {
                 "two keys share their material");
         // The check value is three bytes of the CMAC of the key, so two keys may
         // legitimately share one. Only the material has to differ.
+    }
+
+    @Test
+    void aKeySavedBeforeTheRegionWasPartOfItsNameIsStillFound() {
+        // A store written before the region became part of the name holds its keys under
+        // their identifier alone, so an alias written then keeps working.
+        InMemoryStorage<String, PaymentCryptographyKey> store = new InMemoryStorage<>();
+        PaymentCryptographyService old = new PaymentCryptographyService(store,
+                new InMemoryStorage<>(), new RegionResolver("us-east-1", "000000000000"),
+                new PaymentCryptographyRequestContext());
+        PaymentCryptographyKey key = createKey("us-east-1");
+        // The key under the name it was saved under before the region was part of it.
+        store.put(key.getKeyId(), key);
+        old.createAlias("alias/team/old-key", key);
+
+        PaymentCryptographyKey found = old.findKey("us-east-1", "alias/team/old-key");
+        assertNotNull(found, "the alias names the key that was saved under the old name");
+        assertEquals(key.getKeyId(), found.getKeyId());
+    }
+
+    @Test
+    void aDeletedKeyIsGoneUnderTheNameItWasSavedUnder() {
+        InMemoryStorage<String, PaymentCryptographyKey> store = new InMemoryStorage<>();
+        PaymentCryptographyService old = new PaymentCryptographyService(store,
+                new InMemoryStorage<>(), new RegionResolver("us-east-1", "000000000000"),
+                new PaymentCryptographyRequestContext());
+        PaymentCryptographyKey key = createKey("us-east-1");
+        store.put(key.getKeyId(), key);
+
+        old.deleteKey(key);
+
+        assertNull(store.get(key.getKeyId()).orElse(null),
+                "the key is gone under the name it was saved under too");
     }
 
     @Test
@@ -196,7 +380,9 @@ class PaymentCryptographyServiceTest {
     @Test
     void aKeyThatAsksForMaterialTheServiceDoesNotMakeIsRefused() {
         Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("KeyAlgorithm", "AES_128");
+        // The service makes the AES sizes, so the algorithm it does not make is one it has
+        // no material for.
+        attributes.put("KeyAlgorithm", "DES");
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
 

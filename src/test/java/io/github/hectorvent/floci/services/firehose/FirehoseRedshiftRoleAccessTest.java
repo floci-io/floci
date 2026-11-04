@@ -69,7 +69,7 @@ class FirehoseRedshiftRoleAccessTest {
         ServiceRoleAuthorizer authorizer = new ServiceRoleAuthorizer(config, iamService, evaluator,
                 new AssumeRolePolicyEvaluator(new ObjectMapper(), evaluator), scpProvider);
         delivery = new FirehoseRedshiftDelivery(mock(RedshiftService.class), mock(RedshiftServerlessService.class),
-                mock(SecretsManagerService.class), authorizer, new ObjectMapper(),
+                mock(SecretsManagerService.class), authorizer, iamService, new ObjectMapper(),
                 (url, user, password, sql) -> { });
     }
 

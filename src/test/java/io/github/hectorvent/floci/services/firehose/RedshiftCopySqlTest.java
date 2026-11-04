@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.firehose;
 
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -124,6 +125,35 @@ class RedshiftCopySqlTest {
         String sql = RedshiftCopySql.build("events", null, "stage", "2026/10/19/f.gz", "json 'auto' gzip");
 
         assertEquals("COPY events FROM 's3://stage/2026/10/19/f.gz' json 'auto' gzip", sql);
+    }
+
+    @Test
+    void buildPutsCredentialsRightAfterTheSourceAndBeforeTheOptions() {
+        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAEXAMPLE", "s3cr3t/+x", "tok==");
+
+        String sql = RedshiftCopySql.build("events", "id, name", "stage", "k", "json 'auto'", session);
+
+        assertEquals("COPY events (id, name) FROM 's3://stage/k' CREDENTIALS "
+                + "'aws_access_key_id=ASIAEXAMPLE;aws_secret_access_key=s3cr3t/+x;token=tok==' json 'auto'", sql);
+    }
+
+    @Test
+    void buildRefusesCredentialsItCannotQuoteWithoutEchoingThem() {
+        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAEXAMPLE", "bad'secret", "tok");
+
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> RedshiftCopySql.build("t", null, "b", "k", null, session));
+
+        assertFalse(e.getMessage().contains("bad"), e.getMessage());
+    }
+
+    @Test
+    void redactHidesTheSecretAndTokenOnly() {
+        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAEXAMPLE", "s3cr3t", "t0k3n9");
+
+        assertEquals("key ASIAEXAMPLE secret=*** token=***",
+                RedshiftCopySql.redact("key ASIAEXAMPLE secret=s3cr3t token=t0k3n9", session));
+        assertEquals("plain", RedshiftCopySql.redact("plain", null));
     }
 
     @Test

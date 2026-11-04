@@ -108,6 +108,21 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void eventsV2CreateOnlyPropertiesMatchTheRegistrySchemas() {
+        assertEquals(Set.of("Name"), CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::EventsV2::EventBus"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::EventsV2::EventBus", "Description"));
+        String subscriber = "AWS::EventsV2::Subscriber";
+        assertEquals(Set.of("Name", "EventBusArn", "InvokeConfiguration/TargetArn", "Type", "StartingPosition",
+                        "PointInTimeConfiguration"),
+                CfnCreateOnlyProperties.getCreateOnlyProperties(subscriber));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(subscriber, "EventBusArn"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(subscriber, "Type"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(subscriber, "InvokeConfiguration"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(subscriber, "SubscriberFilters"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(subscriber, "RetryPolicy"));
+    }
+
+    @Test
     void isCreateOnly_treatsEmptySchemaListAsAuthoritative() {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGateway::RestApi", "Name"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Cognito::UserPool", "UserPoolName"));

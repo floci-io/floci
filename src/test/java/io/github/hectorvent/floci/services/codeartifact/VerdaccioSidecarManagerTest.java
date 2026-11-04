@@ -19,6 +19,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -214,7 +215,7 @@ class VerdaccioSidecarManagerTest {
     }
 
     @Test
-    void failedRemovalFromLastUseRemainsRetryableAtTeardown() throws Exception {
+    void failedDeferredRemovalDoesNotFailFinishedUseAndRemainsRetryableAtTeardown() throws Exception {
         VerdaccioSidecarManager manager = manager();
         seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", "http://127.0.0.1:1");
         manager.registerRepository("npm-repo-1");
@@ -223,10 +224,11 @@ class VerdaccioSidecarManagerTest {
         doThrow(new IllegalStateException("Docker unavailable")).doNothing().when(lifecycleManager)
                 .stopAndRemoveStrict("tracked-verdaccio-1", null);
 
-        assertThrows(IllegalStateException.class, () -> manager.endUse("npm-repo-1"));
+        assertDoesNotThrow(() -> manager.endUse("npm-repo-1"));
         assertEquals(1, trackedUseCount(manager));
         assertTrue(manager.isRunning("npm-repo-1"));
         assertThrows(IllegalStateException.class, () -> manager.beginUse("npm-repo-1"));
+        assertThrows(IllegalStateException.class, () -> manager.endUse("npm-repo-1"));
 
         manager.stopManagedContainers();
         assertEquals(0, trackedUseCount(manager));
@@ -240,9 +242,12 @@ class VerdaccioSidecarManagerTest {
 
     @SuppressWarnings("unchecked")
     private static int trackedUseCount(VerdaccioSidecarManager manager) throws Exception {
-        Field field = VerdaccioSidecarManager.class.getDeclaredField("uses");
-        field.setAccessible(true);
-        return ((ConcurrentHashMap<String, ?>) field.get(manager)).size();
+        Field leaseField = VerdaccioSidecarManager.class.getDeclaredField("lease");
+        leaseField.setAccessible(true);
+        SidecarRepositoryLease lease = (SidecarRepositoryLease) leaseField.get(manager);
+        Field usesField = SidecarRepositoryLease.class.getDeclaredField("uses");
+        usesField.setAccessible(true);
+        return ((ConcurrentHashMap<String, ?>) usesField.get(lease)).size();
     }
 
     @SuppressWarnings("unchecked")

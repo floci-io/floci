@@ -129,6 +129,13 @@ class AcmServiceTest {
     }
 
     @Test
+    void certificateIdComesFromAnArnInAnyPartitionOrABareId() {
+        assertEquals("abc-123", Certificate.idFromArn("arn:aws:acm:us-east-1:000000000000:certificate/abc-123"));
+        assertEquals("abc-123", Certificate.idFromArn("arn:aws-cn:acm:cn-north-1:000000000000:certificate/abc-123"));
+        assertEquals("abc-123", Certificate.idFromArn("abc-123"));
+    }
+
+    @Test
     void pendingAcmExistsButCannotSupplyAnElbCertificate() {
         AcmService pending = newService(3600);
         Certificate certificate = pending.requestCertificate("pending.example.test", List.of(), ValidationMethod.DNS,

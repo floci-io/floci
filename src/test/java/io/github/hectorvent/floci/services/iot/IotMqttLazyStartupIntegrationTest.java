@@ -1,15 +1,14 @@
 package io.github.hectorvent.floci.services.iot;
 
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -17,15 +16,16 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
-@TestProfile(IotMqttLazyStartupIntegrationTest.LazyMqttProfile.class)
+@TestProfile(LazyMqttTestProfile.class)
 class IotMqttLazyStartupIntegrationTest {
 
-    private static final int PORT = 18832;
+    private static final int PORT = LazyMqttTestProfile.PORT;
 
     @Inject
     IotMqttBrokerService mqttBrokerService;
 
     @BeforeEach
+    @AfterEach
     void stopBroker() throws InterruptedException {
         mqttBrokerService.stop();
         awaitPortClosed(PORT);
@@ -93,15 +93,4 @@ class IotMqttLazyStartupIntegrationTest {
         }
     }
 
-    public static final class LazyMqttProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of(
-                    "floci.services.iot.mqtt.enabled", "true",
-                    "floci.services.iot.mqtt.auto-start", "false",
-                    "floci.services.iot.mqtt.host", "127.0.0.1",
-                    "floci.services.iot.mqtt.port", Integer.toString(PORT)
-            );
-        }
-    }
 }

@@ -423,12 +423,14 @@ public class ElbClassicQueryHandler {
             xml.start("member").elem("InstanceId", instanceId).end("member");
         }
         xml.end("Instances")
-           .raw(healthCheckXml(lb.getHealthCheck()))
-           .start("SourceSecurityGroup")
-             .elem("OwnerAlias", lb.getSourceSecurityGroupOwnerAlias())
-             .elem("GroupName", lb.getSourceSecurityGroupName())
-           .end("SourceSecurityGroup")
-           .start("SecurityGroups");
+           .raw(healthCheckXml(lb.getHealthCheck()));
+        if (lb.getSourceSecurityGroupName() != null) {
+            xml.start("SourceSecurityGroup")
+                 .elem("OwnerAlias", lb.getSourceSecurityGroupOwnerAlias())
+                 .elem("GroupName", lb.getSourceSecurityGroupName())
+               .end("SourceSecurityGroup");
+        }
+        xml.start("SecurityGroups");
         for (String sg : lb.getSecurityGroups()) {
             xml.elem("member", sg);
         }

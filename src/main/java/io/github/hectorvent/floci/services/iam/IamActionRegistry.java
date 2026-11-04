@@ -420,6 +420,11 @@ public class IamActionRegistry {
         rule("eks", "POST",   "^/tags(/.+)?$",                                           "eks:TagResource"),
         rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
 
+        // ── Control Tower ──────────────────────────────────────────────────────
+        rule("controltower", "GET",    "^/tags(/.+)?$", "controltower:ListTagsForResource"),
+        rule("controltower", "POST",   "^/tags(/.+)?$", "controltower:TagResource"),
+        rule("controltower", "DELETE", "^/tags(/.+)?$", "controltower:UntagResource"),
+
         // ── Bedrock ────────────────────────────────────────────────────────────
         rule("bedrock", "POST",   "^/resource-policy$",   "bedrock:PutResourcePolicy"),
         rule("bedrock", "GET",    "^/resource-policy/.+", "bedrock:GetResourcePolicy"),
@@ -553,6 +558,15 @@ public class IamActionRegistry {
         rule("ses", "POST",  "^/v2/email/update-configuration-sets/?$",                              "ses:UpdateConfigurationSet"),
         rule("ses", "POST",  "^/v2/email/vdm/recommendations/?$",                                    "ses:ListRecommendations"),
 
+        // ── OpenSearch Service VPC endpoints ───────────────────────────────────
+        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/?$",          "es:CreateVpcEndpoint"),
+        rule("es", "GET",    "^/2021-01-01/opensearch/vpcEndpoints/?$",          "es:ListVpcEndpoints"),
+        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/describe/?$", "es:DescribeVpcEndpoints"),
+        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/update/?$",   "es:UpdateVpcEndpoint"),
+        rule("es", "DELETE", "^/2021-01-01/opensearch/vpcEndpoints/[^/]+/?$",    "es:DeleteVpcEndpoint"),
+        rule("es", "GET",    "^/2021-01-01/opensearch/domain/[^/]+/vpcEndpoints/?$",
+                "es:ListVpcEndpointsForDomain"),
+
         // ── Resource Groups ─────────────────────────────────────────────────────
         rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
         rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),
@@ -678,6 +692,10 @@ public class IamActionRegistry {
         // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
         // bucket's one trailing slash, so an S3 path is matched as sent.
         String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
+        String modeled = IamRestRoutes.actionFor(credentialScope, method, path);
+        if (modeled != null) {
+            return modeled;
+        }
 
         if ("s3".equals(credentialScope)) {
             // An S3 Control route is matched before the query overrides below, which would read the

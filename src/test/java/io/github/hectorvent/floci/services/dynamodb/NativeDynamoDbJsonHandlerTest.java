@@ -2362,6 +2362,21 @@ class NativeDynamoDbJsonHandlerTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            PutItem    | {"TableName":"Missing","Item":{},"ReturnValues":"ALL_NEW"} | 1 validation error detected: ReturnValues can only be ALL_OLD or NONE
+            DeleteItem | {"TableName":"Missing","Key":{},"ReturnValues":"BOGUS"} | 1 validation error detected: Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]
+            DeleteItem | {"TableName":"bad!name","Key":{},"ReturnValuesOnConditionCheckFailure":"BOGUS","ReturnItemCollectionMetrics":"BOGUS","ReturnValues":"UPDATED_NEW","ReturnConsumedCapacity":"BOGUS"} | 5 validation errors detected: Value 'bad!name' at 'tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; ReturnValues can only be ALL_OLD or NONE; Value 'BOGUS' at 'returnItemCollectionMetrics' failed to satisfy constraint: Member must satisfy enum value set: [SIZE, NONE]; Value 'BOGUS' at 'returnValuesOnConditionCheckFailure' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]
+            PutItem    | {"TableName":"a!","Item":{},"ReturnValuesOnConditionCheckFailure":"ALL_NEW"} | 2 validation errors detected: Value 'a!' at 'tableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'ALL_NEW' at 'returnValuesOnConditionCheckFailure' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]
+            """)
+    void aPutOrDeleteReportsItsTableNameAndEnumErrorsTogether(String operation, String request, String message)
+            throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle(operation, mapper.readTree(request), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             61 | {"TransactItems":[{},{"Delete":{"TableName":"bad!name","Key":{}}}]}     | Invalid Request: TransactWriteRequest should contain Delete or Put or Update request
             61 | {"TransactItems":[{}],"ReturnConsumedCapacity":"BOGUS"}                 | 1 validation error detected: Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
             61 | {"TransactItems":[{"Put":{"TableName":"","Item":{}}}]}                  | 1 validation error detected: Value '' at 'transactItems.1.member.put.tableName' failed to satisfy constraint: Member must have length greater than or equal to 1
@@ -2388,6 +2403,10 @@ class NativeDynamoDbJsonHandlerTest {
             [{"ConditionCheck":{"TableName":"Missing","Key":{},"ConditionExpression":"d = :deep","ExpressionAttributeValues":{":deep":"DEEP"}}}] | ExpressionAttributeValues contains invalid value: Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit for key :deep
             [{"Put":{"TableName":"Missing","Item":{"d":"DEEP"},"ConditionExpression":"a = :n","ExpressionAttributeValues":{":n":{"N":"abc"}}}}] | ExpressionAttributeValues contains invalid value: The parameter cannot be converted to a numeric value: abc for key :n
             [{"Put":{"TableName":"Missing","Item":{},"ExpressionAttributeValues":{":deep":"DEEP"}}}] | Requested resource not found
+            [{"Put":{"TableName":"Missing","Item":{"d":"DEEP","":{"S":"x"}}}}] | Empty attribute name
+            [{"Put":{"TableName":"Missing","Item":{"d":"DEEP","m":{"M":{"":{"S":"x"}}}}}}] | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            [{"Put":{"TableName":"Missing","Item":{"":{"S":"x"},"d":"DEEP"},"ConditionExpression":"a = = b"}}] | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
+            [{"Put":{"TableName":"Missing","Item":{"d":"DEEP"},"ConditionExpression":"a = :v","ExpressionAttributeValues":{":v":{"M":{"":{"S":"x"}}}}}}] | ExpressionAttributeValues contains invalid value: Empty attribute name for key :v
             [{"Put":{"TableName":"bad!name","Item":{"d":"DEEP"},"ReturnValuesOnConditionCheckFailure":"BOGUS"}}] | 1 validation error detected: Value 'BOGUS' at 'transactItems.1.member.put.returnValuesOnConditionCheckFailure' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]
             """)
     void aTransactionTooDeepForTheNewerValidatorChecksItsExpressionsBeforeItsItem(String items, String message)
@@ -2427,6 +2446,12 @@ class NativeDynamoDbJsonHandlerTest {
             [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":""}}] | Invalid ConditionExpression: The expression can not be empty;
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"","ConditionExpression":""}}] | Invalid ConditionExpression: The expression can not be empty;
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":""}}] | Invalid UpdateExpression: The expression can not be empty;
+            [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":"   "}}] | Invalid ConditionExpression: Syntax error; token: "<EOF>", near: "   "
+            [{"Put":{"TableName":"Missing","Item":{}}},{"ConditionCheck":{"TableName":"Missing","Key":{},"ConditionExpression":"attribute_not_exists("}}] | Invalid ConditionExpression: Syntax error; token: "<EOF>", near: "("
+            [{"Put":{"TableName":"Missing","Item":{"":{"S":"x"}},"ReturnValuesOnConditionCheckFailure":"BOGUS"}}] | Empty attribute name
+            [{"Delete":{"TableName":"Missing","Key":{"l":{"L":[{"M":{"":{"S":"x"}}}]}}}}] | Empty attribute name
+            [{"ConditionCheck":{"TableName":"Missing","Key":{},"ConditionExpression":"a = = b","ExpressionAttributeValues":{":v":{"M":{"":{"S":"x"}}}}}}] | Empty attribute name
+            [{"Put":{"TableName":"Missing","Item":{},"ExpressionAttributeValues":{":v":{"M":{"":{"S":"x"}}}}}}] | Requested resource not found
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :zz","ConditionExpression":"a = :yy"}}] | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :yy
             [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :zz","ConditionExpression":"contains(a, a)"}}] | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [a]
             [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":"attribute_not_exists(a)","ExpressionAttributeNames":{"#n":"n"},"ExpressionAttributeValues":{":v":{"S":"x"}}}}] | Value provided in ExpressionAttributeNames unused in expressions: keys: {#n}

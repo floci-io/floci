@@ -11,6 +11,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -5805,6 +5807,79 @@ given()
         .then().statusCode(200);
 
         deleteTable(tableName);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query              | {"TableName": "SyntaxTable", "KeyConditionExpression": "   ", "ExpressionAttributeValues": {":v": {"S": "x"}}} | Invalid KeyConditionExpression: Syntax error; token: "<EOF>", near: "   "
+            Scan               | {"TableName": "SyntaxTable", "FilterExpression": "a = = b", "ExpressionAttributeValues": {":v": {"S": "x"}}} | Invalid FilterExpression: Syntax error; token: "=", near: "= = b"
+            TransactWriteItems | {"TransactItems": [{"ConditionCheck": {"TableName": "SyntaxTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "attribute_not_exists(", "ExpressionAttributeValues": {":v": {"S": "x"}}}}]} | Invalid ConditionExpression: Syntax error; token: "<EOF>", near: "("
+            """)
+    void conditionSyntaxErrorsNameTheTokenAndTheTextAroundIt(String operation, String body, String message) {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "SyntaxTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
+
+        deleteTable("SyntaxTable");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "": {"S": "x"}}}}
+            {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "l": {"L": [{"M": {"": {"S": "x"}}}]}}}}
+            {"ConditionCheck": {"TableName": "EmptyNameTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "m = :m", "ExpressionAttributeValues": {":m": {"M": {"": {"S": "x"}}}}}}
+            """)
+    void transactWriteItemsRefusesAnEmptyAttributeName(String action) {
+        createOnDemandTableForGsiUpdates("EmptyNameTable");
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TransactItems\": [" + action + "]}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Empty attribute name"));
+
+        deleteTable("EmptyNameTable");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            DeleteItem | {"TableName": "Missing", "Key": {"pk": {"S": "a"}}, "ReturnValues": "ALL_NEW"} | 1 validation error detected: ReturnValues can only be ALL_OLD or NONE
+            PutItem    | {"TableName": "bad!name", "Item": {"pk": {"S": "a"}}, "ReturnValues": "BOGUS", "ReturnConsumedCapacity": "BOGUS"} | 3 validation errors detected: Value 'bad!name' at 'tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]
+            """)
+    void putAndDeleteItemReportTheTableNameAndEnumsTogether(String operation, String body, String message) {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
     }
 
     private void deleteTable(String tableName) {

@@ -32,8 +32,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -871,6 +874,67 @@ class CodeArtifactNpmDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertArrayEquals(tarball, fetchedAfterUnarchive);
+    }
+
+    /**
+     * Issue #7439, against the real Verdaccio: a scoped publish sent with a literal slash ({@code
+     * PUT /@scope/name}) is accepted by Verdaccio as is, so it must take the guarded publish route.
+     * Its bytes are counted, a publish:BLOCK origin configuration refuses the next version, and
+     * lifting the block lets that version through.
+     */
+    @Test
+    @Order(23)
+    void aLiteralSlashScopedPublishIsCountedAndRespectsAPublishBlock() {
+        String scope = "flociscope";
+        String packageName = "literal-slash-pkg";
+        String literalPath = "/codeartifact/npm/" + DOMAIN + "/" + REPO + "/@" + scope + "/" + packageName;
+        byte[] firstTarball = "literal slash throwaway tarball 1".getBytes(StandardCharsets.UTF_8);
+        long assetSizeBytesBefore = describeDomainAssetSizeBytes();
+
+        given().urlEncodingEnabled(false).header("Authorization", "Bearer " + bearerToken)
+                .contentType("application/json").body(scopedEnvelope(scope, packageName, "1.0.0", firstTarball))
+                .put(literalPath)
+                .then().statusCode(anyOf201Or200());
+        assertEquals(assetSizeBytesBefore + firstTarball.length, describeDomainAssetSizeBytes());
+
+        setNpmOriginRestrictions(scope, packageName, "BLOCK");
+        String secondVersion = scopedEnvelope(scope, packageName, "2.0.0",
+                "literal slash throwaway tarball 2".getBytes(StandardCharsets.UTF_8));
+        given().urlEncodingEnabled(false).header("Authorization", "Bearer " + bearerToken)
+                .contentType("application/json").body(secondVersion)
+                .put(literalPath)
+                .then().statusCode(409)
+                .body(containsString("blocks direct publish"));
+        given().urlEncodingEnabled(false).header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/@" + scope + "%2F" + packageName)
+                .then().statusCode(200)
+                .body("versions", hasKey("1.0.0"))
+                .body("versions", not(hasKey("2.0.0")));
+
+        setNpmOriginRestrictions(scope, packageName, "ALLOW");
+        given().urlEncodingEnabled(false).header("Authorization", "Bearer " + bearerToken)
+                .contentType("application/json").body(secondVersion)
+                .put(literalPath)
+                .then().statusCode(anyOf201Or200());
+    }
+
+    private static String scopedEnvelope(String scope, String packageName, String version, byte[] tarball) {
+        String npmName = "@" + scope + "/" + packageName;
+        String assetName = packageName + "-" + version + ".tgz";
+        return "{\"name\":\"" + npmName + "\",\"versions\":{\"" + version + "\":{\"name\":\"" + npmName
+                + "\",\"version\":\"" + version + "\",\"dist\":{\"tarball\":\"http://ignored/" + assetName + "\"}}},"
+                + "\"_attachments\":{\"" + assetName + "\":{\"content_type\":\"application/octet-stream\","
+                + "\"data\":\"" + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length
+                + "}}}";
+    }
+
+    private static void setNpmOriginRestrictions(String scope, String packageName, String publish) {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"restrictions\":{\"publish\":\"" + publish + "\",\"upstream\":\"BLOCK\"}}")
+                .post("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&namespace=" + scope
+                        + "&package=" + packageName)
+                .then().statusCode(200)
+                .body("originConfiguration.restrictions.publish", equalTo(publish));
     }
 
     /**

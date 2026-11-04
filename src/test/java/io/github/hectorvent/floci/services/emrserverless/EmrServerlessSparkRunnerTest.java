@@ -54,6 +54,8 @@ import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static io.github.hectorvent.floci.services.emrserverless.SparkJobRunner.Engine.HIVE;
+import static io.github.hectorvent.floci.services.emrserverless.SparkJobRunner.Engine.SPARK;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -107,12 +109,26 @@ class EmrServerlessSparkRunnerTest {
                 "--conf", "spark.hadoop.fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "--conf", "spark.hadoop.fs.AbstractFileSystem.s3.impl=org.apache.hadoop.fs.s3a.S3A",
                 "--conf", "spark.hadoop.aws.glue.endpoint=http://floci:4566",
+                "--conf", "spark.hadoop.hive.metastore.glue.catalogid=123456789012",
                 "--conf", "spark.hadoop.aws.region=eu-west-1",
                 "--conf", "spark.executor.cores=4",
                 "--conf", "spark.sql.shuffle.partitions=8",
                 "--conf", "spark.executor.cores=2",
                 "--py-files", "s3://bucket/jobs/lib.zip",
                 "s3://bucket/jobs/report.py", "s3://bucket/input/", "s3://bucket/output/"), arguments);
+    }
+
+    @Test
+    void theGlueCatalogIsTheJobsAccountUnlessTheJobNamesOneInAnotherAccount() {
+        String own = "spark.hadoop.hive.metastore.glue.catalogid=123456789012";
+        String other = "spark.hadoop.hive.metastore.glue.catalogid=111122223333";
+
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job(List.of("s3://bucket/jobs/app.jar"),
+                Map.of("spark.hadoop.hive.metastore.glue.catalogid", "111122223333")), ENDPOINT);
+
+        // The job's own setting comes later, so it wins.
+        assertTrue(arguments.contains(own));
+        assertTrue(arguments.indexOf(other) > arguments.indexOf(own));
     }
 
     @Test
@@ -149,6 +165,103 @@ class EmrServerlessSparkRunnerTest {
         // The image a cluster's bootstrap left, which its steps get by id.
         String bootstrapped = "sha256:" + "2".repeat(64);
         assertEquals(bootstrapped, EmrServerlessSparkRunner.image(bootstrapped, "emr-7.5.0"));
+        // A Hive run's is the release's Hive image, or its own template's.
+        assertEquals("public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest",
+                EmrServerlessSparkRunner.image(null, "emr-7.5.0", HIVE));
+        assertEquals("registry.internal/emr-serverless/hive/emr-7.5.0:20250425",
+                EmrServerlessSparkRunner.image("registry.internal/emr-serverless/hive/%s:20250425", "emr-7.5.0", HIVE));
+    }
+
+    @Test
+    void hiveRunsOnFlocisS3AndGlueWithTezInLocalModeThenTheRunsOwnArguments() {
+        List<String> application = List.of("--hiveconf", "hive.exec.scratchdir=s3://bucket/scratch/",
+                "-i", "s3://bucket/queries/init.sql", "-f", "s3://bucket/queries/report.sql",
+                "--hivevar", "day=2026-11-03");
+
+        List<String> arguments = EmrServerlessSparkRunner.hiveArguments(hiveJob(application), ENDPOINT);
+
+        assertEquals(List.of(
+                "--hiveconf", "fs.s3a.endpoint=http://floci:4566",
+                "--hiveconf", "fs.s3a.endpoint.region=eu-west-1",
+                "--hiveconf", "fs.s3a.path.style.access=true",
+                "--hiveconf", "fs.s3a.committer.magic.track.commits.in.memory.enabled=true",
+                "--hiveconf", "fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
+                "--hiveconf", "fs.AbstractFileSystem.s3.impl=org.apache.hadoop.fs.s3a.S3A",
+                "--hiveconf", "aws.glue.endpoint=http://floci:4566",
+                "--hiveconf", "hive.metastore.glue.catalogid=123456789012",
+                "--hiveconf", "aws.region=eu-west-1",
+                "--hiveconf", "tez.local.mode=true",
+                "--hiveconf", "tez.am.client.am.port-range=40000-40100",
+                "--hiveconf", "hive.exec.scratchdir=s3://bucket/scratch/",
+                "-i", "s3://bucket/queries/init.sql", "-f", "s3://bucket/queries/report.sql",
+                "--hivevar", "day=2026-11-03"), arguments);
+    }
+
+    @Test
+    void aHiveRunStartsHiveAsTheImagesUserInTheReleasesHiveImageAfterItsScratchFoldersLocalPath() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(hiveJob(List.of("--hiveconf", "hive.exec.scratchdir=s3://bucket/hive/scratch/",
+                "-f", "s3://bucket/queries/report.sql")), progress);
+
+        verify(builder).newContainer("public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest");
+        // As root, which makes the scratch folder's local path the image's user's, then hive as that user.
+        verify(spec).withUser("root");
+        verify(spec).withEntrypoint(argThat((List<String> entrypoint) -> entrypoint.size() == 5
+                && List.of("/bin/bash", "-c").equals(entrypoint.subList(0, 2))
+                && entrypoint.get(2).contains("setpriv --reuid=hadoop --regid=hadoop --clear-groups \"$@\"")
+                && List.of("floci", "/usr/bin/hive").equals(entrypoint.subList(3, 5))));
+        verify(spec).withCmd(argThat((List<String> cmd) -> "--hiveconf".equals(cmd.getFirst())
+                && List.of("-f", "s3://bucket/queries/report.sql").equals(cmd.subList(cmd.size() - 2, cmd.size()))));
+        verify(spec).withEnv("FLOCI_HIVE_SCRATCH", "/hive/scratch/hadoop");
+        verify(spec).withEnv(List.of("LOGS_DIR=/tmp/floci-hive-logs"));
+        // Nothing of Spark's: no spark-defaults for a command, and no Spark configuration of its own.
+        verify(spec, never()).withEnv(eq("FLOCI_SPARK_DEFAULTS"), anyString());
+        verify(spec, never()).withEnv(eq("FLOCI_SPARK_LOG4J2"), anyString());
+    }
+
+    @Test
+    void aHiveScratchFolderInS3LeadsToTheSamePathLocallyThenItsUsersFolder() {
+        assertEquals("/hive/scratch/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(
+                List.of("--hiveconf", "hive.exec.scratchdir=s3://bucket/hive/scratch/")));
+        // The last setting wins, in either form of the option and in any of Hadoop's S3 schemes.
+        assertEquals("/later/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(List.of(
+                "--hiveconf", "hive.exec.scratchdir=s3://bucket/earlier", "-f", "s3://bucket/queries/report.sql",
+                "-hiveconf", "hive.exec.scratchdir=s3a://bucket/later")));
+        // Hive's CLI also takes the option and its setting as one argument, and a setting's value as the next one.
+        assertEquals("/inline/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(List.of(
+                "--hiveconf", "hive.exec.scratchdir=s3://bucket/earlier",
+                "--hiveconf=hive.exec.scratchdir=s3://bucket/inline")));
+        assertEquals("/short/inline/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(List.of(
+                "--hiveconf=hive.exec.scratchdir=s3://bucket/earlier",
+                "-hiveconf=hive.exec.scratchdir=s3://bucket/short/inline")));
+        assertEquals("/separate/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(List.of(
+                "--hiveconf=hive.exec.scratchdir=s3://bucket/earlier",
+                "--hiveconf", "hive.exec.scratchdir", "s3://bucket/separate", "-f", "s3://bucket/queries/report.sql")));
+        assertEquals("/inline/separate/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(List.of(
+                "--hiveconf=hive.exec.scratchdir", "s3://bucket/inline/separate")));
+        // Without a value, an option following it, Hive sets it to true, a local folder.
+        assertNull(EmrServerlessSparkRunner.hiveScratchMirror(List.of(
+                "--hiveconf", "hive.exec.scratchdir=s3://bucket/earlier", "--hiveconf", "hive.exec.scratchdir",
+                "-f", "s3://bucket/queries/report.sql")));
+        assertEquals("/later/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(List.of(
+                "--hiveconf", "hive.exec.scratchdir", "--hiveconf", "hive.exec.scratchdir=s3://bucket/later")));
+        // Another setting's value, or a variable of the same name, is not the scratch folder.
+        assertNull(EmrServerlessSparkRunner.hiveScratchMirror(List.of(
+                "--hiveconf", "hive.exec.stagingdir", "hive.exec.scratchdir=s3://bucket/value",
+                "--hivevar", "hive.exec.scratchdir=s3://bucket/variable")));
+        assertEquals("/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(
+                List.of("--hiveconf", "hive.exec.scratchdir=s3://bucket")));
+        assertEquals("/scratch/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(
+                List.of("--hiveconf", "hive.exec.scratchdir=s3://bucket/a/../scratch/")));
+        assertEquals("/hive/scratch/hadoop", EmrServerlessSparkRunner.hiveScratchMirror(
+                List.of("--hiveconf", "hive.exec.scratchdir=s3://bucket//hive/./scratch//")));
+        // A local scratch folder, or Hive's default one, is the image user's to make.
+        assertNull(EmrServerlessSparkRunner.hiveScratchMirror(
+                List.of("--hiveconf", "hive.exec.scratchdir=/tmp/hive-scratch")));
+        assertNull(EmrServerlessSparkRunner.hiveScratchMirror(List.of("-f", "s3://bucket/queries/report.sql")));
     }
 
     @Test
@@ -415,7 +528,7 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withNamedVolume(STORAGE.home(), "/home/hadoop");
         verify(spec).withNamedVolume(STORAGE.mnt(), "/mnt");
         // After Floci's S3 settings, before the cluster's spark-defaults, which win.
-        assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(17));
+        assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(19));
         assertEquals(List.of(
                 "--conf", "spark.hadoop.fs.defaultFS=hdfs:///",
                 "--conf", "spark.hadoop.fs.hdfs.impl=org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme",
@@ -423,7 +536,7 @@ class EmrServerlessSparkRunnerTest {
                 "--conf", "spark.sql.streaming.checkpointFileManagerClass="
                         + "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager",
                 "--conf", "spark.hadoop.fs.defaultFS=file:///",
-                "s3://bucket/jobs/report.py"), arguments.subList(18, arguments.size()));
+                "s3://bucket/jobs/report.py"), arguments.subList(20, arguments.size()));
     }
 
     @Test
@@ -573,6 +686,7 @@ class EmrServerlessSparkRunnerTest {
                 "<property><name>fs.AbstractFileSystem.s3.impl</name><value>org.apache.hadoop.fs.s3a.S3A</value>"
                         + "</property>",
                 "<property><name>aws.glue.endpoint</name><value>http://floci:4566</value></property>",
+                "<property><name>hive.metastore.glue.catalogid</name><value>123456789012</value></property>",
                 "<property><name>aws.region</name><value>eu-west-1</value></property>",
                 "<property><name>fs.defaultFS</name><value>hdfs:///</value></property>",
                 "<property><name>fs.hdfs.impl</name><value>org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme"
@@ -805,6 +919,7 @@ class EmrServerlessSparkRunnerTest {
                 "spark.hadoop.fs.s3.impl org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "spark.hadoop.fs.AbstractFileSystem.s3.impl org.apache.hadoop.fs.s3a.S3A",
                 "spark.hadoop.aws.glue.endpoint http://floci:4566",
+                "spark.hadoop.hive.metastore.glue.catalogid 123456789012",
                 "spark.hadoop.aws.region eu-west-1",
                 "spark.sql.shuffle.partitions 8"),
                 EmrServerlessSparkRunner.sparkDefaultsFile(
@@ -1233,21 +1348,27 @@ class EmrServerlessSparkRunnerTest {
                                           Map<String, String> sparkDefaults, Duration timeout, String logFolder,
                                           SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
-                imageTemplate, null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
+                SPARK, imageTemplate, null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
                 application, null, timeout, logFolder, cloudWatchLogs, Map.of(), List.of(), null, Map.of(), Map.of(),
                 Map.of(), Map.of(), Map.of());
     }
 
+    private static SparkJobRunner.Job hiveJob(List<String> application) {
+        return new SparkJobRunner.Job("emr-serverless", "00f0000000000002", "123456789012", "eu-west-1", "emr-7.5.0",
+                HIVE, null, null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(), application, null,
+                Duration.ZERO, null, null, Map.of(), List.of(), null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+    }
+
     private static SparkJobRunner.Job customImageJob(String customImage) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
-                null, customImage, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
+                SPARK, null, customImage, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), List.of(), null,
                 Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
 
     private static SparkJobRunner.Job archiveJob(List<String> archives) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
-                null, null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
+                SPARK, null, null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), archives, null,
                 Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
@@ -1258,7 +1379,7 @@ class EmrServerlessSparkRunnerTest {
 
     private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults,
                                                  SparkJobRunner.Storage storage) {
-        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
+        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", SPARK, null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, List.of(), command,
                 Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), List.of(),
                 storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
@@ -1267,7 +1388,7 @@ class EmrServerlessSparkRunnerTest {
     // A step on a cluster with core-site and spark-log4j2 properties: a command, or a Spark step for a null one.
     private static SparkJobRunner.Job clusterJob(List<String> command, Map<String, String> coreSite,
                                                  Map<String, String> sparkLog4j2) {
-        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
+        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", SPARK, null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 command == null ? List.of("s3://bucket/jobs/report.py") : List.of(), command, Duration.ZERO, null,
                 null, Map.of(), List.of(), STORAGE, coreSite, sparkLog4j2, Map.of(), Map.of(), Map.of());
@@ -1277,7 +1398,7 @@ class EmrServerlessSparkRunnerTest {
     private static SparkJobRunner.Job hadoopJob(List<String> command, Map<String, String> mapredSite,
                                                 Map<String, String> hadoopLog4j,
                                                 Map<String, String> hadoopEnvironment) {
-        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
+        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", SPARK, null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 command == null ? List.of("s3://bucket/jobs/report.jar") : List.of(), command, Duration.ZERO, null,
                 null, Map.of(), List.of(), STORAGE, Map.of(), Map.of(), mapredSite, hadoopLog4j, hadoopEnvironment);
@@ -1285,7 +1406,7 @@ class EmrServerlessSparkRunnerTest {
 
     // A Spark step on a cluster, which has storage.
     private static SparkJobRunner.Job stepJob(Map<String, String> sparkDefaults) {
-        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
+        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", SPARK, null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
                 List.of("s3://bucket/jobs/report.py"), null, Duration.ZERO, null, null, Map.of(), List.of(), STORAGE,
                 Map.of(), Map.of(), Map.of(), Map.of(), Map.of());

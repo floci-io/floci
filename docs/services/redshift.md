@@ -140,9 +140,12 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `DeleteTags` | Remove tags by key from a resource |
 | `DescribeTags` | List tagged resources and their tags |
 | `CreateClusterSubnetGroup` | Register a cluster subnet group (metadata only) |
-| `CreateIntegration` | Create a DynamoDB Streams to provisioned Redshift zero-ETL integration. Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
+| `CreateIntegration` | Create a DynamoDB zero-ETL integration from a table (or a stream) to a Redshift Serverless namespace (or a provisioned cluster). Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
 | `DescribeIntegrations` | List integrations with `Filters`, `MaxRecords` and `Marker` pagination, or the one an `IntegrationArn` names |
 | `DeleteIntegration` | Remove a zero-ETL integration |
+| `PutResourcePolicy` | Set the resource policy of a Redshift Serverless namespace or a provisioned cluster, see [Resource policies](#resource-policies) |
+| `GetResourcePolicy` | Return the resource policy of a namespace or cluster |
+| `DeleteResourcePolicy` | Remove the resource policy of a namespace or cluster |
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
@@ -375,9 +378,28 @@ Set `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED=false` to turn publishin
 
 ## DynamoDB zero-ETL
 
-The supported zero-ETL path is DynamoDB Streams to a provisioned Redshift cluster. The source ARN
-must identify an enabled local DynamoDB stream, and the target ARN must identify an existing
-provisioned Redshift cluster.
+As in AWS, `SourceArn` is a DynamoDB table ARN and `TargetArn` is a Redshift Serverless namespace
+ARN. Floci also accepts a DynamoDB stream ARN as the source and a provisioned cluster ARN
+(`arn:aws:redshift:<region>:<account>:cluster:<identifier>`) as the target. A source table that
+does not exist is refused with `IntegrationSourceNotFoundFault`, and a namespace that does not exist
+with `IntegrationTargetNotFoundFault`. A source stream that does not exist is refused with DynamoDB's
+`ResourceNotFoundException`, and a provisioned cluster target that does not exist with `ClusterNotFound`.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift create-integration \
+  --integration-name orders-zero-etl \
+  --source-arn arn:aws:dynamodb:us-east-1:000000000000:table/orders \
+  --target-arn arn:aws:redshift-serverless:us-east-1:000000000000:namespace/<namespace-id>
+```
+
+A namespace target is written through the namespace's workgroup, into the namespace's database as
+its admin user. Until the namespace has a workgroup, polling fails and the integration reports
+`failed`; it becomes `active` on the first poll after the workgroup exists.
+
+AWS reads the changes of a table source without DynamoDB Streams. Floci reads them from the table's
+latest stream, so a table source replicates changes only while the table has one, and a table that
+never had a stream gets its initial backfill only. The integration picks up a stream turned on after
+it was created, and moves to the new stream when streams are turned off and on again.
 
 Each stream record is written to a stable landing table named `floci_zetl_<integration-id>`.
 The landing table stores the event id, event name, source, region, sequence number, creation time,
@@ -395,6 +417,32 @@ restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `sy
 approximation to indicate that initial backfill is in progress); it becomes `active` once the scan is
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
+
+### Resource policies
+
+A zero-ETL integration needs a resource policy on its target that lets the source in.
+`PutResourcePolicy`, `GetResourcePolicy` and `DeleteResourcePolicy` take the ARN of a Redshift
+Serverless namespace or of a provisioned cluster, so `aws_redshift_resource_policy` applies as it
+does on AWS:
+
+- The policy must be a nonempty JSON object, or the call is refused with `InvalidPolicyFault` before
+  the resource is looked up.
+- The policy is stored the way AWS returns it: `Version` and `Statement` first, each statement's
+  `Effect`, `Principal`, `Action`, `Resource` and `Condition` first, other keys after them in the
+  order sent, pretty-printed. The provider compares policies by content, so this causes no drift.
+- A namespace that does not exist is `ResourceNotFoundFault` ("The requested namespace doesn't
+  exist."), as is a cluster that does not exist, or a resource without a policy on
+  `GetResourcePolicy` and `DeleteResourcePolicy`.
+- An ARN in another Region, a namespace id that is not a UUID, and an ARN of any other resource type
+  (a workgroup, a snapshot) are `InvalidParameterValue`, with AWS's messages.
+- Deleting the namespace or cluster deletes its policy.
+- Floci does not evaluate the policy: `CreateIntegration` does not require one.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift put-resource-policy \
+  --resource-arn arn:aws:redshift-serverless:us-east-1:000000000000:namespace/<namespace-id> \
+  --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"redshift.amazonaws.com"},"Action":"redshift:AuthorizeInboundIntegration","Resource":"*"}]}'
+```
 
 ### EventBridge events
 
@@ -422,8 +470,9 @@ data-type, pause and resume, serverless restore and modification events do not o
 is best effort. It is skipped when the EventBridge service is disabled, a refused or failed
 delivery is logged, and neither changes the outcome of the Redshift operation.
 
-Serverless Redshift targets, schema inference, and relational projection are not supported in this
-first implementation.
+Schema inference, relational projection and `CREATE DATABASE ... FROM INTEGRATION` are not
+supported, and a provisioned cluster's namespace ARN (`arn:aws:redshift:<region>:<account>:namespace:<id>`)
+is not accepted as a target.
 
 ## CloudFormation
 
@@ -662,8 +711,29 @@ GROUP BY c.country ORDER BY total DESC;
 
 This path needs Docker for PostgreSQL and the existing floci-duck runtime used to read external
 data. Use the `floci.duck` configuration described under [Athena](athena.md) to supply a reachable
-runtime when container management is unsuitable. This iteration validates CSV relational reads;
-it does not add new file formats or partition pruning.
+runtime when container management is unsuitable.
+
+Tables declared `STORED AS PARQUET` (or with a Parquet input format or SerDe in Glue) are read the same
+way. Columns are matched to the Parquet files by name, ignoring case. A declared column that a partition's
+files do not carry, as when the column was added to the table after those files were written, reads as
+`NULL`. A value that cannot be converted to the declared type fails the query.
+
+A partitioned table is loaded partition by partition, and a query loads only the partitions its `WHERE`
+can select, as Spectrum reads only those. Only these are listed, checked against the role's S3 access and
+read, so a partition that no predicate of the query selects can be unreadable without failing the query.
+A predicate selects partitions when it is a top-level `AND` term of the `WHERE` of the block that names the
+table, uses only partition keys, literals, comparisons, `IN`, `BETWEEN`, `IS [NOT] NULL`, `AND`, `OR` and
+`NOT`, covers an integer, date or string key (a string key only for `=`, `<>` and `IN`), and is false for a
+row whose keys are all NULL, so that a table on the nullable side of an outer join keeps its rows. Any
+other predicate leaves every partition in. The query still runs unchanged on the rows loaded, so pruning
+never changes a result. Partitions loaded by one query stay for the next: a later query adds the ones it
+needs, reloads the ones whose objects or Glue entry changed and drops the ones Glue no longer lists.
+When two partitions hold key values that PostgreSQL casts to the same value, such as integer `1` and `01`,
+rows can no longer be told apart by partition, so a query on that table loads every partition and replaces
+the whole table when any of them changes.
+Pruning applies to the simple query protocol and the Data API. A session in a transaction block, and a client
+on the extended query protocol (the default of the PostgreSQL JDBC driver, unless `preferQueryMode=simple`),
+load every partition.
 
 Materialized relations are cached in the cluster database. Each new query checks the associated
 role, trust policy and S3 access before using cached data, following the existing S3 enforcement
@@ -777,9 +847,14 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   request. `IAM_ROLE default` uses the cluster's default role with the same permission checks.
 - `REGION '<region>'` is accepted and ignored: Floci has one S3.
 - `CREDENTIALS 'aws_iam_role=<arn>'` behaves like `IAM_ROLE`. `ACCESS_KEY_ID` with `SECRET_ACCESS_KEY`
-  (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...'`,
-  are accepted but never verified or stored: S3 is read as an unsigned request, the same as with no
-  authorization clause. Combining key credentials with `IAM_ROLE`, or giving only one of the pair, is
+  (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...[;token=...]'`,
+  make S3 be read as that principal when S3 authorization is enforced. IAM must know the access key (a temporary
+  key also needs its session token) and the secret must match, otherwise the `COPY` fails with SQLSTATE `XX000`.
+  The key's identity policy must allow `s3:ListBucket` and `s3:GetObject`, and any bucket policy must not deny
+  the request (`42501` otherwise). With S3 authorization off the keys are ignored, so placeholder keys keep
+  working, and a statement with no authorization clause reads S3 as an unsigned request. The keys are not
+  stored, and the statement text keeps them out of Floci's own messages. Combining key credentials with
+  `IAM_ROLE`, or giving only one of the pair, is
   not intercepted, and neither is a blank key, secret, token or role.
 - `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
   (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
@@ -886,8 +961,9 @@ the result to S3 as one or more objects under `<prefix>`.
   AWS, the compression suffix is added only when no extension is given, so `EXTENSION 'txt.gz' GZIP`
   gives `<prefix>0000_part_00.txt.gz`. The value is not validated; an empty value or one containing
   `/` is not intercepted. AWS does not document whether it inserts the dot itself.
-- `REGION` and the credential clauses (`CREDENTIALS`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`,
-  `SESSION_TOKEN`) behave as described for COPY.
+- `REGION` behaves as described for COPY. The key credential clauses (`CREDENTIALS 'aws_access_key_id=...'`,
+  `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `SESSION_TOKEN`) are accepted but ignored by UNLOAD, which writes
+  as the role or as an unsigned request. Only COPY reads S3 as the principal those clauses name.
 - `ESCAPE` is accepted and relies on PostgreSQL text framing, which already escapes the backslash,
   newline, carriage return and the delimiter. It is only valid with text framing: combined with
   `CSV`, `ADDQUOTES` or `HEADER` (which switch the framing to CSV here) the statement is not

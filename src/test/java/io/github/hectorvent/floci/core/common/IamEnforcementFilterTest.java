@@ -2486,7 +2486,7 @@ class IamEnforcementFilterTest {
                 .thenReturn(conditions);
 
         Map<String, List<String>> expected = IamConditionContextResolver.withGlobalContext(
-                conditions, "arn:aws:s3:::partner-bucket", "us-east-1", "222233334444", "111111111111");
+                conditions, "arn:aws:s3:::partner-bucket", "us-east-1", "222233334444", "111111111111", "s3:ListBucket");
         assertEquals(List.of("111111111111"), expected.get("aws:ResourceAccount"));
 
         when(evaluator.evaluateResourcePolicyFor(any(), any(), anyString(), anyString(), any()))

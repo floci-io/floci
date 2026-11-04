@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
@@ -22,6 +24,7 @@ import java.util.Map;
 import java.util.concurrent.Semaphore;
 import java.util.function.Function;
 import java.util.function.IntConsumer;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
@@ -115,25 +118,32 @@ public final class S3CopySimulator {
 
     static CopyInput prepareCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
                                  String clusterAccountId, List<String> associatedRoleArns) {
+        return asKeyAccount(spec, s3, iamService,
+                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns));
+    }
+
+    private static CopyInput prepareCopyScoped(CopyStatementParser.S3CopyFrom spec, S3Service s3,
+                                               IamService iamService, String clusterAccountId,
+                                               List<String> associatedRoleArns) {
         requireDefaultIamRole(spec);
-        RedshiftRoleAccess.RoleSession roleSession = spec.iamRoleArn() != null
-                ? RedshiftRoleAccess.resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId, associatedRoleArns)
-                : null;
+        RedshiftRoleAccess.RoleSession roleSession = resolveCopySession(spec, s3, iamService, clusterAccountId,
+                associatedRoleArns);
         try {
             try {
                 if (spec.manifest()) {
                     if (roleSession != null) {
-                        RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject",
-                                RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), spec.keyOrPrefix()));
+                        RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                                "s3:GetObject", copyObjectArn(spec, s3, spec.keyOrPrefix()));
                         s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), spec.keyOrPrefix());
                     } else {
                         s3.authorizeAnonymousGetObject(spec.bucket(), spec.keyOrPrefix());
                     }
                 } else {
                     if (roleSession != null) {
-                        RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket",
-                                RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket()));
-                        s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
+                        RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                                "s3:ListBucket", copyBucketArn(spec, s3), Map.of("s3:prefix", List.of(spec.keyOrPrefix())));
+                        s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(),
+                                spec.keyOrPrefix());
                     } else {
                         s3.authorizeAnonymousListBucket(spec.bucket());
                     }
@@ -158,8 +168,8 @@ public final class S3CopySimulator {
             try {
                 for (String key : keys) {
                     if (roleSession != null) {
-                        RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject",
-                                RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), key));
+                        RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                                "s3:GetObject", copyObjectArn(spec, s3, key));
                         s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
                     } else {
                         s3.authorizeAnonymousGetObject(spec.bucket(), key);
@@ -174,6 +184,55 @@ public final class S3CopySimulator {
             RedshiftRoleAccess.releaseRoleSession(roleSession, spec.iamRoleArn(), iamService);
             throw e;
         }
+    }
+
+    /**
+     * The session COPY reads S3 as: the role's, or the one the statement's own access keys name. Keys
+     * are only checked when S3 authorization is on, since with it off every read is allowed and a
+     * statement may carry placeholder keys.
+     */
+    private static RedshiftRoleAccess.RoleSession resolveCopySession(
+            CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+            String clusterAccountId, List<String> associatedRoleArns) {
+        if (spec.iamRoleArn() != null) {
+            return RedshiftRoleAccess.resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId,
+                    associatedRoleArns);
+        }
+        if (spec.accessKeys() != null && s3.isAuthEnforced()) {
+            return RedshiftRoleAccess.resolveKeySession(spec.accessKeys(), iamService);
+        }
+        return null;
+    }
+
+    /** A role's ARNs live in its partition; an access key has none, so the bucket's own region decides. */
+    private static String copyBucketArn(CopyStatementParser.S3CopyFrom spec, S3Service s3) {
+        if (spec.iamRoleArn() != null) {
+            return RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket());
+        }
+        return AwsArnUtils.Arn.global(s3.bucketPartition(spec.bucket()), "s3", "",
+                spec.bucket()).toString();
+    }
+
+    private static String copyObjectArn(CopyStatementParser.S3CopyFrom spec, S3Service s3, String key) {
+        return copyBucketArn(spec, s3) + "/" + key;
+    }
+
+    /**
+     * Runs {@code body} in the account that owns the statement's access key, since IAM and S3 look a key up in
+     * the current account and the proxy's connection thread carries none. A role-based or keyless COPY, or one
+     * whose keys are ignored because S3 authorization is off, runs as is.
+     */
+    private static <T> T asKeyAccount(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+                                      Supplier<T> body) {
+        return RequestScopes.callAs(keyAccount(spec, s3, iamService), body);
+    }
+
+    /** Null when no key is in play, which {@link RequestScopes} reads as "stay in the current account". */
+    private static String keyAccount(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService) {
+        if (spec.iamRoleArn() != null || spec.accessKeys() == null || !s3.isAuthEnforced()) {
+            return null;
+        }
+        return iamService.findAccountForAccessKeyId(spec.accessKeys().accessKeyId()).orElse(null);
     }
 
     static String copyBackendSql(CopyStatementParser.S3CopyFrom spec) {
@@ -200,8 +259,19 @@ public final class S3CopySimulator {
     static void streamCopyInput(CopyInput input, List<String> discoveredColumns,
                                 List<Integer> columnMaxBytes, List<CopyRecordTransformer.ColumnKind> columnKinds,
                                 OutputStream backendOut) throws IOException {
-        streamObjects(input.spec(), discoveredColumns, columnMaxBytes, columnKinds, input.s3(), input.iamService(),
-                input.roleSession(), input.keys(), backendOut);
+        String account = keyAccount(input.spec(), input.s3(), input.iamService());
+        try {
+            RequestScopes.callAsChecked(account, () -> {
+                streamObjects(input.spec(), discoveredColumns, columnMaxBytes, columnKinds, input.s3(),
+                        input.iamService(), input.roleSession(), input.keys(), backendOut);
+                return null;
+            });
+        } catch (IOException | RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            // The body throws only IOException and unchecked exceptions, so this is unreachable.
+            throw new IllegalStateException(e);
+        }
     }
 
     static void releaseCopySession(CopyInput input) {
@@ -504,8 +574,8 @@ public final class S3CopySimulator {
         byte[] buffer = new byte[CHUNK];
         for (int i = 0; i < keys.size(); i++) {
             if (roleSession != null) {
-                RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:GetObject",
-                        RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), keys.get(i)));
+                RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                        "s3:GetObject", copyObjectArn(spec, s3, keys.get(i)));
                 s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), keys.get(i));
             } else {
                 s3.authorizeAnonymousGetObject(spec.bucket(), keys.get(i));

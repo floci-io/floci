@@ -25,6 +25,7 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -123,16 +124,34 @@ class NodeAppSyncJsRuntimeTest {
     }
 
     @Test
+    void launchCommandCarriesOnlyTheServerWithinTheShellArgumentLimit() throws IOException {
+        String command = runtime.startCommand();
+        assertTrue(command.length() < 128 * 1024, "container command exceeds Linux MAX_ARG_STRLEN");
+
+        String[] sections = command.split("echo ");
+        assertEquals(2, sections.length);
+        assertTrue(sections[1].contains("| base64 -d > /tmp/floci-appsync-js-runtime.mjs"));
+        assertEquals(resource("appsync/appsync-js-runtime.mjs"), decode(sections[1]));
+    }
+
+    private static String resource(String path) throws IOException {
+        try (InputStream in = Thread.currentThread().getContextClassLoader().getResourceAsStream(path)) {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static String decode(String section) {
+        String encoded = section.substring(0, section.indexOf(' '));
+        return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+    }
+
+    @Test
     void aSurvivingSidecarIsAdoptedThroughTheNetworkItWasCreatedOn() throws IOException {
         when(jsRuntime.url()).thenReturn(Optional.empty());
         when(jsRuntime.containerName()).thenReturn("appsync-js-runtime-test");
         when(jsRuntime.dockerNetwork()).thenReturn(Optional.of("js-net"));
         when(containerBuilder.resolveDockerNetwork(Optional.of("js-net"))).thenReturn(Optional.of("js-net"));
-        String digest;
-        try (InputStream in = Thread.currentThread().getContextClassLoader()
-                .getResourceAsStream("appsync/appsync-js-runtime.mjs")) {
-            digest = Digests.sha256Hex(new String(in.readAllBytes(), StandardCharsets.UTF_8)).substring(0, 16);
-        }
+        String digest = Digests.sha256Hex(resource("appsync/appsync-js-runtime.mjs")).substring(0, 16);
         Container survivor = mock(Container.class);
         when(survivor.getId()).thenReturn("survivor");
         when(survivor.getLabels()).thenReturn(Map.of("io.floci.appsync.js-runtime.script", digest));
@@ -145,6 +164,36 @@ class NodeAppSyncJsRuntimeTest {
 
         verify(lifecycleManager).adopt("survivor", List.of(4600), Optional.of("js-net"));
         verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void aSidecarWithAnOldScriptDigestIsReplaced() throws IOException {
+        when(jsRuntime.url()).thenReturn(Optional.empty());
+        when(jsRuntime.image()).thenReturn("node:22-alpine");
+        when(jsRuntime.containerName()).thenReturn("appsync-js-runtime-test");
+        when(jsRuntime.port()).thenReturn(0);
+        when(jsRuntime.startTimeoutSeconds()).thenReturn(5);
+        when(jsRuntime.dockerNetwork()).thenReturn(Optional.empty());
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+
+        Container stale = mock(Container.class);
+        when(stale.getId()).thenReturn("old-script");
+        when(stale.getLabels()).thenReturn(Map.of(
+                "io.floci.appsync.js-runtime.script", "old-script-digest"));
+        when(lifecycleManager.findByName(anyString())).thenReturn(Optional.of(stale));
+
+        ContainerBuilder.Builder builder =
+                mock(ContainerBuilder.Builder.class, withSettings().defaultAnswer(Answers.RETURNS_SELF));
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("new-script",
+                Map.of(4600, new EndpointInfo("127.0.0.1", server.getAddress().getPort()))));
+
+        runtime.ensureStarted();
+
+        verify(lifecycleManager).stopAndRemove("old-script", null);
+        verify(lifecycleManager, never()).adopt(anyString(), any(), any());
+        verify(lifecycleManager).createAndStart(any());
     }
 
 

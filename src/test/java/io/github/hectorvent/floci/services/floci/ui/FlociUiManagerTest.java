@@ -324,6 +324,10 @@ class FlociUiManagerTest {
                 "socket-permission failure must not be reported as a missing image, was: " + msg);
         assertTrue(msg.contains("could not reach the container runtime"), msg);
         assertTrue(msg.contains("Permission denied"), msg);
+        // A ':z' relabel only fixes access to the socket file; SELinux still denies connectto
+        // on the Podman service, so the message must not send users back to it.
+        assertTrue(msg.contains("'--security-opt label=disable'"), msg);
+        assertFalse(msg.contains(":z"), msg);
     }
 
     @Test

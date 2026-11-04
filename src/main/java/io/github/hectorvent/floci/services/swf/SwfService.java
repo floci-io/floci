@@ -1261,7 +1261,7 @@ public class SwfService implements Resettable {
             reason = e.getErrorCode();
             details = e.getMessage();
         } catch (RuntimeException e) {
-            LOG.warnv("SWF Lambda invocation {0} ({1}) failed: {2}",
+            LOG.warnv(e, "SWF Lambda invocation {0} ({1}) failed: {2}",
                     pending.id(), pending.name(), e.getMessage());
             eventType = "LambdaFunctionFailed";
             reason = e.getClass().getSimpleName();

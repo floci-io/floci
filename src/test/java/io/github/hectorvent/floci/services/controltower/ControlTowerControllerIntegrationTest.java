@@ -16,6 +16,7 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -70,6 +71,109 @@ class ControlTowerControllerIntegrationTest {
                 .statusCode(200)
                 .body("arn", containsString(":landingzone/"))
                 .body("operationIdentifier", containsString("-"));
+    }
+
+    @Test
+    void landingZoneTagsCanBeListedAddedAndRemoved() {
+        String authorization = auth("000000000298", "eu-central-1");
+        String arn = given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"version\":\"4.0\",\"tags\":{\"env\":\"test\"},"
+                        + "\"manifest\":{\"accessManagement\":{\"enabled\":true}}}")
+                .when()
+                .post("/create-landingzone")
+                .then()
+                .statusCode(200)
+                .extract().path("arn");
+
+        given()
+                .header("Authorization", authorization)
+                .when()
+                .get("/tags/" + arn)
+                .then()
+                .statusCode(200)
+                .body("tags.env", equalTo("test"));
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"tags\":{\"team\":\"platform\"}}")
+                .when()
+                .post("/tags/" + arn)
+                .then()
+                .statusCode(204);
+
+        given()
+                .header("Authorization", authorization)
+                .queryParam("tagKeys", "env")
+                .when()
+                .delete("/tags/" + arn)
+                .then()
+                .statusCode(204);
+
+        given()
+                .header("Authorization", authorization)
+                .when()
+                .get("/tags/" + arn)
+                .then()
+                .statusCode(200)
+                .body("tags.team", equalTo("platform"))
+                .body("tags.env", nullValue());
+    }
+
+    @Test
+    void landingZoneTagsForAnUnknownLandingZoneReturnResourceNotFound() {
+        String authorization = auth("000000000297", "eu-west-1");
+        String arn = listLandingZonesArn(authorization);
+
+        given()
+                .header("Authorization", authorization)
+                .when()
+                .get("/tags/" + arn.substring(0, arn.lastIndexOf('/') + 1) + "UNKNOWNLZ")
+                .then()
+                .statusCode(404)
+                .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void landingZoneTagsForAnotherAccountAreNotFoundAndSeedNothing() {
+        String caller = auth("000000000296", EAST);
+        String other = listLandingZonesArn(auth("000000000295", EAST));
+
+        given()
+                .header("Authorization", caller)
+                .when()
+                .get("/tags/" + other)
+                .then()
+                .statusCode(404)
+                .body("__type", containsString("ResourceNotFoundException"));
+
+        assertTrue(listLandingZonesArn(caller).contains(":000000000296:"));
+    }
+
+    @Test
+    void landingZoneTagRequestsWithMalformedTagsAreRejected() {
+        String authorization = auth("000000000294", EAST);
+        String arn = listLandingZonesArn(authorization);
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"tags\":{\"env\":123}}")
+                .when()
+                .post("/tags/" + arn)
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"));
+
+        given()
+                .header("Authorization", authorization)
+                .when()
+                .delete("/tags/" + arn)
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ValidationException"));
     }
 
     @Test

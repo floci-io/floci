@@ -123,6 +123,7 @@ import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_FINGERPRINT;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_KEY;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.TRUNCATED_RSA_KEY;
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -233,6 +234,58 @@ class Ec2ServiceTest {
         assertEquals(List.of(userTag), service.resourceTags("us-east-1", ids.getFirst()));
     }
 
+
+    @Test
+    void defaultSecurityGroupOfReturnsTheGroupNamedDefaultInThatVpc() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        service.createSecurityGroup(region, "web", "not the default", vpcId);
+        SecurityGroup expected = service.describeSecurityGroups(region, List.of(), List.of(),
+                Map.of("vpc-id", List.of(vpcId), "group-name", List.of("default"))).getFirst();
+
+        SecurityGroup found = service.defaultSecurityGroupOf(region, vpcId).orElseThrow();
+
+        assertEquals(expected.getGroupId(), found.getGroupId());
+        assertEquals(vpcId, found.getVpcId());
+        assertEquals("default", found.getGroupName());
+        assertNotEquals(service.defaultSecurityGroupOf(region, service.resolveDefaultVpcId(region))
+                .orElseThrow().getGroupId(), found.getGroupId());
+    }
+
+    @Test
+    void createNetworkInterfaceWithoutGroupsGetsItsVpcsDefaultGroup() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        Subnet subnet = service.createSubnet(region, vpcId, "10.94.1.0/24", region + "a");
+
+        NetworkInterface eni = service.createNetworkInterface(region, subnet.getSubnetId(), null, null,
+                List.of(), List.of(), List.of());
+
+        assertEquals(List.of(service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId()),
+                eni.getGroups().stream().map(GroupIdentifier::getGroupId).toList());
+    }
+
+    @Test
+    void defaultSecurityGroupOfIsEmptyOnceTheDefaultGroupIsGone() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        service.deleteSecurityGroup(region, service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
+
+        assertTrue(service.defaultSecurityGroupOf(region, vpcId).isEmpty());
+    }
+
+    @Test
+    void defaultSecurityGroupOfRejectsAnUnknownVpc() {
+        Ec2Service service = mockModeService();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.defaultSecurityGroupOf("us-east-1", "vpc-0123456789abcdef0"));
+
+        assertEquals("InvalidVpcID.NotFound", error.getErrorCode());
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -2568,6 +2621,154 @@ class Ec2ServiceTest {
         service.deleteNatGateway("us-east-1", nat.getNatGatewayId());
         assertNull(service.describeAddresses("us-east-1", List.of(allocationId), Map.of())
                 .getFirst().getAssociationId(), "delete must still release the gateway's Elastic IP");
+    }
+
+    /**
+     * A secondary-address update that read the gateway before a delete finished must not write it
+     * back: the delete runs while the update waits for the allocation lock, and another gateway
+     * takes the released primary Elastic IP meanwhile.
+     */
+    @Test
+    void aSecondaryAddressUpdateDoesNotBringBackAGatewayDeletedUnderIt() throws Exception {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String subnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String primary = service.allocateAddress(region).getAllocationId();
+        String secondary = service.allocateAddress(region).getAllocationId();
+        String added = service.allocateAddress(region).getAllocationId();
+        String natId = service.createNatGateway(region, subnetId, primary, "public", null, List.of(secondary),
+                List.of(), null, List.of()).getNatGatewayId();
+        Field lockField = Ec2Service.class.getDeclaredField("privateIpAllocationLock");
+        lockField.setAccessible(true);
+        Object lock = lockField.get(service);
+        AtomicReference<Thread> updater = new AtomicReference<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> updating;
+            String other;
+            synchronized (lock) {
+                updating = worker.submit(() -> {
+                    updater.set(Thread.currentThread());
+                    service.updateNatGatewaySecondaryAddresses(region, natId, List.of(added), List.of(), null);
+                });
+                awaitBlockedOrDone(updater, updating);
+                assertFalse(updating.isDone(), "the update must wait for the allocation lock");
+                service.deleteNatGateway(region, natId);
+                other = service.createNatGateway(region, subnetId, primary, "public", List.of()).getNatGatewayId();
+            }
+            ExecutionException e = assertThrows(ExecutionException.class, () -> updating.get(5, TimeUnit.SECONDS));
+            assertEquals("NatGatewayNotFound", ((AwsException) e.getCause()).getErrorCode());
+
+            assertTrue(service.describeNatGateways(region, List.of(), Map.of()).stream()
+                    .noneMatch(g -> natId.equals(g.getNatGatewayId())), "the deleted gateway stays deleted");
+            NatGateway taker = service.describeNatGateways(region, List.of(other), Map.of()).getFirst();
+            assertEquals(taker.getNatGatewayAddresses().getFirst().getAssociationId(),
+                    service.describeAddresses(region, List.of(primary), Map.of()).getFirst().getAssociationId(),
+                    "the primary Elastic IP stays with the gateway that took it");
+            for (String free : List.of(secondary, added)) {
+                assertNull(service.describeAddresses(region, List.of(free), Map.of()).getFirst().getAssociationId(),
+                        free + " is not held again");
+            }
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * A NAT gateway whose addresses run out part way gives back the lease it took on the VPC
+     * network. The subnet is a /28, eleven assignable addresses, and 31 more are asked for.
+     */
+    @Test
+    void aNatGatewayCreateThatRunsOutOfAddressesGivesBackTheLeaseItTook() {
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
+        String subnetId = privateSubnet(service, "us-east-1", "10.60.0.0/28");
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("10.60.0.5"), Optional.empty());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.createNatGateway("us-east-1", subnetId,
+                null, "private", null, List.of(), List.of(), "31", List.of()));
+        assertEquals("InsufficientFreeAddressesInSubnet", e.getErrorCode());
+        verify(vpcNetworks).releasePrivateIp("us-east-1", subnetId, "10.60.0.5");
+        assertTrue(service.describeNatGateways("us-east-1", List.of(), Map.of()).isEmpty());
+    }
+
+    /** The same on a secondary-address update, which also leaves the gateway as it was. */
+    @Test
+    void aNatGatewayUpdateThatRunsOutOfAddressesGivesBackTheLeaseItTook() {
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
+        String subnetId = privateSubnet(service, "us-east-1", "10.60.0.0/28");
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("10.60.0.6"), Optional.of("10.60.0.7"), Optional.empty());
+        NatGateway nat = service.createNatGateway("us-east-1", subnetId, null, "private", List.of());
+        assertEquals("10.60.0.6", nat.getNatGatewayAddresses().getFirst().getPrivateIp());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateNatGatewaySecondaryAddresses(
+                "us-east-1", nat.getNatGatewayId(), List.of(), List.of(), "31"));
+        assertEquals("InsufficientFreeAddressesInSubnet", e.getErrorCode());
+        verify(vpcNetworks).releasePrivateIp("us-east-1", subnetId, "10.60.0.7");
+        assertEquals(List.of("10.60.0.6"), service.describeNatGateways("us-east-1", List.of(nat.getNatGatewayId()),
+                Map.of()).getFirst().getNatGatewayAddresses().stream().map(NatGatewayAddress::getPrivateIp).toList(),
+                "the gateway keeps only its primary address");
+    }
+
+    /**
+     * CreateTags writes a NAT gateway back under the gateway's tag lock, which DeleteNatGateway
+     * does not take, so a tag write that read the gateway before a delete stores the record the
+     * delete marked deleted. A secondary-address update must refuse that record rather than hold
+     * Elastic IPs for it.
+     */
+    @Test
+    void aSecondaryAddressUpdateRefusesAGatewayStoredAsDeleted() throws Exception {
+        CountDownLatch putReached = new CountDownLatch(1);
+        CountDownLatch deleteDone = new CountDownLatch(1);
+        AtomicReference<Boolean> pausePut = new AtomicReference<>(false);
+        InMemoryStorage<String, NatGateway> rawGateways = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, NatGateway value) {
+                if (pausePut.getAndSet(false)) {
+                    putReached.countDown();
+                    try {
+                        assertTrue(deleteDone.await(5, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                super.put(key, value);
+            }
+        };
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-nat-gateways.json",
+                        new AccountAwareStorageBackend<>(rawGateways, null, "000000000000"))));
+        String region = "us-east-1";
+        String subnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String primary = service.allocateAddress(region).getAllocationId();
+        String added = service.allocateAddress(region).getAllocationId();
+        String natId = service.createNatGateway(region, subnetId, primary, "public", List.of()).getNatGatewayId();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            pausePut.set(true);
+            Future<?> tagging = worker.submit(() -> service.createTags(region, List.of(natId),
+                    List.of(new Tag("k", "v"))));
+            assertTrue(putReached.await(5, TimeUnit.SECONDS), "the tag write reaches its put");
+            service.deleteNatGateway(region, natId);
+            deleteDone.countDown();
+            tagging.get(5, TimeUnit.SECONDS);
+            assertEquals("deleted", rawGateways.scan(k -> true).getFirst().getState(),
+                    "the tag write stored the deleted gateway");
+
+            AwsException e = assertThrows(AwsException.class, () -> service.updateNatGatewaySecondaryAddresses(
+                    region, natId, List.of(added), List.of(), null));
+            assertEquals("NatGatewayNotFound", e.getErrorCode());
+            assertNull(service.describeAddresses(region, List.of(added), Map.of()).getFirst().getAssociationId(),
+                    "the requested Elastic IP is not held for the deleted gateway");
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     /**
@@ -6666,6 +6867,35 @@ class Ec2ServiceTest {
         service.revokeSecurityGroupIngress("us-east-1", groupId, List.of(cidrPermission("6", 22, 22)));
         assertTrue(service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
                 .getFirst().getIpPermissions().isEmpty(), "protocol 6 is tcp");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void revokingAStoredPermissionKeepsLaterSources(boolean egress, boolean repeatedRemoval) {
+        Ec2Service service = sgService();
+        String groupId = service.createSecurityGroup("us-east-1", "web", "web", null).getGroupId();
+        IpPermission retired = basePermission();
+        retired.getIpRanges().add(new IpRange("192.0.2.1/32", null));
+        IpPermission current = basePermission();
+        current.getIpRanges().add(new IpRange("192.0.2.2/32", null));
+        IpPermission otherOwner = basePermission();
+        otherOwner.getIpRanges().add(new IpRange("192.0.2.3/32", null));
+        List<IpPermission> permissions = List.of(retired, current, otherOwner);
+        List<IpPermission> removals = repeatedRemoval ? List.of(retired, retired) : List.of(retired);
+        if (egress) {
+            service.revokeSecurityGroupEgress("us-east-1", groupId, List.of(cidrPermission("-1", 0, 0)));
+            service.authorizeSecurityGroupEgress("us-east-1", groupId, permissions);
+            service.revokeSecurityGroupEgress("us-east-1", groupId, removals);
+        } else {
+            service.authorizeSecurityGroupIngress("us-east-1", groupId, permissions);
+            service.revokeSecurityGroupIngress("us-east-1", groupId, removals);
+        }
+        SecurityGroup group = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst();
+        List<IpPermission> remaining = egress ? group.getIpPermissionsEgress() : group.getIpPermissions();
+        assertEquals(List.of("192.0.2.2/32", "192.0.2.3/32"),
+                remaining.stream().flatMap(permission -> permission.getIpRanges().stream())
+                        .map(IpRange::getCidrIp).toList());
     }
 
     /** Ingress only: createSecurityGroup seeds a default allow-all egress rule. */

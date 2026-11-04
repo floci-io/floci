@@ -279,7 +279,9 @@ but for its bootstrap actions and its storage.
   applies; a `spark-hive-site` setting wins over the same one in `core-site`, and a `spark.hadoop.` setting
   in `spark-defaults` over both. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases
   before 7.10.0 too, where `s3://` would otherwise be EMRFS, so the application and its files can be read
-  from there; the Glue Data Catalog client is pointed at Floci's Glue, and `hdfs://` paths, and those
+  from there; the Glue Data Catalog client is pointed at Floci's Glue, with the cluster's account as its
+  `hive.metastore.glue.catalogid` (from `emr-7.10.0` the client would otherwise ask STS for it), which a
+  `spark-hive-site` one replaces for a Data Catalog in another account; and `hdfs://` paths, and those
   without a scheme, at the cluster's HDFS. The cluster's `spark-log4j2` properties, which "Change values in
   Spark's log4j2.properties file", follow the `log4j2.properties` of the folder a `spark-env` export of
   `SPARK_CONF_DIR` names, else of the image's, in a copy of the step's own, a later key winning, so

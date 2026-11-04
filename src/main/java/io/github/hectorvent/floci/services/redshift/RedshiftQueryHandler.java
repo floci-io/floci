@@ -63,13 +63,15 @@ public class RedshiftQueryHandler {
     private final RegionResolver regionResolver;
     private final RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer;
     private final IamEnforcementFilter iamEnforcementFilter;
+    private final RedshiftResourcePolicies resourcePolicies;
 
     @Inject
     public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                                 EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                                 RegionResolver regionResolver,
                                 RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer,
-                                IamEnforcementFilter iamEnforcementFilter) {
+                                IamEnforcementFilter iamEnforcementFilter,
+                                RedshiftResourcePolicies resourcePolicies) {
         this.service = service;
         this.credentialBroker = credentialBroker;
         this.config = config;
@@ -77,12 +79,13 @@ public class RedshiftQueryHandler {
         this.regionResolver = regionResolver;
         this.zeroEtlConsumer = zeroEtlConsumer;
         this.iamEnforcementFilter = iamEnforcementFilter;
+        this.resourcePolicies = resourcePolicies;
     }
 
     RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                          EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                          RegionResolver regionResolver) {
-        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null);
+        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null, null);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -519,6 +522,25 @@ public class RedshiftQueryHandler {
                         .elem("RequestId", "test-req-id")
                       .end("ResponseMetadata")
                     .end("DeleteIntegrationResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "PutResourcePolicy" -> {
+            RedshiftResourcePolicies.ResourcePolicy stored = resourcePolicies.put(
+                    params.getFirst("ResourceArn"), params.getFirst("Policy"));
+            return resourcePolicyResponse("PutResourcePolicy", stored);
+        }
+        case "GetResourcePolicy" -> {
+            return resourcePolicyResponse("GetResourcePolicy", resourcePolicies.get(params.getFirst("ResourceArn")));
+        }
+        case "DeleteResourcePolicy" -> {
+            resourcePolicies.delete(params.getFirst("ResourceArn"));
+            String xml = new XmlBuilder()
+                    .start("DeleteResourcePolicyResponse")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DeleteResourcePolicyResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
@@ -989,6 +1011,23 @@ public class RedshiftQueryHandler {
         }
         default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         }
+    }
+
+    private static Response resourcePolicyResponse(String operation, RedshiftResourcePolicies.ResourcePolicy policy) {
+        String xml = new XmlBuilder()
+                .start(operation + "Response")
+                  .start(operation + "Result")
+                    .start("ResourcePolicy")
+                      .elem("ResourceArn", policy.resourceArn())
+                      .elem("Policy", policy.policy())
+                    .end("ResourcePolicy")
+                  .end(operation + "Result")
+                  .start("ResponseMetadata")
+                    .elem("RequestId", "test-req-id")
+                  .end("ResponseMetadata")
+                .end(operation + "Response")
+                .build();
+        return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
     /**

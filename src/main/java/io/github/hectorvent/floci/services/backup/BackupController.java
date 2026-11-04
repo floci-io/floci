@@ -310,8 +310,13 @@ public class BackupController {
     @DELETE
     @Path("/backup/plans/{backupPlanId}")
     public Response deleteBackupPlan(@PathParam("backupPlanId") String planId) {
-        service.deleteBackupPlan(planId);
-        return Response.noContent().build();
+        BackupPlan plan = service.deleteBackupPlan(planId);
+        ObjectNode out = objectMapper.createObjectNode();
+        out.put("BackupPlanId", plan.getBackupPlanId());
+        out.put("BackupPlanArn", plan.getBackupPlanArn());
+        out.put("DeletionDate", plan.getDeletionDate());
+        out.put("VersionId", plan.getVersionId());
+        return Response.ok(out).build();
     }
 
     @GET

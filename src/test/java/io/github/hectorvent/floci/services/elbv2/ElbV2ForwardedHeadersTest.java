@@ -121,7 +121,7 @@ class ElbV2ForwardedHeadersTest {
         ElbV2ForwardedHeaders forwarded = new ElbV2ForwardedHeaders(CLIENT_V4, true, 443, "append", false);
 
         Map<String, Object> event = new ElbV2DataPlane(new ConcurrentHashMap<>())
-                .buildAlbEvent(request, forwarded, Buffer.buffer());
+                .buildAlbEvent(request, forwarded, null, Buffer.buffer());
 
         Map<String, String> headers = (Map<String, String>) event.get("headers");
         assertEquals("127.0.0.4, 12.34.56.78", headers.get("x-forwarded-for"));
@@ -142,8 +142,41 @@ class ElbV2ForwardedHeadersTest {
                 .add("Cookie", "name2=value2"));
 
         Map<String, Object> event = new ElbV2DataPlane(new ConcurrentHashMap<>())
-                .buildAlbEvent(request, mode("append"), Buffer.buffer());
+                .buildAlbEvent(request, mode("append"), null, Buffer.buffer());
 
         assertEquals("name2=value2", ((Map<String, String>) event.get("headers")).get("cookie"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void lambdaHostRewriteReachesBothHeaderMaps() {
+        HttpServerRequest request = mock(HttpServerRequest.class);
+        when(request.method()).thenReturn(HttpMethod.GET);
+        when(request.path()).thenReturn("/");
+        when(request.headers()).thenReturn(MultiMap.caseInsensitiveMultiMap()
+                .add("Host", "client.example.test").add("Host", "second.example.test"));
+
+        Map<String, Object> event = new ElbV2DataPlane(new ConcurrentHashMap<>())
+                .buildAlbEvent(request, mode("append"), "client.example.test:8080", Buffer.buffer());
+
+        assertEquals("client.example.test:8080", ((Map<String, String>) event.get("headers")).get("host"));
+        assertEquals(List.of("client.example.test:8080"),
+                ((Map<String, List<String>>) event.get("multiValueHeaders")).get("host"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void lambdaHostPreservationKeepsRepeatedClientHeaders() {
+        HttpServerRequest request = mock(HttpServerRequest.class);
+        when(request.method()).thenReturn(HttpMethod.GET);
+        when(request.path()).thenReturn("/");
+        when(request.headers()).thenReturn(MultiMap.caseInsensitiveMultiMap()
+                .add("Host", "client.example.test").add("Host", "second.example.test:8443"));
+
+        Map<String, Object> event = new ElbV2DataPlane(new ConcurrentHashMap<>())
+                .buildAlbEvent(request, mode("append"), null, Buffer.buffer());
+
+        assertEquals(List.of("client.example.test", "second.example.test:8443"),
+                ((Map<String, List<String>>) event.get("multiValueHeaders")).get("host"));
     }
 }

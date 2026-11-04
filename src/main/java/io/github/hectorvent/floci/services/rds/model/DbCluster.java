@@ -51,6 +51,8 @@ public class DbCluster {
     private String dockerVolumeName;
     private String volumeId;
     private String containerStorageResourceId;
+    private boolean backendCleanupRequired;
+    private boolean managedSecretCleanupRequired;
 
     // Aurora Serverless v2 scaling (ACUs). Null when the cluster is not Serverless v2.
     private Double serverlessV2MinCapacity;
@@ -212,6 +214,16 @@ public class DbCluster {
     public String getContainerStorageResourceId() { return containerStorageResourceId; }
     public void setContainerStorageResourceId(String containerStorageResourceId) {
         this.containerStorageResourceId = containerStorageResourceId;
+    }
+
+    public boolean isBackendCleanupRequired() { return backendCleanupRequired; }
+    public void setBackendCleanupRequired(boolean backendCleanupRequired) {
+        this.backendCleanupRequired = backendCleanupRequired;
+    }
+
+    public boolean isManagedSecretCleanupRequired() { return managedSecretCleanupRequired; }
+    public void setManagedSecretCleanupRequired(boolean managedSecretCleanupRequired) {
+        this.managedSecretCleanupRequired = managedSecretCleanupRequired;
     }
 
     public String getContainerId() { return containerId; }

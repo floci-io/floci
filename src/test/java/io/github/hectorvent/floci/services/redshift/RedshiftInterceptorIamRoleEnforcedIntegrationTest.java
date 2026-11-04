@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.AccessKey;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.S3EnforceAuthProfile;
@@ -197,6 +198,95 @@ class RedshiftInterceptorIamRoleEnforcedIntegrationTest {
                     "COPY people FROM 's3://" + bucket + "/p1.txt' "
                             + "IAM_ROLE 'arn:aws:iam::000000000000:role/CopyRoleDeny'")) {
                 assertThrows(SQLException.class, copy::execute);
+            }
+        }
+    }
+
+    @Test
+    void copyWithAnIamUsersOwnAccessKeyIsAuthorizedAsThatUser() throws Exception {
+        clusterId = "it-copy-access-key";
+        String bucket = "redshift-copy-access-key";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "p1.txt", "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        iamService.createUser("CopyKeyReader", "/");
+        iamService.putUserPolicy("CopyKeyReader", "ReadBucket", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::redshift-copy-access-key"},
+                  {"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::redshift-copy-access-key/*"}
+                ]}
+                """);
+        iamService.createUser("CopyKeyStranger", "/");
+        AccessKey reader = iamService.createAccessKey("CopyKeyReader");
+        AccessKey stranger = iamService.createAccessKey("CopyKeyStranger");
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123", null, List.of(),
+                List.of());
+
+        try (Connection connection = waitForConnection(cluster, "simple");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE people (id int, name text)");
+            statement.execute("COPY people FROM 's3://" + bucket + "/p1.txt' ACCESS_KEY_ID '"
+                    + reader.getAccessKeyId() + "' SECRET_ACCESS_KEY '" + reader.getSecretAccessKey() + "'");
+            try (ResultSet rows = statement.executeQuery("SELECT name FROM people")) {
+                assertTrue(rows.next());
+                assertEquals("alice", rows.getString(1));
+            }
+
+            SQLException wrongSecret = assertThrows(SQLException.class, () -> statement.execute(
+                    "COPY people FROM 's3://" + bucket + "/p1.txt' ACCESS_KEY_ID '" + reader.getAccessKeyId()
+                            + "' SECRET_ACCESS_KEY 'not-the-secret'"));
+            assertEquals("XX000", wrongSecret.getSQLState());
+
+            SQLException unknownKey = assertThrows(SQLException.class, () -> statement.execute(
+                    "COPY people FROM 's3://" + bucket + "/p1.txt' ACCESS_KEY_ID 'AKIAUNKNOWNKEY00000' "
+                            + "SECRET_ACCESS_KEY 'whatever'"));
+            assertEquals("XX000", unknownKey.getSQLState());
+
+            SQLException noPolicy = assertThrows(SQLException.class, () -> statement.execute(
+                    "COPY people FROM 's3://" + bucket + "/p1.txt' ACCESS_KEY_ID '" + stranger.getAccessKeyId()
+                            + "' SECRET_ACCESS_KEY '" + stranger.getSecretAccessKey() + "'"));
+            assertEquals("42501", noPolicy.getSQLState());
+        }
+    }
+
+    @Test
+    void copyHonorsABucketPolicyDenyConditionedOnTheRequestedPrefix() throws Exception {
+        clusterId = "it-copy-bucket-prefix";
+        String bucket = "redshift-copy-bucket-prefix";
+        s3.createBucket(bucket, "us-east-1");
+        s3.putObject(bucket, "private/p1.txt", "1|alice\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        s3.putObject(bucket, "public/p1.txt", "2|bob\n".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        // the user's own policy allows everything, so only the bucket policy can refuse the private prefix
+        iamService.createUser("CopyPrefixReader", "/");
+        iamService.putUserPolicy("CopyPrefixReader", "ReadAll", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"}
+                ]}
+                """);
+        s3.putBucketPolicy(bucket, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Deny","Principal":"*","Action":"s3:ListBucket",
+                   "Resource":"arn:aws:s3:::redshift-copy-bucket-prefix",
+                   "Condition":{"StringLike":{"s3:prefix":"private/*"}}}
+                ]}
+                """);
+        AccessKey reader = iamService.createAccessKey("CopyPrefixReader");
+        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123", null, List.of(),
+                List.of());
+
+        try (Connection connection = waitForConnection(cluster, "simple");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE people (id int, name text)");
+            String credentials = " ACCESS_KEY_ID '" + reader.getAccessKeyId() + "' SECRET_ACCESS_KEY '"
+                    + reader.getSecretAccessKey() + "'";
+
+            SQLException denied = assertThrows(SQLException.class, () -> statement.execute(
+                    "COPY people FROM 's3://" + bucket + "/private/p1.txt'" + credentials));
+            assertEquals("42501", denied.getSQLState());
+
+            statement.execute("COPY people FROM 's3://" + bucket + "/public/p1.txt'" + credentials);
+            try (ResultSet rows = statement.executeQuery("SELECT name FROM people")) {
+                assertTrue(rows.next());
+                assertEquals("bob", rows.getString(1));
             }
         }
     }

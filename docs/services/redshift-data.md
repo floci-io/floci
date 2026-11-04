@@ -44,7 +44,7 @@ A request identifies its target cluster or serverless workgroup one of three way
 
 A statement run against a workgroup reports `WorkgroupName` and omits `ClusterIdentifier`, and the reverse holds for a cluster statement. `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` accept `WorkgroupName` the same way.
 
-Under IAM enforcement, `ExecuteStatement`, `BatchExecuteStatement`, `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` are checked on the cluster's ARN, or on the ARN of the workgroup `WorkgroupName` names, `workgroup/<id>`, whichever form it takes; a workgroup that does not exist is checked on `workgroup/*`. `ExecuteStatement` and `BatchExecuteStatement` naming a `SessionId` are checked on the cluster or workgroup the caller's session runs on, so a grant or a deny on that target covers every statement in the session, and on `*` when the caller has no such session.
+Under IAM enforcement, `ExecuteStatement`, `BatchExecuteStatement`, `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` are checked on the cluster's ARN, or on the ARN of the workgroup `WorkgroupName` names, `workgroup/<id>`, whichever form it takes; a workgroup that does not exist is checked on `workgroup/*`. `ExecuteStatement` and `BatchExecuteStatement` naming a `SessionId` are checked on the cluster or workgroup the caller's session runs on, so a grant or a deny on that target covers every statement in the session, and on `*` when the caller has no such session. AWS does not document which resource such a request is authorized on, so the session's target is Floci's inference: a session runs on the cluster or workgroup named by the statement that opened it.
 
 ## Session reuse
 

@@ -418,7 +418,7 @@ class EksRegistryHostsDockerIntegrationTest {
         long deadline = System.currentTimeMillis() + 60000;
         while (System.currentTimeMillis() < deadline) {
             Cluster c = eksService.describeCluster(cluster.getName());
-            if (c.getStatus() == ClusterStatus.ACTIVE) {
+            if (c.getStatus() == ClusterStatus.ACTIVE && !c.isFinalizePending()) {
                 return;
             }
             Thread.sleep(1000);
@@ -435,13 +435,6 @@ class EksRegistryHostsDockerIntegrationTest {
     }
 
     private ContainerExec.Result execInContainerWithExitCode(String containerId, String[] cmd) {
-        try {
-            return ContainerExec.run(dockerClient, containerId, cmd, 30);
-        } catch (RuntimeException failure) {
-            if (Thread.currentThread().isInterrupted()) {
-                throw failure;
-            }
-            return new ContainerExec.Result(-1, "", failure.toString(), false);
-        }
+        return ContainerExec.run(dockerClient, containerId, cmd, 30);
     }
 }

@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
@@ -10,6 +9,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
+import static io.github.hectorvent.floci.testing.CfnRequests.tags;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
@@ -140,11 +140,7 @@ class CloudFormationUpdateStackTagsIntegrationTest {
                 .formParam("Tags.member.2.Value", secondValue);
     }
 
-    private static Map<String, String> tags(String stackName) {
-        String xml = cfn("DescribeStacks", stackName).when().post("/")
-                .then().statusCode(200).extract().asString();
-        return XmlParser.extractPairs(xml, "member", "Key", "Value");
-    }
+
 
     private static void executeChangeSet(String stackName, String changeSetName) {
         cfn("ExecuteChangeSet", stackName).formParam("ChangeSetName", changeSetName)

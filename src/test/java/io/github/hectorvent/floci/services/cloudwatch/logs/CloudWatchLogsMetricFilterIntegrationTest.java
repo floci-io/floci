@@ -12,6 +12,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.LogsRequests.logs;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
@@ -30,19 +31,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 @QuarkusTest
 class CloudWatchLogsMetricFilterIntegrationTest {
 
-    private static final String LOGS_CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String LOGS_AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260908/us-east-1/logs/aws4_request";
     private static final String CW_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String CW_AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260908/us-east-1/monitoring/aws4_request";
 
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
-    }
-
-    private static Response logs(String action, String body) {
-        return given().contentType(LOGS_CONTENT_TYPE).header("Authorization", LOGS_AUTH)
-                .header("X-Amz-Target", "Logs_20140328." + action).body(body).post("/");
     }
 
     private static Response cloudWatch(String action, String body) {

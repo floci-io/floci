@@ -96,8 +96,8 @@ public final class RedshiftAuditSql {
 
     public static String sanitize(String sql) {
         List<Redaction> redactions = new ArrayList<>();
-        collectPasswordRedactions(sql, tokens(sql), redactions);
-        collectPasswordRedactions(sql, tokens(sql, true), redactions);
+        collectSecretRedactions(sql, tokens(sql), redactions);
+        collectSecretRedactions(sql, tokens(sql, true), redactions);
         redactions.sort(Comparator.comparingInt(Redaction::start));
         StringBuilder sanitized = new StringBuilder(sql.length());
         int copied = 0;
@@ -110,12 +110,17 @@ public final class RedshiftAuditSql {
         return sanitized.append(sql, copied, sql.length()).toString();
     }
 
-    private static void collectPasswordRedactions(String sql, List<Token> tokens, List<Redaction> redactions) {
+    private static void collectSecretRedactions(String sql, List<Token> tokens, List<Redaction> redactions) {
         for (int i = 0; i + 1 < tokens.size(); i++) {
-            if (!tokens.get(i).keyword("PASSWORD")) {
+            if (!secretClause(tokens.get(i))) {
                 continue;
             }
-            Token value = tokens.get(++i);
+            int valueIndex = i + 1;
+            if (tokens.get(valueIndex).keyword("AS") && valueIndex + 1 < tokens.size()) {
+                valueIndex++;
+            }
+            Token value = tokens.get(valueIndex);
+            i = valueIndex;
             if (value.kind() == Kind.SYMBOL) {
                 continue;
             }
@@ -130,6 +135,12 @@ public final class RedshiftAuditSql {
             // A session may disable standard_conforming_strings, making the remaining password boundary uncertain.
             redactions.add(new Redaction(value.start(), uncertainBoundary ? sql.length() : end));
         }
+    }
+
+    /** PASSWORD of a user statement, and the COPY or UNLOAD clauses that carry a secret key or session token. */
+    private static boolean secretClause(Token token) {
+        return token.keyword("PASSWORD") || token.keyword("CREDENTIALS") || token.keyword("SECRET_ACCESS_KEY")
+                || token.keyword("SESSION_TOKEN");
     }
 
     private static boolean ambiguousPasswordString(Token token) {

@@ -15,14 +15,12 @@ import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 import software.amazon.awssdk.services.cloudformation.model.Output;
 import software.amazon.awssdk.services.cloudformation.model.Parameter;
-import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ResourceServerScopeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.ResourceServerType;
 
 import java.util.List;
-import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -34,8 +32,6 @@ import static org.assertj.core.api.Assertions.tuple;
  */
 @DisplayName("CloudFormation AWS::Cognito::UserPoolResourceServer")
 class CloudFormationCognitoResourceServerTest {
-
-    private static final long TIMEOUT_NANOS = 300_000_000_000L;
 
     private static final String TEMPLATE = """
             {
@@ -435,54 +431,11 @@ class CloudFormationCognitoResourceServerTest {
     }
 
     private void awaitStatus(String expected) throws InterruptedException {
-        TestFixtures.await(() -> {
-            Stack stack = cfn.describeStacks(r -> r.stackName(stackId)).stacks().get(0);
-            String status = stack.stackStatusAsString();
-            if (expected.equals(status)) {
-                return true;
-            }
-            if (!status.endsWith("_IN_PROGRESS") && (status.contains("FAILED") || status.contains("ROLLBACK"))) {
-                throw new AssertionError(stackName + " reached " + status + " instead of " + expected + ": "
-                        + stack.stackStatusReason() + failedEvents());
-            }
-            return false;
-        }, stackName, expected, TIMEOUT_NANOS, TestFixtures.isRealAws() ? 2_000 : 100);
-    }
-
-    private String failedEvents() {
-        return cfn.describeStackEvents(r -> r.stackName(stackId)).stackEvents().stream()
-                .filter(event -> event.resourceStatusAsString().endsWith("_FAILED"))
-                .map(event -> event.logicalResourceId() + " " + event.resourceStatusAsString() + ": "
-                        + event.resourceStatusReason())
-                .collect(Collectors.joining("; ", " [", "]"));
+        CloudFormationStackTestHelper.awaitStatus(cfn, stackId, stackName, expected);
     }
 
     private void deleteStack() throws InterruptedException {
-        if (stackId == null) {
-            return;
-        }
-        cfn.deleteStack(r -> r.stackName(stackId));
-        TestFixtures.await(() -> {
-            try {
-                List<Stack> stacks = cfn.describeStacks(r -> r.stackName(stackId)).stacks();
-                if (stacks.isEmpty()) {
-                    return true;
-                }
-                Stack stack = stacks.get(0);
-                if ("DELETE_FAILED".equals(stack.stackStatusAsString())) {
-                    throw new AssertionError(stackName + " deletion failed: " + stack.stackStatusReason());
-                }
-                return "DELETE_COMPLETE".equals(stack.stackStatusAsString());
-            } catch (CloudFormationException e) {
-                if ("ValidationError".equals(e.awsErrorDetails().errorCode())
-                        && e.getMessage().contains("does not exist")) {
-                    return true;
-                }
-                throw e;
-            }
-        }, stackName, "stack deletion", TIMEOUT_NANOS, TestFixtures.isRealAws() ? 2_000 : 100);
+        CloudFormationStackTestHelper.deleteStack(cfn, stackId, stackName);
         stackId = null;
     }
-
-
 }

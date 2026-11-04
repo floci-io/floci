@@ -219,7 +219,7 @@ class Ec2NetworkCfnProvisionerTest {
     @Test
     void natGatewayIsCreatedPublicWithNoTags() {
         NatGateway nat = natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.10");
-        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", null, List.of())).thenReturn(nat);
+        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", null, List.of(), List.of(), null, List.of())).thenReturn(nat);
         StackResource r = resource("AWS::EC2::NatGateway", "Nat");
 
         provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID), ctx());
@@ -238,7 +238,7 @@ class Ec2NetworkCfnProvisionerTest {
     void natGatewayRecordsTheSubnetAndElasticIpItUsesUnderHiddenKeys() {
         NatGateway nat = natGateway(NAT_ID);
         nat.setSubnetId(SUBNET_ID);
-        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", null, List.of())).thenReturn(nat);
+        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", null, List.of(), List.of(), null, List.of())).thenReturn(nat);
         Address addr = new Address();
         addr.setAllocationId(ALLOC_ID);
         addr.setPublicIp(PUBLIC_IP);
@@ -484,11 +484,11 @@ class Ec2NetworkCfnProvisionerTest {
         when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of())).thenReturn(List.of(nat));
         StackResource same = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
         provisioner.provision(same, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID), ctx(NAT_ID));
-        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any(), any(), any(), any());
         assertEquals(NAT_ID, same.getPhysicalId());
 
         NatGateway replacement = natGateway("nat-replacement");
-        when(ec2.createNatGateway(REGION, "subnet-other", ALLOC_ID, "public", null, List.of())).thenReturn(replacement);
+        when(ec2.createNatGateway(REGION, "subnet-other", ALLOC_ID, "public", null, List.of(), List.of(), null, List.of())).thenReturn(replacement);
         StackResource moved = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
         provisioner.provision(moved, mapper.createObjectNode().put("SubnetId", "subnet-other").put("AllocationId", ALLOC_ID), ctx(NAT_ID));
         assertEquals("nat-replacement", moved.getPhysicalId());
@@ -622,7 +622,7 @@ class Ec2NetworkCfnProvisionerTest {
     @Test
     void aPrivateNatGatewayNeedsNoAllocationAndAPublicOneRequiresIt() {
         NatGateway nat = natGateway(NAT_ID);
-        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), isNull(), eq("private"), isNull(), any())).thenReturn(nat);
+        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), isNull(), eq("private"), isNull(), eq(List.of()), eq(List.of()), isNull(), any())).thenReturn(nat);
         StackResource r = resource("AWS::EC2::NatGateway", "Nat");
 
         provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private"), ctx());
@@ -653,35 +653,80 @@ class Ec2NetworkCfnProvisionerTest {
                 mapper.createObjectNode().put("AvailabilityMode", "Regional").put("SubnetId", SUBNET_ID)
                         .put("ConnectivityType", "private"), ctx()));
         assertEquals("InvalidParameterValue", invalid.getErrorCode());
-        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    /**
+     * The three secondary-address properties reach CreateNatGateway, each secondary Elastic IP is
+     * recorded as held, and the gateway is kept whether or not they change.
+     */
+    @Test
+    void aNatGatewayIsCreatedWithItsSecondaryAddressesAndChangedOnesUpdateItInPlace() {
+        String secondaryAlloc = "eipalloc-0fedcba9876543210";
+        NatGateway nat = natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50");
+        nat.setSubnetId(SUBNET_ID);
+        nat.setAllocationId(ALLOC_ID);
+        nat.setConnectivityType("public");
+        nat.getNatGatewayAddresses().get(0).setAllocationId(ALLOC_ID);
+        NatGatewayAddress secondary = new NatGatewayAddress();
+        secondary.setPrimary(false);
+        secondary.setNetworkInterfaceId("eni-0123456789abcdef0");
+        secondary.setPrivateIp("10.0.1.70");
+        secondary.setAllocationId(secondaryAlloc);
+        secondary.setPublicIp("203.0.113.70");
+        nat.getNatGatewayAddresses().add(secondary);
+        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", null, List.of(secondaryAlloc),
+                List.of("10.0.1.70"), null, List.of())).thenReturn(nat);
+        ObjectNode props = mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID);
+        props.putArray("SecondaryAllocationIds").add(secondaryAlloc);
+        props.putArray("SecondaryPrivateIpAddresses").add("10.0.1.70");
+        StackResource r = resource("AWS::EC2::NatGateway", "Nat");
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals(NAT_ID, r.getPhysicalId());
+        assertEquals("203.0.113.70", r.getAttributes().get(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
+
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of())).thenReturn(List.of(nat));
+        StackResource kept = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+        provisioner.provision(kept, props, ctx(NAT_ID));
+        assertEquals(NAT_ID, kept.getPhysicalId());
+
+        verify(ec2, never()).updateNatGatewaySecondaryAddresses(any(), any(), any(), any(), any());
+
+        when(ec2.updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+        StackResource changed = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+        provisioner.provision(changed, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID),
+                ctx(NAT_ID));
+        verify(ec2).updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null);
+        verify(ec2).createNatGateway(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertEquals(NAT_ID, changed.getPhysicalId(), "changed secondaries keep the gateway");
+        assertFalse(changed.getAttributes().containsKey(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
     }
 
     @Test
-    void aNatGatewayWithSecondaryAddressesIsRefusedRatherThanCreatedWithoutThem() {
-        ObjectNode withAllocations = mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID);
-        withAllocations.putArray("SecondaryAllocationIds").add("eipalloc-0fedcba9876543210");
-        ObjectNode withAddresses = mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private");
-        withAddresses.putArray("SecondaryPrivateIpAddresses").add("10.0.1.70");
-        for (ObjectNode props : List.of(withAllocations, withAddresses,
-                mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private")
-                        .put("SecondaryPrivateIpAddressCount", 2))) {
-            AwsException e = assertThrows(AwsException.class,
-                    () -> provisioner.provision(resource("AWS::EC2::NatGateway", "Nat"), props, ctx()));
-            assertEquals("UnsupportedOperation", e.getErrorCode());
-        }
-        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
+    void aPrivateNatGatewayPassesItsSecondaryAddressCount() {
+        when(ec2.createNatGateway(REGION, SUBNET_ID, null, "private", null, List.of(), List.of(), "2", List.of()))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+        StackResource r = resource("AWS::EC2::NatGateway", "Nat");
+
+        provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private")
+                .put("SecondaryPrivateIpAddressCount", 2), ctx());
+
+        assertEquals(NAT_ID, r.getPhysicalId());
     }
 
     @Test
     void aNatGatewayIsCreatedWithThePrivateIpAddressTheTemplateNames() {
-        when(ec2.createNatGateway(REGION, SUBNET_ID, null, "private", "10.0.1.50", List.of()))
+        when(ec2.createNatGateway(REGION, SUBNET_ID, null, "private", "10.0.1.50", List.of(), List.of(), null, List.of()))
                 .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
         StackResource r = resource("AWS::EC2::NatGateway", "Nat");
 
         provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private")
                 .put("PrivateIpAddress", "10.0.1.50"), ctx());
 
-        verify(ec2).createNatGateway(REGION, SUBNET_ID, null, "private", "10.0.1.50", List.of());
+        verify(ec2).createNatGateway(REGION, SUBNET_ID, null, "private", "10.0.1.50", List.of(), List.of(), null, List.of());
         assertEquals(NAT_ID, r.getPhysicalId());
     }
 
@@ -702,9 +747,9 @@ class Ec2NetworkCfnProvisionerTest {
             provisioner.provision(kept, props, ctx(NAT_ID));
             assertEquals(NAT_ID, kept.getPhysicalId());
         }
-        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any(), any(), any(), any());
 
-        when(ec2.createNatGateway(REGION, SUBNET_ID, null, "private", "10.0.1.60", List.of()))
+        when(ec2.createNatGateway(REGION, SUBNET_ID, null, "private", "10.0.1.60", List.of(), List.of(), null, List.of()))
                 .thenReturn(natGateway("nat-replacement", "eni-0fedcba9876543210", "10.0.1.60"));
         StackResource moved = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
         provisioner.provision(moved, privateNat.deepCopy().put("PrivateIpAddress", "10.0.1.60"), ctx(NAT_ID));
@@ -720,7 +765,7 @@ class Ec2NetworkCfnProvisionerTest {
         nat.setConnectivityType("public");
         when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of())).thenReturn(List.of(nat));
         NatGateway replacement = natGateway("nat-private", "eni-0fedcba9876543210", "10.0.1.11");
-        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), isNull(), eq("private"), isNull(), any())).thenReturn(replacement);
+        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), isNull(), eq("private"), isNull(), eq(List.of()), eq(List.of()), isNull(), any())).thenReturn(replacement);
         StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID,
                 Map.of("NatGatewayId", NAT_ID, "EniId", "eni-0123456789abcdef0"));
 
@@ -735,14 +780,14 @@ class Ec2NetworkCfnProvisionerTest {
     @Test
     void natGatewayTagsGoThroughItsCreateCall() {
         NatGateway nat = natGateway(NAT_ID);
-        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), eq(ALLOC_ID), eq("public"), isNull(), any())).thenReturn(nat);
+        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), eq(ALLOC_ID), eq("public"), isNull(), eq(List.of()), eq(List.of()), isNull(), any())).thenReturn(nat);
 
         provisioner.provision(resource("AWS::EC2::NatGateway", "Nat"),
                 withTags(mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID), "Name", "nat"), ctx());
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
-        verify(ec2).createNatGateway(eq(REGION), eq(SUBNET_ID), eq(ALLOC_ID), eq("public"), isNull(), tags.capture());
+        verify(ec2).createNatGateway(eq(REGION), eq(SUBNET_ID), eq(ALLOC_ID), eq("public"), isNull(), eq(List.of()), eq(List.of()), isNull(), tags.capture());
         assertEquals(List.of("Name=nat"), pairs(tags.getValue()));
         verify(ec2, never()).createTags(any(), any(), any());
     }
@@ -987,7 +1032,7 @@ class Ec2NetworkCfnProvisionerTest {
         verify(ec2, never()).createRouteTable(any(), any());
         verify(ec2, never()).associateRouteTable(any(), any(), any());
         verify(ec2, never()).createRoute(any(), any(), any(), any(), any(), any(), any(), any(), any());
-        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test

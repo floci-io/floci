@@ -582,7 +582,7 @@ class BackupIntegrationTest {
 
         given().header("Authorization", AUTH)
         .when().delete("/backup/plans/" + otherPlanId)
-        .then().statusCode(204);
+        .then().statusCode(200);
     }
 
     @Test
@@ -650,12 +650,31 @@ class BackupIntegrationTest {
     @Test
     @Order(81)
     void deleteBackupPlan() {
+        String versionId = given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/backup/plans/" + planId + "/")
+        .then()
+            .statusCode(200)
+            .extract().path("VersionId");
+
         given()
             .header("Authorization", AUTH)
         .when()
             .delete("/backup/plans/" + planId)
         .then()
-            .statusCode(204);
+            .statusCode(200)
+            .body("BackupPlanId", equalTo(planId))
+            .body("BackupPlanArn", endsWith(":backup-plan:" + planId))
+            .body("VersionId", equalTo(versionId))
+            .body("DeletionDate", notNullValue());
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/backup/plans/" + planId + "/")
+        .then()
+            .statusCode(400);
     }
 
     @Test
