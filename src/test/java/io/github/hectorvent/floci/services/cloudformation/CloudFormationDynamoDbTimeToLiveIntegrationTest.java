@@ -6,7 +6,6 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.ValidatableResponse;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -16,6 +15,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -198,40 +198,55 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
         String table = "ttl-retry-table-" + suffix;
         String replacement = "ttl-retry-new-" + suffix;
 
-        cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", "", ""));
-        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
-        String tableArn = dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
-            .statusCode(200)
-            .extract().path("Table.TableArn");
-        cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(table, "prod", "", ""));
-        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
-
-        failNextUpdateTimeToLive();
-        Mockito.doThrow(new IllegalStateException("simulated DeleteTable failure"))
-                .doCallRealMethod()
-                .when(dynamoDbService)
-                .deleteTable(anyString(), anyString());
+        Throwable testFailure = null;
         try {
-            cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(replacement, "prod", TTL_ENABLED, ""));
-            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+            cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", "", ""));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+            String tableArn = dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+                .statusCode(200)
+                .extract().path("Table.TableArn");
+            cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(table, "prod", "", ""));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+            failNextUpdateTimeToLive();
+            Mockito.doThrow(new IllegalStateException("simulated DeleteTable failure"))
+                    .doCallRealMethod()
+                    .when(dynamoDbService)
+                    .deleteTable(anyString(), anyString());
+            try {
+                cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(replacement, "prod", TTL_ENABLED, ""));
+                assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+            } finally {
+                Mockito.doCallRealMethod().when(dynamoDbService)
+                        .updateTimeToLive(anyString(), anyString(), anyBoolean(), anyString());
+                Mockito.doCallRealMethod().when(dynamoDbService).deleteTable(anyString(), anyString());
+            }
+
+            CfnStackWaits.continueUpdateRollback(stack, CFN_AUTH);
+            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status(),
+                    "a replacing table update still has no rollback, so the retry fails again");
+
+            dynamoDb("ListTagsOfResource", "{\"ResourceArn\": \"" + tableArn + "\"}")
+                .statusCode(200)
+                .body("Tags.Value", contains("prod"));
+
+            CfnStackWaits.continueUpdateRollback(stack, CFN_AUTH, "Orders");
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        } catch (RuntimeException | Error failure) {
+            testFailure = failure;
+            throw failure;
         } finally {
-            Mockito.doCallRealMethod().when(dynamoDbService)
-                    .updateTimeToLive(anyString(), anyString(), anyBoolean(), anyString());
-            Mockito.doCallRealMethod().when(dynamoDbService).deleteTable(anyString(), anyString());
+            try {
+                assertAll("retry test cleanup",
+                        () -> dynamoDb("DeleteTable", "{\"TableName\": \"" + replacement + "\"}"),
+                        () -> deleteStack(stack));
+            } catch (RuntimeException | Error cleanupFailure) {
+                if (testFailure == null) {
+                    throw cleanupFailure;
+                }
+                testFailure.addSuppressed(cleanupFailure);
+            }
         }
-
-        continueUpdateRollback(stack);
-        assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status(),
-                "a replacing table update still has no rollback, so the retry fails again");
-
-        dynamoDb("ListTagsOfResource", "{\"ResourceArn\": \"" + tableArn + "\"}")
-            .statusCode(200)
-            .body("Tags.Value", contains("prod"));
-
-        continueUpdateRollback(stack, "Orders");
-        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
-        dynamoDb("DeleteTable", "{\"TableName\": \"" + replacement + "\"}");
-        deleteStack(stack);
     }
 
     /** A create that fails after the table exists rolls back to no table, not to an orphan. */
@@ -421,18 +436,6 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
             .formParam("StackName", stack)
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200);
-    }
-
-    private void continueUpdateRollback(String stack, String... resourcesToSkip) {
-        RequestSpecification request = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "ContinueUpdateRollback")
-            .formParam("StackName", stack);
-        for (int i = 0; i < resourcesToSkip.length; i++) {
-            request.formParam("ResourcesToSkip.member." + (i + 1), resourcesToSkip[i]);
-        }
-        request.when().post("/").then().statusCode(200);
     }
 
     private void deleteStack(String stack) {
