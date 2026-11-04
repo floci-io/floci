@@ -236,6 +236,9 @@ class CloudFormationStackPolicyIntegrationTest {
             assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
             assertEquals(POLICY, storedPolicy(stackName));
             assertEquals(resourceEvents, resourceEvents(stackName));
+            cfn("ListChangeSets", stackName).then().statusCode(200)
+                    .body(not(containsString("<Status>FAILED</Status>")))
+                    .body(containsString("<ExecutionStatus>EXECUTE_COMPLETE</ExecutionStatus>"));
 
             cfn("UpdateStack", stackName, "UsePreviousTemplate", "true", "StackPolicyBody", POLICY)
                     .then().statusCode(400)

@@ -121,11 +121,9 @@ public class CloudFormationQueryHandler {
         String stackPolicy = cfnService.resolveStackPolicy(params.getFirst("StackPolicyBody"),
                 params.getFirst("StackPolicyURL"), " to be applied after stack creation");
 
-        cfnService.createChangeSet(stackName, "initial-create", "CREATE",
+        ChangeSet cs = cfnService.createChangeSet(stackName, "initial-create", "CREATE",
                 templateBody, templateUrl, parameters, capabilities, tags, region);
-        if (stackPolicy != null) {
-            cfnService.applyStackPolicy(stackName, stackPolicy, region);
-        }
+        cs.setStackPolicyBody(stackPolicy);
         awaitExecution(cfnService.executeChangeSet(stackName, "initial-create", region));
 
         if (Boolean.parseBoolean(params.getFirst("EnableTerminationProtection"))) {
@@ -170,17 +168,19 @@ public class CloudFormationQueryHandler {
         // behind, as UpdateStack does on AWS. A new stack policy alone is still an update.
         boolean newPolicy = stackPolicy != null
                 && !stackPolicy.equals(cfnService.getStackPolicy(stackName, region));
-        if (CloudFormationService.NO_CHANGES_REASON.equals(cs.getStatusReason()) && !newPolicy) {
-            cfnService.deleteChangeSet(stackName, cs.getChangeSetName(), region);
-            return xmlError("ValidationError", "No updates are to be performed.", 400);
+        if (CloudFormationService.NO_CHANGES_REASON.equals(cs.getStatusReason())) {
+            if (!newPolicy) {
+                cfnService.deleteChangeSet(stackName, cs.getChangeSetName(), region);
+                return xmlError("ValidationError", "No updates are to be performed.", 400);
+            }
+            // The template is unchanged, so the update carries the policy alone.
+            cs.setStatus("CREATE_COMPLETE");
+            cs.setStatusReason(null);
         }
+        cs.setStackPolicyBody(stackPolicy);
         awaitExecution(cfnService.executeChangeSet(stackName, cs.getChangeSetName(), region));
 
         Stack stack = cfnService.describeStacks(stackName, region).get(0);
-        // The policy takes effect only once the update succeeds; a rolled-back update keeps the old one.
-        if (stackPolicy != null && "UPDATE_COMPLETE".equals(stack.getStatus())) {
-            cfnService.applyStackPolicy(stackName, stackPolicy, region);
-        }
         String xml = new XmlBuilder()
                 .start("UpdateStackResponse", CF_NS)
                 .start("UpdateStackResult")

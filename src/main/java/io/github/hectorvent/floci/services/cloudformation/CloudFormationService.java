@@ -249,25 +249,32 @@ public class CloudFormationService implements ResourceProvider {
         }
         rejectBothPolicySources(body, url);
         Stack stack = stackForPolicy(stackName, region);
+        refuseStackPolicyIn(stack);
+        String policy = resolveStackPolicy(body, url, "");
+        // Reading a StackPolicyURL takes time, so the state is checked again under the lock an
+        // update or delete claims.
+        stacks.compute(stackKey(ownerAccount(stack), stack.getStackName(), stack.getRegion()), (key, live) -> {
+            refuseStackPolicyIn(stack);
+            if (live != stack) {
+                throw new AwsException("ValidationError", CONTINUE_STACK_MISSING.formatted(stackName), 400);
+            }
+            stack.setStackPolicyBody(policy);
+            return live;
+        });
+        persistStack(stack);
+    }
+
+    private static void refuseStackPolicyIn(Stack stack) {
         String status = stack.getStatus();
         if (refusesUpdate(status) || "DELETE_COMPLETE".equals(status)) {
             throw new AwsException("ValidationError",
                     "SetStackPolicy cannot be called when stack is in the " + status + " state", 400);
         }
-        stack.setStackPolicyBody(resolveStackPolicy(body, url, ""));
-        persistStack(stack);
     }
 
     /** The stack's policy as it was submitted, or null when it has none. A deleted stack keeps it. */
     public String getStackPolicy(String stackName, String region) {
         return stackForPolicy(stackName, region).getStackPolicyBody();
-    }
-
-    /** Stores the policy CreateStack or UpdateStack carried; the caller already resolved and checked it. */
-    public void applyStackPolicy(String stackName, String policy, String region) {
-        Stack stack = getStackOrThrow(stackName, region);
-        stack.setStackPolicyBody(policy);
-        persistStack(stack);
     }
 
     /**
@@ -1396,7 +1403,8 @@ public class CloudFormationService implements ResourceProvider {
 
         return submitOperation(() -> RequestScopes.runAs(accountId, region, () -> {
             try {
-                executeTemplate(stack, templateBody, params, cs.getTags(), claimed.isCreate(), region, accountId);
+                executeTemplate(stack, templateBody, params, cs.getTags(), claimed.isCreate(), region, accountId,
+                        cs.getStackPolicyBody());
                 String status = stack.getStatus();
                 cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
                     ? "EXECUTE_FAILED" : "EXECUTE_COMPLETE");
@@ -2150,7 +2158,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private void executeTemplate(Stack stack, String templateBody, Map<String, String> params,
                                  Map<String, String> tags,
-                                 boolean isCreate, String region, String accountId) {
+                                 boolean isCreate, String region, String accountId, String stackPolicy) {
         Map<String, String> previousTags = stack.tagsSnapshot();
         Map<String, String> operationTags = tags == null ? previousTags : new LinkedHashMap<>(tags);
         boolean stackTagsChanged = !operationTags.equals(previousTags);
@@ -2158,6 +2166,9 @@ public class CloudFormationService implements ResourceProvider {
         StackUpdateSnapshot previousState = snapshotForUpdate(stack);
         if (tags != null) {
             stack.replaceTags(tags);
+        }
+        if (isCreate && stackPolicy != null) {
+            stack.setStackPolicyBody(stackPolicy);
         }
         boolean updateCommitted = false;
         Set<String> attemptedResourceIds = new LinkedHashSet<>();
@@ -2509,6 +2520,9 @@ public class CloudFormationService implements ResourceProvider {
 
             if (!isCreate) {
                 updateCommitted = true;
+                if (stackPolicy != null) {
+                    stack.setStackPolicyBody(stackPolicy);
+                }
                 stack.replaceTags(operationTags);
                 stack.getResources().values().forEach(resource -> resource.getAttributes()
                         .remove(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR));
@@ -4551,7 +4565,7 @@ public class CloudFormationService implements ResourceProvider {
                     savedChildDeployment(childStack, region, accountId).toString());
         }
 
-        executeTemplate(childStack, childTemplate, childParams, childTags, childCreate, region, accountId);
+        executeTemplate(childStack, childTemplate, childParams, childTags, childCreate, region, accountId, null);
 
         resource.setPhysicalId(childStack.getStackId());
         resource.getAttributes().put("Arn", childStack.getStackId());
