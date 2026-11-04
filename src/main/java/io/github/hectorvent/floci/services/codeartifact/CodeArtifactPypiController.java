@@ -109,15 +109,19 @@ public class CodeArtifactPypiController {
                                   @PathParam("repository") String repository,
                                   @PathParam("package") String packageName) {
         RepositoryHandle handle = requireRepository(headers, domain, repository);
-        Response response = proxyGet(handle.baseUrl(), SIMPLE_PATH + SidecarUriUtils.encodeSegment(packageName)
-                + "/");
-        if (response.getStatus() != 200) {
-            return response;
+        try {
+            Response response = proxyGet(handle.baseUrl(), SIMPLE_PATH + SidecarUriUtils.encodeSegment(packageName)
+                    + "/");
+            if (response.getStatus() != 200) {
+                return response;
+            }
+            String html = new String((byte[]) response.getEntity(), StandardCharsets.UTF_8);
+            String rewritten = html.replace("href=\"/packages/", "href=\"" + handle.pathPrefix() + "/packages/");
+            return Response.status(200).entity(rewritten.getBytes(StandardCharsets.UTF_8)).type(MediaType.TEXT_HTML)
+                    .build();
+        } finally {
+            pypiserver.endUse(handle.repoId());
         }
-        String html = new String((byte[]) response.getEntity(), StandardCharsets.UTF_8);
-        String rewritten = html.replace("href=\"/packages/", "href=\"" + handle.pathPrefix() + "/packages/");
-        return Response.status(200).entity(rewritten.getBytes(StandardCharsets.UTF_8)).type(MediaType.TEXT_HTML)
-                .build();
     }
 
     /**
@@ -141,16 +145,20 @@ public class CodeArtifactPypiController {
                                   @PathParam("repository") String repository,
                                   @PathParam("filename") String filename) {
         RepositoryHandle handle = requireRepository(headers, domain, repository);
-        ArchivedOrDisposedMatch match = archivedOrDisposedVersionFromFilename(handle, domain, repository, filename);
-        if (match != null) {
-            try {
-                service.requireContainerBackedVersionDownloadable(handle.owner(), handle.region(), domain,
-                        repository, "pypi", null, match.packageName(), match.version(), handle.repoId());
-            } catch (AwsException e) {
-                return Response.status(404).build();
+        try {
+            ArchivedOrDisposedMatch match = archivedOrDisposedVersionFromFilename(handle, domain, repository, filename);
+            if (match != null) {
+                try {
+                    service.requireContainerBackedVersionDownloadable(handle.owner(), handle.region(), domain,
+                            repository, "pypi", null, match.packageName(), match.version(), handle.repoId());
+                } catch (AwsException e) {
+                    return Response.status(404).build();
+                }
             }
+            return proxyGet(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename));
+        } finally {
+            pypiserver.endUse(handle.repoId());
         }
-        return proxyGet(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename));
     }
 
     /**
@@ -180,7 +188,15 @@ public class CodeArtifactPypiController {
             return Response.status(413).build();
         }
         RepositoryHandle handle = requireRepository(headers, domain, repository);
+        try {
+            return uploadWithLease(headers, domain, repository, content, handle);
+        } finally {
+            pypiserver.endUse(handle.repoId());
+        }
+    }
 
+    private Response uploadWithLease(HttpHeaders headers, String domain, String repository, byte[] content,
+            RepositoryHandle handle) {
         String contentType = headers.getHeaderString(HttpHeaders.CONTENT_TYPE);
         String boundary = MultipartFormParser.extractBoundary(contentType).orElse(null);
         if (boundary == null) {
@@ -287,30 +303,9 @@ public class CodeArtifactPypiController {
             Response response = forwardUpload(handle.baseUrl(), contentType, content);
             boolean uploadSucceeded = response.getStatus() == 200 || response.getStatus() == 201;
             if (uploadSucceeded) {
-                service.recordContainerBackedAssetBytes(handle.region(), domain, handle.owner(), repository,
-                        "pypi", null, packageName, file.get().content().length, fenceSnapshot);
-                // Found by Qodo review: a real twine upload that republishes a coordinate an
-                // earlier updatePackageVersionsStatus/disposePackageVersions call left Archived or
-                // Disposed would otherwise still have its fresh content blocked by that stale
-                // override. A missing/blank version is the same case the readme capture below
-                // already skips: no coordinate to clear an override for. Cleared only if still
-                // unchanged since the guard above ran (Greptile review): a status change that
-                // landed while forwardUpload was in flight must not be erased by this.
-                if (version != null && !version.isBlank()) {
-                    service.forgetContainerBackedStatusOverrideIfUnchanged(handle.region(), domain, handle.owner(),
-                            repository, "pypi", null, packageName, version, beforeRevision);
-                }
-            }
-            // Only for a real new publish, never the byte-identical-retry short-circuit above
-            // (nothing new was written there either): the "description" field is the real PyPI
-            // legacy upload API's form field for a distribution's long description, the only place
-            // this text is ever available (see CodeArtifactService#getPackageVersionReadme's own
-            // javadoc for why pypiserver itself can't answer for it later). A missing/blank version
-            // field means twine never named a version for this upload, so there is no package
-            // version coordinate to record the readme against.
-            if (uploadSucceeded && version != null && !version.isBlank()) {
-                service.recordPublishedPackageVersionReadme(handle.region(), domain, handle.owner(), repository,
-                        "pypi", null, packageName, version, form.fields().get("description"), readmeFenceSnapshot);
+                service.completeContainerBackedPublishIfCurrentRepository(handle.region(), domain, handle.owner(),
+                        repository, handle.repoId(), "pypi", packageName, version, file.get().content().length,
+                        fenceSnapshot, beforeRevision, form.fields().get("description"), readmeFenceSnapshot);
             }
             return response;
         }
@@ -474,12 +469,18 @@ public class CodeArtifactPypiController {
                 .orElseThrow(() -> new NotAuthorizedException("Basic realm=\"floci-codeartifact\""));
         String repoId;
         try {
-            repoId = service.ensureFormatContainerId("pypi", scope.region(), domain, scope.owner(), repository);
+            repoId = service.resolveContainerIdAndBeginUse("pypi", scope.region(), domain, scope.owner(),
+                    repository, pypiserver);
         } catch (AwsException e) {
             throw new NotFoundException();
         }
-        String baseUrl = pypiserver.ensureReady(repoId, null);
-        return new RepositoryHandle(repoId, baseUrl, "/codeartifact/pypi/" + domain + "/" + repository,
-                scope.region(), scope.owner());
+        try {
+            String baseUrl = pypiserver.ensureReady(repoId, null);
+            return new RepositoryHandle(repoId, baseUrl, "/codeartifact/pypi/" + domain + "/" + repository,
+                    scope.region(), scope.owner());
+        } catch (RuntimeException e) {
+            pypiserver.endUse(repoId);
+            throw e;
+        }
     }
 }

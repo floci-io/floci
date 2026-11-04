@@ -312,8 +312,9 @@ public class CodeArtifactNuGetController {
                     || response.getStatus() == 202;
         }
         if (pushSucceeded) {
-            service.completeNugetPushIfCurrentRepository(handle.region(), domain, handle.owner(), repository,
-                    handle.repoId(), packageName, version, nupkgBytes.length, fenceSnapshot, beforeRevision);
+            service.completeContainerBackedPublishIfCurrentRepository(handle.region(), domain, handle.owner(),
+                    repository, handle.repoId(), "nuget", packageName, version, nupkgBytes.length, fenceSnapshot,
+                    beforeRevision, null, 0L);
         }
         return response;
     }
