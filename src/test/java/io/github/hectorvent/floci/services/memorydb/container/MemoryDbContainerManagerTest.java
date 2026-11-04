@@ -8,15 +8,15 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
-import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -35,12 +35,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class MemoryDbContainerManagerTest {
-
-    private static final Logger LOG = Logger.getLogger(MemoryDbContainerManagerTest.class);
 
     @Test
     void failedStartPreservesTheCleanupAwareLifecycleFailure() {
@@ -81,17 +80,7 @@ class MemoryDbContainerManagerTest {
         CountDownLatch finish = new CountDownLatch(1);
         CountDownLatch shutdownStarted = new CountDownLatch(1);
         try (ServerSocket backend = new ServerSocket(0)) {
-            Thread responder = new Thread(() -> {
-                try (Socket socket = backend.accept()) {
-                    socket.getInputStream().read(new byte[64]);
-                    socket.getOutputStream().write("+PONG\r\n".getBytes(StandardCharsets.UTF_8));
-                    socket.getOutputStream().flush();
-                } catch (IOException e) {
-                    LOG.debugv(e, "Backend probe socket closed during teardown");
-                }
-            });
-            responder.setDaemon(true);
-            responder.start();
+            CompletableFuture<Void> responder = startPongResponder(backend, 1);
             ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
             when(lifecycle.createAndStartEphemeral(any())).thenAnswer(inv -> {
                 entered.countDown();
@@ -115,7 +104,7 @@ class MemoryDbContainerManagerTest {
                 finish.countDown();
                 assertThrows(ExecutionException.class, () -> starting.get(5, TimeUnit.SECONDS));
                 shutdown.get(5, TimeUnit.SECONDS);
-                responder.join(5000);
+                responder.get(5, TimeUnit.SECONDS);
             }
             verify(lifecycle).stopAndRemoveStrict("late-cid", null, 5, true);
         }
@@ -172,23 +161,11 @@ class MemoryDbContainerManagerTest {
     }
 
     @Test
-    void tryStartReturnsTheHandleOnceADaemonIsReachable() throws IOException, InterruptedException {
+    void tryStartReturnsTheHandleOnceADaemonIsReachable() throws Exception {
         // Real loopback socket standing in for the backend container's Redis port, so the
         // manager's PING/PONG readiness probe succeeds without a real container.
         try (ServerSocket serverSocket = new ServerSocket(0)) {
-            Thread responder = new Thread(() -> {
-                try (Socket socket = serverSocket.accept()) {
-                    socket.getInputStream().read(new byte[64]);
-                    OutputStream out = socket.getOutputStream();
-                    out.write("+PONG\r\n".getBytes(StandardCharsets.UTF_8));
-                    out.flush();
-                } catch (IOException e) {
-                    // Test teardown races the socket close; nothing left to assert on.
-                    LOG.debugv(e, "Acceptor socket closed during test teardown");
-                }
-            });
-            responder.setDaemon(true);
-            responder.start();
+            CompletableFuture<Void> responder = startPongResponder(serverSocket, 1);
 
             ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
             when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
@@ -207,25 +184,14 @@ class MemoryDbContainerManagerTest {
             manager.stopAll();
             manager.stopAll();
             verify(lifecycleManager, Mockito.times(2)).stopAndRemoveStrict("container-id", null, 5, true);
-            responder.join(5000);
+            responder.get(5, TimeUnit.SECONDS);
         }
     }
 
     @Test
-    void startLabelsContainerWithResourceIdentity() throws IOException {
+    void startLabelsContainerWithResourceIdentity() throws Exception {
         try (ServerSocket serverSocket = new ServerSocket(0)) {
-            Thread responder = new Thread(() -> {
-                try (Socket socket = serverSocket.accept()) {
-                    socket.getInputStream().read(new byte[64]);
-                    OutputStream out = socket.getOutputStream();
-                    out.write("+PONG\r\n".getBytes(StandardCharsets.UTF_8));
-                    out.flush();
-                } catch (IOException e) {
-                    LOG.debugv(e, "Acceptor socket closed during test teardown");
-                }
-            });
-            responder.setDaemon(true);
-            responder.start();
+            CompletableFuture<Void> responder = startPongResponder(serverSocket, 1);
 
             ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
             when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
@@ -256,7 +222,108 @@ class MemoryDbContainerManagerTest {
                     "io.floci.resource-id", "cluster1",
                     "io.floci.account", "000000000000",
                     "io.floci.region", "us-east-1"));
+            responder.get(5, TimeUnit.SECONDS);
         }
+    }
+
+    @Test
+    void logicalDefaultNamesKeepLogsAndContainersWhileRuntimeKeysStayScoped() throws Exception {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        ContainerBuilder containers = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containers.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(new ContainerSpec("valkey/valkey:8"));
+        ContainerLogStreamer logs = mock(ContainerLogStreamer.class);
+        when(logs.generateLogStreamName(anyString())).thenReturn("engine");
+        MemoryDbContainerManager manager = newManager(containers, lifecycle, logs);
+        String defaultIdentity = "000000000000-us-east-1-cache";
+        String collisionIdentity = "000000000000-us-east-1-111111111111-eu-west-1-same";
+        String foreignIdentity = "111111111111-eu-west-1-same";
+        try (ServerSocket backend = new ServerSocket(0)) {
+            CompletableFuture<Void> responder = startPongResponder(backend, 3);
+            when(lifecycle.createAndStartEphemeral(any())).thenReturn(
+                    new ContainerLifecycleManager.ContainerInfo("default-cid", Map.of(6379,
+                            new ContainerLifecycleManager.EndpointInfo("127.0.0.1", backend.getLocalPort()))),
+                    new ContainerLifecycleManager.ContainerInfo("collision-cid", Map.of(6379,
+                            new ContainerLifecycleManager.EndpointInfo("127.0.0.1", backend.getLocalPort()))),
+                    new ContainerLifecycleManager.ContainerInfo("foreign-cid", Map.of(6379,
+                            new ContainerLifecycleManager.EndpointInfo("127.0.0.1", backend.getLocalPort()))));
+            try {
+                MemoryDbContainerHandle first = manager.tryStart(defaultIdentity, "valkey/valkey:8", null,
+                        "000000000000", "us-east-1", "cache");
+                MemoryDbContainerHandle collision = manager.tryStart(collisionIdentity, "valkey/valkey:8", null,
+                        "000000000000", "us-east-1", "111111111111-eu-west-1-same");
+                MemoryDbContainerHandle foreign = manager.tryStart(foreignIdentity, "valkey/valkey:8", null,
+                        "111111111111", "eu-west-1", "same");
+                assertEquals(defaultIdentity, first.getClusterName());
+                assertEquals(collisionIdentity, collision.getClusterName());
+                assertEquals(foreignIdentity, foreign.getClusterName());
+                ArgumentCaptor<String> names = ArgumentCaptor.forClass(String.class);
+                verify(builder, times(3)).withName(names.capture());
+                assertEquals(List.of("floci-aws-memorydb-cache",
+                        "floci-aws-memorydb-111111111111-eu-west-1-same",
+                        "floci-aws-memorydb-111111111111_eu-west-1_same"), names.getAllValues());
+                verify(logs).attach("default-cid", "/aws/memorydb/cluster/cache/engine-log", "engine",
+                        "us-east-1", "memorydb:" + defaultIdentity);
+                verify(logs).attach("collision-cid",
+                        "/aws/memorydb/cluster/111111111111-eu-west-1-same/engine-log", "engine",
+                        "us-east-1", "memorydb:" + collisionIdentity);
+                verify(logs).attach("foreign-cid",
+                        "/aws/memorydb/cluster/111111111111-eu-west-1-same/engine-log", "engine",
+                        "eu-west-1", "memorydb:" + foreignIdentity);
+                responder.get(5, TimeUnit.SECONDS);
+            } finally {
+                backend.close();
+                manager.stopAll();
+            }
+        }
+        verify(lifecycle).stopAndRemoveStrict("default-cid", null, 5, true);
+        verify(lifecycle).stopAndRemoveStrict("collision-cid", null, 5, true);
+        verify(lifecycle).stopAndRemoveStrict("foreign-cid", null, 5, true);
+    }
+
+    @Test
+    void failedCreationRollbackUsesTheSameDefaultAndForeignContainerNames() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        ContainerBuilder containers = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
+        when(containers.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(new ContainerSpec("valkey/valkey:8"));
+        RuntimeException failure = new IllegalStateException("creation failed before registration");
+        when(lifecycle.createAndStartEphemeral(any())).thenThrow(failure);
+        MemoryDbContainerManager manager = newManager(containers, lifecycle, mock(ContainerLogStreamer.class));
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> manager.start("000000000000-us-east-1-cache", "valkey/valkey:8", null,
+                        "000000000000", "us-east-1", "cache")));
+        manager.stopByClusterName("000000000000-us-east-1-cache", "000000000000", "us-east-1", "cache");
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> manager.start("111111111111-eu-west-1-cache", "valkey/valkey:8", null,
+                        "111111111111", "eu-west-1", "cache")));
+        manager.stopByClusterName("111111111111-eu-west-1-cache", "111111111111", "eu-west-1", "cache");
+        verify(lifecycle, times(2)).removeIfExistsStrict("floci-aws-memorydb-cache", true);
+        verify(lifecycle, times(2)).removeIfExistsStrict("floci-aws-memorydb-111111111111_eu-west-1_cache", true);
+    }
+
+    private static CompletableFuture<Void> startPongResponder(ServerSocket backend, int connections) {
+        CompletableFuture<Void> completed = new CompletableFuture<>();
+        Thread responder = new Thread(() -> {
+            try {
+                for (int i = 0; i < connections; i++) {
+                    try (Socket socket = backend.accept()) {
+                        socket.setSoTimeout(5000);
+                        socket.getInputStream().read(new byte[64]);
+                        socket.getOutputStream().write("+PONG\r\n".getBytes(StandardCharsets.UTF_8));
+                        socket.getOutputStream().flush();
+                    }
+                }
+                completed.complete(null);
+            } catch (IOException e) {
+                completed.completeExceptionally(e);
+            }
+        });
+        responder.setDaemon(true);
+        responder.start();
+        return completed;
     }
 
     private MemoryDbContainerManager newManager(ContainerLifecycleManager lifecycleManager) {
@@ -268,6 +335,12 @@ class MemoryDbContainerManagerTest {
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
 
+        return newManager(containerBuilder, lifecycleManager, logStreamer);
+    }
+
+    private MemoryDbContainerManager newManager(ContainerBuilder containerBuilder,
+                                                ContainerLifecycleManager lifecycleManager,
+                                                ContainerLogStreamer logStreamer) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.MemoryDbServiceConfig memorydb = mock(EmulatorConfig.MemoryDbServiceConfig.class);
