@@ -54,7 +54,6 @@ import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -164,12 +163,8 @@ public class Ec2ContainerManager {
     /** Instances whose service-network lookup failed and is retried on the next address read. */
     private final Set<String> serviceNetworkRetries = ConcurrentHashMap.newKeySet();
     private final Set<String> serviceNetworkRetriesRunning = ConcurrentHashMap.newKeySet();
-    /**
-     * Runs the retries on their own virtual threads, never on {@link #executor}: that pool blocks a
-     * full queue's submitters, and a launch worker waiting on it for a retry could stall them all.
-     */
-    private Executor serviceNetworkRetryExecutor =
-            Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("ec2-service-network-retry-", 0).factory());
+    /** Runs service-network lookup retries; see {@link #createServiceNetworkRetryExecutor}. */
+    private final ExecutorService serviceNetworkRetryExecutor;
     private final Duration userDataExecutionTimeout;
     private final Set<ResultCallback<Frame>> activeUserDataCallbacks = ConcurrentHashMap.newKeySet();
 
@@ -309,7 +304,8 @@ public class Ec2ContainerManager {
         this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
                 portAllocator, config, metadataServer, portForwardManager, regionResolver,
                 containerNetworkReachability, vpcNetworkManager, reachableEndpoint, instanceTypeCatalog,
-                createLaunchExecutor(), Duration.ofMinutes(USER_DATA_EXECUTION_TIMEOUT_MINUTES));
+                createLaunchExecutor(), createServiceNetworkRetryExecutor(),
+                Duration.ofMinutes(USER_DATA_EXECUTION_TIMEOUT_MINUTES));
     }
 
     public Ec2ContainerManager(ContainerBuilder containerBuilder,
@@ -347,6 +343,7 @@ public class Ec2ContainerManager {
                         ContainerReachableEndpoint reachableEndpoint,
                         Ec2InstanceTypeCatalog instanceTypeCatalog,
                         ExecutorService executor,
+                        ExecutorService serviceNetworkRetryExecutor,
                         Duration userDataExecutionTimeout) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -364,6 +361,7 @@ public class Ec2ContainerManager {
         this.reachableEndpoint = reachableEndpoint;
         this.instanceTypeCatalog = instanceTypeCatalog != null ? instanceTypeCatalog : new Ec2InstanceTypeCatalog();
         this.executor = executor;
+        this.serviceNetworkRetryExecutor = serviceNetworkRetryExecutor;
         this.userDataExecutionTimeout = userDataExecutionTimeout;
     }
 
@@ -386,7 +384,15 @@ public class Ec2ContainerManager {
         this(containerBuilder, lifecycleManager, logStreamer, containerDetector, dockerHostResolver, dockerClient,
                 portAllocator, config, metadataServer, portForwardManager, regionResolver,
                 containerNetworkReachability, vpcNetworkManager, reachableEndpoint, new Ec2InstanceTypeCatalog(),
-                executor, userDataExecutionTimeout);
+                executor, createServiceNetworkRetryExecutor(), userDataExecutionTimeout);
+    }
+
+    /**
+     * Its own virtual threads, never {@link #createLaunchExecutor}'s: that pool blocks a full queue's
+     * submitters, and a launch worker waiting on it for a retry could stall them all.
+     */
+    private static ExecutorService createServiceNetworkRetryExecutor() {
+        return Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("ec2-service-network-retry-", 0).factory());
     }
 
     private static ExecutorService createLaunchExecutor() {
@@ -404,17 +410,11 @@ public class Ec2ContainerManager {
                 BLOCKING_BACKPRESSURE);
     }
 
-    void useServiceNetworkRetryExecutorForTest(Executor retryExecutor) {
-        this.serviceNetworkRetryExecutor = retryExecutor;
-    }
-
     @PreDestroy
     void stop() {
         closeActiveUserDataCallbacks();
         executor.shutdownNow();
-        if (serviceNetworkRetryExecutor instanceof ExecutorService retries) {
-            retries.shutdownNow();
-        }
+        serviceNetworkRetryExecutor.shutdownNow();
         closeActiveUserDataCallbacks();
     }
 
@@ -1368,15 +1368,35 @@ public class Ec2ContainerManager {
      * addresses are (re)learned: launch, start and restore.
      */
     void refreshServiceNetworkIp(Instance instance) {
+        String instanceId = instance.getInstanceId();
+        // The container is the lookup's generation: a result is published only while the instance
+        // still runs that container, so a lookup that outlives a replacement or a teardown cannot
+        // overwrite what came after it. Docker is asked outside the instance lock.
+        String containerId;
+        synchronized (instance) {
+            containerId = instance.getDockerContainerId();
+        }
+        String address;
         try {
-            instance.setServiceNetworkIp(resolveServiceNetworkIp(instance));
-            serviceNetworkRetries.remove(instance.getInstanceId());
+            address = resolveServiceNetworkIp(instanceId, containerId);
         } catch (RuntimeException e) {
-            // A Docker hiccup is not an answer: keep what was recorded and let the next address
-            // read retry the lookup in the background.
+            synchronized (instance) {
+                if (containerId != null && containerId.equals(instance.getDockerContainerId())) {
+                    // A Docker hiccup is not an answer: keep what was recorded and let the next
+                    // address read retry the lookup in the background.
+                    serviceNetworkRetries.add(instanceId);
+                }
+            }
             LOG.debugv("Could not read the service-network address of {0}, will retry: {1}",
-                    instance.getInstanceId(), e.getMessage());
-            serviceNetworkRetries.add(instance.getInstanceId());
+                    instanceId, e.getMessage());
+            return;
+        }
+        synchronized (instance) {
+            if (!Objects.equals(containerId, instance.getDockerContainerId())) {
+                return;
+            }
+            instance.setServiceNetworkIp(address);
+            serviceNetworkRetries.remove(instanceId);
         }
     }
 
@@ -1405,16 +1425,16 @@ public class Ec2ContainerManager {
         }
     }
 
-    private String resolveServiceNetworkIp(Instance instance) {
+    private String resolveServiceNetworkIp(String instanceId, String containerId) {
         if (!config.services().ec2().publicIpFromServiceNetwork() || !containerDetector.isRunningInContainer()
-                || instance.getDockerContainerId() == null) {
+                || containerId == null) {
             return null;
         }
         Optional<String> network = containerBuilder.resolveDockerNetwork(Optional.empty());
         if (network.isEmpty()) {
             return null;
         }
-        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(instance.getDockerContainerId()).exec();
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
         // A security-group protected guest joins its firewall helper's network namespace and has
         // no attachment of its own: the helper's address on the network is the guest's.
         String helperId = namespaceOwnerId(inspect);

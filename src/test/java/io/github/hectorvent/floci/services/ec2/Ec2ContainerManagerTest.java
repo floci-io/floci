@@ -1134,9 +1134,10 @@ class Ec2ContainerManagerTest {
         when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec())
                 .thenThrow(new IllegalStateException("daemon busy")).thenReturn(guest);
         ExecutorService launchExecutor = mock(ExecutorService.class);
-        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker, launchExecutor);
+        ExecutorService retryExecutor = mock(ExecutorService.class);
         List<Runnable> tasks = new ArrayList<>();
-        manager.useServiceNetworkRetryExecutorForTest(tasks::add);
+        doAnswer(invocation -> tasks.add(invocation.getArgument(0))).when(retryExecutor).execute(any(Runnable.class));
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker, launchExecutor, retryExecutor);
         Instance instance = serviceNetworkInstance();
         manager.refreshServiceNetworkIp(instance);
         clearInvocations(docker);
@@ -1153,6 +1154,69 @@ class Ec2ContainerManagerTest {
         // Never on the launch pool, whose blocking backpressure could stall the workers behind it.
         verify(launchExecutor, never()).execute(any(Runnable.class));
         verify(launchExecutor, never()).submit(any(Runnable.class));
+    }
+
+    @Test
+    void aLookupThatOutlivesAContainerReplacementDoesNotOverwriteTheNewAddress() throws Exception {
+        CountDownLatch staleInspectStarted = new CountDownLatch(1);
+        CountDownLatch releaseStaleInspect = new CountDownLatch(1);
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        InspectContainerResponse oldGuest = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.9")));
+        InspectContainerResponse newGuest = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.21")));
+        when(docker.inspectContainerCmd("old-container").exec()).thenAnswer(invocation -> {
+            staleInspectStarted.countDown();
+            releaseStaleInspect.await(5, TimeUnit.SECONDS);
+            return oldGuest;
+        });
+        when(docker.inspectContainerCmd("new-container").exec()).thenReturn(newGuest);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+        instance.setDockerContainerId("old-container");
+
+        Thread staleLookup = Thread.ofVirtual().start(() -> manager.refreshServiceNetworkIp(instance));
+        assertTrue(staleInspectStarted.await(5, TimeUnit.SECONDS));
+        synchronized (instance) {
+            instance.setDockerContainerId("new-container");
+        }
+        manager.refreshServiceNetworkIp(instance);
+        releaseStaleInspect.countDown();
+        staleLookup.join(Duration.ofSeconds(5));
+
+        assertFalse(staleLookup.isAlive());
+        assertEquals("172.20.0.21", instance.getServiceNetworkIp());
+        assertEquals("172.20.0.21", manager.reachablePublicAddress(instance));
+    }
+
+    @Test
+    void aLookupInFlightDuringTeardownCannotRestoreTheAddress() throws Exception {
+        CountDownLatch staleInspectStarted = new CountDownLatch(1);
+        CountDownLatch releaseStaleInspect = new CountDownLatch(1);
+        AtomicBoolean firstInspect = new AtomicBoolean(true);
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        InspectContainerResponse guest = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.9")));
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec()).thenAnswer(invocation -> {
+            if (firstInspect.getAndSet(false)) {
+                staleInspectStarted.countDown();
+                releaseStaleInspect.await(5, TimeUnit.SECONDS);
+            }
+            return guest;
+        });
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+        instance.setState(InstanceState.pending());
+
+        Thread staleLookup = Thread.ofVirtual().start(() -> manager.refreshServiceNetworkIp(instance));
+        assertTrue(staleInspectStarted.await(5, TimeUnit.SECONDS));
+        assertTrue(manager.cancelLaunch(instance));
+        releaseStaleInspect.countDown();
+        staleLookup.join(Duration.ofSeconds(5));
+
+        assertFalse(staleLookup.isAlive());
+        assertNull(instance.getDockerContainerId());
+        assertNull(instance.getServiceNetworkIp());
     }
 
     @Test
@@ -1249,12 +1313,14 @@ class Ec2ContainerManagerTest {
 
     private static Ec2ContainerManager managerOnServiceNetwork(boolean enabled, boolean inContainer,
                                                                DockerClient docker) {
-        return managerOnServiceNetwork(enabled, inContainer, docker, mock(ExecutorService.class));
+        return managerOnServiceNetwork(enabled, inContainer, docker, mock(ExecutorService.class),
+                mock(ExecutorService.class));
     }
 
     /** A manager on {@code docker} whose bridge addresses are unroutable from the host. */
     private static Ec2ContainerManager managerOnServiceNetwork(boolean enabled, boolean inContainer,
-                                                               DockerClient docker, ExecutorService executor) {
+                                                               DockerClient docker, ExecutorService executor,
+                                                               ExecutorService retryExecutor) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ec2().publicIpFromServiceNetwork()).thenReturn(enabled);
         ContainerDetector detector = mock(ContainerDetector.class);
@@ -1277,7 +1343,9 @@ class Ec2ContainerManagerTest {
                 mock(ContainerNetworkReachability.class),
                 mock(VpcNetworkManager.class),
                 mock(ContainerReachableEndpoint.class),
+                new Ec2InstanceTypeCatalog(),
                 executor,
+                retryExecutor,
                 Duration.ofSeconds(5));
     }
 
