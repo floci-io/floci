@@ -27,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import static io.github.hectorvent.floci.core.common.SshPublicKeysTest.withTrailing;
@@ -52,6 +53,21 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2QueryHandlerTest {
+
+    @Test
+    void describeInstanceTypesOmitsUnknownProcessorManufacturer() {
+        Map<String, Object> type = new Ec2InstanceTypeCatalog().find("t3a.nano").orElseThrow().toResponseMap();
+        type.remove("processorManufacturer");
+        Ec2Service service = mock(Ec2Service.class);
+        when(service.describeInstanceTypes(anyList())).thenReturn(List.of(type));
+
+        Response response = handler(service).handle("DescribeInstanceTypes", new MultivaluedHashMap<>(), "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<supportedArchitectures><item>x86_64</item></supportedArchitectures>"));
+        assertFalse(xml.contains("<manufacturer>"));
+    }
 
     @ParameterizedTest
     @CsvSource({

@@ -30,6 +30,35 @@ EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addre
 interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
 `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
 
+### Processor manufacturer metadata
+
+`DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
+instance types. The values were captured from AWS in `us-east-1` on 2026-11-04:
+`AWS` for Graviton, `Intel` for the catalog's T2, T3, M5 and R5 types, and `AMD`
+for `t3a.nano`. The catalog stores these values explicitly; architecture alone
+cannot distinguish Intel from AMD. See the AWS
+[ProcessorInfo API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ProcessorInfo.html).
+
+### Graviton instance-type metadata
+
+The full catalog includes the virtual sizes of `c6g`, `c6gn`, `c7g`, `c8g`,
+`m6g`, `m7g` and `m8g`: medium, large, xlarge, 2xlarge, 4xlarge, 8xlarge,
+12xlarge and 16xlarge, plus 24xlarge and 48xlarge for C8g/M8g.
+`DescribeInstanceTypes` and the emulator's `DescribeInstanceTypeOfferings` use
+these same entries. Catalog consumers also use their ARM64 architecture and
+CPU/memory capacity for launch validation and container resource limits.
+
+The values were captured from AWS `DescribeInstanceTypes` in `us-east-1` on
+2026-11-04, including each size's network-card/interface limits and each family's
+generation and encryption-in-transit flags. The capture reports C6gn as previous
+generation. All these sizes are EBS-only. See the AWS
+[compute-optimized specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/co.html)
+and [general-purpose specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/gp.html).
+
+This is a bounded metadata catalog, not a live regional-availability feed.
+Offerings retain Floci's synthetic region/availability-zone behavior; a catalog
+entry does not establish that AWS offers the type in every region or zone.
+
 ## Standard On-Demand admission
 
 Quota admission is opt-in. Set `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS=true` to
@@ -914,9 +943,19 @@ any other `PrivateIpAddress` fails with `InvalidParameterValue` and changes no a
 exception is container mode without AWS-faithful private addresses: the instance reports its Docker
 bridge address there, so any value means its primary address.
 
+`AssociateAddress` accepts `NetworkInterfaceId` for a detached interface or an instance's
+primary interface. A detached interface records the association on its selected private
+address; omitting `PrivateIpAddress` selects the primary address. Supplying both
+`InstanceId` and `NetworkInterfaceId`, a missing interface, or a private address the
+interface does not own fails before changing an existing association. Association to a
+nonprimary attached interface or a service-managed interface, including NAT gateway
+and VPC endpoint interfaces, is not implemented and returns `Unsupported`.
+
 Deleting an interface, including deletion on instance termination, disassociates its
-Elastic IP without releasing the allocation. A retained interface keeps its association
-after termination; release still follows that interface's VPC rules.
+Elastic IP without releasing the allocation. Concurrent `AssociateAddress` and
+`DeleteNetworkInterface` requests cannot leave an association pointing to a deleted
+interface. A retained interface keeps its association after termination; release still
+follows that interface's VPC rules.
 
 AllocateAddress draws Elastic IPs from `203.0.113.0/24`, a range reserved for documentation that
 no host answers on, in every mode, so a client never reaches someone else's host through one. An
@@ -968,6 +1007,12 @@ regions, for which AWS publishes no zone id, keep the whole region as the prefix
 | DeleteLaunchTemplate | Deletes a launch template and its versions. |
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
+
+`ModifyLaunchTemplate` honors `DryRun` for requests by template ID or name. A valid
+dry run returns `DryRunOperation` with HTTP 412 and leaves the default version,
+latest version, and stored launch data unchanged.
+Exactly one of `LaunchTemplateId` and `LaunchTemplateName` is required, including
+on a dry run; missing or conflicting selectors fail before any state changes.
 
 #### Launch template data members
 
@@ -1370,6 +1415,7 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESS` | `127.0.0.1` | The address every mock instance due one gets when `FLOCI_SERVICES_EC2_MOCK_PUBLIC_ADDRESSES` is `fixed`, for example this host's own address; an Elastic IP associated with its primary private address shows it too |
 | `FLOCI_SERVICES_EC2_AWS_FAITHFUL_PRIVATE_IP` | `false` | Report the CFN/subnet-allocated private IP instead of the container bridge IP; routing and IMDS are unaffected |
 | `FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE` | auto-detect | Whether an instance's container IP is reachable from the machines consuming Floci's API (Terraform, Terratest, your shell). When it is, DescribeInstances and DescribeAddresses report the container IP, so port 22 really is port 22; when it is not, they report `127.0.0.1` and reachability goes through the published high host ports. Detected by a throwaway TCP connect; set explicitly when Floci itself runs as a container |
+| `FLOCI_SERVICES_EC2_PUBLIC_IP_FROM_SERVICE_NETWORK` | `false` | When Floci itself runs as a container, report an instance's address on Floci's own Docker network as its public IP, so clients on that network (an orchestrator, a worker running Ansible) reach the guest's real ports, port 22 included |
 | `FLOCI_SERVICES_EC2_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | On startup, remove instance containers this Floci left on the daemon whose record did not survive the restart or came back terminated; stopped instances are never swept |
 | `FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED` | `true` | Back each VPC with a real Docker network (see [VPC Docker networks](#vpc-docker-networks)) |
 | `FLOCI_SERVICES_EC2_VPC_NETWORKS_FALLBACK_POOL` | `10.240.0.0/12` | RFC 1918 pool that substituted CIDRs are drawn from |

@@ -37,8 +37,10 @@
 # src/main/resources/aws/emr-serverless-shapes.json, the shapes the Step Functions emr-serverless
 # integrations recase against, is generated from botocore's EMR Serverless model by
 # tools/aws/regen_emr_serverless_shapes.py.
-# src/main/resources/aws/rest-routes.json, the routes read by runtime IAM authorization and
-# IamRestRouteCoverageTest, is generated from botocore's models by tools/aws/regen_rest_routes.py.
+# src/main/resources/aws/rest-routes.json, the REST routes IamActionRegistry checks a request no rule
+# maps by, and IamRestRouteCoverageTest checks the rules against, is generated from botocore's models
+# by tools/aws/regen_rest_routes.py. A model it adds also needs make iam-authorized-actions-sync, whose
+# check fails until the actions of no resource type list the model's scope.
 # src/main/resources/aws/iam-paginators.json, what each paged IAM list pages by, is generated
 # from botocore's IAM model and paginators by tools/aws/regen_iam_paginators.py.
 
@@ -71,7 +73,7 @@ PREFIX ?= $(HOME)/.local
 .DEFAULT_GOAL := help
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
         docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test rename-test \
-        slr-check slr-table slr-audit slr-test \
+        slr-check slr-table slr-audit slr-test snapshot-mine snapshot-mine-test \
         aws-data-sync aws-data-sync-botocore aws-data-check aws-data-check-botocore aws-data-test botocore-bump eks-addons-sync \
         iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
         iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
@@ -236,6 +238,17 @@ slr-audit: ## Print the service-linked role table, marking names that are not de
 
 slr-test: ## Run the service-linked role tooling's unit tests
 	$(PYTHON) -m pytest tools/slr -q
+
+snapshot-mine: ## Print the answers a LocalStack checkout's AWS-validated snapshots carry (LOCALSTACK=<checkout>)
+	@test -n "$(LOCALSTACK)" || { \
+		echo "error: set LOCALSTACK to a LocalStack checkout, which this repository does not vendor"; \
+		echo "       git clone --depth 1 https://github.com/localstack/localstack ../localstack"; \
+		exit 1; \
+	}
+	$(PYTHON) tools/aws-capture/localstack/mine_snapshot_messages.py --localstack "$(LOCALSTACK)" $(MINE_ARGS)
+
+snapshot-mine-test: ## Run the snapshot miner's unit tests
+	$(PYTHON) -m pytest tools/aws-capture/localstack -q
 
 botocore-bump: ## Bump the botocore pin to VERSION, move local/aws/botocore to that tag and regenerate the botocore-derived AWS data
 	@test -n "$(VERSION)" || { echo "usage: make botocore-bump VERSION=<botocore release, e.g. 1.43.118>"; exit 2; }
@@ -478,7 +491,8 @@ IAM_NAMESPACES_PATHS := src/main/resources/aws/iam-service-namespaces.json \
 IAM_ACTION_RESOURCES_PATHS := src/main/resources/aws/iam-action-resources.json \
 	tools/aws/regen_iam_action_resources.py tools/aws/test_regen_iam_action_resources.py
 IAM_AUTHORIZED_ACTIONS_PATHS := src/main/resources/aws/iam-authorized-actions.json \
-	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py
+	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py \
+	src/main/resources/aws/rest-routes.json
 IAM_PASSED_ROLES_PATHS := src/main/resources/aws/iam-passed-roles.json $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_passed_roles.py
 IAM_PASSED_NETWORK_CONNECTORS_PATHS := src/main/resources/aws/iam-passed-network-connectors.json \

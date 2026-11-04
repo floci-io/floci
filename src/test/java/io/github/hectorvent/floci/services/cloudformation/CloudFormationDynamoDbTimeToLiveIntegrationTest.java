@@ -15,6 +15,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -183,6 +184,69 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
         describeTimeToLive(table).body("TimeToLiveDescription.TimeToLiveStatus", equalTo("DISABLED"));
 
         deleteStack(stack);
+    }
+
+    /**
+     * A committed in-place update is never rolled back. A later replacing update fails and cannot
+     * delete the table it created, so its rollback fails; retrying that rollback must keep the tags
+     * the committed update set rather than put back the ones from before it.
+     */
+    @Test
+    void retryingAFailedReplacementRollbackKeepsTheCommittedTags() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "cfn-ddb-ttl-retry-" + suffix;
+        String table = "ttl-retry-table-" + suffix;
+        String replacement = "ttl-retry-new-" + suffix;
+
+        Throwable testFailure = null;
+        try {
+            cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", "", ""));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+            String tableArn = dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+                .statusCode(200)
+                .extract().path("Table.TableArn");
+            cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(table, "prod", "", ""));
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+
+            failNextUpdateTimeToLive();
+            Mockito.doThrow(new IllegalStateException("simulated DeleteTable failure"))
+                    .doCallRealMethod()
+                    .when(dynamoDbService)
+                    .deleteTable(anyString(), anyString());
+            try {
+                cloudFormation(stack, "UpdateStack", TEMPLATE.formatted(replacement, "prod", TTL_ENABLED, ""));
+                assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+            } finally {
+                Mockito.doCallRealMethod().when(dynamoDbService)
+                        .updateTimeToLive(anyString(), anyString(), anyBoolean(), anyString());
+                Mockito.doCallRealMethod().when(dynamoDbService).deleteTable(anyString(), anyString());
+            }
+
+            CfnStackWaits.continueUpdateRollback(stack, CFN_AUTH);
+            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status(),
+                    "a replacing table update still has no rollback, so the retry fails again");
+
+            dynamoDb("ListTagsOfResource", "{\"ResourceArn\": \"" + tableArn + "\"}")
+                .statusCode(200)
+                .body("Tags.Value", contains("prod"));
+
+            CfnStackWaits.continueUpdateRollback(stack, CFN_AUTH, "Orders");
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        } catch (RuntimeException | Error failure) {
+            testFailure = failure;
+            throw failure;
+        } finally {
+            try {
+                assertAll("retry test cleanup",
+                        () -> dynamoDb("DeleteTable", "{\"TableName\": \"" + replacement + "\"}"),
+                        () -> deleteStack(stack));
+            } catch (RuntimeException | Error cleanupFailure) {
+                if (testFailure == null) {
+                    throw cleanupFailure;
+                }
+                testFailure.addSuppressed(cleanupFailure);
+            }
+        }
     }
 
     /** A create that fails after the table exists rolls back to no table, not to an orphan. */

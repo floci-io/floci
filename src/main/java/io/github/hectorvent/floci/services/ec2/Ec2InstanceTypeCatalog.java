@@ -227,6 +227,7 @@ public class Ec2InstanceTypeCatalog {
         public int memoryMib;
         public int localStorageGiB;
         public List<String> supportedArchitectures = List.of();
+        public String processorManufacturer;
         public List<String> supportedUsageClasses = List.of("on-demand", "spot");
         public Boolean currentGeneration;
         public Boolean encryptionInTransitSupported;
@@ -242,6 +243,7 @@ public class Ec2InstanceTypeCatalog {
             type.put("instanceStorageSupported", localStorageGiB > 0);
             type.put("localStorageGiB", localStorageGiB);
             type.put("supportedArchitectures", List.copyOf(supportedArchitectures));
+            type.put("processorManufacturer", processorManufacturer);
             type.put("supportedUsageClasses", List.copyOf(supportedUsageClasses));
             type.put("currentGeneration", currentGeneration == null || currentGeneration);
             type.put("burstablePerformanceSupported", isBurstablePerformanceType(instanceType));

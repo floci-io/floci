@@ -88,13 +88,12 @@ class ApiGatewayRestApiCfnUpdateRollbackRetryIntegrationTest {
                     .body("endpointConfiguration.types", contains("REGIONAL"));
             assertPaths(apiId, "/", "/items");
 
-            cfn("ContinueUpdateRollback", stack).when().post("/").then().statusCode(200);
+            CfnStackWaits.continueUpdateRollback(stack, null);
             state = CfnStackWaits.awaitTerminal(stack);
             assertEquals("UPDATE_ROLLBACK_FAILED", state.status(), state.reason());
             assertEquals("Rollback is not implemented for AWS::ApiGateway::RestApi", apiResourceReason(stack));
 
-            cfn("ContinueUpdateRollback", stack).formParam("ResourcesToSkip.member.1", "Api")
-                    .when().post("/").then().statusCode(200);
+            CfnStackWaits.continueUpdateRollback(stack, null, "Api");
             state = CfnStackWaits.awaitTerminal(stack);
             assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
         } finally {
@@ -124,7 +123,7 @@ class ApiGatewayRestApiCfnUpdateRollbackRetryIntegrationTest {
                     .body("description", equalTo("second"))
                     .body("endpointConfiguration.types", contains("EDGE"));
 
-            cfn("ContinueUpdateRollback", stack).when().post("/").then().statusCode(200);
+            CfnStackWaits.continueUpdateRollback(stack, null);
             state = CfnStackWaits.awaitTerminal(stack);
             assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
             given().when().get("/restapis/" + apiId).then().statusCode(200)

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.resolver;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -79,11 +80,15 @@ public class ResolverCallbackResource {
                     .entity(Map.of("error", "Resolver callback body is missing invocations")).build();
         }
 
-        List<Map<String, Object>> results = new ArrayList<>();
-        for (JsonNode node : invocations) {
-            results.add(answer(session.get(), node));
-        }
-        return Response.ok(Map.of("results", results)).build();
+        ResolverCallbackSessions.Session execution = session.get();
+        // A callback is a new HTTP request; its bearer token carries the operation's storage scope.
+        return RequestScopes.callAs(execution.accountId(), execution.region(), () -> {
+            List<Map<String, Object>> results = new ArrayList<>();
+            for (JsonNode node : invocations) {
+                results.add(answer(execution, node));
+            }
+            return Response.ok(Map.of("results", results)).build();
+        });
     }
 
     private Map<String, Object> answer(ResolverCallbackSessions.Session session, JsonNode node) {

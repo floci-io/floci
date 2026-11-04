@@ -442,7 +442,7 @@ final class CfnProvisionerFixture {
                 discovered.add(new LambdaEventSourceMappingCfnProvisioner(lambdaService));
             }
             if (flowLogService != null) {
-                discovered.add(new Ec2FlowLogCfnProvisioner(flowLogService));
+                discovered.add(new Ec2FlowLogCfnProvisioner(flowLogService, ec2Service));
             }
             if (iotAuthorizerService != null) {
                 discovered.add(new IotAuthorizerCfnProvisioner(iotAuthorizerService));

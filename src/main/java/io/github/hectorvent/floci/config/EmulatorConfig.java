@@ -2049,7 +2049,8 @@ public interface EmulatorConfig {
 
         /**
          * {@code immediate} completes each step by time without running anything; {@code docker} runs each
-         * Spark step's {@code spark-submit} in a container of the release's EMR Serverless image.
+         * Spark step's {@code spark-submit} in a container of the release's EMR Serverless image, which a cluster
+         * with Hive has Hive added to, and that cluster's Hive steps' {@code hive} too.
          */
         @WithDefault("immediate")
         String runnerMode();
@@ -2062,6 +2063,14 @@ public interface EmulatorConfig {
          * release's public EMR Serverless image on Amazon ECR Public.
          */
         Optional<String> imageTemplate();
+
+        /**
+         * The EMR Serverless Hive image a {@code docker} cluster with Hive takes Hive from, into the image its
+         * bootstrap and steps run in, as {@link #imageTemplate()} names the image Hive is added to, for example
+         * "registry.internal/emr-serverless/hive/%s:20250425". If omitted, Floci uses the release's public EMR
+         * Serverless Hive image on Amazon ECR Public.
+         */
+        Optional<String> hiveImageTemplate();
 
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap
@@ -3445,6 +3454,16 @@ public interface EmulatorConfig {
          * Env var: FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE
          */
         Optional<Boolean> containerIpsRoutable();
+
+        /**
+         * When Floci itself runs as a container, report an instance's address on Floci's own
+         * Docker network as its public IP, so clients on that network (an orchestrator, a worker
+         * running Ansible) reach the guest's real ports there, as they would an AWS public IP.
+         *
+         * Env var: FLOCI_SERVICES_EC2_PUBLIC_IP_FROM_SERVICE_NETWORK
+         */
+        @WithDefault("false")
+        boolean publicIpFromServiceNetwork();
 
         /**
          * When true, Floci removes on startup any EC2 instance container left on the Docker

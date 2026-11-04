@@ -1,6 +1,6 @@
 {
   "source": "https://servicereference.us-east-1.amazonaws.com/v1/iam/iam.json",
-  "botocore": "botocore 1.43.113 (installed package)",
+  "botocore": "botocore 1.43.118 (installed package)",
   "types": {"iam:AWSServiceName": ["String"], "iam:AccountPropertyNamespaces": ["ArrayOfString"], "iam:AssociatedResourceArn": ["ARN"], "iam:DelegationDuration": ["String"], "iam:DelegationRequestOwner": ["ARN"], "iam:FIDO-FIPS-140-2-certification": ["String"], "iam:FIDO-FIPS-140-3-certification": ["String"], "iam:FIDO-certification": ["String"], "iam:NotificationChannel": ["String"], "iam:OrganizationsPolicyId": ["String"], "iam:PassedToService": ["String"], "iam:PermissionsBoundary": ["ARN"], "iam:PolicyARN": ["ARN"], "iam:RegisterSecurityKey": ["String"], "iam:RoleTemplateARN": ["ARN"], "iam:ServiceSpecificCredentialAgeDays": ["Numeric"], "iam:ServiceSpecificCredentialServiceName": ["String"], "iam:TemplateArn": ["ARN"]},
   "read": [
     {"action": "iam:AttachGroupPolicy", "key": "iam:PolicyARN", "member": "PolicyArn"},

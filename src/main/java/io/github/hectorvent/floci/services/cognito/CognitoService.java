@@ -1865,7 +1865,8 @@ public class CognitoService implements ResourceProvider {
             userPoolDomain.setCertificateArn(certificateArn);
             Object securityPolicy = customDomainConfig.get("SecurityPolicy");
             userPoolDomain.setSecurityPolicy(securityPolicy != null ? securityPolicy.toString() : "TLS_V1_2_2021");
-            userPoolDomain.setCloudFrontDistribution(generateCloudFrontDomain());
+            userPoolDomain.setCloudFrontDistribution(
+                    CloudFrontEdgeDomain.create(regionResolver.getPartition(), cloudFrontDomainSuffix).domainName());
         }
 
         // Check and write as one step: two accounts racing for one name write to different
@@ -2104,12 +2105,6 @@ public class CognitoService implements ResourceProvider {
         String name = userPoolDomain.getCloudFrontDistribution();
         String id = name.substring(0, name.indexOf('.')).toUpperCase(Locale.ROOT);
         return AwsArnUtils.Arn.global(partition, "cloudfront", userPoolDomain.getAwsAccountId(), "distribution/" + id).toString();
-    }
-
-    /** A distribution name on the configured CloudFront suffix, or the request partition's when none is. */
-    private String generateCloudFrontDomain() {
-        return UUID.randomUUID().toString().replace("-", "").substring(0, 14) + "."
-                + CloudFrontEdgeDomain.domainSuffix(cloudFrontDomainSuffix, regionResolver.getPartition());
     }
 
     private String generateDomainVersion() {

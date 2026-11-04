@@ -4855,7 +4855,8 @@ public class Ec2QueryHandler {
     private Response handleAssociateAddress(MultivaluedMap<String, String> p, String region) {
         String allocationId = p.getFirst("AllocationId");
         String instanceId = p.getFirst("InstanceId");
-        Address addr = service.associateAddress(region, allocationId, instanceId, p.getFirst("PrivateIpAddress"));
+        Address addr = service.associateAddress(region, allocationId, instanceId,
+                p.getFirst("NetworkInterfaceId"), p.getFirst("PrivateIpAddress"));
         XmlBuilder xml = new XmlBuilder()
                 .start("AssociateAddressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5006,6 +5007,7 @@ public class Ec2QueryHandler {
                         .end("instanceStorageInfo");
             }
             xml.start("processorInfo")
+                    .elem("manufacturer", (String) t.get("processorManufacturer"))
                     .start("supportedArchitectures");
             for (String arch : (List<String>) t.get("supportedArchitectures")) {
                 xml.elem("item", arch);
@@ -5134,7 +5136,8 @@ public class Ec2QueryHandler {
                 region,
                 p.getFirst("LaunchTemplateId"),
                 p.getFirst("LaunchTemplateName"),
-                firstPresent(p, "SetDefaultVersion", "DefaultVersion"));
+                firstPresent(p, "SetDefaultVersion", "DefaultVersion"),
+                Boolean.parseBoolean(p.getFirst("DryRun")));
         XmlBuilder xml = new XmlBuilder()
                 .start("ModifyLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

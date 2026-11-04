@@ -92,6 +92,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -1099,6 +1100,253 @@ class Ec2ContainerManagerTest {
 
         assertNull(manager.reachablePublicAddress(new Instance()));
         assertNull(manager.reachablePublicAddress(null));
+    }
+
+    @Test
+    void reachablePublicAddressReportsTheServiceNetworkAddressWhenEnabledInAContainer() {
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+
+        manager.refreshServiceNetworkIp(instance);
+
+        assertEquals("172.20.0.9", instance.getServiceNetworkIp());
+        assertEquals("172.20.0.9", manager.reachablePublicAddress(instance));
+    }
+
+    @Test
+    void reachablePublicAddressReportsTheRecordedAddressWithoutAskingDocker() {
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+        manager.refreshServiceNetworkIp(instance);
+
+        manager.reachablePublicAddress(instance);
+        manager.reachablePublicAddress(instance);
+
+        verify(docker, times(1)).inspectContainerCmd(TEST_CONTAINER_ID);
+    }
+
+    @Test
+    void aFailedLookupIsRetriedInTheBackgroundByTheNextAddressRead() {
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        InspectContainerResponse guest = docker.inspectContainerCmd(TEST_CONTAINER_ID).exec();
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec())
+                .thenThrow(new IllegalStateException("daemon busy")).thenReturn(guest);
+        ExecutorService launchExecutor = mock(ExecutorService.class);
+        ExecutorService retryExecutor = mock(ExecutorService.class);
+        List<Runnable> tasks = new ArrayList<>();
+        doAnswer(invocation -> tasks.add(invocation.getArgument(0))).when(retryExecutor).execute(any(Runnable.class));
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker, launchExecutor, retryExecutor);
+        Instance instance = serviceNetworkInstance();
+        manager.refreshServiceNetworkIp(instance);
+        clearInvocations(docker);
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+        verify(docker, never()).inspectContainerCmd(anyString());
+        assertEquals(1, tasks.size());
+
+        tasks.getFirst().run();
+
+        assertEquals("172.20.0.9", manager.reachablePublicAddress(instance));
+        assertEquals(1, tasks.size());
+        // Never on the launch pool, whose blocking backpressure could stall the workers behind it.
+        verify(launchExecutor, never()).execute(any(Runnable.class));
+        verify(launchExecutor, never()).submit(any(Runnable.class));
+    }
+
+    @Test
+    void aLookupThatOutlivesAContainerReplacementDoesNotOverwriteTheNewAddress() throws Exception {
+        CountDownLatch staleInspectStarted = new CountDownLatch(1);
+        CountDownLatch releaseStaleInspect = new CountDownLatch(1);
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        InspectContainerResponse oldGuest = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.9")));
+        InspectContainerResponse newGuest = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.21")));
+        when(docker.inspectContainerCmd("old-container").exec()).thenAnswer(invocation -> {
+            staleInspectStarted.countDown();
+            releaseStaleInspect.await(5, TimeUnit.SECONDS);
+            return oldGuest;
+        });
+        when(docker.inspectContainerCmd("new-container").exec()).thenReturn(newGuest);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+        instance.setDockerContainerId("old-container");
+
+        Thread staleLookup = Thread.ofVirtual().start(() -> manager.refreshServiceNetworkIp(instance));
+        assertTrue(staleInspectStarted.await(5, TimeUnit.SECONDS));
+        synchronized (instance) {
+            instance.setDockerContainerId("new-container");
+        }
+        manager.refreshServiceNetworkIp(instance);
+        releaseStaleInspect.countDown();
+        staleLookup.join(Duration.ofSeconds(5));
+
+        assertFalse(staleLookup.isAlive());
+        assertEquals("172.20.0.21", instance.getServiceNetworkIp());
+        assertEquals("172.20.0.21", manager.reachablePublicAddress(instance));
+    }
+
+    @Test
+    void aLookupInFlightDuringTeardownCannotRestoreTheAddress() throws Exception {
+        CountDownLatch staleInspectStarted = new CountDownLatch(1);
+        CountDownLatch releaseStaleInspect = new CountDownLatch(1);
+        AtomicBoolean firstInspect = new AtomicBoolean(true);
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        InspectContainerResponse guest = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.9")));
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec()).thenAnswer(invocation -> {
+            if (firstInspect.getAndSet(false)) {
+                staleInspectStarted.countDown();
+                releaseStaleInspect.await(5, TimeUnit.SECONDS);
+            }
+            return guest;
+        });
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+        instance.setState(InstanceState.pending());
+
+        Thread staleLookup = Thread.ofVirtual().start(() -> manager.refreshServiceNetworkIp(instance));
+        assertTrue(staleInspectStarted.await(5, TimeUnit.SECONDS));
+        assertTrue(manager.cancelLaunch(instance));
+        releaseStaleInspect.countDown();
+        staleLookup.join(Duration.ofSeconds(5));
+
+        assertFalse(staleLookup.isAlive());
+        assertNull(instance.getDockerContainerId());
+        assertNull(instance.getServiceNetworkIp());
+    }
+
+    @Test
+    void aProtectedGuestReportsItsFirewallHelpersServiceNetworkAddress() {
+        DockerClient docker = guestDocker(null, "172.20.0.11");
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+
+        manager.refreshServiceNetworkIp(instance);
+
+        assertEquals("172.20.0.11", manager.reachablePublicAddress(instance));
+    }
+
+    @Test
+    void reachablePublicAddressIgnoresTheServiceNetworkWhenDisabled() {
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(false, true, docker);
+        Instance instance = serviceNetworkInstance();
+
+        manager.refreshServiceNetworkIp(instance);
+
+        assertNull(instance.getServiceNetworkIp());
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+        verify(docker, never()).inspectContainerCmd(anyString());
+    }
+
+    @Test
+    void reachablePublicAddressIgnoresTheServiceNetworkWhenFlociRunsOnTheHost() {
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, false, docker);
+        Instance instance = serviceNetworkInstance();
+
+        manager.refreshServiceNetworkIp(instance);
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+    }
+
+    @Test
+    void reachablePublicAddressFallsBackWhenTheInstanceIsNotOnTheServiceNetwork() {
+        DockerClient docker = guestDocker(null, null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+
+        manager.refreshServiceNetworkIp(instance);
+
+        assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+    }
+
+    private static Instance serviceNetworkInstance() {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-service-network");
+        instance.setDockerContainerId(TEST_CONTAINER_ID);
+        instance.setContainerBridgeIp("172.17.0.4");
+        return instance;
+    }
+
+    /**
+     * A daemon whose guest container sits on the bridge, unroutable from the host, and on Floci's
+     * own network {@code floci-net} at {@code guestIp} when that is not null. With a
+     * {@code helperIp}, the guest instead joins a firewall helper's namespace, as a security-group
+     * protected guest does, and the helper is on {@code floci-net} at that address.
+     */
+    private static DockerClient guestDocker(String guestIp, String helperIp) {
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        Map<String, ContainerNetwork> guestNetworks = new LinkedHashMap<>();
+        if (helperIp == null) {
+            guestNetworks.put("bridge", new ContainerNetwork().withIpv4Address("172.17.0.4"));
+        }
+        if (guestIp != null) {
+            guestNetworks.put("floci-net", new ContainerNetwork().withIpv4Address(guestIp));
+        }
+        InspectContainerResponse guest = inspectWithNetworks(guestNetworks);
+        if (helperIp != null) {
+            HostConfig hostConfig = mock(HostConfig.class);
+            when(hostConfig.getNetworkMode()).thenReturn("container:helper-1");
+            when(guest.getHostConfig()).thenReturn(hostConfig);
+            InspectContainerResponse helper = inspectWithNetworks(Map.of(
+                    "bridge", new ContainerNetwork().withIpv4Address("172.17.0.5"),
+                    "floci-net", new ContainerNetwork().withIpv4Address(helperIp)));
+            when(docker.inspectContainerCmd("helper-1").exec()).thenReturn(helper);
+        }
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec()).thenReturn(guest);
+        clearInvocations(docker);
+        return docker;
+    }
+
+    private static InspectContainerResponse inspectWithNetworks(Map<String, ContainerNetwork> networks) {
+        InspectContainerResponse inspect = mock(InspectContainerResponse.class);
+        NetworkSettings settings = mock(NetworkSettings.class);
+        when(inspect.getNetworkSettings()).thenReturn(settings);
+        when(settings.getNetworks()).thenReturn(networks);
+        return inspect;
+    }
+
+    private static Ec2ContainerManager managerOnServiceNetwork(boolean enabled, boolean inContainer,
+                                                               DockerClient docker) {
+        return managerOnServiceNetwork(enabled, inContainer, docker, mock(ExecutorService.class),
+                mock(ExecutorService.class));
+    }
+
+    /** A manager on {@code docker} whose bridge addresses are unroutable from the host. */
+    private static Ec2ContainerManager managerOnServiceNetwork(boolean enabled, boolean inContainer,
+                                                               DockerClient docker, ExecutorService executor,
+                                                               ExecutorService retryExecutor) {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ec2().publicIpFromServiceNetwork()).thenReturn(enabled);
+        ContainerDetector detector = mock(ContainerDetector.class);
+        when(detector.isRunningInContainer()).thenReturn(inContainer);
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        when(builder.resolveDockerNetwork(Optional.empty())).thenReturn(Optional.of("floci-net"));
+
+        return new Ec2ContainerManager(
+                builder,
+                mock(ContainerLifecycleManager.class),
+                mock(ContainerLogStreamer.class),
+                detector,
+                mock(DockerHostResolver.class),
+                docker,
+                mock(PortAllocator.class),
+                config,
+                mock(Ec2MetadataServer.class),
+                mock(Ec2PortForwardManager.class),
+                mock(RegionResolver.class),
+                mock(ContainerNetworkReachability.class),
+                mock(VpcNetworkManager.class),
+                mock(ContainerReachableEndpoint.class),
+                new Ec2InstanceTypeCatalog(),
+                executor,
+                retryExecutor,
+                Duration.ofSeconds(5));
     }
 
     private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {

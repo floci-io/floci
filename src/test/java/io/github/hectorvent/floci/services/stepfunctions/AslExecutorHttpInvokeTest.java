@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeInvoker;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
@@ -25,13 +27,17 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -43,22 +49,30 @@ class AslExecutorHttpInvokeTest {
 
     private static final String REGION = "us-west-2";
     private static final String ACCOUNT = "000000000000";
-    private static final String CONNECTION_ARN =
-            "arn:aws:events:%s:%s:connection/test/11111111-1111-1111-1111-111111111111"
+    private static final String MISSING_CONNECTION_ARN =
+            "arn:aws:events:%s:%s:connection/missing/11111111-1111-1111-1111-111111111111"
                     .formatted(REGION, ACCOUNT);
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final List<RecordedRequest> receivedRequests = new CopyOnWriteArrayList<>();
+    private final List<String> connectionNames = new ArrayList<>();
 
     private HttpServer server;
     private String baseUrl;
     private AslExecutor executor;
+    private String connectionArn;
 
     @Inject
     Vertx vertx;
 
     @Inject
     EmulatorConfig emulatorConfig;
+
+    @Inject
+    EventBridgeService eventBridgeService;
+
+    @Inject
+    EventBridgeInvoker eventBridgeInvoker;
 
     private record RecordedRequest(String method, String path, String query,
                                    MultiMap headers, String body) {
@@ -137,6 +151,16 @@ class AslExecutorHttpInvokeTest {
                     .subscribe().with(it -> {
                     });
             });
+        router.post("/token-slow")
+            .handler(ctx -> {
+                Uni.createFrom().voidItem()
+                    .onItem().delayIt().by(Duration.ofSeconds(2))
+                    .onItem().transformToUni(ignore -> ctx.response()
+                        .putHeader("Content-Type", "application/json")
+                        .end(Buffer.newInstance(JsonObject.of("access_token", "token").toBuffer())))
+                    .subscribe().with(it -> {
+                    });
+            });
         router.get("/form")
             .handler(ctx -> {
                 ctx.response()
@@ -157,7 +181,9 @@ class AslExecutorHttpInvokeTest {
                 .config(emulatorConfig)
                 .vertx(vertx)
                 .customResourceLiveness(null)
+                .eventBridgeInvoker(eventBridgeInvoker)
                 .build();
+        connectionArn = createConnection("BASIC", basicAuth(""));
     }
 
     private void recordRequest(final RoutingContext ctx, String body) {
@@ -175,6 +201,7 @@ class AslExecutorHttpInvokeTest {
     @AfterEach
     void tearDown() {
         server.closeAndAwait();
+        connectionNames.forEach(name -> eventBridgeService.deleteConnection(name, REGION));
     }
 
     @Test
@@ -205,7 +232,7 @@ class AslExecutorHttpInvokeTest {
                     }
                   }
                 }
-                """.formatted(baseUrl, CONNECTION_ARN), "{}");
+                """.formatted(baseUrl, connectionArn), "{}");
 
         assertEquals("SUCCEEDED", execution.getStatus());
         JsonNode output = objectMapper.readTree(execution.getOutput());
@@ -252,7 +279,7 @@ class AslExecutorHttpInvokeTest {
                     }
                   }
                 }
-                """.formatted(CONNECTION_ARN), """
+                """.formatted(connectionArn), """
                 {
                   "endpoint": "%s/text",
                   "method": "POST",
@@ -300,7 +327,7 @@ class AslExecutorHttpInvokeTest {
                     }
                   }
                 }
-                """.formatted(baseUrl, CONNECTION_ARN), """
+                """.formatted(baseUrl, connectionArn), """
                 {
                   "customerId": null
                 }
@@ -332,7 +359,7 @@ class AslExecutorHttpInvokeTest {
                     }
                   }
                 }
-                """.formatted(baseUrl, CONNECTION_ARN), "{}");
+                """.formatted(baseUrl, connectionArn), "{}");
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Http.StatusCode.429", execution.getError());
@@ -363,7 +390,7 @@ class AslExecutorHttpInvokeTest {
                     }
                   }
                 }
-                """.formatted(baseUrl, CONNECTION_ARN), "{}");
+                """.formatted(baseUrl, connectionArn), "{}");
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Runtime", execution.getError());
@@ -417,7 +444,7 @@ class AslExecutorHttpInvokeTest {
                     }
                   }
                 }
-                """.formatted(CONNECTION_ARN), """
+                """.formatted(connectionArn), """
                 {
                   "endpoint": "%s/jsonslow",
                   "method": "GET",
@@ -427,7 +454,8 @@ class AslExecutorHttpInvokeTest {
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Http.Socket", execution.getError());
-        assertThat(execution.getCause(), startsWith("The timeout period of 1000ms has been exceeded while executing GET /jsonslow for server"));
+        assertThat(execution.getCause(), matchesPattern(
+                "The timeout period of \\d+ms has been exceeded while executing GET /jsonslow for server.*"));
     }
 
     @Test
@@ -457,7 +485,7 @@ class AslExecutorHttpInvokeTest {
                     }
                   }
                 }
-                """.formatted(CONNECTION_ARN), """
+                """.formatted(connectionArn), """
                 {
                   "endpoint": "%s/form",
                   "method": "GET",
@@ -514,6 +542,146 @@ class AslExecutorHttpInvokeTest {
         assertEquals(0, receivedRequests.size());
     }
 
+    @Test
+    void basicConnectionAuthorizesTheRequest() {
+        Execution execution = run(getJsonDefinition(connectionArn), "{}");
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertEquals("Basic " + Base64.getEncoder().encodeToString("user:secret".getBytes(StandardCharsets.UTF_8)),
+                onlyRequest().firstHeader("Authorization"));
+    }
+
+    @Test
+    void connectionParametersAreMergedOverTheTasksAndWinOnDuplicateKeys() throws Exception {
+        // The data merging example of the AWS HTTP Task guide, with its API_KEY connection.
+        String apiKeyConnection = createConnection("API_KEY", """
+                {"ApiKeyAuthParameters":{"ApiKeyName":"ApiKey","ApiKeyValue":"key_value"},
+                 "InvocationHttpParameters":{
+                   "BodyParameters":[{"Key":"BodyParam","Value":"connection_body_param"}],
+                   "HeaderParameters":[{"Key":"Header-Param","Value":"connection_header_param"}],
+                   "QueryStringParameters":[{"Key":"QueryParam","Value":"connection_query_param"}]}}
+                """);
+
+        Execution execution = run("""
+                {"StartAt":"CallHttp","States":{"CallHttp":{"Type":"Task",
+                 "Resource":"arn:aws:states:::http:invoke","Parameters":{
+                   "ApiEndpoint":"%s/text","Method":"POST",
+                   "Authentication":{"ConnectionArn":"%s"},
+                   "Headers":{"Request-Id":"my_request_id","header-param":"state_machine_header_param"},
+                   "RequestBody":{"Job":"Software Engineer","BodyParam":"state_machine_body_param"},
+                   "QueryParameters":{"QueryParam":"state_machine_query_param"}
+                 },"End":true}}}
+                """.formatted(baseUrl, apiKeyConnection), "{}");
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        RecordedRequest request = onlyRequest();
+        assertEquals("/text?QueryParam=connection_query_param", request.path());
+        assertEquals(List.of("key_value"), request.headerValues("ApiKey"));
+        assertEquals(List.of("connection_header_param"), request.headerValues("Header-Param"));
+        assertEquals(List.of("my_request_id"), request.headerValues("Request-Id"));
+        assertEquals(objectMapper.readTree("""
+                {"Job":"Software Engineer","BodyParam":"connection_body_param"}
+                """), objectMapper.readTree(request.body()));
+    }
+
+    @Test
+    void connectionBodyParametersAreMergedBeforeTheBodyIsUrlEncoded() {
+        connectionArn = createConnection("BASIC", basicAuth("""
+                ,"InvocationHttpParameters":{"BodyParameters":[{"Key":"mode","Value":"live"}]}"""));
+
+        Execution execution = runForm("{\"items\":[\"a\",\"b\"]}", "{\"ArrayFormat\":\"REPEAT\"}");
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertEquals("items=a&items=b&mode=live", onlyRequest().body());
+    }
+
+    @Test
+    void stringRequestBodyCannotTakeConnectionBodyParameters() {
+        String bodyConnection = createConnection("BASIC", basicAuth("""
+                ,"InvocationHttpParameters":{"BodyParameters":[{"Key":"mode","Value":"live"}]}"""));
+
+        Execution execution = run("""
+                {"StartAt":"CallHttp","States":{"CallHttp":{"Type":"Task",
+                 "Resource":"arn:aws:states:::http:invoke","Parameters":{
+                   "ApiEndpoint":"%s/text","Method":"POST",
+                   "InvocationConfig":{"ConnectionArn":"%s"},
+                   "RequestBody":"plain text"
+                 },"End":true}}}
+                """.formatted(baseUrl, bodyConnection), "{}");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Runtime", execution.getError());
+        assertEquals(0, receivedRequests.size());
+    }
+
+    @Test
+    void connectionQueryParameterReplacesOnlyTheSameCaseSensitiveName() {
+        String queryConnection = createConnection("BASIC", basicAuth("""
+                ,"InvocationHttpParameters":{"QueryStringParameters":[{"Key":"foo","Value":"connection"}]}"""));
+
+        Execution execution = run("""
+                {"StartAt":"CallHttp","States":{"CallHttp":{"Type":"Task",
+                 "Resource":"arn:aws:states:::http:invoke","Parameters":{
+                   "ApiEndpoint":"%s/json","Method":"GET",
+                   "InvocationConfig":{"ConnectionArn":"%s"},
+                   "QueryParameters":{"Foo":"task"}
+                 },"End":true}}}
+                """.formatted(baseUrl, queryConnection), "{}");
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertEquals("/json?Foo=task&foo=connection", onlyRequest().path());
+    }
+
+    @Test
+    void oauthTokenExchangeSpendsTheTasksTimeout() {
+        String oauthConnection = createConnection("OAUTH_CLIENT_CREDENTIALS", """
+                {"OAuthParameters":{"AuthorizationEndpoint":"%s/token-slow","HttpMethod":"POST",
+                 "ClientParameters":{"ClientID":"cid","ClientSecret":"csecret"}}}
+                """.formatted(baseUrl));
+
+        Execution execution = run("""
+                {"StartAt":"CallHttp","States":{"CallHttp":{"Type":"Task",
+                 "Resource":"arn:aws:states:::http:invoke","Parameters":{
+                   "ApiEndpoint":"%s/json","Method":"GET","TimeoutSeconds":1,
+                   "InvocationConfig":{"ConnectionArn":"%s"}
+                 },"End":true}}}
+                """.formatted(baseUrl, oauthConnection), "{}");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Http.Socket", execution.getError());
+        assertEquals(0, receivedRequests.size());
+    }
+
+    @Test
+    void missingConnectionFailsWithConnectionResourceNotFound() {
+        Execution execution = run(getJsonDefinition(MISSING_CONNECTION_ARN), "{}");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("Events.ConnectionResource.ResourceNotFound", execution.getError());
+        assertEquals(0, receivedRequests.size());
+    }
+
+    private String getJsonDefinition(String connection) {
+        return """
+                {"StartAt":"CallHttp","States":{"CallHttp":{"Type":"Task",
+                 "Resource":"arn:aws:states:::http:invoke","Parameters":{
+                   "ApiEndpoint":"%s/json","Method":"GET",
+                   "InvocationConfig":{"ConnectionArn":"%s"}
+                 },"End":true}}}
+                """.formatted(baseUrl, connection);
+    }
+
+    private String createConnection(String authorizationType, String authParameters) {
+        String name = "http-task-" + UUID.randomUUID();
+        connectionNames.add(name);
+        return eventBridgeService.createConnection(name, null, authorizationType, authParameters, null, null, REGION)
+                .getConnectionArn();
+    }
+
+    private static String basicAuth(String moreAuthParameters) {
+        return "{\"BasicAuthParameters\":{\"Username\":\"user\",\"Password\":\"secret\"}" + moreAuthParameters + "}";
+    }
+
     private Execution runForm(String body, String options) {
         return run("""
                 {"StartAt":"CallHttp","States":{"CallHttp":{"Type":"Task",
@@ -524,7 +692,7 @@ class AslExecutorHttpInvokeTest {
                    "RequestBody.$":"$.body",
                    "Transform":{"RequestBodyEncoding":"URL_ENCODED","RequestEncodingOptions":%s}
                  },"End":true}}}
-                """.formatted(baseUrl, CONNECTION_ARN, options), "{\"body\":" + body + "}");
+                """.formatted(baseUrl, connectionArn, options), "{\"body\":" + body + "}");
     }
 
     private Execution run(String definition, String input) {

@@ -66,7 +66,8 @@ public interface SparkJobRunner {
      * (its settings, then its query files and parameters); or {@code command}, when not
      * null, what the container runs in place of {@code spark-submit}, where a {@code spark-submit} it starts
      * gets Floci's settings and the {@code spark-defaults} as defaults (its {@code application} is then
-     * empty); how long it may run
+     * empty), or, for a Hive run, what runs in place of {@code hive}, followed by Floci's settings and the
+     * {@code application} (an EMR step's {@code hive-script ... --args}); how long it may run
      * ({@link Duration#ZERO} for no limit); the S3 folder its driver's {@code stdout.gz} and
      * {@code stderr.gz} go to once it ends, ending in a slash (null for none); where in CloudWatch Logs
      * its driver's output goes while it runs (null for nowhere but Floci's log); the environment variables
@@ -88,6 +89,13 @@ public interface SparkJobRunner {
                List<String> archives, Storage storage, Map<String, String> coreSite,
                Map<String, String> sparkLog4j2, Map<String, String> mapredSite, Map<String, String> hadoopLog4j,
                Map<String, String> hadoopEnvironment) {
+
+        /** This job, run in {@code image}. */
+        public Job inImage(String image) {
+            return new Job(service, runId, accountId, region, releaseLabel, engine, image, customImage, dockerNetwork,
+                    executionRole, sparkDefaults, application, command, timeout, logFolder, cloudWatchLogs, environment,
+                    archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j, hadoopEnvironment);
+        }
     }
 
     /**

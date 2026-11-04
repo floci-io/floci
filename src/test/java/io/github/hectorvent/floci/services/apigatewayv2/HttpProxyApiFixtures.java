@@ -5,7 +5,7 @@ import io.restassured.http.ContentType;
 import static io.restassured.RestAssured.given;
 
 /** A deployed HTTP API whose one route is an {@code HTTP_PROXY} integration on a test's fixture backend. */
-final class HttpProxyApiFixtures {
+public final class HttpProxyApiFixtures {
 
     private HttpProxyApiFixtures() {
     }
@@ -15,7 +15,7 @@ final class HttpProxyApiFixtures {
      * stage {@code stageName} and a {@code GET path} route to an {@code HTTP_PROXY} integration on
      * {@code http://127.0.0.1:backendPort path}; returns its id.
      */
-    static String createProxyApi(String name, String apiFields, String stageName, int backendPort, String path) {
+    public static String createProxyApi(String name, String apiFields, String stageName, int backendPort, String path) {
         String apiId = given()
                 .contentType(ContentType.JSON)
                 .body("{\"name\":\"" + name + "\",\"protocolType\":\"HTTP\"" + apiFields + "}")

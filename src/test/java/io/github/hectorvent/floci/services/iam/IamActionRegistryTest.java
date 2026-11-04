@@ -19,11 +19,13 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,6 +44,106 @@ import static org.mockito.Mockito.when;
 class IamActionRegistryTest {
 
     private final IamActionRegistry registry = new IamActionRegistry();
+
+    /**
+     * A REST request no rule maps is checked as the operation whose vendored route it matches, as that operation's
+     * action, when Floci checks it on the resources AWS does: built by hand for its namespace ({@code Invoke} as
+     * {@code lambda:InvokeFunction}), read by the vendored request resources ({@code DescribeRepositories}, and
+     * {@code DescribeDomain} from its path), or none, AWS authorizing its action on no resource type
+     * ({@code ListDomainNames}). One AWS checks on a resource Floci does not read stays unmapped ({@code GetAnalyzer}),
+     * as does a request matching no route, and a rule still decides a route it maps.
+     */
+    @Test
+    void aRouteNoRuleMapsIsCheckedAsItsOperationWhenFlociChecksItAsAwsDoes() throws IOException {
+        IamRestRoutes routes = IamRestRoutes.parse(new ByteArrayInputStream("""
+                {"handRouted": {},
+                 "models": {
+                   "opensearch": {"credentialScope": "es", "operations": {
+                     "ListDomainNames": {"method": "GET", "requestUri": "/unmapped/domain"},
+                     "DescribeDomain": {"method": "GET", "requestUri": "/unmapped/domain/{DomainName}"}
+                   }},
+                   "accessanalyzer": {"credentialScope": "access-analyzer", "operations": {
+                     "GetAnalyzer": {"method": "GET", "requestUri": "/unmapped/analyzer/{analyzerName}"}
+                   }},
+                   "ecr": {"credentialScope": "ecr", "operations": {
+                     "DescribeRepositories": {"method": "GET", "requestUri": "/unmapped/repositories"}
+                   }},
+                   "lambda": {"credentialScope": "lambda", "operations": {
+                     "Invoke": {"method": "POST", "requestUri": "/unmapped/{FunctionName}/invocations"},
+                     "ListFunctions": {"method": "GET", "requestUri": "/2015-03-31/functions/{FunctionName}"}
+                   }}
+                 }}""".getBytes(StandardCharsets.UTF_8)));
+        IamActionRegistry routed = new IamActionRegistry(routes);
+        MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
+        assertEquals("es:ListDomainNames", routed.resolveRoute("es", mockCtx("GET", "/unmapped/domain", none, null, "")));
+        assertEquals("es:DescribeDomain", routed.resolveRoute("es", mockCtx("GET", "/unmapped/domain/logs", none, null, "")));
+        assertNull(routed.resolveRoute("access-analyzer", mockCtx("GET", "/unmapped/analyzer/a", none, null, "")));
+        assertNull(routed.resolveRoute("es", mockCtx("GET", "/other/domain", none, null, "")));
+        assertNull(routed.resolveRoute("other", mockCtx("GET", "/unmapped/domain", none, null, "")));
+        assertEquals("lambda:InvokeFunction", routed.resolveRoute("lambda",
+                mockCtx("POST", "/unmapped/fn/invocations", none, null, "")));
+        assertEquals("ecr:DescribeRepositories", routed.resolveRoute("ecr",
+                mockCtx("GET", "/unmapped/repositories", none, null, "")));
+        assertEquals("lambda:GetFunction", routed.resolveRoute("lambda",
+                mockCtx("GET", "/2015-03-31/functions/fn", none, null, "")));
+    }
+
+    /**
+     * With the vendored routes, OpenSearch's and Access Analyzer's requests whose actions act on no resource type
+     * are checked as their operations, the OpenSearch VPC endpoint operations among them, in both API versions;
+     * those AWS checks on an analyzer stay unmapped, so a grant scoped to one is not refused.
+     */
+    @ParameterizedTest
+    @CsvSource({"es,GET,/2021-01-01/domain,es:ListDomainNames",
+            "es,GET,/2015-01-01/domain,es:ListDomainNames",
+            "es,GET,/2021-01-01/opensearch/versions,es:ListVersions",
+            "es,POST,/2021-01-01/opensearch/vpcEndpoints,es:CreateVpcEndpoint",
+            "es,GET,/2021-01-01/opensearch/vpcEndpoints,es:ListVpcEndpoints",
+            "es,POST,/2021-01-01/opensearch/vpcEndpoints/describe,es:DescribeVpcEndpoints",
+            "es,POST,/2021-01-01/opensearch/vpcEndpoints/update,es:UpdateVpcEndpoint",
+            "es,DELETE,/2021-01-01/opensearch/vpcEndpoints/aos-123,es:DeleteVpcEndpoint",
+            "es,GET,/2021-01-01/opensearch/domain/logs/vpcEndpoints,es:ListVpcEndpointsForDomain",
+            "es,GET,/2015-01-01/es/vpcEndpoints,es:ListVpcEndpoints",
+            "access-analyzer,GET,/analyzer,access-analyzer:ListAnalyzers",
+            "access-analyzer,POST,/policy/validation,access-analyzer:ValidatePolicy"})
+    void aVendoredRouteOfNoResourceTypeIsCheckedAsItsOperation(String scope, String method, String path,
+                                                                 String action) {
+        assertEquals(action, registry.resolveRoute(scope, mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"access-analyzer,PUT,/analyzer", "access-analyzer,GET,/analyzer/default",
+            "access-analyzer,DELETE,/analyzer/default"})
+    void aVendoredRouteAwsChecksOnAResourceStaysUnmapped(String scope, String method, String path) {
+        assertNull(registry.resolveRoute(scope, mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
+    }
+
+    /**
+     * OpenSearch's domain routes, in both API versions, are checked as their operations, the vendored request
+     * resources reading the domain from the path, the body or the query, and the labels the routed path gives the
+     * route are the ones the request resources read.
+     */
+    @ParameterizedTest
+    @CsvSource({"GET,/2021-01-01/opensearch/domain/logs,es:DescribeDomain",
+            "POST,/2021-01-01/opensearch/domain,es:CreateDomain",
+            "DELETE,/2021-01-01/opensearch/domain/logs,es:DeleteDomain",
+            "GET,/2021-01-01/opensearch/domain/logs/config,es:DescribeDomainConfig",
+            "GET,/2015-01-01/es/domain/logs,es:DescribeElasticsearchDomain",
+            "POST,/2015-01-01/es/domain/logs/config,es:UpdateElasticsearchDomainConfig"})
+    void anOpenSearchDomainRouteIsCheckedAsItsOperation(String method, String path, String action) {
+        assertEquals(action, registry.resolveRoute("es", mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
+    }
+
+    @Test
+    void theLabelsOfTheVendoredRouteARequestMatchesAreItsPathsValuesDecoded() {
+        MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
+        assertEquals(Map.of("DomainName", "logs"),
+                IamActionRegistry.pathLabels("es", mockCtx("GET", "/2021-01-01/opensearch/domain/logs", none, null, "")));
+        assertEquals(Map.of("DomainName", "logs", "IndexName", "a b"), IamActionRegistry.pathLabels("es",
+                mockCtx("GET", "/2021-01-01/opensearch/domain/logs/index/a%20b", none, null, "")));
+        assertEquals(Map.of(), IamActionRegistry.pathLabels("es", mockCtx("GET", "/nothing", none, null, "")));
+        assertEquals(Map.of(), IamActionRegistry.pathLabels("sqs", mockCtx("GET", "/queue", none, null, "")));
+    }
 
     @ParameterizedTest
     @CsvSource({"/policy/validation", "/%70olicy/validation", "/policy/%76alidation",

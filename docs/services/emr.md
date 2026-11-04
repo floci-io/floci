@@ -125,8 +125,10 @@ but for its bootstrap actions and its storage.
   `s3://<region>.elasticmapreduce/libs/script-runner/script-runner.jar` URI) its script, as the Release
   Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. An `s3-dist-cp` step runs
   Floci's own S3DistCp (see **S3DistCp**), and `hadoop-streaming` and `hadoop-lzo` steps the image's
-  Hadoop (see **Hadoop streaming and MapReduce**). `hive-script` and `pig-script`, which the image does not
-  have, are `FAILED` without running.
+  Hadoop (see **Hadoop streaming and MapReduce**). On a cluster whose `Applications` name Hive, a Hive step
+  runs Hive (see **Hive steps**); on one without, `hive-script` runs in the release's image, and says
+  what EMR's does without Hive, "Hive isn't installed.", and the step fails. `pig-script`, which the image
+  does not have, is `FAILED` without running.
 * **Commands and scripts**: they run as the image's `hadoop` user in `/home/hadoop`, with `bash`, Python
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
@@ -190,6 +192,41 @@ but for its bootstrap actions and its storage.
   shell cannot export is left out. A custom JAR step's `spark-submit` reads neither `hadoop-env.sh` nor
   Hadoop's `log4j.properties`, so those two do not reach it: a `hadoop-env` `HADOOP_CLASSPATH`, say, is not on
   its class path, and it logs as Spark does.
+* **Hive steps**: an EMR cluster's nodes hold every application it installs, so a cluster whose `Applications` name
+  Hive runs its bootstrap actions and all its steps in an image of the release's with Hive added: the release's EMR
+  Serverless image with the Hive, Tez, HDFS, MapReduce and YARN of its EMR Serverless Hive image
+  (`public.ecr.aws/emr-serverless/hive/<release>`, 2.7 GB unpacked, pulled to make it; `hive-image-template` names
+  another). Floci makes it the first time one of the release's clusters needs it: a container of the release's
+  image, never started, gets the Hive image's folders, and is committed, as a bootstrap's is, as
+  `floci-aws-emr-release:<release>-<hash>`, 0.6 GB more than the release's image, and kept for the release's next
+  cluster (`docker image rm` removes it); a newer pull of either image makes another. A failure to make it, a Hive
+  image that cannot be pulled say, fails the step that needed it ("The step could not start: ..."), or, for a
+  bootstrap, ends the cluster with `INTERNAL_ERROR`. The two images ship different builds of one goodies JAR under
+  one name, so Tez keeps the Hive image's, and Hive runs with the Hive image's Hadoop configuration, which puts Tez
+  on its class path, while the cluster's other steps keep the release image's. Then a `command-runner.jar` step
+  running `hive-script`, as the AWS CLI writes a `Type=Hive` step (`hive-script --run-hive-script --args` and the
+  step's `Args`), or `hive` itself, runs Hive: `hive-script` runs `hive` with the arguments after `--args`, as the
+  image's `hadoop` user in `/home/hadoop`, with Tez in local mode in its JVM, as an [EMR Serverless Hive job
+  run](emr-serverless.md#running-hive-job-runs)'s does, on the cluster's storage. It gets the cluster's
+  `core-site`, `tez-site` and `hive-site` properties, each a `--hiveconf`, then the step's own arguments, so a
+  `--hiveconf` of the step's wins over a classification's, as it does over `hive-site.xml`; the cluster's
+  `hive-env` exports are its environment. Floci's settings come before them all, and any of them replaces one: S3A
+  on Floci's S3 for `s3://`, Tez in local mode, the cluster's HDFS, and its metastore. "By default, Hive records
+  metastore information in a MySQL database on the primary node's file system", which Floci keeps as an embedded
+  Derby database in the cluster's `/mnt`, so a table one Hive step makes is there for the next, until the cluster
+  ends. The `hive-site` setting of `hive.metastore.client.factory.class` the Release Guide gives for the Glue Data
+  Catalog uses Floci's Glue instead, with the cluster's account as its `hive.metastore.glue.catalogid`, which a
+  `hive-site` one replaces. A table without a `LOCATION` is in the cluster's HDFS, `/user/hive/warehouse` ("By
+  default, this is a location in HDFS"). Hive reaches that HDFS folder under the `viewfs` scheme: it looks up the
+  HDFS encryption zone of every `hdfs://` path it writes or reads a table at, which only an HDFS NameNode can
+  answer. So a table's location reads `viewfs:/user/hive/warehouse/<table>`, the folder other steps name
+  `hdfs:///user/hive/warehouse/<table>`, and a Hive statement on an `hdfs://` path fails ("Unable to determine if
+  hdfs:... is encrypted"). Spark steps do not use the cluster's Hive metastore, so they see a Hive step's tables
+  only through the Glue Data Catalog. Only one Hive step at a time can use the cluster's metastore: with
+  `StepConcurrencyLevel` above 1, a Hive step that starts while another runs fails ("Another instance of Derby may
+  have already booted the database"). What the bootstrap actions installed is there for every step, Hive's
+  included. A script or command that starts `hive` itself gets none of these settings: only a Hive step runs Hive.
+  Hive's own log stays in the container.
 * **S3DistCp**: the image has no `s3-dist-cp`, so a `command-runner.jar` step whose
   first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
   `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
@@ -231,7 +268,8 @@ but for its bootstrap actions and its storage.
   [EMR Serverless job run](emr-serverless.md#running-spark-job-runs)'s do, so Java code reaches Floci
   over HTTPS too, and through AWS's own endpoint names with `FLOCI_DNS_SPOOF_AWS_ENDPOINTS`.
 * **Bootstrap actions**: a cluster with `BootstrapActions` is `BOOTSTRAPPING` until they have run, one
-  after the other, in one container of the release's image, whatever the second half of
+  after the other, in one container of the release's image (with Hive added for a cluster with Hive, see
+  **Hive steps**), whatever the second half of
   `cluster-startup-delay-seconds`. Each action's script is read from Floci's S3 (an `s3n://` or `s3a://`
   path names the same bucket, and another path is the image's own) and runs with its `Args` in
   `/home/hadoop`, with the credentials of the cluster's `JobFlowRole` instance profile, as a step would.
@@ -315,7 +353,8 @@ but for its bootstrap actions and its storage.
   and the other log folders are not written, nothing is copied while a step runs (EMR copies its logs
   every five minutes), and `FailureDetails` has no `LogFile`.
 * **Image**: `image-template` names another image, such as a mirror or a dated tag of the release's
-  image: `registry.internal/emr-serverless/spark/%s:20250425`. A release with no EMR Serverless image
+  image: `registry.internal/emr-serverless/spark/%s:20250425`, and `hive-image-template` another Hive image:
+  `registry.internal/emr-serverless/hive/%s:20250425`. A release with no EMR Serverless image
   fails its steps with "The step could not start: Could not pull image".
 
 ## EventBridge events
@@ -368,6 +407,7 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps)) |
 | `FLOCI_SERVICES_EMR_DOCKER_NETWORK` | the global default | Docker network for step containers |
 | `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label |
+| `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/hive/%s:latest` | The EMR Serverless Hive image a `docker` cluster with Hive takes Hive from, `%s` standing for the cluster's release label; see [Hive steps](#running-steps) |
 | `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers and bootstrap containers a previous run of this Floci left on the Docker daemon, and the images bootstrap actions left for clusters that are gone or have ended, when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |
 
 ## Release catalogue

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.ProtocolClaim;
+import io.github.hectorvent.floci.core.common.RequestResources;
 import io.github.hectorvent.floci.core.common.WireProtocol;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser;
 import io.github.hectorvent.floci.services.eks.EksController;
@@ -23,6 +24,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 /**
@@ -32,7 +34,9 @@ import java.util.regex.Pattern;
  * parameter, or the controller's Operation fallback, is mapped directly to
  * {@code <service>:<Action>}.
  *
- * For REST-JSON services the first matching rule wins (specific before wildcard).
+ * For REST-JSON services the first matching rule wins (specific before wildcard), and a request no
+ * rule matches is the operation whose route in botocore's model it matches ({@link IamRestRoutes}),
+ * when Floci can check that operation as AWS does.
  */
 @ApplicationScoped
 public class IamActionRegistry {
@@ -45,6 +49,16 @@ public class IamActionRegistry {
 
     private static final Logger LOG = Logger.getLogger(IamActionRegistry.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private final IamRestRoutes restRoutes;
+
+    public IamActionRegistry() {
+        this(IamRestRoutes.vendored());
+    }
+
+    IamActionRegistry(IamRestRoutes restRoutes) {
+        this.restRoutes = restRoutes;
+    }
 
     /**
      * A route and the action it is checked as. A rule naming a query parameter matches only a request
@@ -558,15 +572,6 @@ public class IamActionRegistry {
         rule("ses", "POST",  "^/v2/email/update-configuration-sets/?$",                              "ses:UpdateConfigurationSet"),
         rule("ses", "POST",  "^/v2/email/vdm/recommendations/?$",                                    "ses:ListRecommendations"),
 
-        // ── OpenSearch Service VPC endpoints ───────────────────────────────────
-        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/?$",          "es:CreateVpcEndpoint"),
-        rule("es", "GET",    "^/2021-01-01/opensearch/vpcEndpoints/?$",          "es:ListVpcEndpoints"),
-        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/describe/?$", "es:DescribeVpcEndpoints"),
-        rule("es", "POST",   "^/2021-01-01/opensearch/vpcEndpoints/update/?$",   "es:UpdateVpcEndpoint"),
-        rule("es", "DELETE", "^/2021-01-01/opensearch/vpcEndpoints/[^/]+/?$",    "es:DeleteVpcEndpoint"),
-        rule("es", "GET",    "^/2021-01-01/opensearch/domain/[^/]+/vpcEndpoints/?$",
-                "es:ListVpcEndpointsForDomain"),
-
         // ── Resource Groups ─────────────────────────────────────────────────────
         rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
         rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),
@@ -626,7 +631,8 @@ public class IamActionRegistry {
      * For JSON 1.1 protocol the action comes from {@code X-Amz-Target}
      * (e.g. {@code DynamoDB_20120810.PutItem} → {@code dynamodb:PutItem}).
      *
-     * For REST-JSON services the action is derived from the path rule table.
+     * For REST-JSON services the action is derived from the path rule table, or else from the
+     * operation whose botocore route the request matches.
      *
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
@@ -685,17 +691,19 @@ public class IamActionRegistry {
      * so the route's rule would not match and the call would pass as an unknown action. It is read
      * from the request URI because RESTEasy Reactive does not serve {@code UriInfo.getPath(false)}.
      *
-     * <p>Returns {@code null} when no rule matches (caller treats this as ALLOW).
+     * <p>A request no rule matches is the operation whose route, in botocore's model of its service, it
+     * matches, and is checked as that operation's action ({@link IamAuthorizedActions#actionFor}), as a
+     * request naming its operation is, when Floci can check it as AWS does ({@code checkedAsAws}). One it
+     * cannot is left unmapped rather than checked on {@code *}, which would refuse a grant scoped to the
+     * resource AWS checks it on. The scopes the vendored routes list as hand-routed, S3's and API Gateway's,
+     * have their rules alone. Returns {@code null} when nothing maps the request (caller treats this as
+     * ALLOW).
      */
     public String resolveRoute(String credentialScope, ContainerRequestContext ctx) {
         String method = ctx.getMethod().toUpperCase();
         // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
         // bucket's one trailing slash, so an S3 path is matched as sent.
         String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
-        String modeled = IamRestRoutes.actionFor(credentialScope, method, path);
-        if (modeled != null) {
-            return modeled;
-        }
 
         if ("s3".equals(credentialScope)) {
             // An S3 Control route is matched before the query overrides below, which would read the
@@ -722,9 +730,45 @@ public class IamActionRegistry {
                 return rule.action();
             }
         }
+        Optional<String> operation = restRoutes.operation(credentialScope, method, path,
+                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters());
+        if (operation.isPresent()) {
+            String action = IamAuthorizedActions.actionFor(credentialScope, operation.get());
+            if (checkedAsAws(credentialScope, operation.get(), action)) {
+                return action;
+            }
+        }
 
         LOG.debugv("No action mapping for {0} {1} {2} — defaulting to ALLOW", credentialScope, method, path);
         return null;
+    }
+
+    /**
+     * The value a REST request's path gives each label of the vendored route it matches, decoded, by the label's
+     * name; empty when it matches none. {@link RequestResources} reads a member the table of request resources
+     * locates in the path from them, as {@link #resolveRoute} matches the route.
+     */
+    public static Map<String, String> pathLabels(String credentialScope, ContainerRequestContext ctx) {
+        IamRestRoutes routes = IamRestRoutes.vendored();
+        if (credentialScope == null || !routes.routes(credentialScope)) {
+            return Map.of();
+        }
+        return routes.match(credentialScope, ctx.getMethod().toUpperCase(), routedPath(ctx),
+                        ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters())
+                .map(IamRestRoutes.Match::labels).orElse(Map.of());
+    }
+
+    /**
+     * Whether a request of the operation is checked on the resources AWS checks its action on: those its request
+     * names, which the vendored request resources read for the operation ({@link RequestResources#reads}) or
+     * {@code ResourceArnBuilder} builds for its namespace ({@link RequestResources#builtByHand}), or {@code *}
+     * when AWS authorizes the action on no resource type ({@link IamAuthorizedActions#actsOnNoResourceType}), so
+     * none of the resources in the request's path is needed.
+     */
+    private static boolean checkedAsAws(String credentialScope, String operation, String action) {
+        return RequestResources.reads(credentialScope + ":" + operation)
+                || RequestResources.builtByHand(credentialScope)
+                || IamAuthorizedActions.actsOnNoResourceType(action);
     }
 
     /**
@@ -781,11 +825,16 @@ public class IamActionRegistry {
      * unknown action.
      */
     static String routedPath(ContainerRequestContext ctx) {
-        String path = rawPath(ctx);
-        while (path.length() > 1 && path.endsWith("/")) {
-            path = path.substring(0, path.length() - 1);
+        return withoutTrailingSlash(rawPath(ctx));
+    }
+
+    /** The path without its trailing slashes, the root's own kept. */
+    static String withoutTrailingSlash(String path) {
+        String trimmed = path;
+        while (trimmed.length() > 1 && trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
         }
-        return path;
+        return trimmed;
     }
 
     /**

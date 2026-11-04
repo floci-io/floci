@@ -623,6 +623,7 @@ floci:
       runner-mode: immediate                # docker = run bootstrap actions and steps in containers
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
+      # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # Hive for clusters with Hive
       # Remove the step drivers a previous run of this deployment left on the daemon, and the images
       # bootstrap actions left for clusters that are gone or have ended, when the EMR service starts.
       # Scoped to this deployment's own containers and images.
@@ -754,6 +755,9 @@ floci:
       # FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS
       instance-resource-limits: true
       aws-faithful-private-ip: false
+      # Floci in a container: report an instance's address on Floci's own Docker network as its
+      # public IP. FLOCI_SERVICES_EC2_PUBLIC_IP_FROM_SERVICE_NETWORK
+      public-ip-from-service-network: false
       # container-ips-routable: true  # Auto-detected by default (a throwaway TCP probe toward
                                        # the container network). Set explicitly when the probe
                                        # can't speak for your clients, e.g. Floci itself running

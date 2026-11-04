@@ -2600,6 +2600,65 @@ class Ec2ServiceTest {
                 .getFirst().getAssociationId(), "a failed gateway must not claim the allocation");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void deletingAnInterfaceSerializesWithAddressAssociation(boolean associateFirst) throws Exception {
+        ParkingStore<NetworkInterface> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<NetworkInterface> interfaceStore =
+                new AccountAwareStorageBackend<>(parking, null, "000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-network-interfaces.json", interfaceStore)));
+        String region = "us-east-1";
+        String subnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String interfaceId = service.createNetworkInterface(region, subnetId, null, null,
+                List.of(), List.of(), List.of()).getNetworkInterfaceId();
+        String allocationId = service.allocateAddress(region).getAllocationId();
+        Runnable associate = () -> service.associateAddress(region, allocationId, null, interfaceId, null);
+        Runnable delete = () -> service.deleteNetworkInterface(region, interfaceId);
+        AtomicReference<Thread> firstWorker = new AtomicReference<>();
+        AtomicReference<Thread> secondWorker = new AtomicReference<>();
+        parking.parkNextRead();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> first = workers.submit(() -> {
+                firstWorker.set(Thread.currentThread());
+                (associateFirst ? associate : delete).run();
+            });
+            assertTrue(parking.awaitParked(), "the first request never read the interface");
+            Future<?> second = workers.submit(() -> {
+                secondWorker.set(Thread.currentThread());
+                (associateFirst ? delete : associate).run();
+            });
+            String secondMethod = associateFirst ? "deleteNetworkInterface" : "associateAddress";
+            Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> second.isDone()
+                    || isBlockedIn(secondWorker.get(), secondMethod, firstWorker.get()));
+            parking.release();
+            first.get(10, TimeUnit.SECONDS);
+            if (associateFirst) {
+                second.get(10, TimeUnit.SECONDS);
+            } else {
+                ExecutionException refusal = assertThrows(ExecutionException.class,
+                        () -> second.get(10, TimeUnit.SECONDS));
+                AwsException missing = assertInstanceOf(AwsException.class, refusal.getCause());
+                assertEquals("InvalidNetworkInterfaceID.NotFound", missing.getErrorCode());
+                assertEquals(400, missing.getHttpStatus());
+            }
+            AwsException missing = assertThrows(AwsException.class,
+                    () -> service.describeNetworkInterfaces(region, List.of(interfaceId), Map.of()));
+            assertEquals("InvalidNetworkInterfaceID.NotFound", missing.getErrorCode());
+            Address address = service.describeAddresses(region, List.of(allocationId), Map.of()).getFirst();
+            assertNull(address.getAssociationId(), "the allocation must not remain associated with a deleted interface");
+            assertNull(address.getNetworkInterfaceId());
+            assertNull(address.getPrivateIpAddress());
+        } finally {
+            parking.release();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
     /** AssociateAddress refuses an allocation a NAT gateway holds; the gateway keeps it. */
     @Test
     void associateAddressRefusesANatGatewaysElasticIp() {

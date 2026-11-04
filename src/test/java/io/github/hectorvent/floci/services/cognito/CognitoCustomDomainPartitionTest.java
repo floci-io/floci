@@ -14,6 +14,7 @@ import java.util.Map;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -103,11 +104,24 @@ class CognitoCustomDomainPartitionTest {
 
         UserPoolDomain created = service.createUserPoolDomain(CUSTOM_DOMAIN, poolId, CUSTOM, null);
         assertTrue(created.isCustomDomain());
+        assertThat(created.getCloudFrontDistribution(), matchesPattern("d[0-9a-f]{13}\\.cloudfront\\.net"));
 
         Map<String, Object> replacement =
                 Map.of("CertificateArn", "arn:aws:acm:us-east-1:" + ACCOUNT + ":certificate/def");
         UserPoolDomain updated = service.updateUserPoolDomain(CUSTOM_DOMAIN, poolId, replacement, null);
         assertEquals(replacement.get("CertificateArn"), updated.getCertificateArn());
+    }
+
+    @Test
+    void aCustomDomainInChinaIsServedFromTheChinaCloudFrontSuffix() {
+        CognitoService service = serviceIn("cn-north-1");
+        String poolId = createPool(service, "cn-north-1");
+        Map<String, Object> certificate =
+                Map.of("CertificateArn", "arn:aws-cn:acm:us-east-1:" + ACCOUNT + ":certificate/abc");
+
+        UserPoolDomain created = service.createUserPoolDomain(CUSTOM_DOMAIN, poolId, certificate, null);
+
+        assertThat(created.getCloudFrontDistribution(), matchesPattern("d[0-9a-f]{13}\\.cloudfront\\.cn"));
     }
 
     @ParameterizedTest

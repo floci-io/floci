@@ -26,7 +26,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -43,6 +45,7 @@ class SnsMessageSignatureIntegrationTest {
             List.of("Message", "MessageId", "Subject", "Timestamp", "TopicArn", "Type");
     private static final List<String> CONFIRMATION_FIELDS =
             List.of("Message", "MessageId", "SubscribeURL", "Timestamp", "Token", "TopicArn", "Type");
+    private static final String MILLIS_TIMESTAMP = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final List<String> received = new CopyOnWriteArrayList<>();
@@ -80,6 +83,7 @@ class SnsMessageSignatureIntegrationTest {
 
         JsonNode confirmation = MAPPER.readTree(awaitMessage(0));
         assertEquals("SubscriptionConfirmation", confirmation.get("Type").asText());
+        assertThat(confirmation.get("Timestamp").asText(), matchesPattern(MILLIS_TIMESTAMP));
         assertEquals("1", confirmation.get("SignatureVersion").asText());
         assertTrue(verify(confirmation, "SigningCertURL"));
 
@@ -97,6 +101,7 @@ class SnsMessageSignatureIntegrationTest {
         JsonNode notification = MAPPER.readTree(awaitMessage(1));
         assertEquals("Notification", notification.get("Type").asText());
         assertEquals("Signed subject", notification.get("Subject").asText());
+        assertThat(notification.get("Timestamp").asText(), matchesPattern(MILLIS_TIMESTAMP));
         assertEquals("1", notification.get("SignatureVersion").asText());
         assertTrue(verify(notification, "SigningCertURL"));
         assertEquals(confirmation.get("SigningCertURL").asText(), notification.get("SigningCertURL").asText());
@@ -113,6 +118,7 @@ class SnsMessageSignatureIntegrationTest {
 
         assertEquals("Notification", envelope.get("Type").asText());
         assertFalse(envelope.has("Subject"));
+        assertThat(envelope.get("Timestamp").asText(), matchesPattern(MILLIS_TIMESTAMP));
         assertEquals("1", envelope.get("SignatureVersion").asText());
         assertTrue(envelope.get("UnsubscribeURL").asText().contains("Action=Unsubscribe"));
         assertTrue(verify(envelope, "SigningCertURL"));
@@ -144,6 +150,55 @@ class SnsMessageSignatureIntegrationTest {
         assertEquals("2", envelope.get("SignatureVersion").asText());
         assertTrue(verify(envelope, "SigningCertURL"));
         assertFalse(verifyWith(envelope, "SigningCertURL", "SHA1withRSA"));
+    }
+
+    @Test
+    void everySqsSubscriberOfOnePublishGetsTheSameTimestampAndSignature() throws Exception {
+        String firstQueue = createQueue("shared-signature-queue-1");
+        String secondQueue = createQueue("shared-signature-queue-2");
+        String topicArn = createTopic("shared-signature-topic");
+        subscribe(topicArn, "sqs", firstQueue);
+        subscribe(topicArn, "sqs", secondQueue);
+
+        publish(topicArn, "Hello shared", "Shared subject");
+        JsonNode first = MAPPER.readTree(receiveBody(firstQueue));
+        JsonNode second = MAPPER.readTree(receiveBody(secondQueue));
+
+        assertEquals(first.get("MessageId").asText(), second.get("MessageId").asText());
+        assertEquals(first.get("Timestamp").asText(), second.get("Timestamp").asText());
+        assertEquals(first.get("Signature").asText(), second.get("Signature").asText());
+        assertNotEquals(first.get("UnsubscribeURL").asText(), second.get("UnsubscribeURL").asText());
+        assertTrue(verify(first, "SigningCertURL"));
+        assertTrue(verify(second, "SigningCertURL"));
+    }
+
+    @Test
+    void entriesOfOnePublishBatchShareTheTimestamp() throws Exception {
+        String queueUrl = createQueue("batch-timestamp-queue");
+        String topicArn = createTopic("batch-timestamp-topic");
+        subscribe(topicArn, "sqs", queueUrl);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "PublishBatch")
+            .formParam("TopicArn", topicArn)
+            .formParam("PublishBatchRequestEntries.member.1.Id", "a")
+            .formParam("PublishBatchRequestEntries.member.1.Message", "first entry")
+            .formParam("PublishBatchRequestEntries.member.2.Id", "b")
+            .formParam("PublishBatchRequestEntries.member.2.Message", "second entry")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        JsonNode first = MAPPER.readTree(receiveBody(queueUrl));
+        JsonNode second = MAPPER.readTree(receiveBody(queueUrl));
+
+        assertThat(first.get("Timestamp").asText(), matchesPattern(MILLIS_TIMESTAMP));
+        assertEquals(first.get("Timestamp").asText(), second.get("Timestamp").asText());
+        assertNotEquals(first.get("MessageId").asText(), second.get("MessageId").asText());
+        assertTrue(verify(first, "SigningCertURL"));
+        assertTrue(verify(second, "SigningCertURL"));
     }
 
     @Test

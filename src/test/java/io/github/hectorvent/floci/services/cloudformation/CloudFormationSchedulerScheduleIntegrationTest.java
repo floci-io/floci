@@ -295,7 +295,7 @@ class CloudFormationSchedulerScheduleIntegrationTest {
         Queue queue = sqs.createQueue("external-" + suffix, Map.of(), "us-east-1");
         prepareFailedRollback(stack, name, queue);
         allowOriginalRestore(name);
-        continueUpdateRollback(stack);
+        CfnStackWaits.continueUpdateRollback(stack, AUTH);
         outputs(stack, "UPDATE_ROLLBACK_COMPLETE");
 
         cloudFormation(stack, "UpdateStack", externalQueueTemplate(FAILURE, queue),
@@ -321,7 +321,7 @@ class CloudFormationSchedulerScheduleIntegrationTest {
 
         assertUpdateRefused(stack, externalQueueTemplate("", queue),
                 Map.of("Name", name, "Expression", "rate(15 minutes)", "Payload", "third"));
-        continueUpdateRollback(stack);
+        CfnStackWaits.continueUpdateRollback(stack, AUTH);
         outputs(stack, "UPDATE_ROLLBACK_FAILED");
 
         getSchedule(name, "default").then().statusCode(200)
@@ -505,7 +505,7 @@ class CloudFormationSchedulerScheduleIntegrationTest {
                 .when(scheduler).deleteSchedule(replacementName, "default", "us-east-1");
         // With its delete still failing, the rollback finishes only by skipping the schedule, which
         // keeps the replacement owed when the next update recreates it at the same address.
-        continueUpdateRollback(stack, "Schedule");
+        CfnStackWaits.continueUpdateRollback(stack, AUTH, "Schedule");
         outputs(stack, "UPDATE_ROLLBACK_COMPLETE");
 
         // Change both resources so the engine actually retries the replacement and its failing dependent.
@@ -625,7 +625,7 @@ class CloudFormationSchedulerScheduleIntegrationTest {
         recreateScheduleViaApi(name, "default");
 
         try {
-            continueUpdateRollback(stack);
+            CfnStackWaits.continueUpdateRollback(stack, AUTH);
             outputs(stack, "UPDATE_ROLLBACK_COMPLETE");
             getSchedule(name, "default").then().statusCode(200)
                     .body("ScheduleExpression", equalTo("rate(5 minutes)"))
@@ -685,7 +685,7 @@ class CloudFormationSchedulerScheduleIntegrationTest {
                 && group.equals(request.getGroupName())), eq("us-east-1"));
 
         try {
-            continueUpdateRollback(stack);
+            CfnStackWaits.continueUpdateRollback(stack, AUTH);
             outputs(stack, "UPDATE_ROLLBACK_COMPLETE");
             assertTrue(pausedRecreatedDestination.get());
             getSchedule(name, group).then().statusCode(404);
@@ -1061,14 +1061,6 @@ class CloudFormationSchedulerScheduleIntegrationTest {
     private static void assertUpdateRefused(String stack, String template, Map<String, String> parameters) {
         cloudFormationRequest(stack, "UpdateStack", template, parameters).post("/").then().statusCode(400)
                 .body(containsString("is in UPDATE_ROLLBACK_FAILED state and can not be updated."));
-    }
-
-    private static void continueUpdateRollback(String stack, String... resourcesToSkip) {
-        RequestSpecification request = cloudFormationRequest(stack, "ContinueUpdateRollback", null, Map.of());
-        for (int i = 0; i < resourcesToSkip.length; i++) {
-            request.formParam("ResourcesToSkip.member." + (i + 1), resourcesToSkip[i]);
-        }
-        request.post("/").then().statusCode(200);
     }
 
     private static Map<String, String> outputs(String stack, String expectedStatus) {

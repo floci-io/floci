@@ -18,7 +18,8 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>For {@code overwrite:path}, the source value may contain embedded
- * {@code $request.path.X} / {@code $context.X} substrings which are resolved in-place.
+ * {@code $request.path.X} / {@code $context.X} substrings which are resolved in-place. They land in
+ * a URL, so a path parameter keeps the caller's encoding and any other value is percent-encoded.
  *
  * <p>When a source resolves to {@code null} (missing claim, missing header, etc.),
  * overwrite/append actions are silently skipped to match AWS behavior. {@code remove}
@@ -27,6 +28,7 @@ import java.util.regex.Pattern;
 public class RequestParameterMapper {
     private static final Pattern EMBEDDED_VAR =
             Pattern.compile("\\$[a-zA-Z]+(\\.[a-zA-Z][a-zA-Z0-9_-]*)+");
+    private static final String REQUEST_PATH_PREFIX = "$request.path.";
 
     private final ContextValueResolver resolver;
 
@@ -83,10 +85,18 @@ public class RequestParameterMapper {
     private String substituteEmbeddedVars(String template, RequestContext ctx) {
         if (template == null) return null;
         if (!template.contains("$")) return template;
+        Map<String, String> targetPathParams = ctx.targetPathParams();
         Matcher m = EMBEDDED_VAR.matcher(template);
         StringBuilder out = new StringBuilder();
         while (m.find()) {
-            String resolved = resolver.resolve(m.group(), ctx);
+            String variable = m.group();
+            String resolved;
+            if (variable.startsWith(REQUEST_PATH_PREFIX)) {
+                resolved = targetPathParams == null ? null
+                        : targetPathParams.get(variable.substring(REQUEST_PATH_PREFIX.length()));
+            } else {
+                resolved = PathTemplateResolver.encodePathValue(resolver.resolve(variable, ctx));
+            }
             m.appendReplacement(out, Matcher.quoteReplacement(resolved == null ? "" : resolved));
         }
         m.appendTail(out);
