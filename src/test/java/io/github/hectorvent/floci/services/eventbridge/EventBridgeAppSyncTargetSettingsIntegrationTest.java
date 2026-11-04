@@ -2,12 +2,21 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.PlanResult;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncTransportException;
+import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
+import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
 import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -20,6 +29,7 @@ import software.amazon.awssdk.services.eventbridge.model.EventBridgeException;
 import software.amazon.awssdk.services.eventbridge.model.RuleState;
 import software.amazon.awssdk.services.eventbridge.model.Target;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.UUID;
 
@@ -32,7 +42,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @QuarkusTest
@@ -44,6 +59,8 @@ class EventBridgeAppSyncTargetSettingsIntegrationTest {
     private static final String OPERATION = "mutation Publish($id: ID!) { publish(id: $id) { id } }";
     @InjectMock
     GraphqlSidecarClient sidecar;
+    @Inject
+    EventsCfnProvisioner provisioner;
     private EventBridgeClient client;
     private String rule;
 
@@ -155,6 +172,69 @@ class EventBridgeAppSyncTargetSettingsIntegrationTest {
         assertEquals(500, error.statusCode());
         assertFalse(error.getMessage().contains("SENSITIVE"));
         assertEquals(List.of(original), client.listTargetsByRule(request -> request.rule(rule)).targets());
+    }
+
+    @Test
+    void cloudFormationRollbackRestoresAcceptedTargetsWhileTheParserIsUnavailable() {
+        putTarget(OPERATION);
+        Target original = listedTarget();
+        StackResource resource = ruleResource();
+        ObjectNode props = new ObjectMapper().createObjectNode().put("Name", rule).put("State", "DISABLED");
+        props.putObject("EventPattern");
+        props.putArray("Targets");
+        RequestScopes.runAs(ACCOUNT, "us-east-1", () -> provisioner.provision(resource, props, updateContext()));
+        assertTrue(client.listTargetsByRule(request -> request.rule(rule)).targets().isEmpty());
+
+        when(sidecar.plan(any(), any(), any(), any())).thenThrow(
+                new AppSyncTransportException(500, "InternalFailureException", "Parser unavailable"));
+        clearInvocations(sidecar);
+        RequestScopes.runAs(ACCOUNT, "us-east-1", () -> assertTrue(provisioner.rollbackUpdate(resource)));
+
+        assertEquals(List.of(original), client.listTargetsByRule(request -> request.rule(rule)).targets());
+        assertNull(resource.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR));
+        verifyNoInteractions(sidecar);
+    }
+
+    @Test
+    void failedCloudFormationUpdateRestoresItsSnapshotWithoutRetryingTheParser() {
+        putTarget(OPERATION);
+        Target original = listedTarget();
+        StackResource resource = ruleResource();
+        ObjectNode props = new ObjectMapper().createObjectNode().put("Name", rule).put("State", "DISABLED");
+        props.putObject("EventPattern");
+        props.putArray("Targets").addObject().put("Id", "appsync").put("Arn", ENDPOINT).put("RoleArn", ROLE)
+                .putObject("AppSyncParameters").put("GraphQLOperation", "mutation { replacement }");
+        when(sidecar.plan(any(), any(), any(), any())).thenThrow(
+                new AppSyncTransportException(500, "InternalFailureException", "Parser unavailable"));
+        clearInvocations(sidecar);
+        RequestScopes.runAs(ACCOUNT, "us-east-1", () -> assertThrows(AwsException.class,
+                () -> provisioner.provision(resource, props, updateContext())));
+
+        assertEquals(List.of(original), client.listTargetsByRule(request -> request.rule(rule)).targets());
+        assertNull(resource.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+        assertNull(resource.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR));
+        verify(sidecar, times(1)).plan(any(), any(), any(), any());
+    }
+
+    private StackResource ruleResource() {
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::Events::Rule");
+        resource.setLogicalId("Rule");
+        resource.setPhysicalId(rule);
+        resource.setAttributes(new HashMap<>());
+        return resource;
+    }
+
+    private ProvisionContext updateContext() {
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolve(any())).thenAnswer(call -> {
+            JsonNode node = call.getArgument(0);
+            return node == null ? null : node.asText();
+        });
+        when(engine.resolveNode(any())).thenAnswer(call -> call.getArgument(0));
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(call -> call.getArgument(0));
+        when(engine.omitNoValue(any())).thenAnswer(call -> call.getArgument(0));
+        return new ProvisionContext(engine, "us-east-1", ACCOUNT, "rollback-stack", rule);
     }
 
     @Test

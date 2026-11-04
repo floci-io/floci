@@ -351,7 +351,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             eventBridgeService.removeTargets(ruleName, busName, added, region);
         }
         if (!restored.isEmpty()) {
-            eventBridgeService.putTargets(ruleName, busName, restored, region);
+            eventBridgeService.restoreAcceptedTargets(ruleName, busName, restored, region);
         }
         resource.getAttributes().remove(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
     }

@@ -492,6 +492,20 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public int putTargets(String ruleName, String busName, List<Target> newTargets, String region) {
         validateTargetSettings(newTargets);
+        newTargets.forEach(appSyncTargetValidator::validate);
+        return upsertTargets(ruleName, busName, newTargets, region);
+    }
+
+    /**
+     * Internal rollback path for previously accepted targets. Local shape checks still apply,
+     * but restoring a snapshot must not depend on the GraphQL sidecar being available.
+     */
+    public int restoreAcceptedTargets(String ruleName, String busName, List<Target> targets, String region) {
+        validateTargetSettings(targets);
+        return upsertTargets(ruleName, busName, targets, region);
+    }
+
+    private int upsertTargets(String ruleName, String busName, List<Target> newTargets, String region) {
         String effectiveBus = resolvedBusName(busName);
         String key = ruleKey(region, effectiveBus, ruleName);
         Rule rule = ruleStore.get(key)
@@ -528,7 +542,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return arn.resource().startsWith("event-bus/") && AwsArnUtils.isForeignAccount(arn, accountId);
     }
 
-    private void validateTargetSettings(List<Target> targets) {
+    private static void validateTargetSettings(List<Target> targets) {
         for (int i = 0; i < targets.size(); i++) {
             Target target = targets.get(i);
             String operation = target.getAppSyncParameters() == null
@@ -577,7 +591,6 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             }
             validateTargetArn(target.getRoleArn(), "iam");
             validateTargetArn(arn, "sqs");
-            appSyncTargetValidator.validate(target);
         }
     }
 

@@ -187,6 +187,8 @@ these settings and a parsed document containing exactly one mutation operation, 
 replacement preserves the previous targets. Validation errors omit the operation's sensitive
 contents. Parsing uses the GraphQL sidecar and requires Docker; it does not require the target
 API to exist or validate its schema fields during `PutTargets`.
+CloudFormation rollback restores previously accepted targets without requiring the GraphQL
+sidecar to be available.
 
 With IAM enforcement enabled, the target role must exist and trust `events.amazonaws.com`,
 including any trust conditions on the rule's `aws:SourceArn` and `aws:SourceAccount`. Its
