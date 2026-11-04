@@ -919,12 +919,14 @@ primary interface. A detached interface records the association on its selected 
 address; omitting `PrivateIpAddress` selects the primary address. Supplying both
 `InstanceId` and `NetworkInterfaceId`, a missing interface, or a private address the
 interface does not own fails before changing an existing association. Association to a
-nonprimary attached interface or a service-managed interface is not implemented and
-returns `Unsupported`.
+nonprimary attached interface or a service-managed interface, including NAT gateway
+and VPC endpoint interfaces, is not implemented and returns `Unsupported`.
 
 Deleting an interface, including deletion on instance termination, disassociates its
-Elastic IP without releasing the allocation. A retained interface keeps its association
-after termination; release still follows that interface's VPC rules.
+Elastic IP without releasing the allocation. Concurrent `AssociateAddress` and
+`DeleteNetworkInterface` requests cannot leave an association pointing to a deleted
+interface. A retained interface keeps its association after termination; release still
+follows that interface's VPC rules.
 
 AllocateAddress draws Elastic IPs from `203.0.113.0/24`, a range reserved for documentation that
 no host answers on, in every mode, so a client never reaches someone else's host through one. An

@@ -205,6 +205,55 @@ def test_detached_interface_address_association(ec2_client, secondary):
         assert all("Association" not in ip for ip in observed["PrivateIpAddresses"])
 
 
+def _delete_nat_gateway(ec2_client, nat_gateway_id):
+    ec2_client.delete_nat_gateway(NatGatewayId=nat_gateway_id)
+    ec2_client.get_waiter("nat_gateway_deleted").wait(
+        NatGatewayIds=[nat_gateway_id], WaiterConfig={"Delay": 1, "MaxAttempts": 120})
+
+
+@pytest.mark.parametrize("managed_by", ["nat_gateway", "vpc_endpoint"])
+def test_service_managed_interface_association_is_unsupported(ec2_client, managed_by):
+    """Known service interfaces are unsupported, and rejection preserves the EIP."""
+    with ExitStack() as cleanup:
+        vpc = ec2_client.create_vpc(CidrBlock="10.237.0.0/24")["Vpc"]["VpcId"]
+        cleanup.callback(ec2_client.delete_vpc, VpcId=vpc)
+        subnet = ec2_client.create_subnet(
+            VpcId=vpc, CidrBlock="10.237.0.0/26")["Subnet"]["SubnetId"]
+        cleanup.callback(ec2_client.delete_subnet, SubnetId=subnet)
+        if managed_by == "nat_gateway":
+            gateway = ec2_client.create_nat_gateway(
+                SubnetId=subnet, ConnectivityType="private")["NatGateway"]
+            cleanup.callback(_delete_nat_gateway, ec2_client, gateway["NatGatewayId"])
+            ec2_client.get_waiter("nat_gateway_available").wait(
+                NatGatewayIds=[gateway["NatGatewayId"]], WaiterConfig={"Delay": 1, "MaxAttempts": 120})
+            gateway = ec2_client.describe_nat_gateways(
+                NatGatewayIds=[gateway["NatGatewayId"]])["NatGateways"][0]
+            interface_id = gateway["NatGatewayAddresses"][0]["NetworkInterfaceId"]
+        else:
+            endpoint = ec2_client.create_vpc_endpoint(
+                VpcId=vpc, VpcEndpointType="Interface", SubnetIds=[subnet],
+                ServiceName=f"com.amazonaws.{ec2_client.meta.region_name}.ssm")["VpcEndpoint"]
+            cleanup.callback(ec2_client.delete_vpc_endpoints, VpcEndpointIds=[endpoint["VpcEndpointId"]])
+            interface_id = endpoint["NetworkInterfaceIds"][0]
+        interface = ec2_client.describe_network_interfaces(
+            NetworkInterfaceIds=[interface_id])["NetworkInterfaces"][0]
+        assert interface["RequesterManaged"]
+
+        original = ec2_client.create_network_interface(SubnetId=subnet)["NetworkInterface"]["NetworkInterfaceId"]
+        cleanup.callback(ec2_client.delete_network_interface, NetworkInterfaceId=original)
+        allocation = ec2_client.allocate_address(Domain="vpc")["AllocationId"]
+        cleanup.callback(_release_address, ec2_client, allocation)
+        ec2_client.associate_address(AllocationId=allocation, NetworkInterfaceId=original)
+        before = ec2_client.describe_addresses(AllocationIds=[allocation])["Addresses"]
+        with pytest.raises(ClientError) as error:
+            ec2_client.associate_address(AllocationId=allocation, NetworkInterfaceId=interface_id)
+        assert error.value.response["Error"]["Code"] == "Unsupported"
+        assert error.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+        assert ec2_client.describe_addresses(AllocationIds=[allocation])["Addresses"] == before
+        assert ec2_client.describe_network_interfaces(
+            NetworkInterfaceIds=[interface_id])["NetworkInterfaces"][0] == interface
+
+
 @pytest.mark.parametrize("supplied_interface", [False, True])
 @pytest.mark.parametrize("default_vpc", [False, True])
 def test_termination_preserves_only_retained_interface_associations(

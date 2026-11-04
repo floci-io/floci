@@ -13206,17 +13206,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterCombination",
                     "Specify either InstanceId or NetworkInterfaceId, but not both.", 400);
         }
+        ensureDefaultResources(region);
         synchronized (privateIpAllocationLock) {
             NetworkInterface networkInterface = networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
             if (networkInterface == null) {
-                Instance owner = instances.scan(k -> k.startsWith(region + "::")).stream()
-                        .filter(instance -> networkInterfaceId.equals(primaryInterfaceId(instance)))
-                        .findFirst().orElse(null);
-                if (owner != null) {
-                    return associateAddress(region, allocationId, owner.getInstanceId(), privateIpAddress);
-                }
-                throw new AwsException("InvalidNetworkInterfaceID.NotFound",
-                        "The network interface ID '" + networkInterfaceId + "' does not exist.", 400);
+                networkInterface = describeNetworkInterfaces(region, List.of(networkInterfaceId), Map.of())
+                        .networkInterfaces().getFirst();
             }
             networkInterface = releaseIfHostIsGone(region, networkInterface);
             NetworkInterfaceAttachment attachment = networkInterface.getAttachment();
@@ -15252,13 +15247,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * behind, so the status is what says the interface is spoken for.
      */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
-        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
-        if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
-            throw new AwsException("InvalidParameterValue",
-                    "Network interface '" + networkInterfaceId + "' is currently in use", 400);
+        synchronized (privateIpAllocationLock) {
+            NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+            if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
+                throw new AwsException("InvalidParameterValue",
+                        "Network interface '" + networkInterfaceId + "' is currently in use", 400);
+            }
+            releaseInterfaceAddresses(region, networkInterfaceId, true);
+            networkInterfaces.delete(key(region, networkInterfaceId));
         }
-        releaseInterfaceAddresses(region, networkInterfaceId, true);
-        networkInterfaces.delete(key(region, networkInterfaceId));
     }
 
     /**
