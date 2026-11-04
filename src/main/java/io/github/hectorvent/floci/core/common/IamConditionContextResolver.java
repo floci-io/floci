@@ -270,13 +270,17 @@ public class IamConditionContextResolver {
 
     /** The {@code redshift:} keys a Redshift request carries in its own members, such as its DbUser. */
     private Map<String, List<String>> redshiftConditionContext(String action, ContainerRequestContext ctx) {
-        Map<String, String> members = RedshiftConditionKeys.members(action);
-        if (members.isEmpty()) {
+        List<String> keys = RequestConditionKeys.requestKeys(action);
+        if (keys.isEmpty()) {
             return null;
         }
         Map<String, String> form = formParameters(ctx);
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        members.forEach((key, member) -> putIfPresent(conditions, key, form.get(member)));
+        for (String key : keys) {
+            for (String member : RequestConditionKeys.members(action, key)) {
+                putIfPresent(conditions, key, form.get(member));
+            }
+        }
         return conditions.isEmpty() ? null : conditions;
     }
 
@@ -363,11 +367,11 @@ public class IamConditionContextResolver {
     /** The authType a web function endpoint request names, and the one the endpoint has before it. */
     private Map<String, List<String>> lambdaConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        for (String member : LambdaWebConditionKeys.members(action, REQUEST_AUTH_TYPE)) {
+        for (String member : RequestConditionKeys.members(action, REQUEST_AUTH_TYPE)) {
             PassedRoles.values(PassedRoles.jsonBody(ctx), member.split("\\."))
                     .forEach(value -> putIfPresent(conditions, REQUEST_AUTH_TYPE, value));
         }
-        if (LambdaWebConditionKeys.takes(action, RESOURCE_AUTH_TYPE)) {
+        if (RequestConditionKeys.takes(action, RESOURCE_AUTH_TYPE)) {
             putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
         }
         return conditions.isEmpty() ? null : conditions;

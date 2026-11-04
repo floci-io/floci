@@ -1,9 +1,9 @@
 {
   "_source": {
-    "generator": "tools/aws/regen_lambda_web_condition_keys.py",
-    "reference": "https://servicereference.us-east-1.amazonaws.com/v1/lambda/lambda.json",
+    "generator": "tools/aws/regen_request_condition_keys.py",
+    "reference": "https://servicereference.us-east-1.amazonaws.com/",
     "botocore": "botocore 1.43.118 (installed package)",
-    "note": "make lambda-web-condition-keys-check re-derives members from botocore; make lambda-web-condition-keys-verify checks actions against AWS."
+    "note": "make request-condition-keys-check re-derives members from botocore; make request-condition-keys-verify checks actions against AWS."
   },
   "actions": {
     "lambda:CreateWebFunction": [
@@ -24,6 +24,12 @@
     "lambda:UpdateWebFunctionEndpoint": [
       "lambda:Request/WebFunctionAuthType",
       "lambda:Resource/WebFunctionAuthType"
+    ],
+    "redshift:CreateClusterUser": [
+      "redshift:DbUser"
+    ],
+    "redshift:GetClusterCredentials": [
+      "redshift:DbUser"
     ]
   },
   "members": {
@@ -40,6 +46,11 @@
     "lambda:UpdateWebFunctionEndpoint": {
       "lambda:Request/WebFunctionAuthType": [
         "authType"
+      ]
+    },
+    "redshift:GetClusterCredentials": {
+      "redshift:DbUser": [
+        "DbUser"
       ]
     }
   }

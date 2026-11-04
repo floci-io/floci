@@ -2744,15 +2744,15 @@ floci populates:
   request, for `GetWebFunctionEndpoint`, `UpdateWebFunctionEndpoint` and
   `DeleteWebFunctionEndpoint`, absent when the endpoint does not exist, as on AWS. An
   `IamAuth` endpoint request carries it too (see [Lambda Web Functions](lambda-web-functions.md)).
-  The actions and request members come from `lambda-web-condition-keys.json`, which
-  `tools/aws/regen_lambda_web_condition_keys.py` generates from the Service Reference and pinned
-  botocore. Regenerate with `make lambda-web-condition-keys-sync`.
+  The actions and request members come from `request-condition-keys.json`, which
+  `tools/aws/regen_request_condition_keys.py` generates from the Service Reference and pinned
+  botocore. Regenerate with `make request-condition-keys-sync`.
 - `redshift:DbUser`: the database user a `GetClusterCredentials` request names in `DbUser`, and the
   same value for the `redshift:CreateClusterUser` check its `AutoCreate` adds, as the value is given,
   so a policy can scope both actions to `dbuser:<cluster>/${redshift:DbUser}`. The actions and request
-  members come from `redshift-condition-keys.json`, which `tools/aws/regen_redshift_condition_keys.py`
+  members come from the same `request-condition-keys.json`, which `tools/aws/regen_request_condition_keys.py`
   generates from the Service Reference and pinned botocore. Regenerate with
-  `make redshift-condition-keys-sync`. `redshift:DbName` and `redshift:DurationSeconds` are not
+  `make request-condition-keys-sync`. `redshift:DbName` and `redshift:DurationSeconds` are not
   populated yet.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
