@@ -5007,6 +5007,7 @@ public class Ec2QueryHandler {
                         .end("instanceStorageInfo");
             }
             xml.start("processorInfo")
+                    .elem("manufacturer", (String) t.get("processorManufacturer"))
                     .start("supportedArchitectures");
             for (String arch : (List<String>) t.get("supportedArchitectures")) {
                 xml.elem("item", arch);
