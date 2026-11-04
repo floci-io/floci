@@ -1676,7 +1676,7 @@ Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kine
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
 Timestream for InfluxDB, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
-Amazon Rekognition and IAM Identity Center they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Amazon Rekognition, IAM Identity Center and Amazon OpenSearch Service they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1853,6 +1853,18 @@ it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
 `resourceArn` query parameter on the other bare routes.
 
+A REST request names its resources in its path and its query as well as its body. For OpenSearch
+Service, the one REST service the table reads, a member its path carries, the `DomainName` of
+`/2021-01-01/opensearch/domain/{DomainName}`, is read from the route the request matches in the
+vendored routes below, and one its query carries, the `arn` of `ListTags`, from the query, as members of
+the body are: `DescribeDomain` is checked on `domain/<DomainName>` and `ListTags` on the ARN it gives.
+A member its path or query carries is read from there alone, as OpenSearch reads it: a
+`GetCompatibleVersions` naming a domain in its body and none in its query names no domain.
+The table reads both API versions' operations, `2015-01-01` and `2021-01-01`, the Service Reference
+listing the first's alone, each the action of its own name. A request of an operation whose resource
+the table does not find, an outbound connection's or an OpenSearch application's, is checked on `*`;
+Floci serves neither.
+
 A route no rule maps is the operation whose route it matches in botocore's model of its service,
 vendored in `src/main/resources/aws/rest-routes.json` (`make aws-data-sync` regenerates it): of the
 routes it matches, the most specific, segment by segment from the left a literal before a label and a
@@ -1863,10 +1875,11 @@ when the Service Reference gives the action no resource type, as AWS authorizes 
 The actions of no resource type are vendored in `src/main/resources/aws/iam-authorized-actions.json`
 for each scope whose routes are read (`make iam-authorized-actions-sync` regenerates them). So
 OpenSearch Service's `ListDomainNames`, `ListVersions` and VPC endpoint operations, in both API
-versions, and Access Analyzer's `ListAnalyzers` and `ValidatePolicy` are checked by their routes. A
-route whose action AWS checks on a resource Floci neither builds nor reads, OpenSearch's domain
-operations and Access Analyzer's analyzer operations among them, is not checked: checked on `*`, a
-grant scoped to the domain or analyzer would be refused. The routes of
+versions, and Access Analyzer's `ListAnalyzers` and `ValidatePolicy` are checked by their routes, and
+so are OpenSearch Service's domain operations, the table of request resources reading the domain they
+name. A route whose action AWS checks on a resource Floci neither builds nor reads, Access Analyzer's
+analyzer operations among them, is not checked: checked on `*`, a grant scoped to the analyzer would
+be refused. The routes of
 Lambda, EKS, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL are all mapped by their rules,
 so none is checked differently. S3 and API Gateway are routed by their rules alone: S3 tells apart the
 operations of one route by their query and headers, and API Gateway is checked by HTTP method. A route
