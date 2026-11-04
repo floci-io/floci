@@ -24,6 +24,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
@@ -66,7 +67,7 @@ class SnsMessageSignerTest {
     void signingFailure_doesNotDeliverAnUnsignedPlaceholder() {
         SnsMessageSigner signer = mock(SnsMessageSigner.class);
         doThrow(new IllegalStateException("Failed to sign SNS message"))
-                .when(signer).sign(any(ObjectNode.class), anyString(), anyString());
+                .when(signer).sign(any(ObjectNode.class), anyString(), anyString(), anyMap());
         LambdaService lambdaService = mock(LambdaService.class);
         SnsService service = new SnsService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),

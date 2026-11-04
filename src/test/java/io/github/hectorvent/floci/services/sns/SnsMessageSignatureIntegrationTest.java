@@ -147,6 +147,54 @@ class SnsMessageSignatureIntegrationTest {
     }
 
     @Test
+    void everySqsSubscriberOfOnePublishGetsTheSameTimestampAndSignature() throws Exception {
+        String firstQueue = createQueue("shared-signature-queue-1");
+        String secondQueue = createQueue("shared-signature-queue-2");
+        String topicArn = createTopic("shared-signature-topic");
+        subscribe(topicArn, "sqs", firstQueue);
+        subscribe(topicArn, "sqs", secondQueue);
+
+        publish(topicArn, "Hello shared", "Shared subject");
+        JsonNode first = MAPPER.readTree(receiveBody(firstQueue));
+        JsonNode second = MAPPER.readTree(receiveBody(secondQueue));
+
+        assertEquals(first.get("MessageId").asText(), second.get("MessageId").asText());
+        assertEquals(first.get("Timestamp").asText(), second.get("Timestamp").asText());
+        assertEquals(first.get("Signature").asText(), second.get("Signature").asText());
+        assertNotEquals(first.get("UnsubscribeURL").asText(), second.get("UnsubscribeURL").asText());
+        assertTrue(verify(first, "SigningCertURL"));
+        assertTrue(verify(second, "SigningCertURL"));
+    }
+
+    @Test
+    void entriesOfOnePublishBatchShareTheTimestamp() throws Exception {
+        String queueUrl = createQueue("batch-timestamp-queue");
+        String topicArn = createTopic("batch-timestamp-topic");
+        subscribe(topicArn, "sqs", queueUrl);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "PublishBatch")
+            .formParam("TopicArn", topicArn)
+            .formParam("PublishBatchRequestEntries.member.1.Id", "a")
+            .formParam("PublishBatchRequestEntries.member.1.Message", "first entry")
+            .formParam("PublishBatchRequestEntries.member.2.Id", "b")
+            .formParam("PublishBatchRequestEntries.member.2.Message", "second entry")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        JsonNode first = MAPPER.readTree(receiveBody(queueUrl));
+        JsonNode second = MAPPER.readTree(receiveBody(queueUrl));
+
+        assertEquals(first.get("Timestamp").asText(), second.get("Timestamp").asText());
+        assertNotEquals(first.get("MessageId").asText(), second.get("MessageId").asText());
+        assertTrue(verify(first, "SigningCertURL"));
+        assertTrue(verify(second, "SigningCertURL"));
+    }
+
+    @Test
     void unknownCertificateName_isNotFound() {
         given()
         .when()
