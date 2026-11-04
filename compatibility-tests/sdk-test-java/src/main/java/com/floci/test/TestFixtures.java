@@ -156,6 +156,8 @@ import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityResponse;
 import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityRequest;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.sfn.model.DescribeExecutionResponse;
+import software.amazon.awssdk.services.sfn.model.ExecutionStatus;
 import software.amazon.awssdk.services.signin.SigninClient;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
@@ -1037,6 +1039,28 @@ public final class TestFixtures {
             long remainingNanos = deadline - System.nanoTime();
             if (remainingNanos <= 0) {
                 return status;
+            }
+            Thread.sleep(Math.min(pollMillis, Math.max(1, Duration.ofNanos(remainingNanos).toMillis())));
+        }
+    }
+
+    /**
+     * The execution's description once it is no longer {@code RUNNING}, or its last description at the
+     * timeout. It checks every 50 ms against Floci and every 500 ms against real AWS, like
+     * {@link #awaitStackTerminal}.
+     */
+    public static DescribeExecutionResponse awaitExecutionTerminal(SfnClient sfn, String executionArn, Duration timeout)
+            throws InterruptedException {
+        long pollMillis = isRealAws() ? 500 : 50;
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            DescribeExecutionResponse execution = sfn.describeExecution(request -> request.executionArn(executionArn));
+            if (execution.status() != ExecutionStatus.RUNNING) {
+                return execution;
+            }
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0) {
+                return execution;
             }
             Thread.sleep(Math.min(pollMillis, Math.max(1, Duration.ofNanos(remainingNanos).toMillis())));
         }
