@@ -30,6 +30,7 @@ import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoll
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
+import io.github.hectorvent.floci.services.memorydb.MemoryDbService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
@@ -104,6 +105,8 @@ class EmulatorLifecycleTest {
     @Mock private RdsProxyManager rdsProxyManager;
     @Mock private MemoryDbContainerManager memoryDbContainerManager;
     @Mock private MemoryDbProxyManager memoryDbProxyManager;
+    @Mock private MemoryDbService memoryDbService;
+    @Mock private EmulatorConfig.MemoryDbServiceConfig memoryDbServiceConfig;
     @Mock private DocDbContainerManager docDbContainerManager;
     @Mock private NeptuneContainerManager neptuneContainerManager;
     @Mock private NeptuneProxyManager neptuneProxyManager;
@@ -141,6 +144,7 @@ class EmulatorLifecycleTest {
     @BeforeEach
     void setUp() {
         Mockito.lenient().when(config.services()).thenReturn(servicesConfig);
+        Mockito.lenient().when(servicesConfig.memorydb()).thenReturn(memoryDbServiceConfig);
         Mockito.lenient().when(servicesConfig.ec2()).thenReturn(ec2ServiceConfig);
         Mockito.lenient().when(servicesConfig.ecs()).thenReturn(ecsServiceConfig);
         Mockito.lenient().when(ecsServiceConfig.taskRoleCredentials()).thenReturn(ecsTaskRoleCredentialsConfig);
@@ -170,7 +174,7 @@ class EmulatorLifecycleTest {
                 iamService, elastiCacheService, elastiCacheMemcachedService,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
-                memoryDbContainerManager, memoryDbProxyManager,
+                memoryDbContainerManager, memoryDbProxyManager, memoryDbService,
                 docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
                 rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
                 elbV2Service, elbClassicService, ecsService,

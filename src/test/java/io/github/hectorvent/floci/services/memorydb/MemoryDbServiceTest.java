@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -87,6 +88,29 @@ class MemoryDbServiceTest {
 
         service = new MemoryDbService(containerManager, proxyManager, sigV4Validator,
                 storageFactory, config, regionResolver);
+    }
+
+    @Test
+    void recreatedPersistentClusterDoesNotReuseRetainedDataVolume() {
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        when(config.storage()).thenReturn(storage);
+        when(storage.mode()).thenReturn("persistent");
+        when(containerManager.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(new MemoryDbContainerHandle("cid", "durable", "localhost", 6379));
+        Cluster spec = new Cluster();
+        spec.setName("durable");
+        spec.setAclName("open-access");
+
+        Cluster first = service.createCluster(spec, "us-east-1");
+        service.deleteCluster("durable", "us-east-1");
+        Cluster replacement = service.createCluster(spec, "us-east-1");
+
+        assertNotEquals(first.getVolumeId(), replacement.getVolumeId());
+        verify(containerManager).removeStorage("000000000000-us-east-1-durable", first.getVolumeId());
+        verify(containerManager).tryStart("000000000000-us-east-1-durable", "valkey/valkey:8", first.getVolumeId(),
+                "000000000000", "us-east-1");
+        verify(containerManager).tryStart("000000000000-us-east-1-durable", "valkey/valkey:8", replacement.getVolumeId(),
+                "000000000000", "us-east-1");
     }
 
     @Test
@@ -365,7 +389,7 @@ class MemoryDbServiceTest {
 
         // Proxy startup blows up after the port is reserved and the container is started.
         doThrow(new RuntimeException("proxy boom"))
-                .when(proxyManager).startProxy(eq("c1"), anyBoolean(), anyInt(), anyString(), anyInt(), any());
+                .when(proxyManager).startProxy(eq("000000000000-us-east-1-c1"), anyBoolean(), anyInt(), anyString(), anyInt(), any());
 
         Cluster spec = new Cluster();
         spec.setName("c1");
@@ -378,7 +402,7 @@ class MemoryDbServiceTest {
         // handle from this request, not by name: a concurrent create for the same cluster name
         // could have raced ahead and overwritten the registered container, and looking it up by
         // name here would risk stopping that other request's container instead of this one's.
-        verify(proxyManager).stopProxy("c1");
+        verify(proxyManager).stopProxy("000000000000-us-east-1-c1");
         verify(containerManager).stop(handle);
         verify(containerManager, never()).stopByClusterName(anyString());
 
@@ -400,7 +424,7 @@ class MemoryDbServiceTest {
         // and (crucially) a readiness timeout, where start() created + registered the container
         // before throwing, so no handle ever reaches the service.
         doThrow(new RuntimeException("readiness boom"))
-                .when(containerManager).tryStart(eq("c1"), anyString());
+                .when(containerManager).tryStart(eq("000000000000-us-east-1-c1"), anyString());
 
         Cluster spec = new Cluster();
         spec.setName("c1");
@@ -413,7 +437,7 @@ class MemoryDbServiceTest {
         verify(proxyManager, never()).stopProxy(anyString());
         // ...but the container must still be cleaned up by name, since start() may have created
         // and registered it before failing. Cleaning up by handle here would orphan it.
-        verify(containerManager).stopByClusterName("c1");
+        verify(containerManager).stopByClusterName("000000000000-us-east-1-c1");
 
         // The reserved proxy port was still released: a subsequent successful create reuses the base port.
         when(containerManager.tryStart(anyString(), anyString()))
