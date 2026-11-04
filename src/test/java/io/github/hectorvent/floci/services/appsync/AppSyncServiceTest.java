@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.DomainName;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
+import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -22,8 +24,16 @@ import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -550,5 +560,149 @@ class AppSyncServiceTest {
                 "arn:aws:sqs:us-east-1:000000000000:apis/abcdefghijklmnopqrstuvwxyz", Map.of()));
         assertThrows(AwsException.class, () -> service.tagResource("apis/abc", Map.of()));
         assertThrows(AwsException.class, () -> service.tagResource(null, Map.of()));
+    }
+
+    /**
+     * Parks {@code first} in its next write to {@code store}, starts {@code second} on another
+     * thread, waits until it is blocked behind the first or done, then lets the first go and waits
+     * for both. The second can only be blocked if a lock covers the first's read, change and write;
+     * the callers assert the final state.
+     */
+    private static void secondWriterRunsAroundTheFirst(ParkingStore<?> store, Runnable first, Runnable second)
+            throws Exception {
+        secondCallRunsAroundTheFirst(store, store::parkNextWrite, first, second);
+    }
+
+    /** As above, with the caller choosing which store call of the first one is parked. */
+    private static void secondCallRunsAroundTheFirst(ParkingStore<?> store, Runnable arm, Runnable first,
+            Runnable second) throws Exception {
+        arm.run();
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> firstWrite = pool.submit(first);
+            assertTrue(store.awaitParked(), "the first write must reach the store");
+            AtomicReference<Thread> secondThread = new AtomicReference<>();
+            Future<?> secondWrite = pool.submit(() -> {
+                secondThread.set(Thread.currentThread());
+                second.run();
+            });
+            awaitBlockedOrDone(secondThread, secondWrite);
+
+            store.release();
+            firstWrite.get(2, TimeUnit.SECONDS);
+            secondWrite.get(2, TimeUnit.SECONDS);
+        } catch (ExecutionException e) {
+            throw new AssertionError(e.getCause());
+        } finally {
+            store.release();
+            pool.shutdownNow();
+        }
+    }
+
+    private AppSyncService serviceWithApiStore(ParkingStore<GraphqlApi> apiStore) {
+        return newService(Clock.fixed(NOW, ZoneOffset.UTC), "http://localhost:4566",
+                new AccountAwareStorageBackend<>(apiStore, null, "000000000000"));
+    }
+
+    private static String arnOf(GraphqlApi api) {
+        return "arn:aws:appsync:us-east-1:000000000000:apis/" + api.getApiId();
+    }
+
+    private static Map<String, Object> apiRequest(String name) {
+        return Map.of("name", name, "authenticationType", "API_KEY");
+    }
+
+    @Test
+    void aTagDuringAnApiUpdateSurvivesTheUpdate() throws Exception {
+        ParkingStore<GraphqlApi> store = new ParkingStore<>();
+        AppSyncService svc = serviceWithApiStore(store);
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("before"), "us-east-1");
+
+        secondWriterRunsAroundTheFirst(store,
+                () -> svc.updateGraphqlApi(api.getApiId(), apiRequest("after"), "us-east-1"),
+                () -> svc.tagResource(arnOf(api), Map.of("env", "test")));
+
+        assertEquals("after", svc.getGraphqlApi(api.getApiId()).getName());
+        assertEquals("test", svc.getTags(arnOf(api)).get("env"));
+    }
+
+    @Test
+    void anUntagDuringAnApiUpdateStaysRemoved() throws Exception {
+        ParkingStore<GraphqlApi> store = new ParkingStore<>();
+        AppSyncService svc = serviceWithApiStore(store);
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("before"), "us-east-1");
+        svc.tagResource(arnOf(api), Map.of("drop", "1", "keep", "2"));
+
+        secondWriterRunsAroundTheFirst(store,
+                () -> svc.updateGraphqlApi(api.getApiId(), apiRequest("after"), "us-east-1"),
+                () -> svc.untagResource(arnOf(api), List.of("drop")));
+
+        assertEquals("after", svc.getGraphqlApi(api.getApiId()).getName());
+        assertFalse(svc.getTags(arnOf(api)).containsKey("drop"), svc.getTags(arnOf(api)).toString());
+        assertEquals("2", svc.getTags(arnOf(api)).get("keep"));
+    }
+
+    @Test
+    void environmentVariablesWrittenDuringAnApiUpdateSurviveTheUpdate() throws Exception {
+        ParkingStore<GraphqlApi> store = new ParkingStore<>();
+        AppSyncService svc = serviceWithApiStore(store);
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("before"), "us-east-1");
+
+        secondWriterRunsAroundTheFirst(store,
+                () -> svc.updateGraphqlApi(api.getApiId(), apiRequest("after"), "us-east-1"),
+                () -> svc.putEnvironmentVariables(api.getApiId(), Map.of("TABLE_NAME", "my-table")));
+
+        assertEquals("after", svc.getGraphqlApi(api.getApiId()).getName());
+        assertEquals("my-table", svc.getEnvironmentVariables(api.getApiId()).get("TABLE_NAME"));
+    }
+
+    @Test
+    void twoUpdatesOfDifferentApiKeyMembersBothLand() throws Exception {
+        ParkingStore<ApiKey> keyStore = new ParkingStore<>();
+        apiKeyStoreOverride = new AccountAwareStorageBackend<>(keyStore, null, "000000000000");
+        AppSyncService svc = newService(Clock.fixed(NOW, ZoneOffset.UTC));
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("keys"), "us-east-1");
+        ApiKey created = svc.createApiKey(api.getApiId(), Map.of());
+        long expires = NOW.plus(Duration.ofDays(30)).getEpochSecond();
+
+        secondWriterRunsAroundTheFirst(keyStore,
+                () -> svc.updateApiKey(api.getApiId(), created.getId(), Map.of("description", "renewed")),
+                () -> svc.updateApiKey(api.getApiId(), created.getId(), Map.of("expires", expires)));
+
+        ApiKey result = svc.getApiKey(api.getApiId(), created.getId());
+        assertEquals("renewed", result.getDescription());
+        assertEquals(expires, result.getExpires());
+    }
+
+    /**
+     * StartSchemaCreation checks the API and writes its PROCESSING status as one step under the
+     * service monitor that DeleteGraphqlApi holds, so a delete arriving between the two waits. It
+     * then finds the schema busy and is refused with a 409, leaving the API and its PROCESSING
+     * status in place. Without the shared hold the delete would succeed and leave a PROCESSING
+     * status for a deleted API. The schema creation worker is the fixture's mock, so the status
+     * stays PROCESSING.
+     */
+    @Test
+    void anApiDeleteDuringSchemaStartIsRefusedAndKeepsTheApi() throws Exception {
+        ParkingStore<GraphqlApi> store = new ParkingStore<>();
+        AppSyncService svc = serviceWithApiStore(store);
+        GraphqlApi api = svc.createGraphqlApi(apiRequest("kept"), "us-east-1");
+        AtomicReference<Throwable> deleteFailure = new AtomicReference<>();
+
+        secondCallRunsAroundTheFirst(store, store::parkNextRead,
+                () -> svc.startSchemaCreation(api.getApiId(), "type Query { a: String }"),
+                () -> {
+                    try {
+                        svc.deleteGraphqlApi(api.getApiId());
+                    } catch (AwsException e) {
+                        deleteFailure.set(e);
+                    }
+                });
+
+        assertTrue(deleteFailure.get() instanceof AwsException, "the delete must be refused: " + deleteFailure.get());
+        assertEquals(409, ((AwsException) deleteFailure.get()).getHttpStatus());
+        assertEquals("kept", svc.getGraphqlApi(api.getApiId()).getName());
+        assertEquals(SchemaCreationStatusType.PROCESSING,
+                svc.getSchemaCreationStatus(api.getApiId()).getStatus());
     }
 }
