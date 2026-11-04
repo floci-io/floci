@@ -5882,6 +5882,26 @@ given()
             .body("message", equalTo(message));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            DeleteItem | {"TableName": "Missing", "ReturnValues": "BOGUS", "ReturnConsumedCapacity": "BOGUS"} | 3 validation errors detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value null at 'key' failed to satisfy constraint: Member must not be null
+            PutItem    | {"TableName": "Missing", "Item": {"pk": {"S": "a"}}, "Expected": {"a": {"Value": "DEEP"}, "b": {"Exists": false}}, "ConditionalOperator": "XOR"} | 1 validation error detected: Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [OR, AND]
+            DeleteItem | {"TableName": "Missing", "Key": {"pk": "DEEP"}, "ReturnValues": "UPDATED_NEW"} | ReturnValues can only be ALL_OLD or NONE
+            """)
+    void putAndDeleteItemWithoutTheItemOrKeyOrNestedTooDeepGetTheOlderChecks(String operation, String body,
+            String message) {
+        String deep = "{\"M\": {\"n\": ".repeat(63) + "{\"S\": \"leaf\"}" + "}}".repeat(63);
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body.replace("\"DEEP\"", deep))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
+    }
+
     private void deleteTable(String tableName) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")

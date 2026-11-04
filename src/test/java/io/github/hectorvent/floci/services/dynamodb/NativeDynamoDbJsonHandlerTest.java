@@ -2377,6 +2377,32 @@ class NativeDynamoDbJsonHandlerTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            DeleteItem | 0  | {"TableName":"Tbl","ReturnValues":"BOGUS","ConditionalOperator":"XOR","ReturnValuesOnConditionCheckFailure":"BOGUS","ReturnConsumedCapacity":"BOGUS","ReturnItemCollectionMetrics":"BOGUS"} | 6 validation errors detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]; Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [OR, AND]; Value 'BOGUS' at 'returnValuesOnConditionCheckFailure' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value 'BOGUS' at 'returnItemCollectionMetrics' failed to satisfy constraint: Member must satisfy enum value set: [SIZE, NONE]; Value null at 'key' failed to satisfy constraint: Member must not be null
+            PutItem    | 0  | {"TableName":"","ReturnValues":"BOGUS"} | 3 validation errors detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]; Value null at 'item' failed to satisfy constraint: Member must not be null; Value '' at 'tableName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            PutItem    | 0  | {"TableName":"bad!name","Item":null,"ReturnValues":"ALL_NEW"} | 1 validation error detected: Value null at 'item' failed to satisfy constraint: Member must not be null
+            PutItem    | 63 | {"TableName":"a!","Item":{"pk":{"S":"a"}},"Expected":{"d":{"Value":"DEEP"}},"ReturnValues":"ALL_NEW"} | 2 validation errors detected: Value 'a!' at 'tableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'a!' at 'tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            DeleteItem | 63 | {"TableName":"Missing","Key":{"pk":"DEEP"},"ReturnValues":"UPDATED_NEW"} | ReturnValues can only be ALL_OLD or NONE
+            PutItem    | 63 | {"TableName":"Missing","Item":{"d":"DEEP"},"ExpressionAttributeValues":{":v":{"S":"x"}}} | ExpressionAttributeValues can only be specified when using expressions: ConditionExpression is null
+            DeleteItem | 63 | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"Expected":{"d":{"Value":"DEEP"}},"ExpressionAttributeNames":{"#d":"d"},"ExpressionAttributeValues":{":v":{"S":"x"}}} | ExpressionAttributeNames can only be specified when using expressions
+            PutItem    | 63 | {"TableName":"Missing","Item":{"n":{"N":"x"}},"Expected":{"d":{"Value":"DEEP"}}} | The parameter cannot be converted to a numeric value: x
+            DeleteItem | 63 | {"TableName":"Missing","Key":{"pk":{"S":"a"},"m":{"M":{"":{"S":"x"}}}},"ConditionExpression":"d = :deep","ExpressionAttributeValues":{":deep":"DEEP"}} | Empty attribute name
+            PutItem    | 63 | {"TableName":"Missing","Item":{"d":"DEEP"}} | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            DeleteItem | 63 | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"ConditionExpression":"d = :deep","ExpressionAttributeValues":{":deep":"DEEP"}} | ExpressionAttributeValues contains invalid value: Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit for key :deep
+            DeleteItem | 63 | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"Expected":{"d":{"Value":"DEEP"}},"ConditionalOperator":"AND"} | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            DeleteItem | 62 | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"Expected":{"d":{"Value":"DEEP"}},"ReturnValues":"BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]
+            DeleteItem | 62 | {"TableName":"Missing","Key":{"pk":"DEEP"},"ReturnValues":"BOGUS"} | 1 validation error detected: Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]
+            """)
+    void theOlderValidatorChecksAPutOrDeleteWithoutItsItemOrKeyOrNestedTooDeep(String operation, int levels,
+            String request, String message) throws Exception {
+        JsonNode body = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(levels))));
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             61 | {"TransactItems":[{},{"Delete":{"TableName":"bad!name","Key":{}}}]}     | Invalid Request: TransactWriteRequest should contain Delete or Put or Update request
             61 | {"TransactItems":[{}],"ReturnConsumedCapacity":"BOGUS"}                 | 1 validation error detected: Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
             61 | {"TransactItems":[{"Put":{"TableName":"","Item":{}}}]}                  | 1 validation error detected: Value '' at 'transactItems.1.member.put.tableName' failed to satisfy constraint: Member must have length greater than or equal to 1
