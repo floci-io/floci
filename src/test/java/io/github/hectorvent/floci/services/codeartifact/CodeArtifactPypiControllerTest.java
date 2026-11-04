@@ -449,8 +449,8 @@ class CodeArtifactPypiControllerTest {
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
-        verify(service, never()).completePypiUploadIfCurrentRepository(any(), any(), any(), any(), any(), any(),
-                any(), anyLong(), anyLong(), any(), any(), anyLong());
+        verify(service, never()).completeContainerBackedPublishIfCurrentRepository(any(), any(), any(), any(),
+                any(), any(), any(), any(), anyLong(), anyLong(), any(), any(), anyLong());
     }
 
     /**
@@ -559,9 +559,9 @@ class CodeArtifactPypiControllerTest {
                 headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
 
         assertEquals(200, response.getStatus());
-        verify(service).completePypiUploadIfCurrentRepository(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("pypi-repo-id"), eq("my-pkg"), eq("1.0.0"), eq(11L), anyLong(), isNull(), isNull(),
-                anyLong());
+        verify(service).completeContainerBackedPublishIfCurrentRepository(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(REPOSITORY), eq("pypi-repo-id"), eq("pypi"), eq("my-pkg"), eq("1.0.0"), eq(11L), anyLong(),
+                isNull(), isNull(), anyLong());
         verify(pypiserver).endUse("pypi-repo-id");
     }
 
@@ -618,8 +618,8 @@ class CodeArtifactPypiControllerTest {
 
         assertEquals(409, response.getStatus());
         assertEquals(false, uploadReceived.get());
-        verify(service, never()).completePypiUploadIfCurrentRepository(any(), any(), any(), any(), any(), any(),
-                any(), anyLong(), anyLong(), any(), any(), anyLong());
+        verify(service, never()).completeContainerBackedPublishIfCurrentRepository(any(), any(), any(), any(),
+                any(), any(), any(), any(), anyLong(), anyLong(), any(), any(), anyLong());
     }
 
     /**
@@ -692,8 +692,9 @@ class CodeArtifactPypiControllerTest {
         controller.upload(headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY,
                 body);
 
-        verify(service).completePypiUploadIfCurrentRepository(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
-                eq("pypi-repo-id"), eq("my-pkg"), isNull(), eq(11L), anyLong(), isNull(), isNull(), anyLong());
+        verify(service).completeContainerBackedPublishIfCurrentRepository(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(REPOSITORY), eq("pypi-repo-id"), eq("pypi"), eq("my-pkg"), isNull(), eq(11L), anyLong(),
+                isNull(), isNull(), anyLong());
         verify(service, never()).requireContainerBackedVersionNotArchivedOrDisposed(any(), any(), any(), any(),
                 any(), any(), any(), any());
         verify(pypiserver).endUse("pypi-repo-id");

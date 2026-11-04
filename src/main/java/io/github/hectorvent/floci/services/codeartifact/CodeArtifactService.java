@@ -2988,15 +2988,22 @@ public class CodeArtifactService implements Resettable {
                 new PackageOriginConfig("BLOCK", "ALLOW", format, namespace, packageName));
     }
 
+    private boolean isCurrentRepositorySidecar(String owner, String region, String domain, String repository,
+            String format, String repositoryContainerId) {
+        if (repositoryContainerId == null) {
+            return false;
+        }
+        return repositories.getForAccount(owner, repositoryKey(region, domain, repository))
+                .map(current -> repositoryContainerId.equals(current.getSidecarContainerIds().get(format)))
+                .orElse(false);
+    }
+
     /** Checks the repository generation and writes the default under the same deletion monitor. */
     public synchronized void ensureRetainedPackageOriginDefaultIfCurrentRepository(String region, String domain,
             String domainOwner, String repository, String format, String namespace, String packageName,
             long packageFenceSnapshot, String repositoryContainerId) {
         String owner = effectiveOwner(domainOwner);
-        CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain, repository))
-                .orElse(null);
-        if (current == null || repositoryContainerId == null || !repositoryContainerId.equals(
-                current.getSidecarContainerIds().get(format))) {
+        if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repositoryContainerId)) {
             return;
         }
         ensureRetainedPackageOriginDefault(region, domain, owner, repository, format, namespace, packageName,
@@ -3279,9 +3286,7 @@ public class CodeArtifactService implements Resettable {
             long versionFenceSnapshot, long episodeId) {
         String owner = effectiveOwner(domainOwner);
         if ("nuget".equals(format)) {
-            CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain,
-                    repository)).orElse(null);
-            if (current == null || !Objects.equals(repoId, current.getSidecarContainerIds().get(format))) {
+            if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repoId)) {
                 return false;
             }
         }
@@ -4966,44 +4971,26 @@ public class CodeArtifactService implements Resettable {
         containerBackedAssetBytes.put(ownerScopedKey, existing + bytes);
     }
 
-    /** Completes a NuGet push only while its leased sidecar still belongs to the same repository creation. */
-    public synchronized void completeNugetPushIfCurrentRepository(String region, String domain, String domainOwner,
-            String repository, String repositoryContainerId, String packageName, String version, long bytes,
-            long packageFenceSnapshot, String expectedRevisionOrNull) {
+    /** Completes a sidecar publish only while its lease belongs to the same repository creation. */
+    public synchronized void completeContainerBackedPublishIfCurrentRepository(String region, String domain,
+            String domainOwner, String repository, String repositoryContainerId, String format, String packageName,
+            String version, long bytes, long packageFenceSnapshot, String expectedRevisionOrNull, String readme,
+            long readmeFenceSnapshot) {
         String owner = effectiveOwner(domainOwner);
-        CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain, repository))
-                .orElse(null);
-        if (current == null || !Objects.equals(repositoryContainerId,
-                current.getSidecarContainerIds().get("nuget"))) {
-            LOG.warnv("Skipping NuGet publish bookkeeping for {0}/{1}: the repository was replaced while its "
-                    + "sidecar request was in flight.", domain, repository);
+        if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repositoryContainerId)) {
+            LOG.warnv("Skipping {0} publish bookkeeping for {1}/{2}: the repository was replaced while its "
+                    + "sidecar request was in flight.", format, domain, repository);
             return;
         }
-        recordContainerBackedAssetBytes(region, domain, owner, repository, "nuget", null, packageName, bytes,
+        recordContainerBackedAssetBytes(region, domain, owner, repository, format, null, packageName, bytes,
                 packageFenceSnapshot);
-        forgetContainerBackedStatusOverrideIfUnchanged(region, domain, owner, repository, "nuget", null,
-                packageName, version, expectedRevisionOrNull);
-    }
-
-    /** Completes a PyPI upload only while its leased sidecar belongs to the same repository creation. */
-    public synchronized void completePypiUploadIfCurrentRepository(String region, String domain, String domainOwner,
-            String repository, String repositoryContainerId, String packageName, String version, long bytes,
-            long packageFenceSnapshot, String expectedRevisionOrNull, String readme, long readmeFenceSnapshot) {
-        String owner = effectiveOwner(domainOwner);
-        CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain, repository))
-                .orElse(null);
-        if (current == null || !Objects.equals(repositoryContainerId,
-                current.getSidecarContainerIds().get("pypi"))) {
-            LOG.warnv("Skipping PyPI upload bookkeeping for {0}/{1}: the repository was replaced while its "
-                    + "sidecar request was in flight.", domain, repository);
-            return;
-        }
-        recordContainerBackedAssetBytes(region, domain, owner, repository, "pypi", null, packageName, bytes,
-                packageFenceSnapshot);
-        if (version != null && !version.isBlank()) {
-            forgetContainerBackedStatusOverrideIfUnchanged(region, domain, owner, repository, "pypi", null,
+        boolean hasVersion = version != null && !version.isBlank();
+        if ("nuget".equals(format) || hasVersion) {
+            forgetContainerBackedStatusOverrideIfUnchanged(region, domain, owner, repository, format, null,
                     packageName, version, expectedRevisionOrNull);
-            recordPublishedPackageVersionReadme(region, domain, owner, repository, "pypi", null, packageName,
+        }
+        if ("pypi".equals(format) && hasVersion) {
+            recordPublishedPackageVersionReadme(region, domain, owner, repository, format, null, packageName,
                     version, readme, readmeFenceSnapshot);
         }
     }
@@ -5035,9 +5022,7 @@ public class CodeArtifactService implements Resettable {
             return;
         }
         String owner = effectiveOwner(domainOwner);
-        CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain, repository))
-                .orElse(null);
-        if (current == null || !repositoryContainerId.equals(current.getSidecarContainerIds().get(format))) {
+        if (!isCurrentRepositorySidecar(owner, region, domain, repository, format, repositoryContainerId)) {
             return;
         }
         String key = packageKey(region, domain, repository, format, namespace, accountingPackageName(format,

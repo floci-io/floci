@@ -303,9 +303,9 @@ public class CodeArtifactPypiController {
             Response response = forwardUpload(handle.baseUrl(), contentType, content);
             boolean uploadSucceeded = response.getStatus() == 200 || response.getStatus() == 201;
             if (uploadSucceeded) {
-                service.completePypiUploadIfCurrentRepository(handle.region(), domain, handle.owner(), repository,
-                        handle.repoId(), packageName, version, file.get().content().length, fenceSnapshot,
-                        beforeRevision, form.fields().get("description"), readmeFenceSnapshot);
+                service.completeContainerBackedPublishIfCurrentRepository(handle.region(), domain, handle.owner(),
+                        repository, handle.repoId(), "pypi", packageName, version, file.get().content().length,
+                        fenceSnapshot, beforeRevision, form.fields().get("description"), readmeFenceSnapshot);
             }
             return response;
         }
