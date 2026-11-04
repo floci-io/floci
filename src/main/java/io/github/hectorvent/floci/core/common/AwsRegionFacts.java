@@ -13,8 +13,8 @@ import java.util.Set;
 /**
  * The per-region and per-partition constants AWS publishes only as prose tables, vendored in
  * {@code aws/region-facts.json} by {@code tools/aws/regen_region_facts.py} from the Terraform
- * provider, the CDK, the botocore models and the China and GovCloud user guides: load balancer,
- * S3 website and GovCloud API Gateway hosted zone ids, the CloudFront hosted zone and distribution
+ * provider, the CDK, the botocore models, the API Gateway General Reference page and the China and
+ * GovCloud user guides: load balancer, S3 website and API Gateway regional hosted zone ids, the CloudFront hosted zone and distribution
  * domain suffix per partition, the SAML sign-on URL and the management console host per partition
  * and the VPC endpoint service-name prefixes. Every accessor is {@link Optional}: the ISO and EUSC partitions have no published
  * hosted zones, and a service that needs one there has nothing faithful to answer.
@@ -56,7 +56,8 @@ public final class AwsRegionFacts {
 
     /**
      * The hosted zone of an API Gateway regional endpoint, which a Route 53 alias to a regional
-     * custom domain targets. Published in the corpus for the two GovCloud regions only.
+     * custom domain targets, from the General Reference table. Absent for a region with no row:
+     * the China, ISO and EUSC regions and {@code ap-southeast-6}.
      */
     public static Optional<String> apiGatewayRegionalHostedZoneId(String region) {
         return regionText(region, "apiGatewayRegionalHostedZoneId");
