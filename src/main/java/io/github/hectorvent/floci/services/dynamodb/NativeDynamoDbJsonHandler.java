@@ -615,7 +615,88 @@ public class NativeDynamoDbJsonHandler {
         throwValidationErrors(validationErrors);
     }
 
+    // DynamoDB's newer validator gives up on an attribute value with a member it does not know.
+    // It leaves the other unknown members out when it measures how deep a request nests.
+    private static boolean readByOlderValidator(JsonNode request, String target) {
+        if (!request.hasNonNull(target)) {
+            return true;
+        }
+        List<JsonNode> values = new ArrayList<>();
+        request.path(target).forEach(values::add);
+        request.path("ExpressionAttributeValues").forEach(values::add);
+        int deepest = Math.max(jsonDepth(request.path(target)), jsonDepth(request.path("ExpressionAttributeValues")));
+        for (JsonNode condition : request.path("Expected")) {
+            values.add(condition.path("Value"));
+            condition.path("AttributeValueList").forEach(values::add);
+            int known = Math.max(jsonDepth(condition.path("Value")), jsonDepth(condition.path("AttributeValueList")));
+            // Expected and the condition hold these members.
+            deepest = Math.max(deepest, known + 2);
+        }
+        // The request holds these members.
+        return deepest + 1 >= OLDER_VALIDATOR_DEPTH
+                || values.stream().anyMatch(DynamoDbAttributeValueValidator::hasUnknownMember);
+    }
+
+    private static final List<String> OLDER_RETURN_VALUES =
+            List.of("ALL_NEW", "UPDATED_OLD", "ALL_OLD", "NONE", "UPDATED_NEW");
+    private static final List<String> OLDER_CONDITIONAL_OPERATORS = List.of("OR", "AND");
+
+    // The older validator lists the members in this order and leaves out a missing table name.
+    private void requireValidOlderItemWrite(JsonNode request, String target) {
+        String tableName = textOrNull(request, "TableName");
+        String returnValues = textOrNull(request, "ReturnValues");
+        List<String> validationErrors = new ArrayList<>();
+        if (returnValues != null && !OLDER_RETURN_VALUES.contains(returnValues)) {
+            validationErrors.add(SmithyValidationErrors.notInEnum(returnValues, "returnValues", OLDER_RETURN_VALUES));
+        }
+        String conditionalOperator = textOrNull(request, "ConditionalOperator");
+        if (conditionalOperator != null && !OLDER_CONDITIONAL_OPERATORS.contains(conditionalOperator)) {
+            validationErrors.add(SmithyValidationErrors.notInEnum(conditionalOperator, "conditionalOperator",
+                    OLDER_CONDITIONAL_OPERATORS));
+        }
+        if ("Item".equals(target) && !request.hasNonNull(target)) {
+            validationErrors.add(SmithyValidationErrors.notNull("item"));
+        }
+        addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
+        addReturnConsumedCapacityError(request, validationErrors);
+        addIfPresent(validationErrors, returnItemCollectionMetricsError(request));
+        if ("Key".equals(target) && !request.hasNonNull(target)) {
+            validationErrors.add(SmithyValidationErrors.notNull("key"));
+        }
+        if ("".equals(tableName)) {
+            validationErrors.add(SmithyValidationErrors.lengthTooShort("tableName", "", 1));
+        }
+        throwValidationErrors(validationErrors);
+
+        if (AwsArnUtils.looksLikeArn(tableName)) {
+            DynamoDbTableNames.resolve(tableName);
+        } else if (tableName != null) {
+            throwValidationErrors(DynamoDbTableNames.nameViolations(tableName));
+        }
+        if (returnValues != null && !VALID_RETURN_VALUES_ITEM_WRITE.contains(returnValues)) {
+            throw new AwsException("ValidationException", "ReturnValues can only be ALL_OLD or NONE", 400);
+        }
+        rejectMixedParameters(request, List.of("Expected"), List.of("ConditionExpression"));
+        // Only the ExpressionAttributeValues message names the missing expression.
+        if (!request.has("ConditionExpression") && request.has("ExpressionAttributeNames")) {
+            throw new AwsException("ValidationException",
+                    "ExpressionAttributeNames can only be specified when using expressions", 400);
+        }
+        rejectExprAttrsWithoutExpression(null, request.get("ExpressionAttributeValues"),
+                request.has("ConditionExpression"), "ConditionExpression is null");
+        JsonNode values = request.get(target);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(values, false);
+        requireReadableValues(values, "");
+        DynamoDbAttributeValueValidator.requireNonEmptyNames(values);
+        DynamoDbAttributeValueValidator.requireNonEmptyMemberNames(values);
+        requireNamedExpressionValues(request.get("ExpressionAttributeValues"));
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(request.get("Expected")), false);
+    }
+
     private Response handlePutItem(JsonNode request, String region) {
+        if (readByOlderValidator(request, "Item")) {
+            requireValidOlderItemWrite(request, "Item");
+        }
         String tableName = request.has("TableName") ? request.path("TableName").asText() : null;
         requireValidItemWriteMembers(request, tableName);
         JsonNode item = request.path("Item");
@@ -722,6 +803,9 @@ public class NativeDynamoDbJsonHandler {
             Set.of("NONE", "ALL_OLD", "ALL_NEW", "UPDATED_OLD", "UPDATED_NEW");
 
     private Response handleDeleteItem(JsonNode request, String region) {
+        if (readByOlderValidator(request, "Key")) {
+            requireValidOlderItemWrite(request, "Key");
+        }
         String tableName = request.path("TableName").asText();
         requireValidItemWriteMembers(request, tableName);
         JsonNode key = request.path("Key");

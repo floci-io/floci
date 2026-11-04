@@ -612,14 +612,14 @@ public class EventBridgeInvoker {
 
         HttpParameters httpParameters = target.getHttpParameters();
         JsonNode authNode = readAuthParameters(connection);
-        JsonNode invocationHttp = authNode.path("InvocationHttpParameters");
+        ConnectionHttpParameters connectionParameters = invocationHttpParameters(authNode);
 
         // The connection's parameters are applied last so a target cannot override what the connection configures
         Map<String, String> queryParams = new LinkedHashMap<>();
         if (httpParameters != null && httpParameters.getQueryStringParameters() != null) {
             queryParams.putAll(httpParameters.getQueryStringParameters());
         }
-        queryParams.putAll(readKeyValues(invocationHttp.path("QueryStringParameters")));
+        queryParams.putAll(connectionParameters.queryStringParameters());
         String resolvedUrl = appendQueryParameters(
                 substitutePathParameters(rawUrl,
                         httpParameters != null ? httpParameters.getPathParameterValues() : null),
@@ -631,7 +631,7 @@ public class EventBridgeInvoker {
         if (httpParameters != null && httpParameters.getHeaderParameters() != null) {
             httpParameters.getHeaderParameters().forEach((name, value) -> putHeader(headers, name, value));
         }
-        readKeyValues(invocationHttp.path("HeaderParameters")).forEach((name, value) -> putHeader(headers, name, value));
+        connectionParameters.headers().forEach((name, value) -> putHeader(headers, name, value));
         applyConnectionAuth(connection, authNode, headers);
 
         String method = destination.getHttpMethod() != null ? destination.getHttpMethod().toUpperCase() : "POST";
@@ -640,7 +640,7 @@ public class EventBridgeInvoker {
             headers.put("Content-Type", "application/json; charset=utf-8");
         }
         String body = hasBody
-                ? mergeBodyParameters(payload, readKeyValues(invocationHttp.path("BodyParameters")))
+                ? mergeBodyParameters(payload, connectionParameters.bodyParameters())
                 : null;
 
         HttpRequest request;
@@ -823,6 +823,29 @@ public class EventBridgeInvoker {
                     connection.getName(), e.getOriginalMessage());
             return MissingNode.getInstance();
         }
+    }
+
+    /**
+     * The parameters a connection adds to a request it authorizes, with its authorization among the headers.
+     * Callers apply them over their own: on a conflict, the connection's value wins.
+     */
+    public ConnectionHttpParameters connectionHttpParameters(String connectionArn, String region) {
+        Connection connection = eventBridgeService.findConnectionByArn(connectionArn, region);
+        JsonNode authNode = readAuthParameters(connection);
+        ConnectionHttpParameters parameters = invocationHttpParameters(authNode);
+        applyConnectionAuth(connection, authNode, parameters.headers());
+        return parameters;
+    }
+
+    private static ConnectionHttpParameters invocationHttpParameters(JsonNode authNode) {
+        JsonNode invocationHttp = authNode.path("InvocationHttpParameters");
+        return new ConnectionHttpParameters(readKeyValues(invocationHttp.path("HeaderParameters")),
+                readKeyValues(invocationHttp.path("QueryStringParameters")),
+                readKeyValues(invocationHttp.path("BodyParameters")));
+    }
+
+    public record ConnectionHttpParameters(Map<String, String> headers, Map<String, String> queryStringParameters,
+                                           Map<String, String> bodyParameters) {
     }
 
     private static Map<String, String> readKeyValues(JsonNode params) {

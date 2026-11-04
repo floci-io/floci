@@ -115,6 +115,9 @@ final class MessageList extends AbstractList<Message> implements RandomAccess {
                 kept[count++] = message;
             }
         }
+        if (count == kept.length) {
+            return new MessageList(new Slots(kept, count), count);
+        }
         Message[] items = new Message[count];
         System.arraycopy(kept, 0, items, 0, count);
         return new MessageList(new Slots(items, count), count);

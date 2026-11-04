@@ -247,6 +247,23 @@ final class DynamoDbAttributeValueValidator {
         return false;
     }
 
+    static boolean hasUnknownMember(JsonNode value) {
+        if (value.properties().stream().anyMatch(member -> !TYPES.contains(member.getKey()))) {
+            return true;
+        }
+        for (JsonNode member : value.path("M")) {
+            if (hasUnknownMember(member)) {
+                return true;
+            }
+        }
+        for (JsonNode element : value.path("L")) {
+            if (hasUnknownMember(element)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static int depthOf(JsonNode value) {
         if (!value.isObject()) {
             return 1;
