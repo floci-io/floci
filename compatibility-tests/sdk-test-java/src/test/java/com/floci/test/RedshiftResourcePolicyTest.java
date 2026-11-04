@@ -6,7 +6,6 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.redshift.RedshiftClient;
 import software.amazon.awssdk.services.redshift.model.InvalidPolicyException;
 import software.amazon.awssdk.services.redshift.model.RedshiftException;
@@ -57,9 +56,9 @@ class RedshiftResourcePolicyTest {
         StaticCredentialsProvider credentials =
                 StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
         redshift = RedshiftClient.builder().endpointOverride(URI.create(endpoint))
-                .region(Region.US_EAST_1).credentialsProvider(credentials).build();
+                .region(TestFixtures.region()).credentialsProvider(credentials).build();
         serverless = RedshiftServerlessClient.builder().endpointOverride(URI.create(endpoint))
-                .region(Region.US_EAST_1).credentialsProvider(credentials).build();
+                .region(TestFixtures.region()).credentialsProvider(credentials).build();
         namespaceArn = serverless.createNamespace(r -> r.namespaceName(NAMESPACE_NAME)).namespace().namespaceArn();
     }
 

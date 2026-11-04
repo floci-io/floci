@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.redshiftdata.RedshiftDataClient;
 import software.amazon.awssdk.services.redshiftdata.model.DescribeStatementResponse;
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementResponse;
@@ -35,6 +36,7 @@ import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -455,23 +457,30 @@ class RedshiftServerlessTest {
     @Test
     void snapshotCopyDestinationCanChangeOnlyAfterDeletion() {
         assumeFalse(TestFixtures.isRealAws(), "Asserts emulator-local snapshot copy configuration rules");
+        List<String> others = Region.regions().stream()
+                .filter(r -> !r.isGlobalRegion() && !r.equals(TestFixtures.region()))
+                .filter(r -> r.metadata() != null && TestFixtures.partition().equals(r.metadata().partition().id()))
+                .map(Region::id).sorted().toList();
+        assumeFalse(others.isEmpty(), () -> "no second region in partition " + TestFixtures.partition());
+        String first = others.get(0);
+        String replacement = others.get(others.size() - 1);
         try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
             String namespaceName = "floci-compat-copy-ns";
             try {
                 client.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin"));
                 String copyId = client.createSnapshotCopyConfiguration(request -> request
-                        .namespaceName(namespaceName).destinationRegion("us-west-2"))
+                        .namespaceName(namespaceName).destinationRegion(first))
                         .snapshotCopyConfiguration().snapshotCopyConfigurationId();
                 assertThatThrownBy(() -> client.createSnapshotCopyConfiguration(request -> request
-                        .namespaceName(namespaceName).destinationRegion("eu-west-1")))
+                        .namespaceName(namespaceName).destinationRegion(replacement)))
                         .isInstanceOf(ConflictException.class);
                 client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(copyId));
                 String replacementId = client.createSnapshotCopyConfiguration(request -> request
-                        .namespaceName(namespaceName).destinationRegion("eu-west-1"))
+                        .namespaceName(namespaceName).destinationRegion(replacement))
                         .snapshotCopyConfiguration().snapshotCopyConfigurationId();
                 assertThat(client.listSnapshotCopyConfigurations(request -> request.namespaceName(namespaceName))
                         .snapshotCopyConfigurations()).extracting(configuration -> configuration.destinationRegion())
-                        .containsExactly("eu-west-1");
+                        .containsExactly(replacement);
                 assertThatThrownBy(() -> client.listSnapshotCopyConfigurations(request -> request
                         .namespaceName(namespaceName).maxResults(0)))
                         .isInstanceOf(ValidationException.class);
