@@ -33,6 +33,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -112,6 +113,67 @@ class VpcNetworkManagerTest {
         });
 
         manager = new VpcNetworkManager(config, docker);
+    }
+
+    @Test
+    void deletingVpcRemovesANetworkWhoseCreationIsStillInFlight() throws Exception {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        manager.declareSubnet(REGION, "vpc-1", "subnet-a", "10.0.1.0/24");
+        String address = manager.allocatePrivateIp(REGION, "subnet-a").orElseThrow();
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(docker.createNetworkCmd().exec()).thenAnswer(invocation -> {
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return new CreateNetworkResponse();
+        });
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<?> attaching = executor.submit(() ->
+                    manager.attach(REGION, "vpc-1", "subnet-a", "container-1", address));
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                Future<?> deleting = executor.submit(() -> manager.deleteVpcNetwork(REGION, "vpc-1"));
+                await().atMost(2, TimeUnit.SECONDS)
+                        .until(() -> manager.effectiveVpcCidr(REGION, "vpc-1").isEmpty());
+                release.countDown();
+                attaching.get(2, TimeUnit.SECONDS);
+                deleting.get(2, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+            }
+        }
+
+        assertEquals(List.of(manager.networkName(REGION, "vpc-1")), removedNetworks);
+        assertTrue(manager.attach(REGION, "vpc-1", "subnet-a", "container-2", address).isEmpty());
+        verify(docker.createNetworkCmd(), times(1)).exec();
+    }
+
+    @Test
+    void anAttachThatWasPlanningWhenVpcWasDeletedCannotCreateItsNetwork() throws Exception {
+        manager.declareVpc(REGION, "vpc-1", "10.0.0.0/16");
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(docker.listNetworksCmd().exec()).thenAnswer(invocation -> {
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return List.of();
+        });
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<Boolean> attaching = executor.submit(() ->
+                    manager.attachContainer(REGION, "vpc-1", "container-1"));
+            try {
+                assertTrue(entered.await(2, TimeUnit.SECONDS));
+                manager.deleteVpcNetwork(REGION, "vpc-1");
+            } finally {
+                release.countDown();
+            }
+            assertFalse(attaching.get(2, TimeUnit.SECONDS));
+        }
+
+        verify(docker, never()).createNetworkCmd();
+        assertTrue(removedNetworks.isEmpty());
     }
 
     private void existingNetwork(String name, String subnet, Map<String, String> labels) {
