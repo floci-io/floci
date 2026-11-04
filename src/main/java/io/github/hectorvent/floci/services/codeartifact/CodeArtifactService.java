@@ -41,6 +41,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -194,6 +195,7 @@ public class CodeArtifactService implements Resettable {
     private final AccountAwareStorageBackend<CodeArtifactRepository> repositories;
     private final AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions;
     private final AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigs;
+    private final Set<String> migratedOriginConfigAccounts = new HashSet<>();
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final CodeArtifactSidecarRegistry sidecarRegistry;
@@ -1185,7 +1187,7 @@ public class CodeArtifactService implements Resettable {
 
         String originKey = packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName));
-        boolean hasOriginConfig = packageOriginConfigs.getForAccount(owner, originKey).isPresent();
+        boolean hasOriginConfig = packageOriginConfig(owner, originKey, format).isPresent();
         List<PackageVersionEntry> entries;
         String preferredDisplayVersion = null;
         if (CONTAINER_BACKED_FORMATS.contains(format)) {
@@ -2270,7 +2272,7 @@ public class CodeArtifactService implements Resettable {
             String format, String namespace, String packageName) {
         String originKey = packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName));
-        String publishRestriction = packageOriginConfigs.getForAccount(owner, originKey)
+        String publishRestriction = packageOriginConfig(owner, originKey, format)
                 .map(PackageOriginConfig::getPublishRestriction)
                 .orElse("ALLOW");
         if ("BLOCK".equals(publishRestriction)) {
@@ -2601,8 +2603,9 @@ public class CodeArtifactService implements Resettable {
      * records' own {@code format}/{@code namespace}/{@code packageName} fields (the same technique
      * {@link #genericPackageVersions} already uses for one known package, here scanned
      * repository-wide instead of by one package's own prefix), plus any origin-config-only
-     * package's own matching fields on {@link PackageOriginConfig}, never by parsing a scanned key
-     * back into parts, which {@link #escapeKeySegment}'s own javadoc explains is lossy. Every
+     * package's own matching fields on {@link PackageOriginConfig}. Historical NuGet and PyPI
+     * origin records without those fields are first repaired from their scoped keys; these formats
+     * have no namespace, and {@link #escapeKeySegment}'s escapes recover the package name. Every
      * container-backed format's own new {@link RepositorySidecarManager#listPackages} answers the
      * same for real sidecar content, plus the same origin-config-only union. {@code domainOwner}
      * is threaded through (rather than just the already-resolved {@code owner}) only because
@@ -2633,6 +2636,7 @@ public class CodeArtifactService implements Resettable {
                         accountingPackageName(pv.getFormat(), pv.getPackageName())));
             }
         }
+        migrateOriginConfigs(owner);
         for (PackageOriginConfig config : packageOriginConfigs.scanForAccount(owner,
                 k -> k.startsWith(originPrefix))) {
             if (config.getFormat() != null
@@ -2640,7 +2644,9 @@ public class CodeArtifactService implements Resettable {
                 PackageCoordinate coordinate = new PackageCoordinate(config.getFormat(), config.getNamespace(),
                         accountingPackageName(config.getFormat(), config.getPackageName()));
                 coordinates.add(coordinate);
-                originConfigsByCoordinate.put(coordinate, config);
+                packageOriginConfig(owner, packageKey(region, domain, repository, coordinate.format(),
+                        coordinate.namespace(), coordinate.packageName()), coordinate.format())
+                        .ifPresent(current -> originConfigsByCoordinate.put(coordinate, current));
             }
         }
         for (String format : CONTAINER_BACKED_FORMATS) {
@@ -2766,13 +2772,8 @@ public class CodeArtifactService implements Resettable {
             // under its caller's original, un-normalized spelling.
             Optional<PackageOriginConfig> config = Optional.ofNullable(
                     packages.originConfigsByCoordinate().get(coordinate));
-            // Raised by Greptile's review: a PackageOriginConfig persisted before format/namespace/
-            // packageName existed on it (see that model's own javadoc) has none of the three, so
-            // allPackagesInRepository's own scan can never resolve it into this map at all, even
-            // though the package it configures is still found here through its real version record
-            // or sidecar listing. Falling back to the original key-based lookup, exactly like
-            // describePackage's own, is what keeps that package's real restriction (not the ALLOW/
-            // BLOCK default) resolving for it too.
+            // The discovery pass already migrated NuGet/PyPI aliases. Read remaining metadata-free
+            // records directly without rescanning every origin key for each unconfigured package.
             if (config.isEmpty()) {
                 config = packageOriginConfigs.getForAccount(owner, packageKey(region, domain, repository,
                         coordinate.format(), coordinate.namespace(), coordinate.packageName()));
@@ -2802,6 +2803,73 @@ public class CodeArtifactService implements Resettable {
     public record PackageDescription(String format, String namespace, String packageName,
                                      String publishRestriction, String upstreamRestriction) {}
 
+    private Optional<PackageOriginConfig> packageOriginConfig(String owner, String key, String format) {
+        migrateOriginConfigs(owner);
+        return packageOriginConfigs.getForAccount(owner, key);
+    }
+
+    private synchronized void migrateOriginConfigs(String owner) {
+        if (migratedOriginConfigAccounts.contains(owner)) {
+            return;
+        }
+        Map<String, List<String>> aliasesByCanonicalKey = new LinkedHashMap<>();
+        for (String storedKey : packageOriginConfigs.keysForAccount(owner).stream().sorted().toList()) {
+            String[] parts = storedKey.split("::", -1);
+            if (parts.length != 6 || !parts[4].isEmpty()
+                    || (!"nuget".equals(parts[3]) && !"pypi".equals(parts[3]))) {
+                continue;
+            }
+            String key = storedKey.substring(0, storedKey.lastIndexOf("::") + 2)
+                    + accountingPackageName(parts[3], parts[5]);
+            aliasesByCanonicalKey.computeIfAbsent(key, ignored -> new ArrayList<>()).add(storedKey);
+        }
+        for (Map.Entry<String, List<String>> entry : aliasesByCanonicalKey.entrySet()) {
+            String key = entry.getKey();
+            String format = key.split("::", -1)[3];
+            PackageOriginConfig canonical = packageOriginConfigs.getForAccount(owner, key).orElse(null);
+            PackageOriginConfig migrated = canonical == null ? null : originConfigWithCoordinates(canonical, key, format);
+            if (canonical == null) {
+                for (String legacyKey : entry.getValue()) {
+                    PackageOriginConfig legacy = packageOriginConfigs.getForAccount(owner, legacyKey).orElse(null);
+                    if (legacy == null) {
+                        continue;
+                    }
+                    if (migrated == null) {
+                        migrated = originConfigWithCoordinates(legacy, key, format);
+                    } else {
+                        if ("BLOCK".equals(legacy.getPublishRestriction())) {
+                            migrated.setPublishRestriction("BLOCK");
+                        }
+                        if ("BLOCK".equals(legacy.getUpstreamRestriction())) {
+                            migrated.setUpstreamRestriction("BLOCK");
+                        }
+                    }
+                }
+            }
+            if (migrated == null) {
+                continue;
+            }
+            // Persist repaired coordinates before deleting aliases; unchanged canonical records are already durable.
+            if (canonical == null || !Objects.equals(canonical.getFormat(), migrated.getFormat())
+                    || !Objects.equals(canonical.getNamespace(), migrated.getNamespace())
+                    || !Objects.equals(canonical.getPackageName(), migrated.getPackageName())) {
+                packageOriginConfigs.putForAccount(owner, key, migrated);
+            }
+            for (String legacyKey : entry.getValue()) {
+                if (!legacyKey.equals(key)) {
+                    packageOriginConfigs.deleteForAccount(owner, legacyKey);
+                }
+            }
+        }
+        migratedOriginConfigAccounts.add(owner);
+    }
+
+    private PackageOriginConfig originConfigWithCoordinates(PackageOriginConfig config, String key, String format) {
+        String name = key.substring(key.lastIndexOf("::") + 2).replace("#b", "\\").replace("#c", ":");
+        return new PackageOriginConfig(config.getPublishRestriction(), config.getUpstreamRestriction(),
+                format, null, name);
+    }
+
     public PackageDescription describePackage(String region, String domain, String domainOwner, String repository,
                                               String format, String namespace, String packageName) {
         validatePackageCoordinates(format, namespace, packageName, "describing");
@@ -2811,7 +2879,7 @@ public class CodeArtifactService implements Resettable {
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
         String originKey = packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName));
-        Optional<PackageOriginConfig> originConfig = packageOriginConfigs.getForAccount(owner, originKey);
+        Optional<PackageOriginConfig> originConfig = packageOriginConfig(owner, originKey, format);
         // PutPackageOriginConfiguration can be called on a package with no versions yet, creating
         // it with no versions (its own documented behavior): a stored config, even with zero
         // versions behind it, already proves the package exists, and the && below must short-circuit
@@ -2867,6 +2935,7 @@ public class CodeArtifactService implements Resettable {
         // same normalized spelling, so a restriction set under one casing is found under any other.
         String key = packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName));
+        migrateOriginConfigs(owner);
         packageOriginConfigs.putForAccount(owner, key, new PackageOriginConfig(publishRestriction,
                 upstreamRestriction, format, namespace, packageName));
         return new PackageDescription(format, namespace, packageName, publishRestriction, upstreamRestriction);
@@ -2910,7 +2979,7 @@ public class CodeArtifactService implements Resettable {
         // match a request spelled the other.
         String key = packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName));
-        Optional<PackageOriginConfig> config = packageOriginConfigs.getForAccount(owner, key);
+        Optional<PackageOriginConfig> config = packageOriginConfig(owner, key, format);
         if (config.isPresent()) {
             return "BLOCK".equals(config.get().getUpstreamRestriction());
         }
@@ -2981,7 +3050,7 @@ public class CodeArtifactService implements Resettable {
         if (currentFence != packageFenceSnapshot) {
             return;
         }
-        if (packageOriginConfigs.getForAccount(owner, key).isPresent()) {
+        if (packageOriginConfig(owner, key, format).isPresent()) {
             return;
         }
         packageOriginConfigs.putForAccount(owner, key,
@@ -3474,7 +3543,7 @@ public class CodeArtifactService implements Resettable {
         // key already serves every other per-package map below too.
         String accountingKey = packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName));
-        Optional<PackageOriginConfig> originConfig = packageOriginConfigs.getForAccount(owner, accountingKey);
+        Optional<PackageOriginConfig> originConfig = packageOriginConfig(owner, accountingKey, format);
         boolean hadRealContent;
         if (CONTAINER_BACKED_FORMATS.contains(format)) {
             hadRealContent = deleteContainerBackedPackageIfPresent(region, domain, owner, repository, format,
@@ -3559,6 +3628,7 @@ public class CodeArtifactService implements Resettable {
         // were actually in effect, not CodeArtifact's bare defaults. A later DescribePackage on the
         // same coordinates must 404 rather than finding a zero-version package the deleted config
         // left behind.
+        migrateOriginConfigs(owner);
         packageOriginConfigs.deleteForAccount(owner, accountingKey);
         // Harmless no-op for generic (nothing is ever recorded there under this key; its bytes
         // live in packageVersions instead, already gone via the version-deleting branch above).
@@ -4735,7 +4805,10 @@ public class CodeArtifactService implements Resettable {
         domains.clear();
         repositories.clear();
         packageVersions.clear();
-        packageOriginConfigs.clear();
+        synchronized (this) {
+            packageOriginConfigs.clear();
+            migratedOriginConfigAccounts.clear();
+        }
         containerBackedAssetBytes.clear();
         containerBackedPackageDeletionFence.clear();
         containerBackedVersionDeletionFence.clear();

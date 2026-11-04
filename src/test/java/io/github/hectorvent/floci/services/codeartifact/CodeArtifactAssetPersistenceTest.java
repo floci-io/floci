@@ -623,6 +623,54 @@ class CodeArtifactAssetPersistenceTest {
         }
     }
 
+    @Test
+    void legacyNugetOriginConfigurationMigratesAndStaysDeletedAfterRestart(@TempDir Path dir) {
+        legacyOriginConfigurationMigratesAndStaysDeleted(dir, "nuget", "Newtonsoft.Json", "newtonsoft.json");
+    }
+
+    @Test
+    void legacyPypiOriginConfigurationMigratesAndStaysDeletedAfterRestart(@TempDir Path dir) {
+        legacyOriginConfigurationMigratesAndStaysDeleted(dir, "pypi", "My_Proj", "my-proj");
+    }
+
+    private void legacyOriginConfigurationMigratesAndStaysDeleted(Path dir, String format,
+                                                                 String original, String normalized) {
+        CodeArtifactService first = newService(dir);
+        first.createDomain(REGION, "dom", null, Map.of());
+        first.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String file = "codeartifact-package-origin-configs.json";
+        String prefix = REGION + "::dom::repo::" + format + "::::";
+        AccountAwareStorageBackend<PackageOriginConfig> oldStore = accountAware(dir, file,
+                new TypeReference<Map<String, PackageOriginConfig>>() {});
+        oldStore.putForAccount(ACCOUNT_ID, prefix + original,
+                new PackageOriginConfig("BLOCK", "BLOCK", null, null, null));
+
+        CodeArtifactService upgraded = newService(dir);
+        CodeArtifactService.ListPackagesResult listed = upgraded.listPackages(REGION, "dom", null, "repo",
+                format, null, null, null, null, "BLOCK", "BLOCK");
+        assertEquals(List.of(normalized), listed.packages().stream()
+                .map(CodeArtifactService.PackageSummaryEntry::packageName).toList());
+        assertTrue(upgraded.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized));
+        AccountAwareStorageBackend<PackageOriginConfig> migrated = accountAware(dir, file,
+                new TypeReference<Map<String, PackageOriginConfig>>() {});
+        assertTrue(migrated.getForAccount(ACCOUNT_ID, prefix + original).isEmpty());
+        assertTrue(migrated.getForAccount(ACCOUNT_ID, prefix + normalized).isPresent());
+
+        CodeArtifactService restarted = newService(dir);
+        CodeArtifactService.PackageDescription described = restarted.describePackage(REGION, "dom", null,
+                "repo", format, null, original);
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("BLOCK", described.upstreamRestriction());
+        restarted.deletePackage(REGION, "dom", null, "repo", format, null, normalized);
+
+        CodeArtifactService afterDelete = newService(dir);
+        assertThrows(AwsException.class, () -> afterDelete.describePackage(REGION, "dom", null,
+                "repo", format, null, original));
+        AccountAwareStorageBackend<PackageOriginConfig> deleted = accountAware(dir, file,
+                new TypeReference<Map<String, PackageOriginConfig>>() {});
+        assertTrue(deleted.keysForAccount(ACCOUNT_ID).isEmpty());
+    }
+
     private CodeArtifactService newService(Path dir) {
         AccountAwareStorageBackend<CodeArtifactDomain> domainStore = accountAware(dir, "codeartifact-domains.json",
                 new TypeReference<Map<String, CodeArtifactDomain>>() {});
@@ -644,7 +692,15 @@ class CodeArtifactAssetPersistenceTest {
 
         return new CodeArtifactService(domainStore, repoStore, packageVersionStore, packageOriginConfigStore,
                 regionResolver, config, false, dir.resolve("codeartifact-assets"),
-                new CodeArtifactSidecarRegistry(List.of()));
+                persistenceSidecars());
+    }
+
+    private CodeArtifactSidecarRegistry persistenceSidecars() {
+        BagetterSidecarClient nuget = mock(BagetterSidecarClient.class);
+        when(nuget.format()).thenReturn("nuget");
+        PypiserverSidecarClient pypi = mock(PypiserverSidecarClient.class);
+        when(pypi.format()).thenReturn("pypi");
+        return new CodeArtifactSidecarRegistry(List.of(nuget, pypi));
     }
 
     private <V> AccountAwareStorageBackend<V> accountAware(Path dir, String fileName, TypeReference<Map<String, V>> type) {
