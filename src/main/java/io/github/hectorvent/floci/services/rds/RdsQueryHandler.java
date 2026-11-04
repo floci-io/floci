@@ -1312,10 +1312,7 @@ public class RdsQueryHandler {
         boolean storageEncrypted = "true".equalsIgnoreCase(params.getFirst("StorageEncrypted"));
         Integer backupRetentionPeriodParam = parseIntegerParam(params, "BackupRetentionPeriod");
         int backupRetentionPeriod = backupRetentionPeriodParam != null ? backupRetentionPeriodParam : 1;
-        if (backupRetentionPeriod < 1 || backupRetentionPeriod > 35) {
-            throw new AwsException("InvalidParameterValue",
-                    "BackupRetentionPeriod must be between 1 and 35.", 400);
-        }
+        RdsService.validateBackupRetentionPeriod(backupRetentionPeriod);
 
         if (engineVersion == null) {
             engineVersion = defaultEngineVersion(engine);
@@ -1499,9 +1496,8 @@ public class RdsQueryHandler {
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             Boolean enableHttpEndpoint = parseOptionalBoolean(params, "EnableHttpEndpoint");
             Integer modifyBackupRetentionPeriod = parseIntegerParam(params, "BackupRetentionPeriod");
-            if (modifyBackupRetentionPeriod != null && (modifyBackupRetentionPeriod < 1 || modifyBackupRetentionPeriod > 35)) {
-                throw new AwsException("InvalidParameterValue",
-                        "BackupRetentionPeriod must be between 1 and 35.", 400);
+            if (modifyBackupRetentionPeriod != null) {
+                RdsService.validateBackupRetentionPeriod(modifyBackupRetentionPeriod);
             }
             if (Boolean.TRUE.equals(enableHttpEndpoint)) {
                 RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());

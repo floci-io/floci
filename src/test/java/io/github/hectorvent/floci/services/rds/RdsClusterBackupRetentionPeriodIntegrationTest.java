@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -29,15 +31,22 @@ class RdsClusterBackupRetentionPeriodIntegrationTest {
                 .formParam("SkipFinalSnapshot", "true").when().post("/");
     }
 
-    @Test
-    void backupRetentionPeriodDefaultsToOneOnCreate() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
+    private static Response createCluster(String id, String period) {
+        RequestSpecification req = rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
                 .formParam("Engine", "aurora-postgresql")
                 .formParam("EngineVersion", "16.3")
                 .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
-                .when().post("/").then().statusCode(200);
+                .formParam("MasterUserPassword", "secret99password");
+        if (period != null) {
+            req = req.formParam("BackupRetentionPeriod", period);
+        }
+        return req.when().post("/");
+    }
+
+    @Test
+    void backupRetentionPeriodDefaultsToOneOnCreate() {
+        createCluster(ID, null).then().statusCode(200);
 
         rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
                 .when().post("/").then().statusCode(200)
@@ -46,14 +55,7 @@ class RdsClusterBackupRetentionPeriodIntegrationTest {
 
     @Test
     void backupRetentionPeriodEchoedOnCreateWhenProvided() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
-                .formParam("BackupRetentionPeriod", "7")
-                .when().post("/").then().statusCode(200);
+        createCluster(ID, "7").then().statusCode(200);
 
         rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
                 .when().post("/").then().statusCode(200)
@@ -62,40 +64,19 @@ class RdsClusterBackupRetentionPeriodIntegrationTest {
 
     @Test
     void backupRetentionPeriodRejectedWhenZero() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", INVALID_ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
-                .formParam("BackupRetentionPeriod", "0")
-                .when().post("/").then().statusCode(400)
+        createCluster(INVALID_ID, "0").then().statusCode(400)
                 .body(containsString("BackupRetentionPeriod must be between 1 and 35"));
     }
 
     @Test
     void backupRetentionPeriodRejectedWhenAbove35() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", INVALID_ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
-                .formParam("BackupRetentionPeriod", "36")
-                .when().post("/").then().statusCode(400)
+        createCluster(INVALID_ID, "36").then().statusCode(400)
                 .body(containsString("BackupRetentionPeriod must be between 1 and 35"));
     }
 
     @Test
     void backupRetentionPeriodModifiedAndValidated() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
-                .formParam("BackupRetentionPeriod", "3")
-                .when().post("/").then().statusCode(200);
+        createCluster(ID, "3").then().statusCode(200);
 
         rds("ModifyDBCluster")
                 .formParam("DBClusterIdentifier", ID)
@@ -110,14 +91,7 @@ class RdsClusterBackupRetentionPeriodIntegrationTest {
 
     @Test
     void backupRetentionPeriodModifyRejectedWhenInvalid() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
-                .formParam("BackupRetentionPeriod", "5")
-                .when().post("/").then().statusCode(200);
+        createCluster(ID, "5").then().statusCode(200);
 
         rds("ModifyDBCluster")
                 .formParam("DBClusterIdentifier", ID)
@@ -128,27 +102,13 @@ class RdsClusterBackupRetentionPeriodIntegrationTest {
 
     @Test
     void backupRetentionPeriodRejectedWhenNegative() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", INVALID_ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
-                .formParam("BackupRetentionPeriod", "-1")
-                .when().post("/").then().statusCode(400)
+        createCluster(INVALID_ID, "-1").then().statusCode(400)
                 .body(containsString("BackupRetentionPeriod must be between 1 and 35"));
     }
 
     @Test
     void retainedAutomatedBackupsInheritClusterPeriod() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
-                .formParam("BackupRetentionPeriod", "7")
-                .when().post("/").then().statusCode(200);
+        createCluster(ID, "7").then().statusCode(200);
 
         // Delete cluster but retain automated backups
         rds("DeleteDBCluster")
@@ -166,14 +126,7 @@ class RdsClusterBackupRetentionPeriodIntegrationTest {
 
     @Test
     void modifyWithoutBackupRetentionPeriodKeepsExistingValue() {
-        rds("CreateDBCluster")
-                .formParam("DBClusterIdentifier", ID)
-                .formParam("Engine", "aurora-postgresql")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "secret99password")
-                .formParam("BackupRetentionPeriod", "7")
-                .when().post("/").then().statusCode(200);
+        createCluster(ID, "7").then().statusCode(200);
 
         // Modify cluster without specifying BackupRetentionPeriod
         rds("ModifyDBCluster")
