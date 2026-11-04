@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -1959,8 +1960,12 @@ public class Ec2QueryHandler {
 
         // Build the full list of service details with all properties for filtering
         List<ServiceDetail> services = buildServiceDetails(region, requested, azNames);
-        // Apply filters
-        services = applyVpcEndpointServiceFilters(services, filters);
+        try {
+            // Apply filters
+            services = applyVpcEndpointServiceFilters(services, filters);
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC2, e.getHttpStatus());
+        }
 
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
@@ -2067,6 +2072,15 @@ public class Ec2QueryHandler {
             return services;
         }
 
+        // Validate filter names before iterating services (AWS returns InvalidFilter for unknown names)
+        for (Map.Entry<String, List<String>> filter : filters) {
+            String name = filter.getKey();
+            if (!isValidFilterName(name)) {
+                throw new AwsException("InvalidFilter",
+                        "The filter '" + name + "' is invalid.", 400);
+            }
+        }
+
         return services.stream()
                 .filter(svc -> {
                     for (Map.Entry<String, List<String>> filter : filters) {
@@ -2084,6 +2098,16 @@ public class Ec2QueryHandler {
                 .toList();
     }
 
+    private boolean isValidFilterName(String name) {
+        return "owner".equals(name)
+                || "service-name".equals(name)
+                || "service-region".equals(name)
+                || "service-type".equals(name)
+                || "supported-ip-address-types".equals(name)
+                || "tag-key".equals(name)
+                || (name != null && name.startsWith("tag:"));
+    }
+
     private boolean matchesFilter(ServiceDetail svc, String filterName, List<String> values) {
         return switch (filterName) {
             case "owner" -> values.contains(svc.owner);
@@ -2097,7 +2121,8 @@ public class Ec2QueryHandler {
                 yield false;
             }
             case "tag-key" -> false; // No tags on these services
-            default -> true; // Unknown filter: ignore (matches AWS behavior of ignoring unknown filters)
+            default -> throw new AwsException("InvalidFilter",
+                    "The filter '" + filterName + "' is invalid.", 400);
         };
     }
 
