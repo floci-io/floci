@@ -177,6 +177,7 @@ public class CloudFormationQueryHandler {
             }
             // The template is unchanged, so the update carries the policy alone.
             cs.setStatus("CREATE_COMPLETE");
+            cs.setExecutionStatus("AVAILABLE");
             cs.setStatusReason(null);
         }
         cs.setStackPolicyBody(stackPolicy);

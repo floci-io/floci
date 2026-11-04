@@ -6,9 +6,12 @@ import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
+import io.restassured.path.xml.element.Node;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
@@ -154,6 +157,52 @@ class CloudFormationServiceRestoreIntegrationTest {
         } finally {
             release(runningOperations);
         }
+
+        service.deleteStack(targetStack, REGION, regionResolver.getAccountId())
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void rejectedPolicyOnlyUpdateCanBeExecutedOnceCapacityReturns() throws Exception {
+        // Outside STACK_PREFIX, so its own create and update are not held by the blocking provisioner.
+        String targetStack = "restore-policy-target-" + System.nanoTime();
+        cfn("CreateStack", targetStack).formParam("TemplateBody", TEMPLATE)
+                .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(targetStack, "CREATE_COMPLETE");
+        String policy = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"Update:*\",\"Principal\":\"*\",\"Resource\":\"*\"}]}";
+
+        String updateChangeSet;
+        List<Future<?>> runningOperations = fillExecutor();
+        try {
+            Response rejected = cfn("UpdateStack", targetStack)
+                    .formParam("UsePreviousTemplate", "true")
+                    .formParam("StackPolicyBody", policy)
+                    .when().post("/");
+            assertEquals(400, rejected.statusCode(), rejected.asString());
+            assertTrue(rejected.asString().contains("LimitExceededException"), rejected.asString());
+
+            String listed = cfn("ListChangeSets", targetStack).when().post("/")
+                    .then().statusCode(200).extract().asString();
+            List<Node> updates = XmlPath.from(listed)
+                    .getList("**.findAll { it.name() == 'member' }", Node.class).stream()
+                    .filter(summary -> summary.getNode("ChangeSetName").value().startsWith("update-"))
+                    .toList();
+            assertEquals(1, updates.size(), listed);
+            Node restored = updates.getFirst();
+            updateChangeSet = restored.getNode("ChangeSetName").value();
+            assertEquals("AVAILABLE", restored.getNode("ExecutionStatus").value(), listed);
+            assertEquals("CREATE_COMPLETE", restored.getNode("Status").value(), listed);
+        } finally {
+            release(runningOperations);
+        }
+
+        cfn("ExecuteChangeSet", targetStack).formParam("ChangeSetName", updateChangeSet)
+                .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(targetStack, "UPDATE_COMPLETE");
+        String applied = cfn("GetStackPolicy", targetStack).when().post("/")
+                .then().statusCode(200).extract().xmlPath()
+                .getString("GetStackPolicyResponse.GetStackPolicyResult.StackPolicyBody");
+        assertEquals(policy, applied);
 
         service.deleteStack(targetStack, REGION, regionResolver.getAccountId())
                 .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
