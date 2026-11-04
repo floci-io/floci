@@ -923,6 +923,99 @@ class CodeArtifactNpmDockerIntegrationTest {
     }
 
     /**
+     * Found while self-reviewing the fix that stopped {@code VerdaccioSidecarClient#storeVersion}
+     * from always sending its own {@code dist-tags.latest}: {@code CopyPackageVersions}'s own
+     * overwrite path ({@code deletePackageVersionAsset} then {@code copyPackageVersionAsset}, both
+     * confirmed live) deletes the conflicting version's packument entry first, which clears {@code
+     * latest} if it pointed there, and, confirmed live against the pinned image, Verdaccio then
+     * auto-recomputes a new {@code latest} from whatever versions remain, rather than leaving the
+     * package tagless. The worry this proves unfounded: that the recreate step, now sending no
+     * {@code dist-tags} of its own, would leave the overwritten version's package without any
+     * {@code latest} at all, or wrongly hand {@code latest} back to the version just overwritten
+     * instead of the one Verdaccio already re-picked. Neither happens: overwriting {@code 1.0.0}
+     * (the current {@code latest}) while {@code 2.0.0} also exists leaves {@code latest} on {@code
+     * 2.0.0} throughout, exactly as it was the moment {@code 1.0.0}'s own entry was removed.
+     */
+    @Test
+    @Order(24)
+    void copyPackageVersionsOverwritingTheCurrentLatestVersionNeverLosesOrWronglyReclaimsLatest() {
+        String packageName = "multiver-overwrite-pkg";
+        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+                .post("/v1/repository?domain=" + DOMAIN + "&repository=overwrite-dest-repo")
+                .then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+                .post("/v1/repository?domain=" + DOMAIN + "&repository=overwrite-source-repo")
+                .then().statusCode(200);
+
+        // Two real versions published directly to REPO, the source for both copies below.
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json")
+                .body(scopelessEnvelope(packageName, "1.0.0", "original 1.0.0 bytes".getBytes(StandardCharsets.UTF_8)))
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json")
+                .body(scopelessEnvelope(packageName, "2.0.0", "the 2.0.0 bytes".getBytes(StandardCharsets.UTF_8)))
+                .put("/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        // Copying 1.0.0 into a brand new destination package makes it latest (Verdaccio's own
+        // first-ever-version default); copying 2.0.0 in afterward must not steal that tag.
+        copyNpmVersion(REPO, "overwrite-dest-repo", packageName, "1.0.0", false);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/overwrite-dest-repo/" + packageName)
+                .then().statusCode(200).body("dist-tags.latest", equalTo("1.0.0"));
+        copyNpmVersion(REPO, "overwrite-dest-repo", packageName, "2.0.0", false);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/overwrite-dest-repo/" + packageName)
+                .then().statusCode(200).body("dist-tags.latest", equalTo("1.0.0"));
+
+        // A different real 1.0.0 (different bytes) published to a third repository, so the
+        // overwrite below has genuinely different content to copy in, the same way the existing
+        // copyPackageVersionsOverwritesAnExistingNpmVersionWithDifferentContentAtTheRealSidecar
+        // test sources its own "new" content from a different repository than the "old" one.
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json")
+                .body(scopelessEnvelope(packageName, "1.0.0", "overwritten 1.0.0 bytes".getBytes(StandardCharsets.UTF_8)))
+                .put("/codeartifact/npm/" + DOMAIN + "/overwrite-source-repo/" + packageName)
+                .then().statusCode(anyOf201Or200());
+
+        // Overwrites 1.0.0, the destination's own current latest, while 2.0.0 still exists there.
+        copyNpmVersion("overwrite-source-repo", "overwrite-dest-repo", packageName, "1.0.0", true);
+
+        byte[] overwritten = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/overwrite-dest-repo/" + packageName + "/-/" + packageName
+                        + "-1.0.0.tgz")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals("overwritten 1.0.0 bytes", new String(overwritten, StandardCharsets.UTF_8));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/overwrite-dest-repo/" + packageName)
+                .then().statusCode(200)
+                .body("versions", hasKey("1.0.0"))
+                .body("versions", hasKey("2.0.0"))
+                .body("dist-tags.latest", equalTo("2.0.0"));
+    }
+
+    private static String scopelessEnvelope(String packageName, String version, byte[] tarball) {
+        String assetName = packageName + "-" + version + ".tgz";
+        return "{\"name\":\"" + packageName + "\",\"versions\":{\"" + version + "\":{\"name\":\"" + packageName
+                + "\",\"version\":\"" + version + "\",\"dist\":{\"tarball\":\"http://ignored/" + assetName + "\"}}},"
+                + "\"_attachments\":{\"" + assetName + "\":{\"content_type\":\"application/octet-stream\","
+                + "\"data\":\"" + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length
+                + "}}}";
+    }
+
+    private static void copyNpmVersion(String sourceRepository, String destinationRepository, String packageName,
+            String version, boolean allowOverwrite) {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"" + version + "\"],\"allowOverwrite\":" + allowOverwrite + "}")
+                .post("/v1/package/versions/copy?domain=" + DOMAIN + "&source-repository=" + sourceRepository
+                        + "&destination-repository=" + destinationRepository + "&format=npm&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions.'" + version + "'.status", equalTo("Published"))
+                .body("failedVersions.size()", equalTo(0));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code VerdaccioSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container, not the repository-record
