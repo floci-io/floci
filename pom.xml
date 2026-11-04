@@ -742,6 +742,14 @@
                     <argLine>@{argLine} -Xmx6g</argLine>
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                        <!-- Parallel execution is opt-in per class; CPU-heavy service
+                             tests with independent fixtures can share four workers. -->
+                        <junit.jupiter.execution.parallel.enabled>true</junit.jupiter.execution.parallel.enabled>
+                        <junit.jupiter.execution.parallel.mode.default>same_thread</junit.jupiter.execution.parallel.mode.default>
+                        <junit.jupiter.execution.parallel.mode.classes.default>same_thread</junit.jupiter.execution.parallel.mode.classes.default>
+                        <junit.jupiter.execution.parallel.config.strategy>fixed</junit.jupiter.execution.parallel.config.strategy>
+                        <junit.jupiter.execution.parallel.config.fixed.parallelism>4</junit.jupiter.execution.parallel.config.fixed.parallelism>
+                        <junit.jupiter.execution.parallel.config.fixed.max-pool-size>4</junit.jupiter.execution.parallel.config.fixed.max-pool-size>
                         <!-- An ARN minted with a blank region fails the test that reached it (BlankRegionGuard). -->
                         <io.github.hectorvent.floci.arn.fail-on-blank-region>true</io.github.hectorvent.floci.arn.fail-on-blank-region>
                     </systemPropertyVariables>
