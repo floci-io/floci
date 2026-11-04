@@ -567,7 +567,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         // evaluated against the role's policies, permissions boundary, or SCPs (which often enforce read-only
         // on data lake buckets). Tying authorization ahead of role policies directly to the minted transfer key
         // and scratch key ensures boundary/SCP checks apply only to the actual S3 source reads.
-        if (isSpectrumScratchTransfer(credentialScope, action, resources, akid, callerArns.orElse(null))) {
+        if (isSpectrumScratchTransfer(credentialScope, action, resources, akid, callerArns.orElse(null))
+                || isUnloadScratchTransfer(ctx, credentialScope, action, resources, akid, callerArns.orElse(null))) {
             return;
         }
         // A create that carries tags is checked with them where its own action takes them, as the tagging
@@ -730,6 +731,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                     + Pattern.quote(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)
                     + "/spectrum-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\\.csv");
 
+    private static final Set<String> UNLOAD_SCRATCH_ACTIONS =
+            Set.of("s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListBucket");
+    private static final Pattern UNLOAD_SCRATCH_PREFIX = Pattern.compile(
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":s3:::"
+                    + Pattern.quote(S3Service.REDSHIFT_UNLOAD_STAGING_BUCKET)
+                    + "/unload/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}/");
+
     private static final Set<String> GOVERNANCE_BYPASS_ACTIONS =
             Set.of("s3:PutObjectRetention", "s3:DeleteObject", "s3:DeleteObjectVersion");
 
@@ -797,6 +805,32 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return false;
         }
         return resources.stream().allMatch(expectedArn::equals);
+    }
+
+    /** Internal conversion access is limited to a tagged bucket, transfer session and UUID prefix. */
+    private boolean isUnloadScratchTransfer(ContainerRequestContext ctx, String credentialScope, String action,
+                                            List<String> resources, String akid, CallerArns callerArns) {
+        if (!"s3".equals(credentialScope) || akid == null || callerArns == null
+                || !CallerArns.TYPE_ASSUMED_ROLE.equals(callerArns.principalType())
+                || !UNLOAD_SCRATCH_ACTIONS.contains(action) || resources.isEmpty()
+                || s3ServiceProvider == null || !s3ServiceProvider.isResolvable()
+                || !s3ServiceProvider.get().isUnloadStagingBucket(S3Service.REDSHIFT_UNLOAD_STAGING_BUCKET)) {
+            return false;
+        }
+        Optional<String> allowed = iamService.unloadScratchPrefixArn(akid);
+        if (allowed.isEmpty() || !UNLOAD_SCRATCH_PREFIX.matcher(allowed.get()).matches()) {
+            return false;
+        }
+        String prefixArn = allowed.get();
+        if ("s3:ListBucket".equals(action)) {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(prefixArn);
+            String bucketArn = AwsArnUtils.Arn.global(arn.partition(), "s3", "",
+                    S3Service.REDSHIFT_UNLOAD_STAGING_BUCKET).toString();
+            String prefix = ctx.getUriInfo().getQueryParameters().getFirst("prefix");
+            String allowedPrefix = arn.resource().substring(S3Service.REDSHIFT_UNLOAD_STAGING_BUCKET.length() + 1);
+            return prefix != null && prefix.startsWith(allowedPrefix) && resources.stream().allMatch(bucketArn::equals);
+        }
+        return resources.stream().allMatch(resource -> resource.startsWith(prefixArn));
     }
 
     /**

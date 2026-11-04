@@ -4860,6 +4860,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .filter(arn -> arn != null && !arn.isBlank());
     }
 
+    /** Binds, or clears with null, the internal UNLOAD prefix for this transfer session. */
+    public void registerUnloadScratchPrefix(String accessKeyId, String prefixArn) {
+        currentSession(accessKeyId).ifPresent(session -> {
+            session.setUnloadScratchPrefixArn(prefixArn);
+            String accountId = session.getOriginAccountId() != null ? session.getOriginAccountId() : "000000000000";
+            putSessionForAccount(accountId, accessKeyId, session);
+        });
+    }
+
+    public Optional<String> unloadScratchPrefixArn(String accessKeyId) {
+        return currentSession(accessKeyId).map(SessionCredential::getUnloadScratchPrefixArn)
+                .filter(prefix -> prefix != null && !prefix.isBlank());
+    }
+
     /**
      * Stores a non-expiring session for a Lambda execution role under the function's account.
      * Lambda launches can happen outside request scope, so the account namespace must be explicit.

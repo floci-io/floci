@@ -1719,6 +1719,65 @@ class IamEnforcementFilterTest {
         verify(containerRequest).abortWith(any(Response.class));
     }
 
+    private static final String UNLOAD_PREFIX = "arn:aws:s3:::floci-redshift-unload-staging/"
+            + "unload/123e4567-e89b-12d3-a456-426614174000/";
+
+    private IamEnforcementFilter unloadFilter(boolean internalBucket) {
+        @SuppressWarnings("unchecked")
+        Instance<S3Service> provider = mock(Instance.class);
+        S3Service s3 = mock(S3Service.class);
+        when(provider.isResolvable()).thenReturn(true);
+        when(provider.get()).thenReturn(s3);
+        when(s3.isUnloadStagingBucket(S3Service.REDSHIFT_UNLOAD_STAGING_BUCKET)).thenReturn(internalBucket);
+        return newFilterWithRealEvaluator(provider);
+    }
+
+    @Test
+    void unloadScratchAccessIsScopedAheadOfRoleDenies() {
+        for (String action : List.of("s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload", "s3:DeleteObject")) {
+            ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+            stubSignedS3Request(ctx, action, UNLOAD_PREFIX + "output.parquet/data_0.parquet", assumedRoleArns(),
+                    "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":\"s3:*\",\"Resource\":\"*\"}]}");
+            when(iamService.unloadScratchPrefixArn("ASIASESSION")).thenReturn(Optional.of(UNLOAD_PREFIX));
+            unloadFilter(true).filter(ctx);
+            verify(ctx, never()).abortWith(any());
+        }
+    }
+
+    @Test
+    void unloadScratchListingsCannotEscapeTheTransferPrefix() {
+        for (String prefix : List.of("unload/123e4567-e89b-12d3-a456-426614174000/output.parquet/", "", "unload/", "other/")) {
+            ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+            stubSignedS3Request(ctx, "s3:ListBucket", "arn:aws:s3:::floci-redshift-unload-staging", assumedRoleArns(), NO_STATEMENTS);
+            when(iamService.unloadScratchPrefixArn("ASIASESSION")).thenReturn(Optional.of(UNLOAD_PREFIX));
+            ctx.getUriInfo().getQueryParameters().putSingle("prefix", prefix);
+            unloadFilter(true).filter(ctx);
+            if (prefix.startsWith("unload/123e4567-e89b-12d3-a456-426614174000/")) {
+                verify(ctx, never()).abortWith(any());
+            } else {
+                verify(ctx).abortWith(any(Response.class));
+            }
+        }
+    }
+
+    @Test
+    void unloadScratchAllowanceRejectsOtherKeysSessionsAndBuckets() {
+        for (String resource : List.of("arn:aws:s3:::user-destination/file.parquet",
+                "arn:aws:s3:::floci-redshift-unload-staging/unload/other/input.csv", UNLOAD_PREFIX + "input.csv")) {
+            ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+            stubSignedS3Request(ctx, "s3:GetObject", resource, assumedRoleArns(), NO_STATEMENTS);
+            when(iamService.unloadScratchPrefixArn("ASIASESSION"))
+                    .thenReturn(resource.equals(UNLOAD_PREFIX + "input.csv") ? Optional.empty() : Optional.of(UNLOAD_PREFIX));
+            unloadFilter(true).filter(ctx);
+            verify(ctx).abortWith(any(Response.class));
+        }
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        stubSignedS3Request(ctx, "s3:PutObject", UNLOAD_PREFIX + "input.csv", assumedRoleArns(), NO_STATEMENTS);
+        when(iamService.unloadScratchPrefixArn("ASIASESSION")).thenReturn(Optional.of(UNLOAD_PREFIX));
+        unloadFilter(false).filter(ctx);
+        verify(ctx).abortWith(any(Response.class));
+    }
+
     // FullAWSAccess baseline auto-attached to every OU/account when SCP enforcement is on.
     private static final String FULL_AWS_ACCESS =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";

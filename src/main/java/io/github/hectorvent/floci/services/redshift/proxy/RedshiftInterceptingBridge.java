@@ -64,6 +64,7 @@ public class RedshiftInterceptingBridge {
     private final Socket client;
     private final Socket backend;
     private final S3Service s3Service;
+    private final RedshiftParquetWriter parquetWriter;
     private final IamService iamService;
     private final String clusterAccountId;
     private final List<String> iamRoleArns;
@@ -118,7 +119,7 @@ public class RedshiftInterceptingBridge {
                                       SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
                                       String defaultIamRoleArn) {
         this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor,
-                clusterKey, databaseName, defaultIamRoleArn, null, null);
+                clusterKey, databaseName, defaultIamRoleArn, null, null, null);
     }
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
@@ -126,17 +127,17 @@ public class RedshiftInterceptingBridge {
                                       SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
                                       String defaultIamRoleArn, RedshiftAuditLogPublisher auditLogPublisher) {
         this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor,
-                clusterKey, databaseName, defaultIamRoleArn, auditLogPublisher, null);
+                clusterKey, databaseName, defaultIamRoleArn, auditLogPublisher, null, null);
     }
 
     public RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
                                       String clusterAccountId, List<String> iamRoleArns,
                                       SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
                                       String defaultIamRoleArn, RedshiftAuditLogPublisher auditLogPublisher,
-                                      String databaseUser) {
+                                      String databaseUser, RedshiftParquetWriter parquetWriter) {
         this(client, backend, s3Service, iamService, clusterAccountId, iamRoleArns, spectrumInterceptor,
                 clusterKey, databaseName, defaultIamRoleArn, auditLogPublisher, databaseUser, new ReentrantLock(true),
-                PUMP_PARK_WAIT_MS);
+                PUMP_PARK_WAIT_MS, parquetWriter);
     }
 
     /**
@@ -145,7 +146,7 @@ public class RedshiftInterceptingBridge {
      */
     RedshiftInterceptingBridge(Socket client, Socket backend, ReentrantLock backendLock, long ownershipWaitMillis) {
         this(client, backend, null, null, null, List.of(), null, null, null, null, null, null, backendLock,
-                ownershipWaitMillis);
+                ownershipWaitMillis, null);
     }
 
     private RedshiftInterceptingBridge(Socket client, Socket backend, S3Service s3Service, IamService iamService,
@@ -153,8 +154,9 @@ public class RedshiftInterceptingBridge {
                                        SpectrumInterceptor spectrumInterceptor, String clusterKey, String databaseName,
                                        String defaultIamRoleArn, RedshiftAuditLogPublisher auditLogPublisher,
                                        String databaseUser, ReentrantLock backendLock,
-                                       long ownershipWaitMillis) {
+                                       long ownershipWaitMillis, RedshiftParquetWriter parquetWriter) {
         this.client = client;
+        this.parquetWriter = parquetWriter;
         this.backend = backend;
         this.s3Service = s3Service;
         this.iamService = iamService;
@@ -306,7 +308,7 @@ public class RedshiftInterceptingBridge {
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
                 case CopyStatementParser.S3Unload unload -> S3CopySimulator.runUnload(
                         client, backend, unload, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
-                        status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
+                        status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), parquetWriter);
             });
             if (intercepted) {
                 return;
@@ -686,7 +688,7 @@ public class RedshiftInterceptingBridge {
         try {
             backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
             ExtendedS3Exchange.execute(client, backend, executeFrame, statement, s3Service, iamService,
-                    clusterAccountId, iamRoleArns, coordinator, ticket);
+                    clusterAccountId, iamRoleArns, coordinator, ticket, parquetWriter);
         } finally {
             try {
                 backend.setSoTimeout(PUMP_READ_TIMEOUT_MS);

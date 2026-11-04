@@ -118,6 +118,8 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String INTERNAL_BUCKET_PREFIX = "floci-internal-";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_BUCKET =
             INTERNAL_BUCKET_PREFIX + "redshift-spectrum-scratch";
+    public static final String REDSHIFT_UNLOAD_STAGING_BUCKET = "floci-redshift-unload-staging";
+    public static final String REDSHIFT_UNLOAD_STAGING_TAG_VALUE = "redshift-unload-staging";
     public static final String INTERNAL_BUCKET_TAG_KEY = "floci:internal";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
@@ -615,7 +617,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public List<Bucket> listBuckets() {
         return bucketStore.scan(key -> true).stream()
-                .filter(bucket -> !isSpectrumScratchBucket(bucket))
+                .filter(bucket -> !isSpectrumScratchBucket(bucket) && !isUnloadStagingBucket(bucket))
                 .toList();
     }
 
@@ -635,6 +637,15 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public boolean isSpectrumScratchBucket(String bucketName) {
         return resolveBucket(bucketName).filter(S3Service::isSpectrumScratchBucket).isPresent();
+    }
+
+    private static boolean isUnloadStagingBucket(Bucket bucket) {
+        return REDSHIFT_UNLOAD_STAGING_BUCKET.equals(bucket.getName()) && bucket.getTags() != null
+                && REDSHIFT_UNLOAD_STAGING_TAG_VALUE.equals(bucket.getTags().get(INTERNAL_BUCKET_TAG_KEY));
+    }
+
+    public boolean isUnloadStagingBucket(String bucketName) {
+        return resolveBucket(bucketName).filter(S3Service::isUnloadStagingBucket).isPresent();
     }
 
     public String getBucketOwnerAccountId(String bucketName) {

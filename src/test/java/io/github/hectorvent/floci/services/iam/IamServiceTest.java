@@ -2627,6 +2627,30 @@ class IamServiceTest {
         assertTrue(service.spectrumScratchResourceArn(accessKeyId).isEmpty());
     }
 
+    @Test
+    void unloadScratchPrefixRegistrationAndClear() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIAUNLOAD";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerSessionForAccount(
+                accountId, accessKeyId, "secret", "token",
+                "arn:aws:iam::222233334444:role/R", Instant.now().plusSeconds(900), null);
+
+        assertTrue(service.unloadScratchPrefixArn(accessKeyId).isEmpty());
+
+        String scratchArn = "arn:aws:s3:::floci-redshift-unload-staging/unload/123e4567-e89b-12d3-a456-426614174000/";
+        service.registerUnloadScratchPrefix(accessKeyId, scratchArn);
+
+        assertEquals(Optional.of(scratchArn), service.unloadScratchPrefixArn(accessKeyId));
+
+        service.registerUnloadScratchPrefix(accessKeyId, null);
+
+        assertTrue(service.unloadScratchPrefixArn(accessKeyId).isEmpty());
+    }
+
     // =========================================================================
     // Instance Profiles
     // =========================================================================
