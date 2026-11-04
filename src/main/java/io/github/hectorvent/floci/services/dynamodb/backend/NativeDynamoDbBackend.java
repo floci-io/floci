@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbTtlService;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbStreamsJsonHandler;
+import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -34,6 +35,7 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
 
     private final NativeDynamoDbJsonHandler jsonHandler;
     private final NativeDynamoDbStreamsJsonHandler streamsHandler;
+    private final NativeDynamoDbTableService tableService;
     private final DynamoDbService dynamoDbService;
     private final DynamoDbStreamService streamService;
     private final DynamoDbTtlService ttlService;
@@ -42,10 +44,12 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     @Inject
     public NativeDynamoDbBackend(NativeDynamoDbJsonHandler jsonHandler,
                                  NativeDynamoDbStreamsJsonHandler streamsHandler,
+                                 NativeDynamoDbTableService tableService,
                                  DynamoDbService dynamoDbService, DynamoDbStreamService streamService,
                                  DynamoDbTtlService ttlService, ObjectMapper objectMapper) {
         this.jsonHandler = jsonHandler;
         this.streamsHandler = streamsHandler;
+        this.tableService = tableService;
         this.dynamoDbService = dynamoDbService;
         this.streamService = streamService;
         this.ttlService = ttlService;
@@ -191,6 +195,32 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     @Override
     public TableDefinition disableStream(Scope scope, String tableName) {
         return RequestScopes.callAs(scope.accountId(), () -> dynamoDbService.disableStream(tableName, scope.region()));
+    }
+
+    @Override
+    public TableDefinition enableKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                             String precision) {
+        return RequestScopes.callAs(scope.accountId(), () -> {
+            tableService.enableKinesisStreamingDestination(tableName, streamArn, precision, scope.region());
+            return dynamoDbService.describeTable(tableName, scope.region());
+        });
+    }
+
+    @Override
+    public TableDefinition disableKinesisStreamingDestination(Scope scope, String tableName, String streamArn) {
+        return RequestScopes.callAs(scope.accountId(), () -> {
+            tableService.disableKinesisStreamingDestination(tableName, streamArn, scope.region());
+            return dynamoDbService.describeTable(tableName, scope.region());
+        });
+    }
+
+    @Override
+    public TableDefinition updateKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                             String precision) {
+        return RequestScopes.callAs(scope.accountId(), () -> {
+            tableService.updateKinesisStreamingDestination(tableName, streamArn, precision, scope.region());
+            return dynamoDbService.describeTable(tableName, scope.region());
+        });
     }
 
     // Mirrors the native DescribeTimeToLive: no attribute name is reported while TTL is off.
