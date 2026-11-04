@@ -3,6 +3,14 @@
 **Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 **Endpoint:** `POST http://localhost:4566/`
 
+## Mapping values
+
+`Fn::FindInMap` preserves both string and list values from `Mappings`. Mapped lists
+can feed list properties or a conditional `Fn::If` branch. `Fn::Select` and
+`Fn::Join` preserve literal commas and empty list positions. This includes templates
+that choose between mapped Availability Zones and `Fn::GetAZs`. AWS documents
+both value types in the [Mappings syntax](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/mappings-section-structure.html).
+
 ## IAM role session duration
 
 `AWS::IAM::Role` applies `MaxSessionDuration` on creation and update, including
