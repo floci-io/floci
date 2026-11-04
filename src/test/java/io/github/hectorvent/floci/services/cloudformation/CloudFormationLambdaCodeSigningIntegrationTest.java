@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -25,8 +26,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @QuarkusTest
 class CloudFormationLambdaCodeSigningIntegrationTest {
 
-    private static final String CFN_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String MISSING_CSC_ARN =
             "arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-00000000000000000";
 
@@ -36,8 +35,10 @@ class CloudFormationLambdaCodeSigningIntegrationTest {
     @Test
     void signingProfileAndCodeSigningConfigAreProvisionedAttachedDetachedAndReattached() {
         String stackName = "cfn-lambda-csc-" + Long.toString(System.nanoTime(), 36);
+        String signed = template("\"CodeSigningConfigArn\": {\"Ref\": \"Csc\"}");
 
-        deploy("CreateStack", stackName, template("\"CodeSigningConfigArn\": {\"Ref\": \"Csc\"}"));
+        cfn("CreateStack", stackName).formParam("TemplateBody", signed).when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         XmlPath stack = describe(stackName);
         String profileArn = output(stack, "ProfileArn");
         String version = output(stack, "ProfileVersion");
@@ -70,11 +71,14 @@ class CloudFormationLambdaCodeSigningIntegrationTest {
         }
         assertCodeSigningConfig(function, cscArn);
 
-        deploy("UpdateStack", stackName, template("\"Description\": \"unsigned\""));
+        cfn("UpdateStack", stackName).formParam("TemplateBody", template("\"Description\": \"unsigned\""))
+            .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
         assertEquals(function, output(describe(stackName), "Name"), "dropping the config updates the function in place");
         assertCodeSigningConfig(function, "");
 
-        deploy("UpdateStack", stackName, template("\"CodeSigningConfigArn\": {\"Ref\": \"Csc\"}"));
+        cfn("UpdateStack", stackName).formParam("TemplateBody", signed).when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
         assertEquals(function, output(describe(stackName), "Name"), "adding the config updates the function in place");
         assertCodeSigningConfig(function, cscArn);
 
@@ -131,22 +135,6 @@ class CloudFormationLambdaCodeSigningIntegrationTest {
                 """.formatted(functionProperty);
     }
 
-    private static void deploy(String action, String stackName, String template) {
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", action)
-            .formParam("StackName", stackName)
-            .formParam("TemplateBody", template)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
-        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
-        assertEquals("CreateStack".equals(action) ? "CREATE_COMPLETE" : "UPDATE_COMPLETE", state.status(),
-                state.reason());
-    }
-
     private static void assertCodeSigningConfig(String function, String expected) {
         given()
         .when()
@@ -157,16 +145,7 @@ class CloudFormationLambdaCodeSigningIntegrationTest {
     }
 
     private static XmlPath describe(String stackName) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().xmlPath();
+        return cfn("DescribeStacks", stackName).when().post("/").then().statusCode(200).extract().xmlPath();
     }
 
     private static String output(XmlPath stack, String key) {

@@ -738,7 +738,7 @@ public class LambdaService implements ResourceProvider {
 
     /**
      * Validates and attaches a code-signing configuration under the configuration's lock, as
-     * PutFunctionCodeSigningConfig does, for callers other than the REST API.
+     * PutFunctionCodeSigningConfig does.
      */
     public LambdaFunction attachFunctionCodeSigningConfig(String region, String functionName,
                                                           String codeSigningConfigArn) {
@@ -749,6 +749,26 @@ public class LambdaService implements ResourceProvider {
         return codeSigningConfigService.withConfigLock(codeSigningConfigArn, () -> {
             codeSigningConfigService.requireForAttachment(region, regionResolver.getAccountId(), codeSigningConfigArn);
             return putFunctionCodeSigningConfig(region, functionName, codeSigningConfigArn);
+        });
+    }
+
+    /**
+     * Deletes a code-signing configuration under the configuration's lock, refusing one a function
+     * still uses, as DeleteCodeSigningConfig does.
+     */
+    public void deleteCodeSigningConfig(String region, String accountId, String codeSigningConfigArn) {
+        if (codeSigningConfigService == null) {
+            throw new IllegalStateException("Lambda code-signing configuration service is unavailable");
+        }
+        codeSigningConfigService.withConfigLock(codeSigningConfigArn, () -> {
+            codeSigningConfigService.get(region, accountId, codeSigningConfigArn);
+            if (!listFunctionsByCodeSigningConfig(region, accountId, codeSigningConfigArn, 1, null)
+                    .items().isEmpty()) {
+                throw new AwsException("ResourceConflictException",
+                        "The code signing configuration is still attached to a function.", 409);
+            }
+            codeSigningConfigService.delete(region, codeSigningConfigArn);
+            return null;
         });
     }
 

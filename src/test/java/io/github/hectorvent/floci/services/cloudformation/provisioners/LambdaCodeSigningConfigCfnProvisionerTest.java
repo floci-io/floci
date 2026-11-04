@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.lambda.LambdaCodeSigningConfigService;
@@ -27,6 +26,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -163,8 +163,6 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
     @Test
     void rollbackOfAStubMigrationDeletesTheCreatedConfig() {
         when(configs.create(eq(REGION), eq(ACCOUNT), any(), any(), any())).thenReturn(stored());
-        when(lambda.listFunctionsByCodeSigningConfig(REGION, ACCOUNT, CSC_ARN, 1, null))
-                .thenReturn(new PaginatedResult<>(List.of(), null));
         StackResource r = config();
         r.setPhysicalId("Csc-0a1b2c3d");
         r.getAttributes().put("Arn", "arn:aws:stub:::Csc");
@@ -172,16 +170,15 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(r));
 
-        verify(configs).delete(REGION, CSC_ARN);
+        verify(lambda).deleteCodeSigningConfig(REGION, ACCOUNT, CSC_ARN);
         assertEquals("Csc-0a1b2c3d", r.getPhysicalId());
     }
 
     @Test
     void configARollbackCouldNotDeleteIsDeletedByTheNextCleanup() {
         when(configs.create(eq(REGION), eq(ACCOUNT), any(), any(), any())).thenReturn(stored());
-        when(lambda.listFunctionsByCodeSigningConfig(REGION, ACCOUNT, CSC_ARN, 1, null))
-                .thenReturn(new PaginatedResult<>(List.of("arn:aws:lambda:eu-west-1:000000000000:function:fn"), null))
-                .thenReturn(new PaginatedResult<>(List.of(), null));
+        doThrow(new AwsException("ResourceConflictException", "attached", 409)).doNothing()
+                .when(lambda).deleteCodeSigningConfig(REGION, ACCOUNT, CSC_ARN);
         StackResource r = config();
         r.setPhysicalId("Csc-0a1b2c3d");
         r.getAttributes().put("Arn", "arn:aws:stub:::Csc");
@@ -191,7 +188,7 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
         assertTrue(provisioner.hasReplacementUpdate(r));
         assertEquals(CSC_ARN, provisioner.updateCleanupPhysicalId(r));
         assertTrue(provisioner.completeUpdate(r).complete());
-        verify(configs).delete(REGION, CSC_ARN);
+        verify(lambda, times(2)).deleteCodeSigningConfig(REGION, ACCOUNT, CSC_ARN);
     }
 
     @Test
@@ -233,48 +230,43 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
     void deleteOfAStubTouchesNothing() {
         provisioner.delete("AWS::Lambda::CodeSigningConfig", "Csc-0a1b2c3d", REGION);
 
-        verify(configs, never()).delete(any(), any());
+        verify(lambda, never()).deleteCodeSigningConfig(any(), any(), any());
     }
 
     @Test
-    void deleteRemovesAnUnattachedConfig() {
-        when(lambda.listFunctionsByCodeSigningConfig(REGION, ACCOUNT, CSC_ARN, 1, null))
-                .thenReturn(new PaginatedResult<>(List.of(), null));
-
+    void deleteRemovesTheConfigThroughLambda() {
         provisioner.delete("AWS::Lambda::CodeSigningConfig", CSC_ARN, REGION);
 
-        verify(configs).delete(REGION, CSC_ARN);
+        verify(lambda).deleteCodeSigningConfig(REGION, ACCOUNT, CSC_ARN);
     }
 
     @Test
     void deleteToleratesAConfigAlreadyGone() {
-        when(lambda.listFunctionsByCodeSigningConfig(REGION, ACCOUNT, CSC_ARN, 1, null))
-                .thenReturn(new PaginatedResult<>(List.of(), null));
-        doThrow(new AwsException("ResourceNotFoundException", "gone", 404)).when(configs).delete(REGION, CSC_ARN);
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+                .when(lambda).deleteCodeSigningConfig(REGION, ACCOUNT, CSC_ARN);
 
         provisioner.delete("AWS::Lambda::CodeSigningConfig", CSC_ARN, REGION);
     }
 
     @Test
-    void deleteOfAnotherAccountsArnLeavesTheLocalConfig() {
+    void deleteLooksTheConfigUpInTheArnsOwnAccount() {
         String foreign = "arn:aws:lambda:eu-west-1:111111111111:code-signing-config:csc-0123456789abcdef0";
-        when(configs.get(REGION, "111111111111", foreign))
-                .thenThrow(new AwsException("ResourceNotFoundException", "not found", 404));
+        doThrow(new AwsException("ResourceNotFoundException", "not found", 404))
+                .when(lambda).deleteCodeSigningConfig(REGION, "111111111111", foreign);
 
         provisioner.delete("AWS::Lambda::CodeSigningConfig", foreign, REGION);
 
-        verify(configs, never()).delete(any(), any());
+        verify(lambda).deleteCodeSigningConfig(REGION, "111111111111", foreign);
     }
 
     @Test
     void deleteRefusesAConfigStillAttachedToAFunction() {
-        when(lambda.listFunctionsByCodeSigningConfig(REGION, ACCOUNT, CSC_ARN, 1, null))
-                .thenReturn(new PaginatedResult<>(List.of("arn:aws:lambda:eu-west-1:000000000000:function:fn"), null));
+        doThrow(new AwsException("ResourceConflictException", "attached", 409))
+                .when(lambda).deleteCodeSigningConfig(REGION, ACCOUNT, CSC_ARN);
 
         AwsException e = assertThrows(AwsException.class,
                 () -> provisioner.delete("AWS::Lambda::CodeSigningConfig", CSC_ARN, REGION));
 
         assertEquals("ResourceConflictException", e.getErrorCode());
-        verify(configs, never()).delete(any(), any());
     }
 }

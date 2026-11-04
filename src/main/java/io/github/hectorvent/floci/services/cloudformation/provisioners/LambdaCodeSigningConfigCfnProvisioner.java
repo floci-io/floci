@@ -1,10 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.lambda.LambdaCodeSigningConfigService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -58,7 +56,7 @@ public class LambdaCodeSigningConfigCfnProvisioner implements CfnResourceProvisi
         CodeSigningConfig config = ctx.isUpdate() && AwsArnUtils.isArn(prior)
                 ? configs.withConfigLock(prior, () -> {
                     r.getAttributes().put(CfnRollback.CODE_SIGNING_CONFIG_UPDATE_SNAPSHOT_ATTR,
-                            write(configs.get(ctx.region(), prior)));
+                            MAPPER.valueToTree(configs.get(ctx.region(), prior)).toString());
                     return configs.update(ctx.region(), prior, description, publishers, policies);
                 })
                 : configs.create(ctx.region(), ctx.accountId(), description, publishers, policies);
@@ -94,11 +92,11 @@ public class LambdaCodeSigningConfigCfnProvisioner implements CfnResourceProvisi
         if (ReplacementCleanup.rollback(resource, this::delete)) {
             return true;
         }
-        String raw = resource.getAttributes().get(CfnRollback.CODE_SIGNING_CONFIG_UPDATE_SNAPSHOT_ATTR);
-        if (raw == null) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, CfnRollback.CODE_SIGNING_CONFIG_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot == null) {
             return true;
         }
-        CodeSigningConfig prior = read(raw);
+        CodeSigningConfig prior = MAPPER.convertValue(snapshot, CodeSigningConfig.class);
         String arn = resource.getPhysicalId();
         String region = AwsArnUtils.parse(arn).region();
         configs.withConfigLock(arn, () -> configs.update(region, arn, prior.getDescription(),
@@ -113,33 +111,8 @@ public class LambdaCodeSigningConfigCfnProvisioner implements CfnResourceProvisi
             return;
         }
         String accountId = AwsArnUtils.parse(physicalId).accountId();
-        configs.withConfigLock(physicalId, () -> {
-            CfnDeletes.safeDelete("Lambda code signing config", physicalId, () -> {
-                configs.get(region, accountId, physicalId);
-                if (!lambdaService.listFunctionsByCodeSigningConfig(region, accountId, physicalId, 1, null)
-                        .items().isEmpty()) {
-                    throw new AwsException("ResourceConflictException",
-                            "The code signing configuration is still attached to a function.", 409);
-                }
-                configs.delete(region, physicalId);
-            }, "ResourceNotFoundException");
-            return null;
-        });
-    }
-
-    private static String write(CodeSigningConfig config) {
-        try {
-            return MAPPER.writeValueAsString(config);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Cannot snapshot code signing config " + config.getCodeSigningConfigArn(), e);
-        }
-    }
-
-    private static CodeSigningConfig read(String raw) {
-        try {
-            return MAPPER.readValue(raw, CodeSigningConfig.class);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Cannot read code signing config snapshot", e);
-        }
+        CfnDeletes.safeDelete("Lambda code signing config", physicalId,
+                () -> lambdaService.deleteCodeSigningConfig(region, accountId, physicalId),
+                "ResourceNotFoundException");
     }
 }
