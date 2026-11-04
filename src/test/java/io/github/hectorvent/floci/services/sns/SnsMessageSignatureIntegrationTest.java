@@ -26,7 +26,9 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -43,6 +45,7 @@ class SnsMessageSignatureIntegrationTest {
             List.of("Message", "MessageId", "Subject", "Timestamp", "TopicArn", "Type");
     private static final List<String> CONFIRMATION_FIELDS =
             List.of("Message", "MessageId", "SubscribeURL", "Timestamp", "Token", "TopicArn", "Type");
+    private static final String MILLIS_TIMESTAMP = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z";
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final List<String> received = new CopyOnWriteArrayList<>();
@@ -80,6 +83,7 @@ class SnsMessageSignatureIntegrationTest {
 
         JsonNode confirmation = MAPPER.readTree(awaitMessage(0));
         assertEquals("SubscriptionConfirmation", confirmation.get("Type").asText());
+        assertThat(confirmation.get("Timestamp").asText(), matchesPattern(MILLIS_TIMESTAMP));
         assertEquals("1", confirmation.get("SignatureVersion").asText());
         assertTrue(verify(confirmation, "SigningCertURL"));
 
@@ -97,6 +101,7 @@ class SnsMessageSignatureIntegrationTest {
         JsonNode notification = MAPPER.readTree(awaitMessage(1));
         assertEquals("Notification", notification.get("Type").asText());
         assertEquals("Signed subject", notification.get("Subject").asText());
+        assertThat(notification.get("Timestamp").asText(), matchesPattern(MILLIS_TIMESTAMP));
         assertEquals("1", notification.get("SignatureVersion").asText());
         assertTrue(verify(notification, "SigningCertURL"));
         assertEquals(confirmation.get("SigningCertURL").asText(), notification.get("SigningCertURL").asText());
@@ -113,6 +118,7 @@ class SnsMessageSignatureIntegrationTest {
 
         assertEquals("Notification", envelope.get("Type").asText());
         assertFalse(envelope.has("Subject"));
+        assertThat(envelope.get("Timestamp").asText(), matchesPattern(MILLIS_TIMESTAMP));
         assertEquals("1", envelope.get("SignatureVersion").asText());
         assertTrue(envelope.get("UnsubscribeURL").asText().contains("Action=Unsubscribe"));
         assertTrue(verify(envelope, "SigningCertURL"));
@@ -188,6 +194,7 @@ class SnsMessageSignatureIntegrationTest {
         JsonNode first = MAPPER.readTree(receiveBody(queueUrl));
         JsonNode second = MAPPER.readTree(receiveBody(queueUrl));
 
+        assertThat(first.get("Timestamp").asText(), matchesPattern(MILLIS_TIMESTAMP));
         assertEquals(first.get("Timestamp").asText(), second.get("Timestamp").asText());
         assertNotEquals(first.get("MessageId").asText(), second.get("MessageId").asText());
         assertTrue(verify(first, "SigningCertURL"));
