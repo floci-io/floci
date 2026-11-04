@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.appsync.graphql.auth.SidecarFieldAuth
 import io.github.hectorvent.floci.services.appsync.graphql.resolver.AppSyncResolverError;
 import io.github.hectorvent.floci.services.appsync.graphql.resolver.AppSyncResolverExecutor;
 import io.github.hectorvent.floci.services.appsync.graphql.resolver.ResolverCallbackSessions;
+import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.POST;
@@ -43,6 +44,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 /**
  * AppSync GraphQL data-plane HTTP endpoint (separate from management {@code AppSyncController}).
@@ -165,6 +167,31 @@ public class AppSyncExecutionController {
             LOG.errorv(e, "Unexpected error executing GraphQL for API {0}", apiId);
             return graphqlError(500, "InternalFailure", "InternalFailure");
         }
+    }
+
+    /**
+     * Internal service delivery, after the adapter has resolved and checked the target role.
+     * Authorization failures reject the complete plan before any mutation can have side effects.
+     */
+    public Map<String, Object> executeServiceMutation(String apiId, String query, Map<String, Object> variables,
+                                                     AppSyncAuthContext auth, Predicate<PlannedField> permission) {
+        if (auth == null || auth.authenticationType() != AuthenticationType.AWS_IAM
+                || auth.graphqlApi() == null || !apiId.equals(auth.graphqlApi().getApiId())) {
+            throw new AwsException("AccessDeniedException", "A service mutation requires an IAM identity.", 403);
+        }
+        String sdl = schemaRegistry.getSdl(apiId).orElseThrow(() -> new AppSyncTransportException(
+                502, "GraphQLSchemaException", AppSyncErrorFormatter.MSG_NO_SCHEMA));
+        String preparedSdl = schemaCompiler.withDirectivesAndScalars(sdl);
+        Map<String, String> scalars = schemaCompiler.scalarKindMapping();
+        PlanResult plan = sidecarClient.plan(preparedSdl, scalars, query, null);
+        if (!"MUTATION".equals(plan.operationType())) {
+            throw new AwsException("ValidationException", "An AppSync target requires a mutation operation.", 400);
+        }
+        List<DenyField> denied = fieldAuthorizationPlanner.planDenyFields(plan, auth, permission);
+        if (!denied.isEmpty()) {
+            throw new AwsException("AccessDeniedException", "The target role may not access every selected field.", 403);
+        }
+        return executeQuery(apiId, preparedSdl, scalars, new ParsedRequest(query, variables, null), denied, plan, auth);
     }
 
     /**

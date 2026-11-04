@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Precomputes which {@code (typeName, fieldName)} coordinates a query must have redacted
@@ -34,12 +35,20 @@ public class SidecarFieldAuthorizationPlanner {
 
     /** Empty when nothing needs redacting (including when {@code auth} carries no API context, same as the live path). */
     public List<DenyField> planDenyFields(PlanResult plan, AppSyncAuthContext auth) {
+        return planDenyFields(plan, auth, field -> !iamAuthValidator.isFieldDenied(auth.accessKeyId(),
+                IamAuthValidator.fieldArn(auth.region(), auth.accountId(), auth.graphqlApi().getApiId(),
+                        field.typeName(), field.fieldName())));
+    }
+
+    /** Service-role calls use the same directive checks with their own IAM principal evaluator. */
+    public List<DenyField> planDenyFields(PlanResult plan, AppSyncAuthContext auth,
+                                        Predicate<PlannedField> iamPermission) {
         if (auth == null || auth.graphqlApi() == null) {
             return List.of();
         }
         List<DenyField> denied = new ArrayList<>();
         for (PlannedField field : plan.fields()) {
-            if (isDenied(field, auth)) {
+            if (isDenied(field, auth, iamPermission)) {
                 denied.add(new DenyField(field.typeName(), field.fieldName(),
                         AppSyncAuth.FIELD_UNAUTHORIZED_TYPE,
                         AppSyncAuth.fieldUnauthorizedMessage(field.fieldName(), field.typeName())));
@@ -48,21 +57,14 @@ public class SidecarFieldAuthorizationPlanner {
         return denied;
     }
 
-    private boolean isDenied(PlannedField field, AppSyncAuthContext auth) {
+    private boolean isDenied(PlannedField field, AppSyncAuthContext auth, Predicate<PlannedField> iamPermission) {
         if (isDeniedField(field, auth)) {
             return true;
         }
         if (!modeAllowed(field, auth)) {
             return true;
         }
-        if (auth.authenticationType() == AuthenticationType.AWS_IAM) {
-            String fieldArn = IamAuthValidator.fieldArn(
-                    auth.region(), auth.accountId(), auth.graphqlApi().getApiId(), field.typeName(), field.fieldName());
-            if (iamAuthValidator.isFieldDenied(auth.accessKeyId(), fieldArn)) {
-                return true;
-            }
-        }
-        return false;
+        return auth.authenticationType() == AuthenticationType.AWS_IAM && !iamPermission.test(field);
     }
 
     private boolean isDeniedField(PlannedField field, AppSyncAuthContext auth) {
