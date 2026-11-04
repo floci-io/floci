@@ -1,9 +1,14 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -11,19 +16,25 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * {@code AWS::Signer::SigningProfile} and {@code AWS::Lambda::CodeSigningConfig} through CloudFormation,
- * and a function that attaches the config and later drops it, with the identifiers AWS returns.
+ * and a function that attaches the config, drops it and attaches it again, with the identifiers AWS returns.
  */
 @QuarkusTest
 class CloudFormationLambdaCodeSigningIntegrationTest {
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
+    private static final String MISSING_CSC_ARN =
+            "arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-00000000000000000";
+
+    @Inject
+    LambdaService lambdaService;
 
     @Test
-    void signingProfileAndCodeSigningConfigAreProvisionedAttachedAndDetached() {
+    void signingProfileAndCodeSigningConfigAreProvisionedAttachedDetachedAndReattached() {
         String stackName = "cfn-lambda-csc-" + Long.toString(System.nanoTime(), 36);
 
         deploy("CreateStack", stackName, template("\"CodeSigningConfigArn\": {\"Ref\": \"Csc\"}"));
@@ -50,21 +61,22 @@ class CloudFormationLambdaCodeSigningIntegrationTest {
             .body("CodeSigningConfig.AllowedPublishers.SigningProfileVersionArns",
                     contains(profileArn + "/" + version))
             .body("CodeSigningConfig.CodeSigningPolicies.UntrustedArtifactOnDeployment", equalTo("Enforce"));
-        given()
-        .when()
-            .get("/2020-06-30/functions/" + function + "/code-signing-config")
-        .then()
-            .statusCode(200)
-            .body("CodeSigningConfigArn", equalTo(cscArn));
+        assertCodeSigningConfig(function, cscArn);
+
+        for (String rejected : List.of(MISSING_CSC_ARN, cscArn.replace(":000000000000:", ":111111111111:"))) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> lambdaService.attachFunctionCodeSigningConfig("us-east-1", function, rejected));
+            assertEquals("CodeSigningConfigNotFoundException", error.getErrorCode());
+        }
+        assertCodeSigningConfig(function, cscArn);
 
         deploy("UpdateStack", stackName, template("\"Description\": \"unsigned\""));
         assertEquals(function, output(describe(stackName), "Name"), "dropping the config updates the function in place");
-        given()
-        .when()
-            .get("/2020-06-30/functions/" + function + "/code-signing-config")
-        .then()
-            .statusCode(200)
-            .body("CodeSigningConfigArn", equalTo(""));
+        assertCodeSigningConfig(function, "");
+
+        deploy("UpdateStack", stackName, template("\"CodeSigningConfigArn\": {\"Ref\": \"Csc\"}"));
+        assertEquals(function, output(describe(stackName), "Name"), "adding the config updates the function in place");
+        assertCodeSigningConfig(function, cscArn);
 
         CfnStackWaits.deleteStack(stackName);
         CfnStackWaits.awaitStackDeleted(stackName);
@@ -133,6 +145,15 @@ class CloudFormationLambdaCodeSigningIntegrationTest {
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
         assertEquals("CreateStack".equals(action) ? "CREATE_COMPLETE" : "UPDATE_COMPLETE", state.status(),
                 state.reason());
+    }
+
+    private static void assertCodeSigningConfig(String function, String expected) {
+        given()
+        .when()
+            .get("/2020-06-30/functions/" + function + "/code-signing-config")
+        .then()
+            .statusCode(200)
+            .body("CodeSigningConfigArn", equalTo(expected));
     }
 
     private static XmlPath describe(String stackName) {
