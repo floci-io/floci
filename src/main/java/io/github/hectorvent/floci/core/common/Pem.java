@@ -70,8 +70,8 @@ public final class Pem {
 
     /**
      * True when {@code privateKey} signs what {@code publicKey} verifies. Done by signing a probe
-     * rather than comparing key fields, so it holds for RSA and EC alike without either being
-     * special-cased beyond the signature algorithm.
+     * rather than comparing key fields, so it holds for RSA and EC alike. EC keys with a provider
+     * algorithm alias are re-encoded through the EC key factory before signing or verification.
      */
     public static boolean isPair(PrivateKey privateKey, PublicKey publicKey) throws Exception {
         boolean ellipticCurve = privateKey instanceof ECKey;
