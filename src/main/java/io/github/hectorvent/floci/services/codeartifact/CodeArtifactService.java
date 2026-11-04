@@ -2849,8 +2849,12 @@ public class CodeArtifactService implements Resettable {
             if (migrated == null) {
                 continue;
             }
-            // Save before deleting aliases; a failed account pass remains eligible for retry.
-            packageOriginConfigs.putForAccount(owner, key, migrated);
+            // Persist repaired coordinates before deleting aliases; unchanged canonical records are already durable.
+            if (canonical == null || !Objects.equals(canonical.getFormat(), migrated.getFormat())
+                    || !Objects.equals(canonical.getNamespace(), migrated.getNamespace())
+                    || !Objects.equals(canonical.getPackageName(), migrated.getPackageName())) {
+                packageOriginConfigs.putForAccount(owner, key, migrated);
+            }
             for (String legacyKey : entry.getValue()) {
                 if (!legacyKey.equals(key)) {
                     packageOriginConfigs.deleteForAccount(owner, legacyKey);

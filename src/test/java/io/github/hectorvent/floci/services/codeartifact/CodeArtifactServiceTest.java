@@ -7203,6 +7203,70 @@ class CodeArtifactServiceTest {
         verify(origins, times(2)).keysForAccount(ACCOUNT_ID);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void firstOriginLookupDoesNotRewriteCanonicalRecords(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        for (String name : List.of("first", "second", "third")) {
+            origins.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::" + format + "::::" + name,
+                    new PackageOriginConfig("BLOCK", "ALLOW", format, null, name));
+        }
+        clearInvocations(origins);
+
+        assertEquals("BLOCK", lookupService.describePackage(REGION, "dom", null, "repo", format, null,
+                "first").publishRestriction());
+        assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, "second"));
+
+        verify(origins, never()).putForAccount(anyString(), anyString(), any(PackageOriginConfig.class));
+        verify(origins, never()).deleteForAccount(anyString(), anyString());
+        verify(origins, times(1)).keysForAccount(ACCOUNT_ID);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void canonicalOriginCoordinatesAreRepairedBeforeAliasRemoval(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        String canonical = REGION + "::dom::repo::" + format + "::::example";
+        String legacy = REGION + "::dom::repo::" + format + "::::EXAMPLE";
+        origins.putForAccount(ACCOUNT_ID, canonical, new PackageOriginConfig("ALLOW", "BLOCK", null, null, null));
+        origins.putForAccount(ACCOUNT_ID, legacy, new PackageOriginConfig("BLOCK", "ALLOW", format, null, "EXAMPLE"));
+        clearInvocations(origins);
+
+        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, "example"));
+
+        PackageOriginConfig repaired = origins.getForAccount(ACCOUNT_ID, canonical).orElseThrow();
+        assertEquals(format, repaired.getFormat());
+        assertNull(repaired.getNamespace());
+        assertEquals("example", repaired.getPackageName());
+        assertEquals("ALLOW", repaired.getPublishRestriction());
+        assertEquals("BLOCK", repaired.getUpstreamRestriction());
+        InOrder order = inOrder(origins);
+        order.verify(origins).putForAccount(ACCOUNT_ID, canonical, repaired);
+        order.verify(origins).deleteForAccount(ACCOUNT_ID, legacy);
+        verify(origins, times(1)).putForAccount(anyString(), anyString(), any(PackageOriginConfig.class));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void unchangedCanonicalOriginRemovesAliasesWithoutRewriting(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        String canonical = REGION + "::dom::repo::" + format + "::::example";
+        String legacy = REGION + "::dom::repo::" + format + "::::EXAMPLE";
+        origins.putForAccount(ACCOUNT_ID, canonical, new PackageOriginConfig("ALLOW", "BLOCK", format, null, "example"));
+        origins.putForAccount(ACCOUNT_ID, legacy, new PackageOriginConfig("BLOCK", "ALLOW", format, null, "EXAMPLE"));
+        clearInvocations(origins);
+
+        assertEquals("ALLOW", lookupService.describePackage(REGION, "dom", null, "repo", format, null,
+                "example").publishRestriction());
+        assertTrue(origins.getForAccount(ACCOUNT_ID, legacy).isEmpty());
+        assertEquals("BLOCK", origins.getForAccount(ACCOUNT_ID, canonical).orElseThrow().getUpstreamRestriction());
+        verify(origins, never()).putForAccount(anyString(), anyString(), any(PackageOriginConfig.class));
+        verify(origins).deleteForAccount(ACCOUNT_ID, legacy);
+    }
+
     private CodeArtifactService originLookupService(AccountAwareStorageBackend<PackageOriginConfig> origins) {
         CodeArtifactService lookupService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
                 AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
