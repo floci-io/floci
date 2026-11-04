@@ -8,6 +8,9 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFileSystemConfig;
@@ -76,7 +79,20 @@ class LambdaServiceTest {
         StorageFactory storageFactory = mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any()))
                 .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        service = new LambdaService(store, warmPool, codeStore, zipExtractor, null, regionResolver, storageFactory);
+        Ec2Service ec2 = mock(Ec2Service.class);
+        for (String suffix : List.of("0", "1")) {
+            Subnet subnet = new Subnet();
+            subnet.setSubnetId("subnet-0123456789abcdef" + suffix);
+            subnet.setVpcId("vpc-0123456789abcdef" + suffix);
+            SecurityGroup group = new SecurityGroup();
+            group.setGroupId("sg-0123456789abcdef" + suffix);
+            group.setVpcId(subnet.getVpcId());
+            when(ec2.describeSubnets(REGION, List.of(subnet.getSubnetId()), Map.of()))
+                    .thenReturn(List.of(subnet));
+            when(ec2.describeSecurityGroups(REGION, List.of(group.getGroupId()), List.of(), Map.of()))
+                    .thenReturn(List.of(group));
+        }
+        service = new LambdaService(store, warmPool, codeStore, zipExtractor, null, regionResolver, storageFactory, ec2);
     }
 
     private Map<String, Object> baseRequest(String name) {
@@ -144,8 +160,8 @@ class LambdaServiceTest {
                 Map.of(
                         "FileSystemConfigs", List.of(),
                         "VpcConfig", Map.of(
-                                "SubnetIds", List.of("subnet-updated"),
-                                "SecurityGroupIds", List.of("sg-updated"))));
+                                "SubnetIds", List.of("subnet-0123456789abcdef1"),
+                                "SecurityGroupIds", List.of("sg-0123456789abcdef1"))));
 
         assertEquals(vpcConfig(), version.getVpcConfig());
         assertEquals(1, version.getFileSystemConfigs().size());

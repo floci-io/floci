@@ -970,7 +970,7 @@ rather than echoing the request back:
 
 | Field | Request shape | Response shape | Extra members Floci fills in |
 |---|---|---|---|
-| `VpcConfig` | `VpcConfig` | `VpcConfigResponse` | `VpcId`, resolved from the first subnet via EC2 |
+| `VpcConfig` | `VpcConfig` | `VpcConfigResponse` | `VpcId`, shared by all declared subnets and security groups |
 | `SnapStart` | `SnapStart` | `SnapStartResponse` | `OptimizationStatus` — `On` only for a published version with `ApplyOn=PublishedVersions`, `Off` for `$LATEST` |
 | `LoggingConfig` | `LoggingConfig` | `LoggingConfig` | — |
 | `DurableConfig` | `DurableConfig` | `DurableConfig` | `RetentionPeriodInDays` defaults to 14; omitted for a function created without it |
@@ -1009,9 +1009,16 @@ on create and on update with `InvalidParameterValueException` ("LogLevel is not 
 LogFormat is set to "Text". Remove LogLevel from your request or change the LogFormat to
 "JSON" and try again."), as Lambda refuses it (measured in eu-west-1, 2026-10-18).
 
-`VpcConfig` is omitted entirely while the function is not attached to a VPC.
-Subnets that EC2 does not know about are still accepted and returned; only `VpcId`
-is left off in that case.
+`VpcConfig` requires existing subnets and security groups in the request's account and
+region, all belonging to one VPC. Missing resources, mixed VPCs, or specifying only
+subnets or only security groups fail with `InvalidParameterValueException`. A rejected
+update preserves the function's configuration and revision. Empty subnet and security
+group lists detach the function, and the response then omits `VpcConfig`. Published
+versions retain their network configuration when `$LATEST` changes.
+
+These checks validate the declaration. Function containers still use the configured
+Docker network; `VpcConfig` does not yet enforce VPC packet routing, security-group
+rules, or NAT egress.
 
 `RuntimeVersionConfig.RuntimeVersionArn` is returned for managed (non-image)
 runtimes. Its value is derived from the runtime name, so it is stable across

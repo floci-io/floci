@@ -2,6 +2,7 @@ package com.floci.test;
 
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.*;
 import software.amazon.awssdk.services.lambda.model.Runtime;
@@ -9,12 +10,17 @@ import software.amazon.awssdk.services.lambda.model.Runtime;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertAll;
 
 @DisplayName("Lambda")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class LambdaTest {
 
     private static LambdaClient lambda;
+    private static Ec2Client ec2;
+    private static String vpcId;
+    private static String subnetId;
+    private static String securityGroupId;
     private static final String FUNCTION_NAME = "sdk-test-fn";
     private static final String FILE_SYSTEM_FUNCTION_NAME = "sdk-test-efs-fn";
     private static final String ROLE = "arn:aws:iam::000000000000:role/lambda-role";
@@ -23,6 +29,7 @@ class LambdaTest {
     @BeforeAll
     static void setup() {
         lambda = TestFixtures.lambdaClient();
+        ec2 = TestFixtures.ec2Client();
     }
 
     @AfterAll
@@ -47,6 +54,28 @@ class LambdaTest {
                 System.err.println("Best-effort Lambda file-system test cleanup failed: " + e.getMessage());
             }
             lambda.close();
+        }
+        if (ec2 != null) {
+            try {
+                assertAll("Remove the Lambda test's declared network",
+                        () -> {
+                            if (securityGroupId != null) {
+                                ec2.deleteSecurityGroup(r -> r.groupId(securityGroupId));
+                            }
+                        },
+                        () -> {
+                            if (subnetId != null) {
+                                ec2.deleteSubnet(r -> r.subnetId(subnetId));
+                            }
+                        },
+                        () -> {
+                            if (vpcId != null) {
+                                ec2.deleteVpc(r -> r.vpcId(vpcId));
+                            }
+                        });
+            } finally {
+                ec2.close();
+            }
         }
     }
 
@@ -377,6 +406,10 @@ class LambdaTest {
     @Test
     @Order(19)
     void fileSystemConfigsRoundTripAndMountWithAwsSdk() {
+        vpcId = ec2.createVpc(r -> r.cidrBlock("10.93.0.0/16")).vpc().vpcId();
+        subnetId = ec2.createSubnet(r -> r.vpcId(vpcId).cidrBlock("10.93.1.0/24")).subnet().subnetId();
+        securityGroupId = ec2.createSecurityGroup(r -> r.vpcId(vpcId)
+                .groupName("sdk-test-lambda-efs").description("Lambda EFS test network")).groupId();
         FileSystemConfig fileSystem = FileSystemConfig.builder()
                 .arn("arn:aws:elasticfilesystem:us-east-1:000000000000:"
                         + "access-point/fsap-0123456789abcdef0")
@@ -389,8 +422,8 @@ class LambdaTest {
                 .role(ROLE)
                 .handler("index.handler")
                 .vpcConfig(VpcConfig.builder()
-                        .subnetIds("subnet-0123456789abcdef0")
-                        .securityGroupIds("sg-0123456789abcdef0")
+                        .subnetIds(subnetId)
+                        .securityGroupIds(securityGroupId)
                         .build())
                 .fileSystemConfigs(fileSystem)
                 .code(FunctionCode.builder()

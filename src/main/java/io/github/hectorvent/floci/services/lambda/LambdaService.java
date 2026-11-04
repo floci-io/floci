@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
@@ -78,6 +79,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Business logic for Lambda function management and invocation.
@@ -243,6 +245,18 @@ public class LambdaService implements ResourceProvider {
                   EmulatorConfig config,
                   RegionResolver regionResolver,
                   StorageFactory storageFactory) {
+        this(functionStore, warmPool, codeStore, zipExtractor, config, regionResolver, storageFactory, null);
+    }
+
+    /** Package-private constructor for tests that attach functions to EC2 resources. */
+    LambdaService(LambdaFunctionStore functionStore,
+                  WarmPool warmPool,
+                  CodeStore codeStore,
+                  ZipExtractor zipExtractor,
+                  EmulatorConfig config,
+                  RegionResolver regionResolver,
+                  StorageFactory storageFactory,
+                  Ec2Service ec2Service) {
         this.functionStore = functionStore;
         this.executorService = null;
         this.concurrencyLimiter = new LambdaConcurrencyLimiter();
@@ -261,7 +275,7 @@ public class LambdaService implements ResourceProvider {
         this.dynamodbStreamsPoller = null;
         this.storageFactory = storageFactory;
         this.layerService = null;
-        this.ec2Service = null;
+        this.ec2Service = ec2Service;
         this.customResourceLiveness = null;
         this.durableExecutionService = null;
         this.codeSigningConfigService = storageFactory == null
@@ -1039,8 +1053,10 @@ public class LambdaService implements ResourceProvider {
                 ? validatedConfigurationInteger(request.get("Timeout"), "Timeout", 1, 900) : 0;
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
+        String requestedVpcId = fn.getVpcId();
         if (requestedVpcConfigUpdate != null) {
             requestedVpcConfig = new HashMap<>(requestedVpcConfigUpdate);
+            requestedVpcId = resolveVpcId(region, requestedVpcConfig);
         }
         List<LambdaFileSystemConfig> requestedFileSystemConfigs = fn.getFileSystemConfigs();
         if (request.containsKey("FileSystemConfigs")) {
@@ -1111,7 +1127,7 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("VpcConfig")) {
             if (requestedVpcConfigUpdate != null) {
                 fn.setVpcConfig(requestedVpcConfig);
-                fn.setVpcId(resolveVpcId(region, requestedVpcConfig));
+                fn.setVpcId(requestedVpcId);
             }
         }
 
@@ -2718,30 +2734,61 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
-    /**
-     * The VpcConfig request shape carries no VpcId; VpcConfigResponse does. AWS derives it from
-     * the subnets the function is attached to, so resolve it once at attach time and store it.
-     * A subnet EC2 has never heard of resolves to null rather than failing the call - Floci's
-     * Lambda accepts unmanaged subnet ids, and CreateFunction must not start rejecting them.
-     */
+    /** Resolve the common VPC only after every requested subnet and security group is validated. */
     private String resolveVpcId(String region, Map<String, Object> vpcConfig) {
-        if (ec2Service == null || !hasValues(vpcConfig, "SubnetIds")) {
+        List<String> subnetIds = vpcResourceIds(vpcConfig, "SubnetIds");
+        List<String> groupIds = vpcResourceIds(vpcConfig, "SecurityGroupIds");
+        if (subnetIds.isEmpty() && groupIds.isEmpty()) {
             return null;
         }
-        for (Object subnetId : (List<?>) vpcConfig.get("SubnetIds")) {
-            if (subnetId == null) {
-                continue;
-            }
-            try {
-                List<Subnet> found = ec2Service.describeSubnets(region, List.of(subnetId.toString()), Map.of());
-                if (!found.isEmpty() && found.get(0).getVpcId() != null) {
-                    return found.get(0).getVpcId();
-                }
-            } catch (RuntimeException e) {
-                LOG.debugv(e, "Could not resolve VpcId for subnet {0} in {1}", subnetId, region);
-            }
+        if (subnetIds.isEmpty() || groupIds.isEmpty()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "VpcConfig requires both subnet IDs and security group IDs", 400);
         }
-        return null;
+        if (ec2Service == null) {
+            throw new IllegalStateException("Lambda VPC configuration requires EC2");
+        }
+        List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
+        if (!Set.copyOf(subnetIds).equals(
+                subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toSet()))) {
+            throw new AwsException("InvalidParameterValueException",
+                    "One or more subnet IDs in VpcConfig do not exist", 400);
+        }
+        String vpcId = subnets.getFirst().getVpcId();
+        if (vpcId == null || subnets.stream().anyMatch(subnet -> !vpcId.equals(subnet.getVpcId()))) {
+            throw new AwsException("InvalidParameterValueException",
+                    "All subnets in VpcConfig must belong to the same VPC", 400);
+        }
+        List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
+        if (!Set.copyOf(groupIds).equals(
+                groups.stream().map(SecurityGroup::getGroupId).collect(Collectors.toSet()))) {
+            throw new AwsException("InvalidParameterValueException",
+                    "One or more security group IDs in VpcConfig do not exist", 400);
+        }
+        if (groups.stream().anyMatch(group -> !vpcId.equals(group.getVpcId()))) {
+            throw new AwsException("InvalidParameterValueException",
+                    "All subnets and security groups in VpcConfig must belong to the same VPC", 400);
+        }
+        return vpcId;
+    }
+
+    private static List<String> vpcResourceIds(Map<String, Object> vpcConfig, String member) {
+        Object value = vpcConfig == null ? null : vpcConfig.get(member);
+        if (value == null) {
+            return List.of();
+        }
+        if (!(value instanceof List<?> list)) {
+            throw new AwsException("SerializationException", "VpcConfig." + member + " must be an array", 400);
+        }
+        List<String> ids = new ArrayList<>(list.size());
+        for (Object id : list) {
+            if (!(id instanceof String resourceId)) {
+                throw new AwsException("SerializationException",
+                        "VpcConfig." + member + " must contain strings", 400);
+            }
+            ids.add(resourceId);
+        }
+        return ids;
     }
 
     private static Map<String, Object> structureMember(Map<String, Object> request, String member) {
