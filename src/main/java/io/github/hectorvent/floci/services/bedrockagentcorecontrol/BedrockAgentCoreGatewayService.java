@@ -18,7 +18,6 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ThreadLocalRandom;
 
 /** CRUD for AgentCore gateways and their targets. Metadata registry only. */
 @ApplicationScoped
@@ -28,7 +27,6 @@ public class BedrockAgentCoreGatewayService {
     private static final String STATUS_READY = "READY";
     private static final String STATUS_DELETING = "DELETING";
     private static final String LOWER = "abcdefghijklmnopqrstuvwxyz0123456789";
-    private static final String ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     private static final int DEFAULT_PAGE = 100;
     private static final int MAX_PAGE = 1000;
 
@@ -58,7 +56,7 @@ public class BedrockAgentCoreGatewayService {
             throw new AwsException("ValidationException", "roleArn is required", 400);
         }
         Instant now = Instant.now();
-        String id = sanitize(name) + "-" + random(LOWER, 10);
+        String id = sanitize(name) + "-" + BedrockAgentCoreControllerSupport.random(LOWER, 10);
         Gateway gateway = new Gateway();
         gateway.setGatewayId(id);
         gateway.setName(name);
@@ -166,7 +164,7 @@ public class BedrockAgentCoreGatewayService {
         Gateway gateway = get(gatewayId, region);
         Instant now = Instant.now();
         GatewayTarget target = new GatewayTarget();
-        target.setTargetId(random(ALNUM, 10));
+        target.setTargetId(BedrockAgentCoreControllerSupport.randomAlphanumeric(10));
         target.setName(name);
         target.setStatus(STATUS_READY);
         target.setTargetConfiguration(targetConfiguration);
@@ -234,13 +232,6 @@ public class BedrockAgentCoreGatewayService {
         return s.length() > 40 ? s.substring(0, 40) : s;
     }
 
-    private static String random(String alphabet, int len) {
-        StringBuilder sb = new StringBuilder(len);
-        for (int i = 0; i < len; i++) {
-            sb.append(alphabet.charAt(ThreadLocalRandom.current().nextInt(alphabet.length())));
-        }
-        return sb.toString();
-    }
 
     private static String key(String region, String id) {
         return keyPrefix(region) + id;

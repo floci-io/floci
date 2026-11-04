@@ -5,8 +5,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Runs a Spark application to its end, in the EMR services' {@code docker} runner mode: an EMR
- * Serverless job run, or a step of an EMR cluster. The service holds the run's state and calls this
+ * Runs a Spark application, or a Hive query, to its end, in the EMR services' {@code docker} runner mode: an
+ * EMR Serverless job run, or a step of an EMR cluster. The service holds the run's state and calls this
  * off the request thread; {@link EmrServerlessSparkRunner} is the Docker implementation, and a test
  * supplies its own.
  */
@@ -47,15 +47,23 @@ public interface SparkJobRunner {
         boolean cancelled();
     }
 
+    /** What a run's driver runs: Spark's {@code spark-submit}, or Hive's {@code hive}. */
+    enum Engine {
+        SPARK,
+        HIVE
+    }
+
     /**
      * What a run needs: the service it belongs to and its id there, which name its container; its account
-     * and Region; its release, and the image template and Docker network to run it in (a null template is
-     * the release's public EMR Serverless image, a null network the global default); {@code customImage}, when
-     * not null, the image the run's application names, which it runs in place of the template's, resolved
+     * and Region; its release; its engine; the image template and Docker network to run it in (a null template
+     * is the release's public EMR Serverless image for the engine, a null network the global default);
+     * {@code customImage}, when not null, the image the run's application names, which it runs in place of the
+     * template's, resolved
      * again for each run; the execution role whose credentials it gets; the {@code spark-defaults} properties
      * that apply to it;
      * {@code application}, what follows Floci's own settings on {@code spark-submit}'s command line (the
-     * run's options, then its application and that application's arguments); or {@code command}, when not
+     * run's options, then its application and that application's arguments), or on {@code hive}'s for a Hive run
+     * (its settings, then its query files and parameters); or {@code command}, when not
      * null, what the container runs in place of {@code spark-submit}, where a {@code spark-submit} it starts
      * gets Floci's settings and the {@code spark-defaults} as defaults (its {@code application} is then
      * empty); how long it may run
@@ -73,7 +81,7 @@ public interface SparkJobRunner {
      * MapReduce gets, the {@code log4j.properties} lines and the {@code hadoop-env.sh} exports its {@code hadoop}
      * command gets (each empty for none).
      */
-    record Job(String service, String runId, String accountId, String region, String releaseLabel,
+    record Job(String service, String runId, String accountId, String region, String releaseLabel, Engine engine,
                String imageTemplate, String customImage, String dockerNetwork, String executionRole,
                Map<String, String> sparkDefaults, List<String> application, List<String> command, Duration timeout,
                String logFolder, CloudWatchLogs cloudWatchLogs, Map<String, String> environment,

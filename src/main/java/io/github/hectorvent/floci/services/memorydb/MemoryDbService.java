@@ -101,18 +101,19 @@ public class MemoryDbService {
             throw new AwsException("InvalidParameterValueException", "ClusterName is required.", 400);
         }
         String resourceKey = key(region, name);
-        if (clusters.get(resourceKey).isPresent() || legacyGet(clusters, name, region).isPresent()) {
-            throw new AwsException("ClusterAlreadyExistsFault",
-                    "Cluster with specified name already exists.", 400);
-        }
         // Claim the name for the whole provisioning attempt so a concurrent create can't race
-        // ahead and be stopped by this request's handle-less rollback fallback.
+        // ahead and be stopped by this request's handle-less rollback fallback. The existence
+        // check follows the claim, so a create that ended before it is seen.
         if (!provisioningClusterNames.add(resourceKey)) {
             throw new AwsException("ClusterAlreadyExistsFault",
                     "Cluster " + name + " is already being created.", 400);
         }
 
         try {
+            if (clusters.get(resourceKey).isPresent() || legacyGet(clusters, name, region).isPresent()) {
+                throw new AwsException("ClusterAlreadyExistsFault",
+                        "Cluster with specified name already exists.", 400);
+            }
             String aclName = spec.getAclName();
             if (aclName == null || aclName.isBlank()) {
                 throw new AwsException("InvalidParameterValueException", "ACLName is required.", 400);

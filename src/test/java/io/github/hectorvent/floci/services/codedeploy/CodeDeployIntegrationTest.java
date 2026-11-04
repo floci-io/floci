@@ -207,6 +207,20 @@ class CodeDeployIntegrationTest {
     }
 
     @Test
+    @Order(10)
+    void listDeploymentGroupsWithoutApplicationNameFails() {
+        given()
+            .header("X-Amz-Target", "CodeDeploy_20141006.ListDeploymentGroups")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ApplicationNameRequiredException"));
+    }
+
+    @Test
     @Order(11)
     void batchGetDeploymentGroups() {
         given()

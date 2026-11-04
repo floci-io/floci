@@ -93,6 +93,63 @@ class Ec2SecurityGroupCfnProvisionerTest {
     }
 
     @Test
+    void updateWithoutGroupNameKeepsTheGeneratedGroupAndAddsItsRule() throws Exception {
+        when(ec2.describeSecurityGroups("us-east-1", List.of("sg-1"), List.of(), Map.of()))
+                .thenReturn(List.of(group("sg-1", "my-stack-WebSg-0123456789ab", "web tier", "vpc-1")));
+        StackResource r = resource("WebSg");
+        r.setPhysicalId("sg-1");
+
+        provisioner.provision(r, props("""
+                {"GroupDescription": "web tier", "VpcId": "vpc-1",
+                 "SecurityGroupIngress": [
+                   {"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443, "CidrIp": "192.0.2.1/32"}
+                 ]}
+                """), ctx("sg-1", props("""
+                {"GroupDescription": "web tier", "VpcId": "vpc-1"}
+                """)));
+
+        assertEquals("sg-1", r.getPhysicalId());
+        assertEquals("sg-1", r.getAttributes().get("GroupId"));
+        verify(ec2).authorizeSecurityGroupIngress(eq("us-east-1"), eq("sg-1"), anyList());
+        verify(ec2, never()).createSecurityGroup(anyString(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void removingAnExplicitGroupNameStillCreatesAReplacement() throws Exception {
+        when(ec2.createSecurityGroup(eq("us-east-1"), anyString(), eq("web tier"), eq("vpc-1")))
+                .thenReturn(group("sg-new", "generated", "web tier", "vpc-1"));
+        StackResource r = resource("WebSg");
+        r.setPhysicalId("sg-old");
+
+        provisioner.provision(r, props("""
+                {"GroupDescription": "web tier", "VpcId": "vpc-1"}
+                """), ctx("sg-old", props("""
+                {"GroupName": "web", "GroupDescription": "web tier", "VpcId": "vpc-1"}
+                """)));
+
+        assertEquals("sg-new", r.getPhysicalId());
+        ArgumentCaptor<String> name = ArgumentCaptor.forClass(String.class);
+        verify(ec2).createSecurityGroup(eq("us-east-1"), name.capture(), eq("web tier"), eq("vpc-1"));
+        assertTrue(name.getValue().matches("my-stack-WebSg-[0-9a-f]{12}"), name.getValue());
+    }
+
+    @Test
+    void changingAnUnnamedGroupsDescriptionStillCreatesAReplacement() throws Exception {
+        when(ec2.describeSecurityGroups("us-east-1", List.of("sg-old"), List.of(), Map.of()))
+                .thenReturn(List.of(group("sg-old", "my-stack-WebSg-0123456789ab", "old tier", "vpc-1")));
+        when(ec2.createSecurityGroup(eq("us-east-1"), anyString(), eq("new tier"), eq("vpc-1")))
+                .thenReturn(group("sg-new", "generated", "new tier", "vpc-1"));
+        StackResource r = resource("WebSg");
+        r.setPhysicalId("sg-old");
+
+        provisioner.provision(r, props("""
+                {"GroupDescription": "new tier", "VpcId": "vpc-1"}
+                """), ctx("sg-old"));
+
+        assertEquals("sg-new", r.getPhysicalId());
+    }
+
+    @Test
     void reservedUpdateTagsFailBeforeChangingRulesOrDeletingExistingTags() throws Exception {
         StackResource r = resource("WebSg");
         r.setPhysicalId("sg-1");
@@ -261,13 +318,18 @@ class Ec2SecurityGroupCfnProvisionerTest {
     }
 
     private ProvisionContext ctx(String priorPhysicalId) {
+        return ctx(priorPhysicalId, null);
+    }
+
+    private ProvisionContext ctx(String priorPhysicalId, JsonNode priorProperties) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
+        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId,
+                event -> {}, priorProperties);
     }
 
     private JsonNode props(String json) throws Exception {

@@ -186,7 +186,7 @@ public class ControlTowerService {
         if (!version.matches("^\\d+\\.\\d+$") || version.length() < 3 || version.length() > 10) {
             throw validation("version must be a valid landing zone version.");
         }
-        validateTags(request.get("tags"));
+        Map<String, String> tags = ControlTowerTags.fromRequest(request.get("tags"));
         if (landingZoneStore.get(region).isPresent()) {
             throw new AwsException("ConflictException",
                     "Updating or deleting the resource can cause an inconsistent state.", 409);
@@ -195,10 +195,33 @@ public class ControlTowerService {
         String arn = AwsArnUtils.Arn.of("controltower", region, accountId, "landingzone/" + shortId()).toString();
         LandingZone landingZone = new LandingZone(
                 arn, version, version, STATUS_ACTIVE, DRIFT_IN_SYNC, manifest, null);
+        landingZone.setTags(tags);
         landingZoneStore.put(region, landingZone);
         String operationIdentifier = UUID.randomUUID().toString();
         recordOperation(accountId, region, operationIdentifier, OP_TYPE_CREATE);
         return new CreateLandingZoneResult(arn, operationIdentifier);
+    }
+
+    public synchronized Map<String, String> listLandingZoneTags(String accountId, String region, String arn) {
+        Map<String, String> tags = requireSeededLandingZone(accountId, region, arn).getTags();
+        return tags == null ? Map.of() : tags;
+    }
+
+    public synchronized void tagLandingZone(String accountId, String region, String arn, Map<String, String> tags) {
+        LandingZone landingZone = requireSeededLandingZone(accountId, region, arn);
+        Map<String, String> merged = new LinkedHashMap<>(listLandingZoneTags(accountId, region, arn));
+        merged.putAll(tags);
+        ControlTowerTags.validate(merged);
+        landingZone.setTags(merged);
+        landingZoneStore.put(region, landingZone);
+    }
+
+    public synchronized void untagLandingZone(String accountId, String region, String arn, List<String> tagKeys) {
+        LandingZone landingZone = requireSeededLandingZone(accountId, region, arn);
+        Map<String, String> remaining = new LinkedHashMap<>(listLandingZoneTags(accountId, region, arn));
+        tagKeys.forEach(remaining::remove);
+        landingZone.setTags(remaining);
+        landingZoneStore.put(region, landingZone);
     }
 
     public synchronized LandingZone getLandingZone(String accountId, String region, JsonNode request) {
@@ -799,21 +822,6 @@ public class ControlTowerService {
             values.add(value.asText());
         }
         return values;
-    }
-
-    private static void validateTags(JsonNode tags) {
-        if (tags == null || tags.isNull()) {
-            return;
-        }
-        if (!tags.isObject() || tags.size() > 200) {
-            throw validation("tags must be an object with at most 200 entries.");
-        }
-        tags.fields().forEachRemaining(entry -> {
-            if (entry.getKey().isBlank() || entry.getKey().length() > 128
-                    || !entry.getValue().isTextual() || entry.getValue().textValue().length() > 256) {
-                throw validation("tags must contain string values with valid lengths.");
-            }
-        });
     }
 
     private static void validateParameters(JsonNode parameters) {

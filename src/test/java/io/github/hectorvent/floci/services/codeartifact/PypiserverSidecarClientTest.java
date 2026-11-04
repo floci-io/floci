@@ -549,4 +549,26 @@ class PypiserverSidecarClientTest {
                 (ConcurrentHashMap<String, PerKeyContainerPool.StartedContainer>) containersField.get(pool);
         containers.put(key, new PerKeyContainerPool.StartedContainer(containerId, url));
     }
+
+    /**
+     * Each expected name is what pypiserver 2.4.2's own guess_pkgname_and_version returns for the
+     * same filename, run inside the pinned image: the port must file an upload under exactly the
+     * package pypiserver does, build-tagged wheels and names with a {@code -<digit>} run included.
+     */
+    @Test
+    void guessPackageNameMatchesPypiserversOwnFilenameParser() {
+        assertEquals(Optional.of("my_pkg"), PypiserverSidecarClient.guessPackageName("my_pkg-1.0.tar.gz"));
+        assertEquals(Optional.of("foo"), PypiserverSidecarClient.guessPackageName("foo-1.0-bar-2.0.tar.gz"));
+        assertEquals(Optional.of("mypkg"), PypiserverSidecarClient.guessPackageName("mypkg-dev.tar.gz"));
+        assertEquals(Optional.of("demo"), PypiserverSidecarClient.guessPackageName("demo-1.0-1-py3-none-any.whl"));
+        assertEquals(Optional.of("demo"), PypiserverSidecarClient.guessPackageName("demo-1.0-py3-none-any.whl"));
+        assertEquals(Optional.of("My.Pkg"), PypiserverSidecarClient.guessPackageName("My.Pkg-2.0b1.zip"));
+        assertEquals(Optional.of("pkg"), PypiserverSidecarClient.guessPackageName("pkg-1.0-py3.11-linux.egg"));
+        assertEquals(Optional.of("pkg"), PypiserverSidecarClient.guessPackageName("pkg-1.0.win-amd64-py3.9.exe"));
+        assertEquals(Optional.of("pkg"), PypiserverSidecarClient.guessPackageName("pkg.tar.gz"));
+        assertEquals(Optional.of("pkg"), PypiserverSidecarClient.guessPackageName("pkg-1.0.tar.gz.asc"));
+        assertEquals(Optional.of("a-b"), PypiserverSidecarClient.guessPackageName("a-b-c.tgz"));
+        assertEquals(Optional.empty(), PypiserverSidecarClient.guessPackageName("notapackage.txt"));
+        assertEquals(Optional.empty(), PypiserverSidecarClient.guessPackageName("pkg-1.0.whl"));
+    }
 }

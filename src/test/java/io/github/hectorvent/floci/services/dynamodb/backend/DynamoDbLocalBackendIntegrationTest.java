@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Shard;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Stream;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.TestAccounts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
@@ -27,7 +28,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ThreadLocalRandom;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -72,7 +72,7 @@ class DynamoDbLocalBackendIntegrationTest {
     private record CreatedTable(Caller caller, String name) {}
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
-    private static final String ACCOUNT_A = randomAccount();
+    private static final String ACCOUNT_A = TestAccounts.randomId();
     private static final String ACCOUNT_B = otherAccountThan(ACCOUNT_A);
     private static final Caller A_EAST = new Caller(ACCOUNT_A, "us-east-1");
     private static final Caller A_WEST = new Caller(ACCOUNT_A, "eu-west-1");
@@ -374,14 +374,10 @@ class DynamoDbLocalBackendIntegrationTest {
         return "local-it-" + purpose + "-" + UUID.randomUUID();
     }
 
-    private static String randomAccount() {
-        return Long.toString(ThreadLocalRandom.current().nextLong(100_000_000_000L, 1_000_000_000_000L));
-    }
-
     private static String otherAccountThan(String account) {
-        String other = randomAccount();
+        String other = TestAccounts.randomId();
         while (other.equals(account)) {
-            other = randomAccount();
+            other = TestAccounts.randomId();
         }
         return other;
     }

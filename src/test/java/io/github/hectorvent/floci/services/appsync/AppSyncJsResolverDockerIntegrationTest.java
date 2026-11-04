@@ -58,6 +58,9 @@ class AppSyncJsResolverDockerIntegrationTest {
               misplacedYield: String
               malformedSyntax: String
               keywordsInText: String
+              templateHole: String
+              keywordObjectKey: String
+              conditionalThis: String
               regexLiteral: String
               regexKeyword: String
               regexClassThenUnsupported: String
@@ -74,6 +77,7 @@ class AppSyncJsResolverDockerIntegrationTest {
               taggedRawInvalidEscapeHole: String
               untaggedInvalidEscape: String
               normalizeString: String
+              subscriptionFilter(mode: Int): String
             }
             """;
 
@@ -220,6 +224,34 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
+    private static final String TEMPLATE_HOLE_RESOLVER = """
+            export function request(ctx) {
+              const prefix = `${"value"}-`;
+              return { payload: { value: `its class: ${prefix}` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String KEYWORD_OBJECT_KEY_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { class: "allowed" } };
+            }
+            export function response(ctx) {
+              return ctx.result.class;
+            }
+            """;
+
+    private static final String CONDITIONAL_THIS_RESOLVER = """
+            export function request(ctx) {
+              return { payload: ctx.args.flag ? this : null };
+            }
+            export function response(ctx) {
+              return ctx.result;
+            }
+            """;
+
     private static final String REGEX_KEYWORD_RESOLVER = """
             export function request(ctx) {
               return { payload: { value: /while/.test("while") } };
@@ -353,6 +385,94 @@ class AppSyncJsResolverDockerIntegrationTest {
         }
         """;
 
+    private static final String SUBSCRIPTION_FILTER_RESOLVER = """
+        import { util } from "@aws-appsync/utils";
+        export function request(ctx) {
+          return { payload: null };
+        }
+        export function response(ctx) {
+          const mode = ctx.args.mode;
+          let filter = { score: { lte: 50, gte: 20 }, owner: { eq: "ignored" } };
+          let ignored = ["owner"];
+          let rules = { owner: { eq: "A" } };
+          if (mode === 1 || mode === 2) {
+            filter = {};
+            ignored = [];
+            rules = {};
+            for (let i = 0; i < (mode === 1 ? 9 : 30); i++) {
+              filter["field" + i] = { eq: i, ne: i };
+            }
+          } else if (mode === 3 || mode === 4 || mode === 6 || mode === 7) {
+            const branches = [];
+            for (let i = 0; i < (mode === 4 ? 1001 : 1000); i++) {
+              branches.push({ branch: { eq: i } });
+            }
+            filter = { or: branches };
+            ignored = [];
+            rules = {};
+            if (mode === 6 || mode === 7) {
+              for (let i = 0; i < (mode === 6 ? 9 : 10); i++) {
+                filter["field" + i] = { eq: i };
+              }
+            }
+          } else if (mode === 5) {
+            filter = {};
+            ignored = [];
+            rules = {};
+            for (let i = 0; i < 1001; i++) {
+              rules["field" + i] = { eq: i };
+            }
+          } else if (mode === 8) {
+            filter = { payload: { eq: "x".repeat(2 * 1024 * 1024) } };
+            ignored = [];
+            rules = {};
+          } else if (mode === 9) {
+            const operators = {};
+            for (let i = 0; i < 1000; i++) {
+              operators["operator" + i] = "x".repeat(6144);
+            }
+            filter = { payload: operators };
+            ignored = [];
+            rules = {};
+          } else if (mode === 10) {
+            filter = { status: { eq: "open" } };
+          } else if (mode === 11) {
+            filter = { status: { eq: "open" }, priority: { ge: 3 } };
+          } else if (mode === 12) {
+            filter = { score: { lte: 50, gte: 20 } };
+          } else if (mode === 13) {
+            filter = {};
+          } else if (mode === 14) {
+            filter = null;
+          } else if (mode === 15 || mode === 16) {
+            filter = { score: { lte: 50, gte: 20 }, and: [
+              { title: { ne: "Book1" } },
+              { or: [{ author: { eq: "Admin" } }, { published: { eq: false } }] }
+            ] };
+            if (mode === 16) {
+              ignored = ["score", "author"];
+            }
+          } else if (mode === 17) {
+            filter = { status: { eq: "open" } };
+            rules = { priority: { ge: 7 }, owner: { eq: "A" } };
+          }
+          if (mode >= 10 && mode <= 17 && mode !== 16) {
+            ignored = [];
+          }
+          if (mode >= 10 && mode <= 16) {
+            rules = {};
+          }
+          const result = util.transform.toSubscriptionFilter(filter, ignored, rules);
+          if (mode === 1 || mode === 3 || mode === 6) {
+            return result.filterGroup.length + "/" + result.filterGroup[0].filters.length;
+          }
+          if (mode === 8) {
+            return String(result.filterGroup[0].filters[0].value.length);
+          }
+          return JSON.stringify(result);
+        }
+        """;
+
     @BeforeAll
     static void configure() {
         SidecarContainersProfile.requireDockerAndImage("floci.services.appsync.graphql-image");
@@ -381,6 +501,9 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "misplacedYield", "local", YIELD_RESOLVER);
         createUnitResolver(apiId, "Query", "malformedSyntax", "local", MALFORMED_RESOLVER);
         createUnitResolver(apiId, "Query", "keywordsInText", "local", KEYWORDS_IN_TEXT_RESOLVER);
+        createUnitResolver(apiId, "Query", "templateHole", "local", TEMPLATE_HOLE_RESOLVER);
+        createUnitResolver(apiId, "Query", "keywordObjectKey", "local", KEYWORD_OBJECT_KEY_RESOLVER);
+        createUnitResolver(apiId, "Query", "conditionalThis", "local", CONDITIONAL_THIS_RESOLVER);
         createUnitResolver(apiId, "Query", "regexLiteral", "local", REGEX_LITERAL_RESOLVER);
         createUnitResolver(apiId, "Query", "regexKeyword", "local", REGEX_KEYWORD_RESOLVER);
         createUnitResolver(apiId, "Query", "regexClassThenUnsupported", "local",
@@ -405,6 +528,7 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "untaggedInvalidEscape", "local",
                 UNTAGGED_INVALID_ESCAPE_RESOLVER);
         createUnitResolver(apiId, "Query", "normalizeString", "local", NORMALIZE_STRING_RESOLVER);
+        createUnitResolver(apiId, "Query", "subscriptionFilter", "local", SUBSCRIPTION_FILTER_RESOLVER);
     }
 
     @Test
@@ -481,6 +605,82 @@ class AppSyncJsResolverDockerIntegrationTest {
                 "{\"defaultForm\":\"é\",\"nfc\":\"é\",\"nfd\":\"é\","
                     + "\"nfkc\":\"é\",\"nfkd\":\"é\",\"lowercaseNfkd\":\"é\"}"
             ));
+    }
+
+    @Test
+    void subscriptionFilterHelperExpandsBranchesThroughTheJsResolver() {
+        query("{ subscriptionFilter }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("{\"filterGroup\":[{\"filters\":["
+                    + "{\"fieldName\":\"score\",\"operator\":\"lte\",\"value\":50},"
+                    + "{\"fieldName\":\"owner\",\"operator\":\"eq\",\"value\":\"A\"}]},"
+                    + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"gte\",\"value\":20},"
+                    + "{\"fieldName\":\"owner\",\"operator\":\"eq\",\"value\":\"A\"}]}]}"));
+    }
+
+    @Test
+    void subscriptionFilterHelperKeepsBasicAndNestedShapes() {
+        assertSubscriptionFilter(10, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"status\",\"operator\":\"eq\",\"value\":\"open\"}]}]}");
+        assertSubscriptionFilter(11, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"status\",\"operator\":\"eq\",\"value\":\"open\"},"
+                + "{\"fieldName\":\"priority\",\"operator\":\"ge\",\"value\":3}]}]}");
+        assertSubscriptionFilter(12, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"score\",\"operator\":\"lte\",\"value\":50}]},"
+                + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"gte\",\"value\":20}]}]}");
+        assertSubscriptionFilter(13, "{\"filterGroup\":[]}");
+        assertSubscriptionFilter(14, "null");
+        assertSubscriptionFilter(15, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"score\",\"operator\":\"lte\",\"value\":50},"
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"author\",\"operator\":\"eq\",\"value\":\"Admin\"}]},"
+                + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"lte\",\"value\":50},"
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"published\",\"operator\":\"eq\",\"value\":false}]},"
+                + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"gte\",\"value\":20},"
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"author\",\"operator\":\"eq\",\"value\":\"Admin\"}]},"
+                + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"gte\",\"value\":20},"
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"published\",\"operator\":\"eq\",\"value\":false}]}]}");
+        assertSubscriptionFilter(16, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"published\",\"operator\":\"eq\",\"value\":false}]}]}");
+        assertSubscriptionFilter(17, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"status\",\"operator\":\"eq\",\"value\":\"open\"},"
+                + "{\"fieldName\":\"priority\",\"operator\":\"ge\",\"value\":7}]},"
+                + "{\"filters\":[{\"fieldName\":\"status\",\"operator\":\"eq\",\"value\":\"open\"},"
+                + "{\"fieldName\":\"owner\",\"operator\":\"eq\",\"value\":\"A\"}]}]}");
+    }
+
+    @Test
+    void subscriptionFilterBudgetAllowsBoundedExpansion() {
+        query("{ subscriptionFilter(mode: 1) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("512/9"));
+        query("{ subscriptionFilter(mode: 3) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("1000/1"));
+        query("{ subscriptionFilter(mode: 6) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("1000/10"));
+        query("{ subscriptionFilter(mode: 8) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("2097152"));
+    }
+
+    @Test
+    void subscriptionFilterBudgetRejectsExcessiveExpansion() {
+        assertSubscriptionFilterBudgetError(2, "subscription filter exceeds 1000 groups");
+        assertSubscriptionFilterBudgetError(4, "subscription filter exceeds 1000 groups");
+        assertSubscriptionFilterBudgetError(5, "subscription filter exceeds 1000 groups");
+        assertSubscriptionFilterBudgetError(7, "subscription filter exceeds 10000 filter entries");
+        assertSubscriptionFilterBudgetError(9, "subscription filter exceeds 5242880 output bytes");
     }
 
     @Test
@@ -595,6 +795,31 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.keywordsInText", equalTo("try catch class while ok"));
+    }
+
+    @Test
+    void aTemplateLiteralResumesAfterItsExpression() {
+        query("{ templateHole }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.templateHole", equalTo("its class: value-"));
+    }
+
+    @Test
+    void aKeywordUsedAsAnObjectKeyIsNotReadAsADeclaration() {
+        query("{ keywordObjectKey }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.keywordObjectKey", equalTo("allowed"));
+    }
+
+    @Test
+    void aConditionalThisBeforeAColonIsStillRefused() {
+        query("{ conditionalThis }")
+            .statusCode(200)
+            .body("data.conditionalThis", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
     }
 
     @Test
@@ -721,6 +946,21 @@ class AppSyncJsResolverDockerIntegrationTest {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private void assertSubscriptionFilter(int mode, String expected) {
+        query("{ subscriptionFilter(mode: " + mode + ") }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo(expected));
+    }
+
+    private void assertSubscriptionFilterBudgetError(int mode, String message) {
+        query("{ subscriptionFilter(mode: " + mode + ") }")
+            .statusCode(200)
+            .body("data.subscriptionFilter", nullValue())
+            .body("errors[0].errorType", equalTo("RangeError"))
+            .body("errors[0].message", containsString(message));
+    }
 
     private ValidatableResponse query(String graphql) {
         return given()

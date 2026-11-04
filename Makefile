@@ -37,8 +37,8 @@
 # src/main/resources/aws/emr-serverless-shapes.json, the shapes the Step Functions emr-serverless
 # integrations recase against, is generated from botocore's EMR Serverless model by
 # tools/aws/regen_emr_serverless_shapes.py.
-# src/test/resources/aws/rest-routes.json, the REST routes IamRestRouteCoverageTest checks, is
-# generated from botocore's models by tools/aws/regen_rest_routes.py.
+# src/main/resources/aws/rest-routes.json, the routes read by runtime IAM authorization and
+# IamRestRouteCoverageTest, is generated from botocore's models by tools/aws/regen_rest_routes.py.
 # src/main/resources/aws/iam-paginators.json, what each paged IAM list pages by, is generated
 # from botocore's IAM model and paginators by tools/aws/regen_iam_paginators.py.
 
@@ -261,6 +261,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
 	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
+	$(PYTHON) tools/aws/regen_logs_delivery_shapes.py
 	$(PYTHON) tools/aws/regen_ecr_shapes.py
 	$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
@@ -341,6 +342,10 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 		echo "error: Resource Groups request shapes are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_logs_delivery_shapes.py --check || { \
+		echo "error: Logs delivery request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_ecr_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/ecr-request-shapes.json is out of date."; \
@@ -389,7 +394,7 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	}
 	@$(PYTHON) tools/aws/regen_rest_routes.py --check || { \
 		echo ""; \
-		echo "error: src/test/resources/aws/rest-routes.json is out of date."; \
+		echo "error: src/main/resources/aws/rest-routes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}

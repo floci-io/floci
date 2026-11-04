@@ -6,6 +6,8 @@ import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Map;
 
@@ -21,7 +23,8 @@ import static org.hamcrest.Matchers.startsWith;
  * errors at all. Its one explicit behaviour is what it does not do: "this operation does not
  * indicate the state of the access key. The key might be active, inactive, or deleted", so an
  * inactive key still answers its account. A key Floci does not hold is the answer the reference
- * leaves open, and {@code docs/services/sts.md} carries that deviation.
+ * leaves open, and a capture from a real account answers it {@code ValidationError} "Access key ID
+ * is not valid." over both id formats, which {@code docs/services/sts.md} carries.
  */
 @QuarkusTest
 class StsAccessKeyInfoIntegrationTest {
@@ -98,10 +101,18 @@ class StsAccessKeyInfoIntegrationTest {
                         containsString("Value null at 'accessKeyId'"));
     }
 
-    @Test
-    void aWellFormedKeyNobodyHoldsIsRefused() {
-        sts("GetAccessKeyInfo", Map.of("AccessKeyId", "AKIAABSENTKEY0000000")).statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
+    /**
+     * Captured from a real account against a long-term and a temporary id alike: an id the account
+     * never issued is a {@code ValidationError} whose sentence names neither the id nor a
+     * violation count, so AWS refuses it rather than reading the account out of it.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"AKIAABSENTKEY0000000", "ASIAABSENTKEY0000000"})
+    void aWellFormedKeyNobodyHoldsIsRefused(String accessKeyId) {
+        sts("GetAccessKeyInfo", Map.of("AccessKeyId", accessKeyId)).statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Type", equalTo("Sender"))
+                .body("ErrorResponse.Error.Message", equalTo("Access key ID is not valid."));
     }
 
     private String user(String label) {

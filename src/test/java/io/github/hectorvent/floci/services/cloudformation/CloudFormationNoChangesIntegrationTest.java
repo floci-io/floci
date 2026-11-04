@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
@@ -19,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
+import static io.github.hectorvent.floci.testing.CfnRequests.tags;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -400,6 +400,46 @@ class CloudFormationNoChangesIntegrationTest {
         }
     }
 
+    /**
+     * A template holding a nested stack is never a no-change, whether or not the child moved: AWS
+     * reads the child template again and reports the nested stack as a change on every update, so
+     * the same parent with the same child is updated, and so is the parent after the child changed
+     * in S3. Regression for the rejection reported on PR #7383: without the nested-stack exception
+     * the comparison only sees the unchanged parent and answers "No updates are to be performed."
+     * before the child is ever read.
+     */
+    @Test
+    void aNestedStackWhoseChildTemplateChangedInS3IsAnUpdate() {
+        String bucket = name("nested-child");
+        s3Service.createBucket(bucket, "us-east-1");
+        putChildTemplate(bucket, "Description: first\n");
+        String parent = """
+                Resources:
+                  Child:
+                    Type: AWS::CloudFormation::Stack
+                    Properties:
+                      TemplateURL: http://localhost/%s/child.yaml
+                """.formatted(bucket);
+        String stackName = name("no-change-nested");
+        try {
+            create(stackName, parent);
+
+            update(stackName, parent).statusCode(200);
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+
+            putChildTemplate(bucket, "Description: second\n");
+            update(stackName, parent).statusCode(200);
+            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+        } finally {
+            s3Service.deleteObject(bucket, "child.yaml");
+            s3Service.deleteBucket(bucket);
+        }
+    }
+
+    private void putChildTemplate(String bucket, String content) {
+        s3Service.putObject(bucket, "child.yaml", content.getBytes(StandardCharsets.UTF_8), "text/yaml", Map.of());
+    }
+
     private void putFragment(String bucket, String content) {
         s3Service.putObject(bucket, "fragment.yaml", content.getBytes(StandardCharsets.UTF_8), "text/yaml", Map.of());
     }
@@ -556,12 +596,6 @@ class CloudFormationNoChangesIntegrationTest {
                     .formParam("Tags.member." + member + ".Value", keysAndValues[i + 1]);
         }
         return request;
-    }
-
-    private static Map<String, String> tags(String stackName) {
-        String xml = cfn("DescribeStacks", stackName).when().post("/")
-                .then().statusCode(200).extract().asString();
-        return XmlParser.extractPairs(xml, "member", "Key", "Value");
     }
 
     private static ValidatableResponse listChangeSets(String stackName) {

@@ -218,6 +218,11 @@
     "UserPoolId",
     "GroupName"
   ],
+  "AWS::Cognito::UserPoolIdentityProvider": [
+    "ProviderName",
+    "ProviderType",
+    "UserPoolId"
+  ],
   "AWS::Cognito::UserPoolResourceServer": [
     "Identifier",
     "UserPoolId"
@@ -477,6 +482,17 @@
   ],
   "AWS::Events::Rule": [
     "Name"
+  ],
+  "AWS::EventsV2::EventBus": [
+    "Name"
+  ],
+  "AWS::EventsV2::Subscriber": [
+    "Name",
+    "EventBusArn",
+    "InvokeConfiguration/TargetArn",
+    "Type",
+    "StartingPosition",
+    "PointInTimeConfiguration"
   ],
   "AWS::GuardDuty::MalwareProtectionPlan": [],
   "AWS::IAM::AccessKey": [

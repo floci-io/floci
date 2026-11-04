@@ -264,6 +264,30 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
+    void controlTowerTaggingIsChecked() {
+        // Control Tower requests name their resources in the path, which RequestResources does not read yet,
+        // so its tagging is checked on *.
+        String user = user("route-controltower-tags");
+        String landingZone = "arn:aws:controltower:us-east-1:" + ACCOUNT + ":landingzone/ROUTE" + suffix();
+
+        refused(as(user, "controltower").get("/tags/" + landingZone).then(), "controltower:ListTagsForResource");
+        refused(as(user, "controltower").body("{\"tags\":{\"team\":\"a\"}}").post("/tags/" + landingZone).then(),
+                "controltower:TagResource");
+        refused(as(user, "controltower").queryParam("tagKeys", "team").delete("/tags/" + landingZone).then(),
+                "controltower:UntagResource");
+        // The shared controller also serves the bare /tags path, naming the ARN in the query or the body.
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).get("/tags").then(),
+                "controltower:ListTagsForResource");
+        refused(as(user, "controltower").body("{\"resourceArn\":\"" + landingZone + "\",\"tags\":{\"team\":\"a\"}}")
+                .post("/tags").then(), "controltower:TagResource");
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).queryParam("tagKeys", "team")
+                .delete("/tags").then(), "controltower:UntagResource");
+
+        policy(user, allow("controltower:ListTagsForResource", "*"));
+        as(user, "controltower").get("/tags/" + landingZone).then().statusCode(not(403));
+    }
+
+    @Test
     void aTrailingSlashDoesNotLetARouteThroughUnchecked() {
         // The router matches /clusters/ as /clusters, so the request is checked as the route it reaches.
         String user = user("route-trailing-slash");

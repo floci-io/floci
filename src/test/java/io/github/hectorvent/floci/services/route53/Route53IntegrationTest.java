@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -17,6 +19,7 @@ class Route53IntegrationTest {
     private static final String XML = "application/xml";
 
     private static String zoneId;
+    private static List<String> zoneNameServers;
     private static String changeId;
     private static String healthCheckId;
 
@@ -52,11 +55,13 @@ class Route53IntegrationTest {
                 .body("CreateHostedZoneResponse.ChangeInfo.Status", equalTo("INSYNC"))
                 .body("CreateHostedZoneResponse.ChangeInfo.Id", startsWith("/change/C"))
                 .body(not(containsString("<VPC>")))
-                .body(containsString("ns-1.awsdns-01.org"))
+                .body(containsString("<NameServer>ns-"))
                 .extract().header("Location");
 
         // Location is an absolute URL: http://localhost:PORT/2013-04-01/hostedzone/ZXXX
         zoneId = locationHeader.substring(locationHeader.lastIndexOf('/') + 1);
+        zoneNameServers = given().when().get("/2013-04-01/hostedzone/" + zoneId).then().extract()
+                .xmlPath().getList("GetHostedZoneResponse.DelegationSet.NameServers.NameServer");
     }
 
     @Test
@@ -71,7 +76,7 @@ class Route53IntegrationTest {
                 .body("GetHostedZoneResponse.HostedZone.Name", equalTo("example.com."))
                 .body("GetHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("false"))
                 .body(not(containsString("<VPCs>")))
-                .body(containsString("ns-1.awsdns-01.org"));
+                .body(containsString(zoneNameServers.getFirst()));
     }
 
     @Test
@@ -163,6 +168,8 @@ class Route53IntegrationTest {
     @Test
     @Order(7)
     void listResourceRecordSets_autoCreatedSOAandNS() {
+        String firstNameserver = zoneNameServers.getFirst() + ".";
+        String fourthNameserver = zoneNameServers.get(3) + ".";
         String body = given()
                 .when().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
                 .then()
@@ -174,8 +181,8 @@ class Route53IntegrationTest {
         assertThat(body, containsString("<Type>SOA</Type>"));
         assertThat(body, containsString("<Type>NS</Type>"));
         assertThat(body, containsString(
-                "<Value>ns-1.awsdns-01.org. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value>"));
-        assertThat(body, containsString("<Value>ns-4.awsdns-04.co.uk.</Value>"));
+                "<Value>" + firstNameserver + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value>"));
+        assertThat(body, containsString("<Value>" + fourthNameserver + "</Value>"));
     }
 
     @Test
@@ -249,14 +256,14 @@ class Route53IntegrationTest {
                           <Type>SOA</Type>
                           <TTL>900</TTL>
                           <ResourceRecords>
-                            <ResourceRecord><Value>ns-1.awsdns-01.org. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value></ResourceRecord>
+                            <ResourceRecord><Value>%s awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value></ResourceRecord>
                           </ResourceRecords>
                         </ResourceRecordSet>
                       </Change>
                     </Changes>
                   </ChangeBatch>
                 </ChangeResourceRecordSetsRequest>
-                """;
+                """.formatted(zoneNameServers.getFirst() + ".");
 
         given()
                 .contentType(XML)

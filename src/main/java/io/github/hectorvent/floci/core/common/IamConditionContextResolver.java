@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
@@ -205,6 +206,10 @@ public class IamConditionContextResolver {
             if (!keys.isEmpty()) {
                 conditions.put("aws:TagKeys", keys);
             }
+        }
+        if (direct && CloudWatchLogsDeliveryService.isDeliveryResourceArn(body.path("resourceArn").asText())) {
+            // A delivery source, destination or delivery: its request tags apply, its own tags are not read.
+            return conditions.isEmpty() ? null : conditions;
         }
         String group = direct ? logsService.get().resolveTagTarget(body.path("resourceArn").asText(), region).name()
                 : body.path("logGroupName").asText();

@@ -53,6 +53,16 @@ class Ec2ExternalImageCatalogTest {
     }
 
     @Test
+    void kubeletRegistrationIsAnExplicitImageCapability() {
+        Ec2ImageCatalog catalog = new Ec2ImageCatalog(Path.of("src/test/resources/ec2/kubelet-image-catalog.yaml"));
+        assertEquals(Boolean.TRUE, catalog.findByIdOrAlias("ami-kubelet-worker").orElseThrow().kubeletRegistersNode);
+        assertEquals(Boolean.TRUE, catalog.findByIdOrAlias("ami-kubelet-alias").orElseThrow().kubeletRegistersNode);
+        assertNull(catalog.findByIdOrAlias("ami-systemd-guest").orElseThrow().kubeletRegistersNode);
+        assertEquals(Boolean.FALSE, catalog.findByIdOrAlias("ami-simulated-worker").orElseThrow().kubeletRegistersNode);
+        assertTrue(new Ec2ImageCatalog().images().stream().noneMatch(image -> Boolean.TRUE.equals(image.kubeletRegistersNode)));
+    }
+
+    @Test
     void missingOrInvalidFileFailsInsteadOfSilentlyUsingBundledImages() throws Exception {
         assertThrows(IllegalStateException.class,
                 () -> new Ec2ImageCatalog(directory.resolve("missing.yaml")).images());

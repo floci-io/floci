@@ -325,6 +325,9 @@ public class ApiGatewayService implements ResourceProvider {
         if (request.get("policy") instanceof String policy && !policy.isEmpty()) {
             api.setPolicy(policy);
         }
+        if (request.get("apiKeySource") != null) {
+            api.setApiKeySource(apiKeySource(request.get("apiKeySource")));
+        }
 
         EndpointConfiguration endpointConfiguration = new EndpointConfiguration();
         if (request.get(EPC_KEY) instanceof Map<?, ?> epMap) {
@@ -374,6 +377,14 @@ public class ApiGatewayService implements ResourceProvider {
 
         LOG.infov("Created REST API: {0} ({1}) in {2}", name, api.getId(), region);
         return api;
+    }
+
+    /** A valid {@code apiKeySource}: {@code HEADER} or {@code AUTHORIZER}, as AWS spells them. */
+    private static String apiKeySource(Object value) {
+        if (RestApi.API_KEY_SOURCE_HEADER.equals(value) || RestApi.API_KEY_SOURCE_AUTHORIZER.equals(value)) {
+            return (String) value;
+        }
+        throw new AwsException("BadRequestException", "API key source must be HEADER or AUTHORIZER.", 400);
     }
 
     /** The endpoint type {@code value} names, in any case. */
@@ -3165,17 +3176,31 @@ public class ApiGatewayService implements ResourceProvider {
         RestApi api = getRestApi(region, apiId);
         if (patchOperations != null) {
             // Worked out before anything is set: the store hands back the live API, and a rejected
-            // endpoint change must leave it as it was.
+            // endpoint change or API key source must leave it as it was.
             EndpointConfiguration endpointConfiguration = patchEndpointConfiguration(api, patchOperations, region);
             for (Map<String, String> op : patchOperations) {
-                if (!"replace" .equals(op.get("op"))) continue;
+                if ("replace".equals(op.get("op")) && "/apiKeySource".equals(op.get("path"))) {
+                    apiKeySource(op.get("value"));
+                }
+            }
+            for (Map<String, String> op : patchOperations) {
+                if (!"replace" .equals(op.get("op"))) {
+                    continue;
+                }
                 String path = op.getOrDefault("path", "");
                 String value = op.get("value");
-                if ("/name" .equals(path)) api.setName(value);
-                else if ("/description" .equals(path)) api.setDescription(value);
-                // aws_api_gateway_rest_api_policy writes the policy this way, and clears it by
-                // replacing it with an empty string.
-                else if ("/policy" .equals(path)) api.setPolicy(value == null || value.isEmpty() ? null : value);
+                if ("/name" .equals(path)) {
+                    api.setName(value);
+                } else if ("/description" .equals(path)) {
+                    api.setDescription(value);
+                } else if ("/policy" .equals(path)) {
+                    // aws_api_gateway_rest_api_policy writes the policy this way, and clears it by
+                    // replacing it with an empty string.
+                    api.setPolicy(value == null || value.isEmpty() ? null : value);
+                } else if ("/apiKeySource" .equals(path)) {
+                    // aws_api_gateway_rest_api sends this for a changed api_key_source.
+                    api.setApiKeySource(apiKeySource(value));
+                }
             }
             if (endpointConfiguration != null) {
                 api.setEndpointConfiguration(endpointConfiguration);
@@ -4160,6 +4185,10 @@ public class ApiGatewayService implements ResourceProvider {
             Object policy = topExtensions.get("x-amazon-apigateway-policy");
             if (policy != null) {
                 api.setPolicy(JSON.valueToTree(policy).toString());
+            }
+            Object keySource = topExtensions.get("x-amazon-apigateway-api-key-source");
+            if (keySource != null) {
+                api.setApiKeySource(apiKeySource(keySource));
             }
             apiStore.put(apiKey(region, apiId), api);
             Map<String, Object> validators = (Map<String, Object>) topExtensions

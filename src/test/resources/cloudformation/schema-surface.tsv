@@ -65,6 +65,7 @@ AWS::Cognito::UserPool	Arn,ProviderName,ProviderURL,UserPoolId	AccountRecoverySe
 AWS::Cognito::UserPoolClient	ClientId,ClientSecret,Name	AccessTokenValidity,AllowedOAuthFlows,AllowedOAuthFlowsUserPoolClient,AllowedOAuthScopes,AnalyticsConfiguration,AuthSessionValidity,CallbackURLs,ClientName,DefaultRedirectURI,EnablePropagateAdditionalUserContextData,EnableTokenRevocation,ExplicitAuthFlows,GenerateSecret,IdTokenValidity,LogoutURLs,PreventUserExistenceErrors,ReadAttributes,RefreshTokenRotation,RefreshTokenValidity,SupportedIdentityProviders,TokenValidityUnits,UserPoolId,WriteAttributes
 AWS::Cognito::UserPoolDomain	CloudFrontDistribution	CustomDomainConfig,Domain,ManagedLoginVersion,Routing,UserPoolId
 AWS::Cognito::UserPoolGroup		Description,GroupName,Precedence,RoleArn,UserPoolId
+AWS::Cognito::UserPoolIdentityProvider		AttributeMapping,IdpIdentifiers,ProviderDetails,ProviderName,ProviderType,UserPoolId
 AWS::Cognito::UserPoolResourceServer		Identifier,Name,Scopes,UserPoolId
 AWS::Cognito::UserPoolUser		ClientMetadata,DesiredDeliveryMediums,ForceAliasCreation,MessageAction,UserAttributes,UserPoolId,Username,ValidationData
 AWS::Cognito::UserPoolUserToGroupAttachment		GroupName,UserPoolId,Username
@@ -115,6 +116,8 @@ AWS::Events::Archive	Arn	ArchiveName,Description,EventPattern,KmsKeyIdentifier,R
 AWS::Events::EventBus	Arn	DeadLetterConfig,Description,EventSourceName,KmsKeyIdentifier,LogConfig,Name,Policy,Tags
 AWS::Events::EventBusPolicy		EventBusName,Statement,StatementId
 AWS::Events::Rule	Arn,RuleName	Description,EventBusName,EventPattern,Name,RoleArn,ScheduleExpression,State,Tags,Targets
+AWS::EventsV2::EventBus	CreationTime,EventBusArn,LastModifiedTime,State	Description,EncryptionConfiguration,Name,StorageConfiguration,Tags
+AWS::EventsV2::Subscriber	BusName,CreationTime,LastModifiedTime,SubscriberArn	BatchConfiguration,Description,EventBusArn,FilterConfiguration,InvokeConfiguration,LogConfiguration,Name,OnFailureConfiguration,PointInTimeConfiguration,ResumePosition,RetryPolicy,StartingPosition,State,Tags,Transformer,Type
 AWS::GuardDuty::MalwareProtectionPlan	Arn,CreatedAt,MalwareProtectionPlanId,Status,StatusReasons	Actions,ProtectedResource,Role,Tags
 AWS::IAM::AccessKey	Id,SecretAccessKey	Serial,Status,UserName
 AWS::IAM::InstanceProfile	Arn	InstanceProfileName,Path,Roles

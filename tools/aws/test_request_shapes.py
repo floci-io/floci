@@ -23,6 +23,7 @@ import regen_ecs_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
 import regen_payment_cryptography_shapes
+import regen_logs_delivery_shapes
 import regen_resource_groups_shapes
 import regen_sesv2_shapes
 import regen_sts_shapes
@@ -354,7 +355,7 @@ def vendored(script) -> tuple[str, ...]:
 
 
 @pytest.mark.parametrize("script", [
-    regen_ecr_shapes, regen_iam_shapes, regen_payment_cryptography_shapes,
+    regen_ecr_shapes, regen_iam_shapes, regen_logs_delivery_shapes, regen_payment_cryptography_shapes,
     regen_resource_groups_shapes, regen_sts_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.kms;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.TestAccounts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
@@ -870,37 +871,35 @@ class KmsIntegrationTest {
 
     @Test
     void listKeysPagesWithLimitAndMarker() {
+        String account = TestAccounts.randomId();
+        String authorization = "AWS4-HMAC-SHA256 Credential=" + account
+                + "/20261103/us-east-1/kms/aws4_request";
+        JsonPath initial = kmsAs(authorization, "ListKeys", "{}")
+                .then().statusCode(200)
+                .extract().jsonPath();
+        List<String> expectedKeyIds = new ArrayList<>(initial.getList("Keys.KeyId"));
         for (int i = 0; i < 2; i++) {
-            given()
-                    .header("X-Amz-Target", "TrentService.CreateKey")
-                    .contentType(KMS_CONTENT_TYPE)
-                    .body("{}")
-                    .when().post("/")
-                    .then().statusCode(200);
+            String keyId = kmsAs(authorization, "CreateKey", "{}")
+                    .then().statusCode(200)
+                    .extract().path("KeyMetadata.KeyId");
+            expectedKeyIds.add(keyId);
         }
 
-        JsonPath unpaged = given()
-                .header("X-Amz-Target", "TrentService.ListKeys")
-                .contentType(KMS_CONTENT_TYPE)
-                .body("{}")
-                .when().post("/")
+        JsonPath unpaged = kmsAs(authorization, "ListKeys", "{}")
                 .then()
                 .statusCode(200)
                 .body("Truncated", equalTo(false))
                 .body("$", not(hasKey("NextMarker")))
                 .extract().jsonPath();
         List<String> allKeyIds = unpaged.getList("Keys.KeyId");
-        assertTrue(allKeyIds.size() >= 2);
+        assertEquals(new HashSet<>(expectedKeyIds), new HashSet<>(allKeyIds));
+        assertEquals(expectedKeyIds.size(), allKeyIds.size());
 
         List<String> pagedKeyIds = new ArrayList<>();
         String marker = null;
         do {
             String body = marker == null ? "{\"Limit\":1}" : "{\"Limit\":1,\"Marker\":\"" + marker + "\"}";
-            JsonPath page = given()
-                    .header("X-Amz-Target", "TrentService.ListKeys")
-                    .contentType(KMS_CONTENT_TYPE)
-                    .body(body)
-                    .when().post("/")
+            JsonPath page = kmsAs(authorization, "ListKeys", body)
                     .then()
                     .statusCode(200)
                     .body("Keys.size()", equalTo(1))

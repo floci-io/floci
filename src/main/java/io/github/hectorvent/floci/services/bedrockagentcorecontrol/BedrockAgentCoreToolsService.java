@@ -18,14 +18,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class BedrockAgentCoreToolsService {
 
     private static final Pattern TOOL_NAME = Pattern.compile("[a-zA-Z][a-zA-Z0-9_]{0,47}");
-    private static final String ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     private final StorageBackend<String, ObjectNode> storage;
     private final RegionResolver regionResolver;
@@ -68,7 +66,7 @@ public class BedrockAgentCoreToolsService {
             throw new AwsException("ConflictException", "Browser already exists: " + name, 409);
         }
 
-        String id = name + "-" + random(10);
+        String id = name + "-" + BedrockAgentCoreControllerSupport.randomAlphanumeric(10);
         Instant now = Instant.now();
         ObjectNode browser = request.deepCopy();
         browser.put("browserId", id);
@@ -123,7 +121,7 @@ public class BedrockAgentCoreToolsService {
         if (findByName("browser-profile", region, name) != null) {
             throw new AwsException("ConflictException", "Browser profile already exists: " + name, 409);
         }
-        String id = name + "-" + random(10);
+        String id = name + "-" + BedrockAgentCoreControllerSupport.randomAlphanumeric(10);
         Instant now = Instant.now();
         ObjectNode profile = request.deepCopy();
         profile.put("profileId", id);
@@ -161,7 +159,7 @@ public class BedrockAgentCoreToolsService {
         if (findByName("code-interpreter", region, name) != null) {
             throw new AwsException("ConflictException", "Code interpreter already exists: " + name, 409);
         }
-        String id = name + "-" + random(10);
+        String id = name + "-" + BedrockAgentCoreControllerSupport.randomAlphanumeric(10);
         Instant now = Instant.now();
         ObjectNode interpreter = request.deepCopy();
         interpreter.put("codeInterpreterId", id);
@@ -446,13 +444,6 @@ public class BedrockAgentCoreToolsService {
         return value == null || value.isNull() ? null : value.asText();
     }
 
-    private static String random(int length) {
-        StringBuilder value = new StringBuilder(length);
-        for (int i = 0; i < length; i++) {
-            value.append(ALNUM.charAt(ThreadLocalRandom.current().nextInt(ALNUM.length())));
-        }
-        return value.toString();
-    }
 
     private static String key(String family, String region, String id) {
         return prefix(family, region) + id;

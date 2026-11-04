@@ -16,10 +16,16 @@ import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactDomain
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
 import io.github.hectorvent.floci.services.codeartifact.model.PackageOriginConfig;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.io.ByteArrayOutputStream;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -38,6 +44,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,6 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -481,6 +490,139 @@ class CodeArtifactServiceTest {
         assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void nugetPushFinishingAfterRepositoryRecreationDoesNotChargeTheNewRepository() throws Exception {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("nuget");
+        String token = service.getAuthorizationToken(REGION, "dom", null, null).token();
+        HttpHeaders headers = mock(HttpHeaders.class);
+        when(headers.getHeaderString(HttpHeaders.AUTHORIZATION)).thenReturn("Bearer " + token);
+        when(headers.getHeaderString(HttpHeaders.CONTENT_TYPE))
+                .thenReturn("multipart/form-data; boundary=boundary123");
+        when(bagetterClient.ensureReady(oldId, null)).thenReturn("http://127.0.0.1:1234");
+        when(bagetterClient.lockFor(oldId)).thenReturn(new Object());
+
+        HttpClient http = mock(HttpClient.class);
+        HttpResponse<byte[]> absent = mock(HttpResponse.class);
+        when(absent.statusCode()).thenReturn(404);
+        HttpResponse<Void> published = mock(HttpResponse.class);
+        when(published.statusCode()).thenReturn(201);
+        when(http.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class))).thenAnswer(call -> {
+            HttpRequest request = call.getArgument(0);
+            if (!"PUT".equals(request.method())) {
+                return absent;
+            }
+            service.deleteRepository(REGION, "dom", null, "repo");
+            CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                    Map.of());
+            assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
+            return published;
+        });
+        CodeArtifactNuGetController controller = new CodeArtifactNuGetController(service, bagetterClient,
+                mock(CodeArtifactNuGetExternalConnectionImporter.class), http);
+
+        byte[] packageBytes;
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream(); ZipOutputStream zip =
+                     new ZipOutputStream(output)) {
+            zip.putNextEntry(new ZipEntry("demo.nuspec"));
+            zip.write(("<?xml version=\"1.0\"?><package><metadata><id>demo</id><version>1.0.0</version>"
+                    + "<authors>floci</authors><description>test</description></metadata></package>")
+                    .getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+            zip.finish();
+            packageBytes = output.toByteArray();
+        }
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.writeBytes(("--boundary123\r\nContent-Disposition: form-data; name=\"package\"; "
+                + "filename=\"demo.nupkg\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+                .getBytes(StandardCharsets.UTF_8));
+        body.writeBytes(packageBytes);
+        body.writeBytes("\r\n--boundary123--\r\n".getBytes(StandardCharsets.UTF_8));
+
+        Response response = controller.push(headers, "dom", "repo", body.toByteArray());
+
+        assertEquals(201, response.getStatus());
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void oldNugetRetentionClaimCannotWriteAfterRepositoryRecreation() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("nuget");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo", "1.0.0");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome oldClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", packageFence);
+        assertTrue(oldClaim.claimed());
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
+        CodeArtifactService.RetainedVersionOriginClaimOutcome newClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", packageFence);
+        assertTrue(newClaim.claimed());
+        assertNotEquals(oldClaim.episodeId(), newClaim.episodeId());
+
+        AtomicBoolean wroteOldAsset = new AtomicBoolean();
+        CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", versionFence, packageFence,
+                oldClaim.episodeId(), oldId, "demo.1.0.0.nupkg", new byte[] {1},
+                () -> wroteOldAsset.set(true));
+
+        assertFalse(result.fenceMatched());
+        assertFalse(wroteOldAsset.get());
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void nugetRetentionUsingOldSidecarIdCannotWriteWithANewRepositoryClaim() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("nuget");
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo", "1.0.0");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome newClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", packageFence);
+        assertTrue(newClaim.claimed());
+
+        AtomicBoolean wroteOldAsset = new AtomicBoolean();
+        CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", versionFence, packageFence,
+                newClaim.episodeId(), oldId, "demo.1.0.0.nupkg", new byte[] {1},
+                () -> wroteOldAsset.set(true));
+
+        assertFalse(result.fenceMatched());
+        assertFalse(wroteOldAsset.get());
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void listNugetPackageVersionsPropagatesInvalidLeaseCompletion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        when(bagetterClient.listPackageVersions(repoId, "dom", "repo", null, "demo"))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+        when(bagetterClient.preferredDisplayVersion(repoId, "dom", "repo", null, "demo"))
+                .thenReturn(Optional.empty());
+        IllegalStateException invalidLease = new IllegalStateException("No active BaGetter sidecar use");
+        doThrow(invalidLease).when(bagetterClient).endUse(repoId);
+
+        assertSame(invalidLease, assertThrows(IllegalStateException.class, () -> service.listPackageVersions(
+                REGION, "dom", null, "repo", "nuget", null, "demo", null, null, null, null, null)));
+    }
+
     /**
      * The same window, but for {@code DeletePackage} instead of {@code DeleteRepository}: the
      * repository stays alive, only the package underneath it is gone, so a resurrected entry
@@ -838,6 +980,75 @@ class CodeArtifactServiceTest {
         PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
                 "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content);
         assertEquals("Published", published.packageVersion().getStatus());
+    }
+
+    /**
+     * The check each native publish path (mvn deploy, npm publish, twine upload, dotnet nuget
+     * push) runs before its sidecar write: refused exactly while the package's origin
+     * configuration says publish:BLOCK, the same rule publishPackageVersion applies to generic.
+     */
+    @Test
+    void containerBackedPackagePublishIsRefusedOnlyWhilePublishIsBlocked() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                "BLOCK", "ALLOW");
+        AwsException blocked = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                        "widget"));
+        assertEquals("ConflictException", blocked.getErrorCode());
+        // Scoped to that one package: a sibling in the same namespace still publishes.
+        service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                "other");
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                "ALLOW", "ALLOW");
+        service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+    }
+
+    /**
+     * pypi and nuget names are case/punctuation insensitive, and PutPackageOriginConfiguration
+     * keys by the normalized spelling, so a restriction set under one spelling must block a
+     * publish that names the package under another (twine sends the name as typed in the
+     * project metadata, the nuget controller lowercases the nuspec id).
+     */
+    @Test
+    void containerBackedPackagePublishBlockMatchesAnyNormalizedSpellingOfTheName() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "My_Pkg", "BLOCK",
+                "BLOCK");
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "nuget", null, "Demo.Package", "BLOCK",
+                "BLOCK");
+
+        assertThrows(AwsException.class, () -> service.requireContainerBackedPackagePublishAllowed(REGION, "dom",
+                null, "repo", "pypi", null, "my-pkg"));
+        assertThrows(AwsException.class, () -> service.requireContainerBackedPackagePublishAllowed(REGION, "dom",
+                null, "repo", "nuget", null, "demo.package"));
+    }
+
+    /**
+     * A package first retained from an external connection defaults to publish:BLOCK (the User
+     * Guide's "Default package origin control settings"), so a later direct publish of it is
+     * refused without anyone calling PutPackageOriginConfiguration.
+     */
+    @Test
+    void containerBackedPackagePublishIsRefusedForAPackageFirstRetainedFromAnExternalConnection() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", "scope",
+                "left-pad");
+        service.ensureRetainedPackageOriginDefault(REGION, "dom", null, "repo", "npm", "scope", "left-pad", fence);
+
+        AwsException blocked = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "npm", "scope",
+                        "left-pad"));
+        assertEquals("ConflictException", blocked.getErrorCode());
     }
 
     @Test
@@ -2020,6 +2231,57 @@ class CodeArtifactServiceTest {
         AwsException e = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
                 "maven", "com.example", "widget"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void nugetImportFinishingAfterRepositoryRecreationDoesNotBlockPublishingToTheNewRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("nuget");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "widget");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
+                "widget", "1.0.0");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "widget", "1.0.0", "public:nuget-org", packageFence);
+        AtomicBoolean wroteOldAsset = new AtomicBoolean();
+
+        CodeArtifactService.AssetRetentionAttemptResult retained = service.retainAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "nuget", null, "widget", "1.0.0", versionFence, packageFence,
+                claim.episodeId(), oldId, "widget.1.0.0.nupkg", new byte[] {1},
+                () -> wroteOldAsset.set(true));
+        assertTrue(retained.fenceMatched());
+        assertTrue(retained.wroteNewContent());
+        assertTrue(wroteOldAsset.get());
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
+
+        service.ensureRetainedPackageOriginDefaultIfCurrentRepository(REGION, "dom", null, "repo", "nuget", null,
+                "widget", packageFence, oldId);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
+                "nuget", null, "widget"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void nugetImportSetsTheDefaultWhileItsRepositoryIsCurrent() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "widget");
+
+        service.ensureRetainedPackageOriginDefaultIfCurrentRepository(REGION, "dom", null, "repo", "nuget", null,
+                "widget", fence, repoId);
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "nuget", null, "widget");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
     }
 
     @Test
@@ -4418,6 +4680,29 @@ class CodeArtifactServiceTest {
         order.verify(pypiserverClient).listPackageVersions(repoId, "dom", "repo", null, "my-pkg");
         order.verify(pypiserverClient).preferredDisplayVersion(repoId, "dom", "repo", null, "my-pkg");
         order.verify(pypiserverClient).endUse(repoId);
+    }
+
+    @Test
+    void getNugetReadmeBracketsTheSidecarCallAndReleasesOnFailure() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        when(bagetterClient.fetchPackageVersionReadme(repoId, "dom", "repo", null, "my-pkg", "1.0.0"))
+                .thenReturn(Optional.of("# readme"))
+                .thenThrow(new IllegalStateException("sidecar unavailable"));
+
+        assertEquals("# readme", service.getPackageVersionReadme(REGION, "dom", null, "repo", "nuget", null,
+                "my-pkg", "1.0.0").readme());
+        assertThrows(IllegalStateException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "nuget", null, "my-pkg", "1.0.0"));
+
+        InOrder order = inOrder(bagetterClient);
+        order.verify(bagetterClient).beginUse(repoId);
+        order.verify(bagetterClient).fetchPackageVersionReadme(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(bagetterClient).endUse(repoId);
+        order.verify(bagetterClient).beginUse(repoId);
+        order.verify(bagetterClient).fetchPackageVersionReadme(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(bagetterClient).endUse(repoId);
     }
 
     @Test

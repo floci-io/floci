@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.swf.model.SwfHistoryEvent;
 import io.github.hectorvent.floci.services.swf.model.SwfWorkflowExecution;
 import io.github.hectorvent.floci.services.swf.model.SwfWorkflowType;
 import io.github.hectorvent.floci.testing.MutableClock;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,6 +46,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -53,6 +56,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -742,6 +746,63 @@ class SwfServiceTest {
         assertEquals("ResourceNotFoundException", failed.getAttributes().get("reason"));
         assertEquals(started.getEventId(), failed.getAttributes().get("startedEventId"));
         assertEquals("DecisionTaskScheduled", events.get(events.size() - 1).getEventType());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void lambdaRuntimeFailureRetainsCauseAndHistory(boolean nullMessage) {
+        RuntimeException nested = new IllegalArgumentException("transport cause");
+        lambdaFailure = new IllegalStateException(nullMessage ? null : "invocation failed", nested);
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        String runId = startLambdaWf("wf-lambda-log", "LW");
+        SwfDecisionTask task = pollFor("wf-lambda-log");
+
+        List<LogRecord> records = LogCapture.capture(SwfService.class,
+                () -> service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                        scheduleLambda("lam-log", "failing-fn", null, null, null)), null));
+
+        List<SwfHistoryEvent> history = service.getWorkflowExecutionHistory(
+                REGION, DOMAIN, "wf-lambda-log", runId, false);
+        SwfHistoryEvent failed = eventOfType(history, "LambdaFunctionFailed");
+        assertEquals("IllegalStateException", failed.getAttributes().get("reason"));
+        assertEquals(nullMessage ? "" : "invocation failed", failed.getAttributes().get("details"));
+        assertEquals(eventOfType(history, "LambdaFunctionScheduled").getEventId(),
+                failed.getAttributes().get("scheduledEventId"));
+        assertEquals(eventOfType(history, "LambdaFunctionStarted").getEventId(),
+                failed.getAttributes().get("startedEventId"));
+        assertEquals(1, service.countPendingDecisionTasks(REGION, DOMAIN, "tl"));
+        assertEquals(List.of("us-east-1|failing-fn|{}"), lambdaInvocations);
+        List<LogRecord> warnings = records.stream()
+                .filter(record -> record.getLevel().intValue() == Level.WARNING.intValue()).toList();
+        assertEquals(1, warnings.size());
+        LogRecord warning = warnings.getFirst();
+        assertEquals("SWF Lambda invocation {0} ({1}) failed: {2}", warning.getMessage());
+        assertEquals("lam-log", warning.getParameters()[0]);
+        assertEquals("failing-fn", warning.getParameters()[1]);
+        assertEquals(lambdaFailure.getMessage(), warning.getParameters()[2]);
+        assertSame(lambdaFailure, warning.getThrown());
+        assertSame(nested, warning.getThrown().getCause());
+    }
+
+    @Test
+    void lambdaModeledFailurePreservesHistoryWithoutRuntimeWarning() {
+        lambdaFailure = new AwsException("ResourceNotFoundException", "function missing", 404);
+        service.registerWorkflowType(REGION, DOMAIN, lambdaWorkflowType("LW", "1",
+                "arn:aws:iam::000000000000:role/swf-lambda"));
+        String runId = startLambdaWf("wf-modeled-log", "LW");
+        SwfDecisionTask task = pollFor("wf-modeled-log");
+
+        List<LogRecord> records = LogCapture.capture(SwfService.class,
+                () -> service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(
+                        scheduleLambda("lam-modeled", "missing-fn", null, null, null)), null));
+
+        SwfHistoryEvent failed = eventOfType(service.getWorkflowExecutionHistory(
+                REGION, DOMAIN, "wf-modeled-log", runId, false), "LambdaFunctionFailed");
+        assertEquals("ResourceNotFoundException", failed.getAttributes().get("reason"));
+        assertEquals("function missing", failed.getAttributes().get("details"));
+        assertEquals(1, service.countPendingDecisionTasks(REGION, DOMAIN, "tl"));
+        assertTrue(records.stream().noneMatch(record -> record.getLevel().intValue() >= Level.WARNING.intValue()));
     }
 
     @ParameterizedTest

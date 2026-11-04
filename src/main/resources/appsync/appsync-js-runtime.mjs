@@ -37,6 +37,7 @@ const UTILS_DIR = path.join(ROOT, 'node_modules', '@aws-appsync', 'utils');
 // - in code *or in a comment* - ends the string and the sidecar fails to boot with a SyntaxError.
 // Escape them (\` and \${) or write around them.
 const UTILS_INDEX = `
+import { Buffer } from 'node:buffer';
 import { randomUUID } from 'node:crypto';
 const ERROR_MARKER = Symbol.for('floci.appsync.error');
 const RETURN_MARKER = Symbol.for('floci.appsync.earlyReturn');
@@ -98,6 +99,120 @@ const fromDynamoDB = (value) => {
 const unsupported = (name) => () => {
   throw new TemplateError(\`util.\${name} is not implemented by Floci's AppSync JS runtime\`,
     'FlociUnsupported');
+};
+
+// Local safety budgets bound expansion in the shared resolver process, not AWS protocol limits.
+const MAX_SUBSCRIPTION_FILTER_GROUPS = 1000;
+const MAX_SUBSCRIPTION_FILTER_ENTRIES = 10000;
+const MAX_SUBSCRIPTION_FILTER_OUTPUT_BYTES = 5 * 1024 * 1024;
+const filterJsonBytes = new WeakMap();
+const requireFilterGroupBudget = (count) => {
+  if (count > MAX_SUBSCRIPTION_FILTER_GROUPS) {
+    throw new RangeError('subscription filter exceeds ' + MAX_SUBSCRIPTION_FILTER_GROUPS + ' groups');
+  }
+};
+const countFilterEntries = (groups) => groups.reduce((count, group) => count + group.length, 0);
+const requireFilterEntryBudget = (count) => {
+  if (count > MAX_SUBSCRIPTION_FILTER_ENTRIES) {
+    throw new RangeError('subscription filter exceeds ' + MAX_SUBSCRIPTION_FILTER_ENTRIES
+      + ' filter entries');
+  }
+};
+const countFilterJsonBytes = (groups) => {
+  let total = 0;
+  for (const group of groups) {
+    for (const filter of group) {
+      let filterBytes = filterJsonBytes.get(filter);
+      if (filterBytes === undefined) {
+        filterBytes = Buffer.byteLength(JSON.stringify(filter));
+        filterJsonBytes.set(filter, filterBytes);
+      }
+      total += filterBytes;
+      if (total > MAX_SUBSCRIPTION_FILTER_OUTPUT_BYTES) {
+        return MAX_SUBSCRIPTION_FILTER_OUTPUT_BYTES + 1;
+      }
+    }
+  }
+  return total;
+};
+const requireFilterOutputBudget = (groups, entries, filterBytes) => {
+  // Wrapper and comma allowance exceeds the JSON structure's actual per-group overhead.
+  if (filterBytes + 2 * entries + 32 * groups + 32 > MAX_SUBSCRIPTION_FILTER_OUTPUT_BYTES) {
+    throw new RangeError('subscription filter exceeds '
+      + MAX_SUBSCRIPTION_FILTER_OUTPUT_BYTES + ' output bytes');
+  }
+};
+
+const joinFilterGroups = (left, right) => {
+  const groupCount = left.length * right.length;
+  const entryCount = countFilterEntries(left) * right.length
+    + countFilterEntries(right) * left.length;
+  requireFilterGroupBudget(groupCount);
+  requireFilterEntryBudget(entryCount);
+  requireFilterOutputBudget(groupCount, entryCount,
+    countFilterJsonBytes(left) * right.length + countFilterJsonBytes(right) * left.length);
+  return left.flatMap((base) => right.map((branch) => [...base, ...branch]));
+};
+
+const expandSubscriptionFilter = (input, ignored) => {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return [];
+  }
+  let groups = [[]];
+  for (const [field, conditions] of Object.entries(input)) {
+    let alternatives = [];
+    if (field === 'and' && Array.isArray(conditions)) {
+      let combined = [[]];
+      for (const condition of conditions) {
+        const nested = expandSubscriptionFilter(condition, ignored);
+        if (nested.length) {
+          combined = joinFilterGroups(combined, nested);
+        }
+      }
+      alternatives = combined.filter((filters) => filters.length);
+    } else if (field === 'or' && Array.isArray(conditions)) {
+      for (const condition of conditions) {
+        const nested = expandSubscriptionFilter(condition, ignored);
+        const groupCount = alternatives.length + nested.length;
+        const entryCount = countFilterEntries(alternatives) + countFilterEntries(nested);
+        requireFilterGroupBudget(groupCount);
+        requireFilterEntryBudget(entryCount);
+        requireFilterOutputBudget(groupCount, entryCount,
+          countFilterJsonBytes(alternatives) + countFilterJsonBytes(nested));
+        alternatives.push(...nested);
+      }
+    } else if (!ignored.has(field) && conditions !== null
+      && typeof conditions === 'object' && !Array.isArray(conditions)) {
+      for (const [operator, value] of Object.entries(conditions)) {
+        requireFilterGroupBudget(alternatives.length + 1);
+        alternatives.push([{ fieldName: field, operator, value }]);
+      }
+    }
+    if (alternatives.length) {
+      groups = joinFilterGroups(groups, alternatives);
+    }
+  }
+  return groups.filter((filters) => filters.length);
+};
+
+const toSubscriptionFilter = (input, ignoredFields = [], rules = {}) => {
+  if (input === null) {
+    return null;
+  }
+  const base = expandSubscriptionFilter(input, new Set(ignoredFields ?? []));
+  const strict = [];
+  if (rules !== null && typeof rules === 'object' && !Array.isArray(rules)) {
+    for (const [fieldName, conditions] of Object.entries(rules)) {
+      if (conditions !== null && typeof conditions === 'object' && !Array.isArray(conditions)) {
+        for (const [operator, value] of Object.entries(conditions)) {
+          requireFilterGroupBudget(strict.length + 1);
+          strict.push([{ fieldName, operator, value }]);
+        }
+      }
+    }
+  }
+  const groups = strict.length ? joinFilterGroups(base.length ? base : [[]], strict) : base;
+  return { filterGroup: groups.map((filters) => ({ filters })) };
 };
 
 export const util = {
@@ -179,7 +294,8 @@ export const util = {
   },
   transform: {
     toDynamoDBFilterExpression: unsupported('transform.toDynamoDBFilterExpression'),
-    toElasticsearchQueryDSL: unsupported('transform.toElasticsearchQueryDSL')
+    toElasticsearchQueryDSL: unsupported('transform.toElasticsearchQueryDSL'),
+    toSubscriptionFilter
   },
   str: {
     normalize: (v, form) => String(v).normalize(
@@ -745,8 +861,12 @@ function validateAppSyncSubset(code) {
   const literals = blankLiterals(code);
   const lineNumber = (index) => code.slice(0, index).split(/\r\n|[\r\n\u2028\u2029]/).length;
   for (const [pattern, description] of BANNED_CONSTRUCTS) {
-    const match = pattern.exec(literals.scanned);
-    if (match) {
+    for (const match of literals.scanned.matchAll(new RegExp(pattern.source, 'g'))) {
+      const before = literals.scanned.slice(0, match.index).trimEnd();
+      const after = literals.scanned.slice(match.index + match[0].length);
+      if (/^[\w$]+$/.test(match[0]) && /[,{]$/.test(before) && /^\s*:/.test(after)) {
+        continue;
+      }
       return unsupportedConstruct(description, lineNumber(match.index));
     }
   }

@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -64,7 +65,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class SsoAdminService implements Resettable {
+public class SsoAdminService implements Resettable, StoredResourceArns {
     private static final String BOOTSTRAP_INSTANCE = "instance/ssoins-7223b02a5d9f7c8e";
     private static final String IDENTITY_STORE_ID = "d-9067f2a3c1";
     private static final Pattern INSTANCE_ARN_PATTERN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::instance/(?:sso)?ins-[a-zA-Z0-9-.]{16}");
@@ -1874,10 +1875,7 @@ public class SsoAdminService implements Resettable {
             if (targetId != null) {
                 throw validation("TargetId must not be provided when TargetType is ALL_PROVISIONED_ACCOUNTS.");
             }
-            permissionSetProvisionings.scan(key -> true).stream()
-                    .filter(provisioning -> permissionSetArn.equals(provisioning.permissionSetArn()))
-                    .map(PermissionSetProvisioning::accountId)
-                    .distinct()
+            provisionedAccounts(permissionSetArn)
                     .forEach(accountId -> ensurePermissionSetProvisioned(permissionSetArn, accountId));
         } else {
             throw validation("TargetType must be AWS_ACCOUNT or ALL_PROVISIONED_ACCOUNTS.");
@@ -1887,6 +1885,40 @@ public class SsoAdminService implements Resettable {
                 requestId, "SUCCEEDED", System.currentTimeMillis(), targetId, permissionSetArn, null);
         permissionSetProvisioningOperations.put(requestId, operation);
         return operation;
+    }
+
+    /** The accounts the permission set is provisioned to. */
+    private List<String> provisionedAccounts(String permissionSetArn) {
+        return permissionSetProvisionings.scan(key -> true).stream()
+                .filter(provisioning -> permissionSetArn.equals(provisioning.permissionSetArn()))
+                .map(PermissionSetProvisioning::accountId)
+                .distinct()
+                .toList();
+    }
+
+    @Override
+    public String namespace() {
+        return "sso";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The accounts a permission set is provisioned to, in its partition, which a {@code ProvisionPermissionSet} for
+     * {@code ALL_PROVISIONED_ACCOUNTS} provisions it to again, as {@link #provisionPermissionSet} does.
+     */
+    @Override
+    public List<String> through(String member, String value, String region) {
+        if (!"PermissionSetArn".equals(member) || !AwsArnUtils.isArn(value)) {
+            return List.of();
+        }
+        String partition = AwsArnUtils.parse(value).partition();
+        return provisionedAccounts(value).stream()
+                .map(accountId -> AwsArnUtils.Arn.global(partition, "sso", "", "account/" + accountId).toString())
+                .toList();
     }
 
     private void ensurePermissionSetProvisioned(String permissionSetArn, String accountId) {

@@ -21,11 +21,15 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -33,10 +37,13 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -48,6 +55,8 @@ class MemoryDbServiceTest {
     private MemoryDbProxyManager proxyManager;
     private SigV4Validator sigV4Validator;
     private EmulatorConfig.MemoryDbServiceConfig mdbConfig;
+    private EmulatorConfig config;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
@@ -55,8 +64,8 @@ class MemoryDbServiceTest {
         proxyManager = mock(MemoryDbProxyManager.class);
         sigV4Validator = mock(SigV4Validator.class);
         StorageFactory storageFactory = mock(StorageFactory.class);
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        RegionResolver regionResolver = mock(RegionResolver.class);
+        config = mock(EmulatorConfig.class);
+        regionResolver = mock(RegionResolver.class);
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         mdbConfig = mock(EmulatorConfig.MemoryDbServiceConfig.class);
@@ -462,6 +471,66 @@ class MemoryDbServiceTest {
         firstRequest.join(5000);
 
         assertEquals(ClusterStatus.AVAILABLE, service.getCluster("c1").getStatus());
+    }
+
+    /**
+     * A create that checked the name before another create of it finished must not go on to start
+     * a second cluster once the first has released its claim: exactly one of the two creates
+     * succeeds and the other is refused, whichever order they end up in.
+     */
+    @Test
+    void createRacingAFinishingCreateOfTheSameNameStartsOneCluster() throws Exception {
+        AccountAwareStorageBackend<Cluster> clusterStore = spy(AccountAwareStorageBackend.<Cluster>inMemory("000000000000"));
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                "memorydb-clusters.json".equals(inv.getArgument(1))
+                        ? clusterStore
+                        : AccountAwareStorageBackend.inMemory("000000000000"));
+        MemoryDbService racedService = new MemoryDbService(containerManager, proxyManager, sigV4Validator,
+                storageFactory, config, regionResolver);
+        CountDownLatch slowCreateLookedUp = new CountDownLatch(1);
+        CountDownLatch otherCreateDone = new CountDownLatch(1);
+        AtomicBoolean heldOnce = new AtomicBoolean();
+        doAnswer(inv -> {
+            Object found = inv.callRealMethod();
+            if ("slow-create".equals(Thread.currentThread().getName()) && heldOnce.compareAndSet(false, true)) {
+                slowCreateLookedUp.countDown();
+                assertTrue(otherCreateDone.await(5, TimeUnit.SECONDS), "the other create never ended");
+            }
+            return found;
+        }).when(clusterStore).get(anyString());
+
+        CompletableFuture<Cluster> slow = new CompletableFuture<>();
+        Thread slowCreate = new Thread(() -> {
+            try {
+                slow.complete(racedService.createCluster(cluster("raced", "open-access"), "us-east-1"));
+            } catch (RuntimeException e) {
+                slow.completeExceptionally(e);
+            }
+        }, "slow-create");
+        slowCreate.start();
+        assertTrue(slowCreateLookedUp.await(5, TimeUnit.SECONDS), "the slow create never looked the name up");
+        CompletableFuture<Cluster> other = new CompletableFuture<>();
+        try {
+            other.complete(racedService.createCluster(cluster("raced", "open-access"), "us-east-1"));
+        } catch (RuntimeException e) {
+            other.completeExceptionally(e);
+        } finally {
+            otherCreateDone.countDown();
+        }
+
+        int succeeded = 0;
+        for (CompletableFuture<Cluster> outcome : List.of(slow, other)) {
+            try {
+                outcome.get(5, TimeUnit.SECONDS);
+                succeeded++;
+            } catch (ExecutionException refused) {
+                AwsException cause = assertInstanceOf(AwsException.class, refused.getCause());
+                assertEquals("ClusterAlreadyExistsFault", cause.jsonType());
+            }
+        }
+        assertEquals(1, succeeded, "exactly one create of the name succeeds");
+        verify(containerManager, times(1)).tryStart(anyString(), anyString());
     }
 
     @Test

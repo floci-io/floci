@@ -451,6 +451,11 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
         groupStore.put(key, group);
     }
 
+    /** The account and partition this service mints its ARNs in. */
+    RegionResolver regionResolver() {
+        return regionResolver;
+    }
+
     public LogGroupTagTarget resolveTagTarget(String resourceArn, String region) {
         return LogGroupTagTarget.resolve(resourceArn, region, regionResolver.getAccountId(), regionResolver.getPartition());
     }
