@@ -839,6 +839,54 @@ class GuardedMessageQueueTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void memoryBackendsKeepEarlierListsUnchangedWhenMessagesAreAdded(boolean accountAware) {
+        InMemoryStorage<String, List<Message>> raw = new InMemoryStorage<>();
+        StorageBackend<String, List<Message>> store = accountAware
+                ? new AccountAwareStorageBackend<>(raw, null, "000000000000") : raw;
+        String rawKey = accountAware ? "000000000000/" + KEY : KEY;
+        GuardedMessageQueue queue = new GuardedMessageQueue(store, KEY);
+        Message first = new Message("first");
+        Message second = new Message("second");
+        queue.addMessage(first);
+        List<Message> earlier = raw.get(rawKey).orElseThrow();
+        queue.addMessage(second);
+
+        assertEquals(1, earlier.size());
+        assertSame(first, earlier.getFirst());
+        List<Message> current = raw.get(rawKey).orElseThrow();
+        assertEquals(2, current.size());
+        assertSame(first, current.get(0));
+        assertSame(second, current.get(1));
+    }
+
+    @Test
+    void memoryBackendFailureDoesNotLeakIntoLaterAdds() {
+        MemoryFailingStore raw = new MemoryFailingStore();
+        GuardedMessageQueue queue = new GuardedMessageQueue(raw, KEY);
+        Message m1 = new Message("m1");
+        Message m2 = new Message("m2");
+        Message m3 = new Message("m3");
+        queue.addMessage(m1);
+        List<Message> beforeFailure = raw.get(KEY).orElseThrow();
+        raw.fail = true;
+        assertThrows(IllegalStateException.class, () -> queue.addMessage(m2));
+        raw.fail = false;
+        queue.addMessage(m3);
+
+        List<Message> stored = raw.get(KEY).orElseThrow();
+        assertEquals(2, stored.size());
+        assertSame(m1, stored.get(0));
+        assertSame(m3, stored.get(1));
+        List<Message> live = queue.peekAll();
+        assertEquals(2, live.size());
+        assertSame(m1, live.get(0));
+        assertSame(m3, live.get(1));
+        assertEquals(1, beforeFailure.size());
+        assertSame(m1, beforeFailure.getFirst());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void memoryBackendFailuresStillRestoreDeliveryAndListState(boolean accountAware) {
         MemoryFailingStore raw = new MemoryFailingStore();
         StorageBackend<String, List<Message>> store = accountAware
