@@ -3,11 +3,12 @@
 
 LocalStack records what a test's AWS calls returned in a `<test>.snapshot.json` beside the test
 that made them, and a test marked `@markers.aws.validated` ran against a real account, so what its
-snapshot carries is a recording rather than an emulator's answer. Several rows of
-`w/iam-operations-tracker.md` were settled one at a time by reading those files by hand: the two
-IAM constraint messages that said IAM leaves the offending value out, the enum set
-`UpdateAccessKey` names, and the STS message for an invalid parameter. This asks the whole file at
-once instead, and keeps answering for questions nobody has written down yet.
+snapshot carries is a recording rather than an emulator's answer. Several of the AWS readings
+recorded in `docs/services/iam.md` and `docs/services/sts.md` were settled one at a time by
+reading those files by hand: the two IAM constraint messages that said IAM leaves the offending
+value out, the enum set `UpdateAccessKey` names, and the STS message for an invalid parameter.
+This asks the whole file at once instead, and keeps answering for questions nobody has written
+down yet.
 
 What it prints, per recording: the service, the test, its marker, the date LocalStack recorded it,
 the path inside the recorded content, and the error code, HTTP status and message. A `--grep` adds
