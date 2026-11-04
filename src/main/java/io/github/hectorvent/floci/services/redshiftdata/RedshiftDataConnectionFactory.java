@@ -10,6 +10,7 @@ import java.util.Properties;
 @ApplicationScoped
 class RedshiftDataConnectionFactory {
 
+    private static final String DATA_API_APPLICATION_NAME = "floci-redshift-data";
     private final Driver driver = new Driver();
 
     Connection open(RedshiftDataResourceResolver.DatabaseTarget target) throws SQLException {
@@ -19,10 +20,11 @@ class RedshiftDataConnectionFactory {
         // "integer = character varying"; unspecified sends the value untyped and lets the
         // server infer the column's type from context, matching how AWS binds parameters.
         String url = "jdbc:postgresql://" + target.host() + ":" + target.port() + "/" + target.database()
-                + "?sslmode=disable&stringtype=unspecified";
+                + "?sslmode=disable&stringtype=unspecified&ApplicationName=" + DATA_API_APPLICATION_NAME;
         Properties props = new Properties();
         props.setProperty("user", target.user());
         props.setProperty("password", target.password());
+        props.setProperty("ApplicationName", DATA_API_APPLICATION_NAME);
         props.setProperty("connectTimeout", "5");
         return driver.connect(url, props);
     }

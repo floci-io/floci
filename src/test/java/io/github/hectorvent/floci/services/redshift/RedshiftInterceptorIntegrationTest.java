@@ -235,7 +235,7 @@ class RedshiftInterceptorIntegrationTest {
     }
 
     @Test
-    void copyTruncateColumnsOverExtendedQueryExplainsTheSimpleQueryRequirement() throws Exception {
+    void copyTruncateColumnsOverExtendedQueryTruncatesData() throws Exception {
         String bucket = "redshift-copy-truncate-ext";
         s3.createBucket(bucket, "us-east-1");
         s3.putObject(bucket, "t.txt",
@@ -244,9 +244,11 @@ class RedshiftInterceptorIntegrationTest {
         try (Connection connection = waitForConnection(sharedCluster, "admin", "Secret123");
                 Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE copy_trunc_ext (id int, name varchar(3))");
-            SQLException failure = assertThrows(SQLException.class, () -> statement.execute(
-                    "COPY copy_trunc_ext FROM 's3://" + bucket + "/t.txt' TRUNCATECOLUMNS"));
-            assertTrue(failure.getMessage().contains("preferQueryMode=simple"), failure.getMessage());
+            statement.execute("COPY copy_trunc_ext FROM 's3://" + bucket + "/t.txt' TRUNCATECOLUMNS");
+            try (ResultSet rs = statement.executeQuery("SELECT name FROM copy_trunc_ext")) {
+                assertTrue(rs.next());
+                assertEquals("abc", rs.getString(1));
+            }
         }
     }
 
@@ -615,7 +617,7 @@ class RedshiftInterceptorIntegrationTest {
     }
 
     @Test
-    void copyFromS3JsonAutoWithoutColumnsOverExtendedQueryFailsClearly() throws Exception {
+    void copyFromS3JsonAutoWithoutColumnsOverExtendedQueryLoadsRows() throws Exception {
         Cluster cluster = sharedCluster;
 
         String bucket = "redshift-copy-json-auto-extended";
@@ -623,13 +625,15 @@ class RedshiftInterceptorIntegrationTest {
         s3.putObject(bucket, "data/items.json",
                 "{\"id\": 1}\n".getBytes(StandardCharsets.UTF_8), "application/json", Map.of());
 
-        // Default connection: pgjdbc's default query mode is Extended even for a plain Statement,
-        // where the column list is fixed at Parse time and catalog discovery cannot run.
         try (Connection c = waitForConnection(cluster, "admin", "Secret123")) {
             c.createStatement().execute("CREATE TABLE ext_items (id int)");
-            SQLException ex = assertThrows(SQLException.class, () -> c.createStatement().execute(
-                    "COPY ext_items FROM 's3://" + bucket + "/data/items.json' FORMAT AS JSON 'auto'"));
-            assertTrue(ex.getMessage().contains("explicit column list"));
+            c.createStatement().execute(
+                    "COPY ext_items FROM 's3://" + bucket + "/data/items.json' FORMAT AS JSON 'auto'");
+            try (ResultSet rs = c.createStatement().executeQuery("SELECT count(*), max(id) FROM ext_items")) {
+                assertTrue(rs.next());
+                assertEquals(1, rs.getInt(1));
+                assertEquals(1, rs.getInt(2));
+            }
         }
     }
 

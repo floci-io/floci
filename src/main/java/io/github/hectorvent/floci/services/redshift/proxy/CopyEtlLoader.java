@@ -170,33 +170,41 @@ final class CopyEtlLoader {
                     InputStream source = CopySourceInputStream.open(raw, spec.gzip())) {
                 S3CopySimulator.skipLines(source, spec.headerLines());
                 CopyRecordReader records = new CopyRecordReader(source, spec);
-                byte[] record;
-                while ((record = records.next()) != null) {
-                    backend.execute("SAVEPOINT " + rowSavepoint);
-                    int[] heldMib = new int[]{0};
-                    try {
-                        acquireTransformHeap(heldMib, (int) ((record.length * 2L) / (1024 * 1024)) + 1);
-                        byte[] transformed = transform(spec, record, jsonColumns, widths, kinds, heldMib);
-                        accepted += backend.copy(sql, output -> {
-                            for (int offset = 0; offset < transformed.length; offset += 8192) {
-                                int length = Math.min(8192, transformed.length - offset);
-                                byte[] chunk = new byte[length];
-                                System.arraycopy(transformed, offset, chunk, 0, length);
-                                S3CopySimulator.writeCopyData(output, chunk, length);
+                int[] heldMib = new int[]{0};
+                try {
+                    byte[] record;
+                    while ((record = records.next(wantedMib -> acquireTransformHeap(heldMib, wantedMib))) != null) {
+                        backend.execute("SAVEPOINT " + rowSavepoint);
+                        try {
+                            acquireTransformHeap(heldMib, (int) ((record.length * 2L) / (1024 * 1024)) + 1);
+                            byte[] transformed = transform(spec, record, jsonColumns, widths, kinds, heldMib);
+                            accepted += backend.copy(sql, output -> {
+                                for (int offset = 0; offset < transformed.length; offset += 8192) {
+                                    int length = Math.min(8192, transformed.length - offset);
+                                    byte[] chunk = new byte[length];
+                                    System.arraycopy(transformed, offset, chunk, 0, length);
+                                    S3CopySimulator.writeCopyData(output, chunk, length);
+                                }
+                            });
+                        } catch (S3TransferException exception) {
+                            backend.recover();
+                            backend.execute("ROLLBACK TO SAVEPOINT " + rowSavepoint);
+                            if (!RECORD_ERRORS.contains(exception.sqlState()) || ++rejected >= spec.transforms().maxError()) {
+                                throw exception;
                             }
-                        });
-                    } catch (S3TransferException exception) {
-                        backend.recover();
-                        backend.execute("ROLLBACK TO SAVEPOINT " + rowSavepoint);
-                        if (!RECORD_ERRORS.contains(exception.sqlState()) || ++rejected >= spec.transforms().maxError()) {
-                            throw exception;
+                        } finally {
+                            if (heldMib[0] > 0) {
+                                S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(heldMib[0]);
+                                heldMib[0] = 0;
+                            }
                         }
-                    } finally {
-                        if (heldMib[0] > 0) {
-                            S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(heldMib[0]);
-                        }
+                        backend.execute("RELEASE SAVEPOINT " + rowSavepoint);
                     }
-                    backend.execute("RELEASE SAVEPOINT " + rowSavepoint);
+                } finally {
+                    if (heldMib[0] > 0) {
+                        S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(heldMib[0]);
+                        heldMib[0] = 0;
+                    }
                 }
             }
         }

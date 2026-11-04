@@ -60,7 +60,17 @@ public class PostgresProtocolHandler {
      * An authenticated client connection ready to be bridged. {@code iamRole} is the role an IAM
      * token named and the session was handed over to, or {@code null} for every other login.
      */
-    public record AuthenticatedSession(Socket client, Socket backend, String iamRole) {}
+    public record AuthenticatedSession(Socket client, Socket backend, String iamRole,
+                                       Map<String, String> startupParameters) {
+        public AuthenticatedSession(Socket client, Socket backend, String iamRole) {
+            this(client, backend, iamRole, Map.of());
+        }
+    }
+
+    @FunctionalInterface
+    public interface StartupObserver {
+        void onStartup(String username, String database, Map<String, String> parameters);
+    }
 
     /** The username/password the proxy opens the backend PostgreSQL connection with. */
     record BackendLogin(String user, String password) {}
@@ -153,6 +163,19 @@ public class PostgresProtocolHandler {
                                       PasswordValidator passwordValidator, int handshakeTimeoutMillis,
                                       boolean forwardStartupParameters, boolean databaseIamAuthentication,
                                       BiConsumer<String, String> startupObserver) throws IOException {
+        return authenticate(client, backendConnector, masterUsername, masterPassword, dbName,
+                iamEnabled, sigV4, binding, tlsCertificates, passwordValidator,
+                handshakeTimeoutMillis, forwardStartupParameters, databaseIamAuthentication,
+                (username, database, parameters) -> startupObserver.accept(username, database));
+    }
+
+    public static AuthenticatedSession authenticate(Socket client, BackendConnector backendConnector,
+                                      String masterUsername, String masterPassword, String dbName,
+                                      boolean iamEnabled, RdsSigV4Validator sigV4,
+                                      RdsProxyBinding binding, RdsProxyTlsCertificates tlsCertificates,
+                                      PasswordValidator passwordValidator, int handshakeTimeoutMillis,
+                                      boolean forwardStartupParameters, boolean databaseIamAuthentication,
+                                      StartupObserver startupObserver) throws IOException {
 
         client.setSoTimeout(handshakeTimeoutMillis);
 
@@ -165,7 +188,8 @@ public class PostgresProtocolHandler {
         }
         client = startup.socket();
         String clientUsername = startup.username();
-        startupObserver.accept(clientUsername, resolveEffectiveDbName(startup.database(), dbName));
+        startupObserver.onStartup(clientUsername, resolveEffectiveDbName(startup.database(), dbName),
+                startup.parameters());
         InputStream clientIn = client.getInputStream();
         // PgBouncer rejects partial login packets; keep the challenge together until flush().
         // https://github.com/pgbouncer/pgbouncer/blob/pgbouncer_1_24_0/src/server.c#L116-L119
@@ -481,7 +505,7 @@ public class PostgresProtocolHandler {
 
             client.setSoTimeout(0);
             backend.setSoTimeout(0);
-            return new AuthenticatedSession(client, backend, iamRole);
+            return new AuthenticatedSession(client, backend, iamRole, startup.parameters());
         } catch (IOException | RuntimeException e) {
             closeQuietly(backend);
             throw e;

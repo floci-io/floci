@@ -235,9 +235,6 @@ public class RedshiftInterceptingBridge {
                 if (extendedSpectrumError && msg.type() != 'S' && msg.type() != 'X') {
                     continue;
                 }
-                if (coordinator.isDiscardingUntilSync() && msg.type() != 'S' && msg.type() != 'X') {
-                    continue;
-                }
                 switch (msg.type()) {
                     case 'Q' -> handleSimpleQuery(msg, backendOut);
                     case 'P' -> handleParse(decoder, msg, backendOut);

@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.PushbackInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.function.IntConsumer;
 
 /** Reads one logical COPY record, retaining CSV newlines inside quoted fields. */
 final class CopyRecordReader {
@@ -24,12 +25,16 @@ final class CopyRecordReader {
     }
 
     byte[] next() throws IOException {
+        return next(null);
+    }
+
+    byte[] next(IntConsumer memoryTracker) throws IOException {
         ByteArrayOutputStream record = new ByteArrayOutputStream();
         int quote = 0;
         boolean fieldStart = true;
         int value;
         while ((value = input.read()) != -1) {
-            append(record, value);
+            append(record, value, memoryTracker);
             if (json) {
                 if (value == '\n') {
                     return record.toByteArray();
@@ -39,7 +44,7 @@ final class CopyRecordReader {
             if (!csv && value == '\\') {
                 int escaped = input.read();
                 if (escaped != -1) {
-                    append(record, escaped);
+                    append(record, escaped, memoryTracker);
                 }
                 fieldStart = false;
                 continue;
@@ -48,7 +53,7 @@ final class CopyRecordReader {
                 if (value == quote) {
                     int following = input.read();
                     if (csv && following == quote) {
-                        append(record, following);
+                        append(record, following, memoryTracker);
                     } else {
                         if (csv || following == -1 || following == delimiter || following == '\n' || following == '\r') {
                             quote = 0;
@@ -66,7 +71,7 @@ final class CopyRecordReader {
                 if (value == '\r') {
                     int following = input.read();
                     if (following == '\n') {
-                        append(record, following);
+                        append(record, following, memoryTracker);
                     } else if (following != -1) {
                         input.unread(following);
                     }
@@ -82,13 +87,16 @@ final class CopyRecordReader {
         if (record.size() == 0) {
             return null;
         }
-        append(record, '\n');
+        append(record, '\n', memoryTracker);
         return record.toByteArray();
     }
 
-    private static void append(ByteArrayOutputStream record, int value) {
+    private static void append(ByteArrayOutputStream record, int value, IntConsumer memoryTracker) {
         if (record.size() >= S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES) {
             throw new S3CopySimulator.S3TransferException("54000", "COPY record exceeds the transform size limit", null);
+        }
+        if (memoryTracker != null && (record.size() % (1024 * 1024) == 0)) {
+            memoryTracker.accept((record.size() / (1024 * 1024)) + 1);
         }
         record.write(value);
     }

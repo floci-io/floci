@@ -265,18 +265,21 @@ public class RedshiftAuthProxy {
             session = PostgresProtocolHandler.authenticate(
                             client, connector, masterUsername, masterPassword, dbName,
                             false, sigV4, null, tlsCertificates, passwordValidator,
-                            handshakeTimeoutMillis, false, true, (user, database) -> {
+                            handshakeTimeoutMillis, false, true, (user, database, params) -> {
                                 login.username = user;
                                 login.database = database;
+                                login.dataApi = "floci-redshift-data".equals(params.get("application_name"));
                             });
             if (session != null) {
                 publishConnection(client, login, "authenticated");
                 // Redshift-only DDL (DISTKEY/SORTKEY/ENCODE/...) is rewritten for the plain
                 // PostgreSQL backend on the way through; every other message is relayed verbatim.
                 RoleConfiguration roles = roleConfiguration;
+                RedshiftAuditLogPublisher bridgeAudit = login.dataApi ? null : auditLogPublisher;
+                SpectrumInterceptor bridgeSpectrum = login.dataApi ? null : spectrumInterceptor;
                 new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
-                        clusterAccountId, roles.iamRoleArns(), spectrumInterceptor, clusterKey, login.database,
-                        roles.defaultIamRoleArn(), auditLogPublisher, login.username).run();
+                        clusterAccountId, roles.iamRoleArns(), bridgeSpectrum, clusterKey, login.database,
+                        roles.defaultIamRoleArn(), bridgeAudit, login.username).run();
                 publishConnection(client, login, "disconnection");
             } else {
                 publishConnection(client, login, login.backendUnavailable ? "connection_error" : "authentication failure");
@@ -302,10 +305,11 @@ public class RedshiftAuthProxy {
         private String username;
         private String database;
         private boolean backendUnavailable;
+        private boolean dataApi;
     }
 
     private void publishConnection(Socket client, LoginAttempt login, String event) {
-        if (auditLogPublisher == null || login.username == null) {
+        if (auditLogPublisher == null || login.username == null || login.dataApi) {
             return;
         }
         String remoteAddress = client.getInetAddress() == null ? null : client.getInetAddress().getHostAddress();
