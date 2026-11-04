@@ -136,6 +136,7 @@ AWS::KMS::Key	KmsCfnProvisioner
 AWS::Kinesis::Stream	KinesisCfnProvisioner
 AWS::KinesisFirehose::DeliveryStream	FirehoseCfnProvisioner
 AWS::Lambda::Alias	LambdaVersionAliasCfnProvisioner
+AWS::Lambda::CodeSigningConfig	LambdaCodeSigningConfigCfnProvisioner
 AWS::Lambda::EventInvokeConfig	LambdaEventInvokeConfigCfnProvisioner
 AWS::Lambda::EventSourceMapping	LambdaEventSourceMappingCfnProvisioner
 AWS::Lambda::Function	LambdaCfnProvisioner
@@ -195,6 +196,7 @@ AWS::ServiceDiscovery::HttpNamespace	CloudMapCfnProvisioner
 AWS::ServiceDiscovery::PrivateDnsNamespace	CloudMapCfnProvisioner
 AWS::ServiceDiscovery::PublicDnsNamespace	CloudMapCfnProvisioner
 AWS::ServiceDiscovery::Service	CloudMapCfnProvisioner
+AWS::Signer::SigningProfile	SignerCfnProvisioner
 AWS::StepFunctions::StateMachine	StepFunctionsCfnProvisioner
 AWS::Transfer::Server	TransferCfnProvisioner
 AWS::Transfer::User	TransferCfnProvisioner

@@ -17,6 +17,7 @@ order:
   - AWS::SES
   - AWS::DynamoDB
   - AWS::Lambda
+  - AWS::Signer
   - AWS::IAM
   - AWS::Organizations
   - AWS::SSM
@@ -175,6 +176,7 @@ service_labels:
   AWS::Scheduler: EventBridge Scheduler
   AWS::SecretsManager: Secrets Manager
   AWS::ServiceDiscovery: Cloud Map
+  AWS::Signer: Signer
   AWS::StepFunctions: Step Functions
   AWS::Transfer: Transfer Family
   AWS::WAFv2: WAFv2
@@ -187,6 +189,7 @@ notes:
   AWS::Lambda::Function: Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket
   AWS::Lambda::EventSourceMapping: 'SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored'
   AWS::Lambda::Alias: also what SAM's `AutoPublishAlias` expands into
+  AWS::Signer::SigningProfile: identifiers only; Floci has no Signer API
   AWS::Lambda::EventInvokeConfig: also what a SAM function's `EventInvokeConfig` expands into
   AWS::Lambda::WebFunction: control plane only; the endpoint domain does not serve requests yet
   AWS::Lambda::WebFunctionRevision: every property is createOnly, so a change mints a new revision

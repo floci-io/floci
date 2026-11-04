@@ -63,10 +63,12 @@ class LambdaCodeSigningConfigDeleteRaceTest {
         function.setFunctionArn("arn:aws:lambda:" + REGION + ":" + ACCOUNT + ":function:" + NAME);
         function.setVersion("$LATEST");
         functions.saveForAccount(ACCOUNT, REGION, function);
-        LambdaService lambda = new LambdaService(functions, new WarmPool(), new CodeStore(codePath),
-                new ZipExtractor(), regions);
+        LambdaService lambda = new LambdaService(functions, null, new LambdaConcurrencyLimiter(),
+                new WarmPool(), new CodeStore(codePath), new ZipExtractor(), null, regions, null, null,
+                new LambdaTargetResolver(functions, null), null, null, null, null, null, factory,
+                null, null, null, null, new ObjectMapper(), configs);
         ObjectMapper mapper = new ObjectMapper();
-        LambdaCodeSigningController attachments = new LambdaCodeSigningController(lambda, configs, regions, mapper);
+        LambdaCodeSigningController attachments = new LambdaCodeSigningController(lambda, regions, mapper);
         LambdaCodeSigningConfigFunctionsController configController =
                 new LambdaCodeSigningConfigFunctionsController(configs, lambda, regions, mapper);
 

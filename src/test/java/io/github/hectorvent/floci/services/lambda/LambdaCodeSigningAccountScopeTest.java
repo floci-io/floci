@@ -19,7 +19,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 
 /** Code-signing mutations stay in the account selected by the request context. */
 class LambdaCodeSigningAccountScopeTest {
@@ -84,7 +83,7 @@ class LambdaCodeSigningAccountScopeTest {
         LambdaService service = new LambdaService(store, new WarmPool(), new CodeStore(codePath),
                 new ZipExtractor(), regions);
         LambdaCodeSigningController controller = new LambdaCodeSigningController(
-                service, mock(LambdaCodeSigningConfigService.class), regions, new ObjectMapper());
+                service, regions, new ObjectMapper());
 
         List<String> references = List.of(
                 REGION + ":" + CALLER_ACCOUNT + ":function:" + FUNCTION_NAME,
@@ -234,7 +233,7 @@ class LambdaCodeSigningAccountScopeTest {
                 new ZipExtractor(), regions);
         ObjectMapper mapper = new ObjectMapper();
         LambdaCodeSigningController controller = new LambdaCodeSigningController(
-                service, mock(LambdaCodeSigningConfigService.class), regions, mapper);
+                service, regions, mapper);
         String foreignArn = "arn:aws:lambda:" + REGION + ":" + ARN_ACCOUNT
                 + ":function:" + FUNCTION_NAME;
 
