@@ -159,11 +159,14 @@ violation at once, the map's own length ahead of its entries. An entry's values 
 member being present rather than by what it holds, the list's members publishing no constraint of
 their own, so a replacement value sent empty is a value.
 
-The message for a broken entry names it by its key, as `replacementValues.Department.values`, which
-is how IAM reports a bad value in its account properties map. No recorded AWS violation on a map
-member is on hand to confirm that spelling, so it is Floci's reading of it: a capture would either
-keep it or replace it with the nested form, where the path is the map itself and the constraint
-reads "Map value must satisfy constraint".
+The message for a broken entry names it by its key and then the field under `.member`, as
+`replacementValues.Department.member.values`. The key half is how IAM reports a bad value in its
+account properties map; the `.member` half comes from an AWS-validated recording of the same
+protocol, SNS answering a missing `DataType` inside its `MessageAttributes` map as `Value null at
+'messageAttributes.attr1.member.dataType'`, and inside a list's member as
+`publishBatchRequestEntries.1.member.messageAttributes.attr1.member.dataType`. So a map of
+structures is named the way a list of structures is, the entry's key standing where a list's index
+stands.
 
 ### Policies
 
@@ -222,15 +225,24 @@ breaking a minimum of 1. A structure member arrives as `TaskPolicyArn.Arn` and i
 A map is read the same way, from the entries the protocol numbers under its name:
 `ReplacementValues.entry.1.key` and `.entry.1.value`, which is the form `AcquireRole`'s own sample
 publishes, or the bare `ReplacementValues.1.key`. An entry's value is named under the key that
-entry carries, `replacementValues.Department.values` and `properties.Team/Owner`, which is how both
-maps this service answered by hand already named one and how the JSON protocols name a map's value
-here. An entry is read off its key, so one numbered with a value and no key is not an entry the map
-could hold: it is neither counted nor answered. The count is held to the map's own bounds with the
-value left out of the message, and a map the request names nowhere is how an absent map arrives, so
-a required one reads as null. A key outside its shape's rules is answered with the whole set that
-shape declares, nested under the map's own name, `Value at 'properties' failed to satisfy
-constraint: Map keys must satisfy constraint: [...]`, which is the form every map key recorded here
-carries and what this service already answered for an account property key.
+entry carries, `replacementValues.Department.member.values` and `properties.Team/Owner`, which is
+how both maps this service answered by hand already named one and how the JSON protocols name a
+map's value here. A value that is a structure carries `.member` between the key and the field, as
+AWS writes it on this protocol and as a list of structures already reads here. A scalar value is
+named at the key itself: nothing recorded covers one on this protocol, and the only recording of a
+scalar-valued map anywhere, Lambda's `routingConfig.additionalVersionWeights` on REST-JSON,
+answers the map rather than the entry, `Value '{2=-1.0}' at
+'routingConfig.additionalVersionWeights' failed to satisfy constraint: Map value must satisfy
+constraint: [...]`. That is a different protocol and a different service, so
+`properties.Team/Owner` keeps the answer this service already gave, and a recording of a
+scalar-valued map on the Query protocol is what would move it. An entry is read off its key, so
+one numbered with a value and no key is not an entry the map could hold: it is neither counted nor
+answered. The count is held to the map's own bounds with the value left out of the message, and a
+map the request names nowhere is how an absent map arrives, so a required one reads as null. A key
+outside its shape's rules is answered with the whole set that shape declares, nested under the
+map's own name, `Value at 'properties' failed to satisfy constraint: Map keys must satisfy
+constraint: [...]`, which is the form every map key recorded here carries and what this service
+already answered for an account property key.
 
 The two maps answered by hand are answered from the model now, and `AcquireRole`'s answers do not
 move at all: its count of 30, each entry's required `Values` and the 20 values one entry admits read
