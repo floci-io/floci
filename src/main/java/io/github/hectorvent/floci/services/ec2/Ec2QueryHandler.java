@@ -303,6 +303,9 @@ public class Ec2QueryHandler {
                 // NAT Gateways
                 case "CreateNatGateway" -> handleCreateNatGateway(params, region);
                 case "DescribeNatGateways" -> handleDescribeNatGateways(params, region);
+                case "CreateInstanceConnectEndpoint" -> handleCreateInstanceConnectEndpoint(params, region);
+                case "DescribeInstanceConnectEndpoints" -> handleDescribeInstanceConnectEndpoints(params, region);
+                case "DeleteInstanceConnectEndpoint" -> handleDeleteInstanceConnectEndpoint(params, region);
                 case "DeleteNatGateway" -> handleDeleteNatGateway(params, region);
                 // Capacity Reservations
                 case "CreateCapacityReservation" -> handleCreateCapacityReservation(params, region);
@@ -4510,6 +4513,96 @@ public class Ec2QueryHandler {
                 .start("natGateway").raw(natGatewayXml(natGateway)).end("natGateway")
                 .end("DeleteNatGatewayResponse");
         return xmlResponse(xml.build());
+    }
+
+    // ─── EC2 Instance Connect Endpoint handlers ───────────────────────────────
+
+    private Response handleCreateInstanceConnectEndpoint(MultivaluedMap<String, String> p, String region) {
+        String preserve = p.getFirst("PreserveClientIp");
+        // The service validates the request before answering a DryRun, as AWS does.
+        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(region, p.getFirst("SubnetId"),
+                getList(p, "SecurityGroupId"), preserve == null ? null : Boolean.parseBoolean(preserve),
+                p.getFirst("IpAddressType"), parseTagsForResource(p, "instance-connect-endpoint"),
+                p.getFirst("ClientToken"), Boolean.parseBoolean(p.getFirst("DryRun")));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateInstanceConnectEndpointResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("instanceConnectEndpoint").raw(instanceConnectEndpointXml(endpoint)).end("instanceConnectEndpoint")
+                .elem("clientToken", p.getFirst("ClientToken"))
+                .end("CreateInstanceConnectEndpointResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeInstanceConnectEndpoints(MultivaluedMap<String, String> p, String region) {
+        String maxResults = p.getFirst("MaxResults");
+        PaginatedResult<InstanceConnectEndpoint> page = service.describeInstanceConnectEndpoints(region,
+                getList(p, "InstanceConnectEndpointId"), getFiltersList(p),
+                maxResults == null || maxResults.isEmpty() ? null : parseIntParam(p, "MaxResults", 0),
+                p.getFirst("NextToken"));
+        // After the describe, so an unknown ID, filter or NextToken fails on its own error first.
+        checkDryRun(p);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeInstanceConnectEndpointsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("instanceConnectEndpointSet");
+        for (InstanceConnectEndpoint endpoint : page.items()) {
+            xml.start("item").raw(instanceConnectEndpointXml(endpoint)).end("item");
+        }
+        xml.end("instanceConnectEndpointSet");
+        if (page.nextToken() != null) {
+            xml.elem("nextToken", page.nextToken());
+        }
+        xml.end("DescribeInstanceConnectEndpointsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteInstanceConnectEndpoint(MultivaluedMap<String, String> p, String region) {
+        String id = p.getFirst("InstanceConnectEndpointId");
+        if (id == null || id.isBlank()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter InstanceConnectEndpointId", 400);
+        }
+        service.describeInstanceConnectEndpoints(region, List.of(id), List.of());
+        checkDryRun(p);
+        InstanceConnectEndpoint endpoint = service.deleteInstanceConnectEndpoint(region, id);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteInstanceConnectEndpointResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("instanceConnectEndpoint").raw(instanceConnectEndpointXml(endpoint)).end("instanceConnectEndpoint")
+                .end("DeleteInstanceConnectEndpointResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private String instanceConnectEndpointXml(InstanceConnectEndpoint endpoint) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("ownerId", endpoint.getOwnerId())
+                .elem("instanceConnectEndpointId", endpoint.getInstanceConnectEndpointId())
+                .elem("instanceConnectEndpointArn", endpoint.getInstanceConnectEndpointArn())
+                .elem("state", endpoint.getState())
+                .elem("stateMessage", "")
+                .elem("dnsName", endpoint.getDnsName())
+                .elem("fipsDnsName", endpoint.getFipsDnsName())
+                .start("networkInterfaceIdSet");
+        endpoint.getNetworkInterfaceIds().forEach(id -> xml.elem("item", id));
+        xml.end("networkInterfaceIdSet")
+                .elem("vpcId", endpoint.getVpcId())
+                .elem("availabilityZone", endpoint.getAvailabilityZone())
+                .elem("availabilityZoneId", endpoint.getAvailabilityZoneId())
+                .elem("createdAt", endpoint.getCreatedAt() == null ? null : ISO_FMT.format(endpoint.getCreatedAt()))
+                .elem("subnetId", endpoint.getSubnetId())
+                .elem("preserveClientIp", endpoint.isPreserveClientIp())
+                .start("securityGroupIdSet");
+        endpoint.getSecurityGroupIds().forEach(id -> xml.elem("item", id));
+        xml.end("securityGroupIdSet")
+                .elem("ipAddressType", endpoint.getIpAddressType())
+                .start("publicDnsNames")
+                .start("ipv4")
+                .elem("dnsName", endpoint.getDnsName())
+                .elem("fipsDnsName", endpoint.getFipsDnsName())
+                .end("ipv4")
+                .end("publicDnsNames");
+        xml.raw(tagSetXml(endpoint.getTags()));
+        return xml.build();
     }
 
     // ─── Capacity Reservation handlers ────────────────────────────────────────
