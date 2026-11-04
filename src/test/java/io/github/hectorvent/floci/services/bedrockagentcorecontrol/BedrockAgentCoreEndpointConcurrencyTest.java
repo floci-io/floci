@@ -18,6 +18,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -39,6 +40,9 @@ class BedrockAgentCoreEndpointConcurrencyTest {
                     return fixture.create("token");
                 });
                 ThreadStates.awaitBlockedOrDone(secondThread, second);
+                assertNotNull(secondThread.get(), "the competing worker must start");
+                assertEquals(Thread.State.BLOCKED, secondThread.get().getState(),
+                        "the competing worker must overlap the parked publication");
                 assertFalse(second.isDone(), "replay must await the original publication");
                 fixture.storage.release();
                 assertSame(first.get(5, TimeUnit.SECONDS), second.get(5, TimeUnit.SECONDS));
@@ -62,6 +66,9 @@ class BedrockAgentCoreEndpointConcurrencyTest {
                     return assertThrows(AwsException.class, () -> fixture.create(null));
                 });
                 ThreadStates.awaitBlockedOrDone(secondThread, second);
+                assertNotNull(secondThread.get(), "the competing worker must start");
+                assertEquals(Thread.State.BLOCKED, secondThread.get().getState(),
+                        "the competing worker must overlap the parked publication");
                 assertFalse(second.isDone(), "the uniqueness decision must await publication");
                 fixture.storage.release();
                 first.get(5, TimeUnit.SECONDS);
@@ -86,6 +93,9 @@ class BedrockAgentCoreEndpointConcurrencyTest {
                     return fixture.service.deleteAgentRuntime(fixture.runtimeId, null, REGION);
                 });
                 ThreadStates.awaitBlockedOrDone(deleteThread, deletion);
+                assertNotNull(deleteThread.get(), "the competing worker must start");
+                assertEquals(Thread.State.BLOCKED, deleteThread.get().getState(),
+                        "the competing worker must overlap the parked publication");
                 assertFalse(deletion.isDone(), "deletion must wait for the in-flight publication");
                 fixture.storage.release();
                 first.get(5, TimeUnit.SECONDS);

@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
+import io.github.hectorvent.floci.core.common.StripedLocks;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntime;
@@ -50,7 +51,7 @@ public class BedrockAgentCoreControlService {
 
     private final StorageBackend<String, AgentRuntime> storage;
     private final RegionResolver regionResolver;
-    private final Object[] runtimeLocks = newRuntimeLocks();
+    private final StripedLocks runtimeLocks = new StripedLocks(RUNTIME_LOCK_STRIPES);
     private final BedrockAgentCoreIdentityService identityService;
     // clientToken idempotency: tokens of completed deletes, so a replayed delete succeeds
     // instead of 404ing. In-memory only (reset on restart), and each entry expires after
@@ -504,15 +505,7 @@ public class BedrockAgentCoreControlService {
 
     private Object runtimeLock(String region, String runtimeId) {
         String lockKey = regionResolver.getAccountId() + ":" + key(region, runtimeId);
-        return runtimeLocks[Math.floorMod(lockKey.hashCode(), RUNTIME_LOCK_STRIPES)];
-    }
-
-    private static Object[] newRuntimeLocks() {
-        Object[] locks = new Object[RUNTIME_LOCK_STRIPES];
-        for (int i = 0; i < locks.length; i++) {
-            locks[i] = new Object();
-        }
-        return locks;
+        return runtimeLocks.lockFor(lockKey);
     }
 
     private AgentRuntimeEndpoint findEndpoint(AgentRuntime runtime, String name) {
