@@ -66,7 +66,8 @@ import java.util.zip.GZIPOutputStream;
  * step's {@code hadoop} command, and a MapReduce job its {@code spark-submit} starts, reach Floci's S3 and run
  * MapReduce in local mode, with the cluster's Hadoop configuration. A Hive run starts {@code hive} in a container of
  * the release's EMR Serverless Hive image instead, with Tez in local mode in Hive's JVM, S3A on Floci's S3 and the
- * Glue Data Catalog client, the image's metastore, on Floci's Glue.
+ * Glue Data Catalog client, the image's metastore, on Floci's Glue; an EMR step's in the image of its cluster, which
+ * holds Spark and Hive, on its storage, with the cluster's HDFS and the cluster's own metastore.
  */
 @ApplicationScoped
 public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardown {
@@ -75,7 +76,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final String SPARK_SUBMIT = "/usr/lib/spark/bin/spark-submit";
     private static final String HIVE = "/usr/bin/hive";
     // hive's option for a setting, and its single-dash form.
-    static final String HIVECONF_OPTION = "--hiveconf";
+    private static final String HIVECONF_OPTION = "--hiveconf";
     private static final String HIVECONF_SHORT_OPTION = "-hiveconf";
     private static final String SPARK_DEFAULTS_VARIABLE = "FLOCI_SPARK_DEFAULTS";
     private static final String HADOOP_SITE_VARIABLE = "FLOCI_HADOOP_SITE";
@@ -242,10 +243,30 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final List<SparkSetting> HIVE_SETTINGS = List.of(
             new SparkSetting("tez.local.mode", "true"),
             new SparkSetting("tez.am.client.am.port-range", "40000-40100"));
+    // On a cluster, after the HDFS settings, Hive's file system is their view of the cluster's HDFS under the viewfs
+    // scheme: Hive looks up the HDFS encryption zone of a path of the hdfs scheme, which only HDFS answers, as its
+    // shim takes that path's file system for HDFS's own, so a table Hive makes in the cluster's HDFS is at a viewfs:
+    // path, the folder an hdfs:// path leads to in other steps. Its metastore is the cluster's own, as "Hive records
+    // metastore information in a MySQL database on the primary node's file system": an embedded Derby database in
+    // the cluster's /mnt, whose tables DataNucleus creates on first use. A cluster's hive-site replaces them, with
+    // the Glue Data Catalog's client factory for one.
+    private static final List<SparkSetting> HIVE_CLUSTER_SETTINGS = List.of(
+            new SparkSetting("fs.defaultFS", "viewfs:///"),
+            new SparkSetting("hive.metastore.client.factory.class",
+                    "org.apache.hadoop.hive.ql.metadata.SessionHiveMetaStoreClientFactory"),
+            new SparkSetting("javax.jdo.option.ConnectionURL",
+                    "jdbc:derby:;databaseName=/mnt/var/lib/hive/metastore_db;create=true"),
+            new SparkSetting("hive.metastore.schema.verification", "false"),
+            new SparkSetting("datanucleus.schema.autoCreateAll", "true"));
     // Hive logs to a file in the folder EMR Serverless names in LOGS_DIR, its HIVE_LOG, apart from the driver's standard
     // output and error.
     private static final List<String> HIVE_ENVIRONMENT = List.of("LOGS_DIR=/tmp/floci-hive-logs");
     private static final String HIVE_SCRATCH_VARIABLE = "FLOCI_HIVE_SCRATCH";
+    /**
+     * Where an EMR cluster's image with Hive keeps its Hive image's Hadoop configuration, which puts Tez on the class
+     * path, apart from the one its other steps' Hadoop reads; Hive runs with it where an image has it.
+     */
+    public static final String HIVE_HADOOP_CONF = "/etc/hadoop/conf.hive";
     private static final String HIVE_SCRATCHDIR = "hive.exec.scratchdir";
     // The user every EMR Serverless image runs as: a custom one sets "the USER back to hadoop:hadoop".
     private static final String IMAGE_USER = "hadoop";
@@ -256,7 +277,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // file system (LocalClient), a copy that silently does nothing where the image's user cannot create that path, at
     // the root of the container for one; so the container starts as root, makes that path its user's, then runs hive
     // as that user, in that user's home, as a Spark image's working directory is: Tez in local mode puts each task's
-    // files in the working directory, and the Hive image names none, which leaves the root.
+    // files in the working directory, and the Hive image names none, which leaves the root. In an EMR cluster's image
+    // with Hive, Hive reads its own Hadoop configuration (HIVE_HADOOP_CONF).
     private static final String HIVE_WRAPPER = String.join("\n",
             "host=$(hostname)",
             "export CLIENT_AM_BIND_ADDRESS=0.0.0.0 TASK_AM_BIND_ADDRESS=0.0.0.0 SHUFFLE_BIND_ADDRESS=0.0.0.0",
@@ -265,6 +287,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  mkdir -p \"$" + HIVE_SCRATCH_VARIABLE + "\" && chown " + IMAGE_USER + ":" + IMAGE_USER + " \"$"
                     + HIVE_SCRATCH_VARIABLE + "\" || exit",
             "fi",
+            "if [ -d " + HIVE_HADOOP_CONF + " ]; then export HADOOP_CONF_DIR=" + HIVE_HADOOP_CONF + "; fi",
             "export HOME=~" + IMAGE_USER,
             "cd \"$HOME\" || exit",
             // The image's user has no other group, as Docker starts it.
@@ -344,8 +367,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             // bash -c's script gets "floci" as its $0, and what runs after it as its arguments, "$@".
             if (job.engine() == Engine.HIVE) {
                 List<String> hive = hiveArguments(job, endpoint);
+                List<String> entrypoint = new ArrayList<>(List.of("/bin/bash", "-c", HIVE_WRAPPER, "floci"));
+                entrypoint.addAll(job.command() != null ? job.command() : List.of(HIVE));
                 container.withUser("root")
-                        .withEntrypoint(List.of("/bin/bash", "-c", HIVE_WRAPPER, "floci", HIVE))
+                        .withEntrypoint(entrypoint)
                         .withCmd(hive)
                         .withEnv(HIVE_ENVIRONMENT);
                 String scratch = hiveScratchMirror(hive);
@@ -367,8 +392,11 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             }
             if (job.storage() != null) {
                 container.withNamedVolume(job.storage().home(), "/home/hadoop")
-                        .withNamedVolume(job.storage().mnt(), "/mnt")
-                        .withEnv(HADOOP_SITE_VARIABLE, hadoopSite(job, endpoint))
+                        .withNamedVolume(job.storage().mnt(), "/mnt");
+            }
+            // Hive's settings reach it as --hiveconf settings, so only a Spark job's container sets up Hadoop.
+            if (job.storage() != null && job.engine() == Engine.SPARK) {
+                container.withEnv(HADOOP_SITE_VARIABLE, hadoopSite(job, endpoint))
                         .withEnv(MAPRED_SITE_VARIABLE, mapredSite(job));
                 if (!job.hadoopLog4j().isEmpty()) {
                     container.withEnv(HADOOP_LOG4J_VARIABLE, hadoopLog4jFile(job));
@@ -533,7 +561,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     /** The image a release's runs on {@code engine} use, as the other {@code image} says, Hive's for Hive. */
-    static String image(String imageTemplate, String releaseLabel, Engine engine) {
+    public static String image(String imageTemplate, String releaseLabel, Engine engine) {
         String template = imageTemplate != null ? imageTemplate
                 : engine == Engine.HIVE ? HIVE_DEFAULT_IMAGE
                 : releaseLabel.startsWith("emr-spark-") ? SPARK_RUNTIME_DEFAULT_IMAGE : DEFAULT_IMAGE;
@@ -701,19 +729,34 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     /**
-     * {@code hive}'s arguments: Floci's S3 and Glue, as a Spark run gets them, and Tez in local mode, each a
-     * {@code --hiveconf}, which a later one replaces, then the run's own arguments.
+     * {@code hive}'s arguments: Floci's S3 and Glue, as a Spark run gets them, Tez in local mode, and on a cluster its
+     * HDFS and metastore, each a {@code --hiveconf}, which a later one replaces, then the run's own arguments.
      */
     static List<String> hiveArguments(Job job, String flociEndpoint) {
         List<SparkSetting> settings = new ArrayList<>(hadoopSettings(job, flociEndpoint));
         settings.addAll(HIVE_SETTINGS);
+        if (job.storage() != null) {
+            settings.addAll(HDFS_SETTINGS);
+            settings.addAll(HIVE_CLUSTER_SETTINGS);
+        }
         List<String> arguments = new ArrayList<>();
         for (SparkSetting setting : settings) {
-            arguments.add(HIVECONF_OPTION);
-            arguments.add(setting.key() + "=" + setting.value());
+            addHiveSetting(arguments, setting.key(), setting.value());
         }
         arguments.addAll(job.application());
         return arguments;
+    }
+
+    /** Each of {@code properties} as {@code hive}'s {@code --hiveconf name=value}, in their order. */
+    public static List<String> hiveSettings(Map<String, String> properties) {
+        List<String> arguments = new ArrayList<>();
+        properties.forEach((name, value) -> addHiveSetting(arguments, name, value));
+        return arguments;
+    }
+
+    private static void addHiveSetting(List<String> arguments, String name, String value) {
+        arguments.add(HIVECONF_OPTION);
+        arguments.add(name + "=" + value);
     }
 
     /**

@@ -25,13 +25,14 @@ import java.util.Set;
  * {@code command-runner.jar} step runs its command, and a {@code script-runner.jar} step its script, as the
  * Release Guide's "Run commands and scripts on an Amazon EMR cluster" describes them, a
  * {@code hadoop-streaming} or {@code hadoop-lzo} one through the image's {@code hadoop}, with MapReduce in local
- * mode; an {@code s3-dist-cp} one runs Floci's own S3DistCp.
+ * mode; an {@code s3-dist-cp} one runs Floci's own S3DistCp. On a cluster with Hive, whose image holds Hive too, a
+ * {@code command-runner.jar} step running {@code hive-script}, as the AWS CLI writes a Hive step, or {@code hive}
+ * runs Hive.
  */
 final class EmrSparkSteps {
 
     // No source gives AWS's wording for these; they are Floci's.
-    static final String NOT_RUN = "Floci does not run this step: hive-script and pig-script are not in the image"
-            + " steps run in.";
+    static final String NOT_RUN = "Floci does not run this step: pig-script is not in the image steps run in.";
     static final String INTERRUPTED = "Floci stopped while the step was running.";
 
     private static final String COMMAND_RUNNER = "command-runner.jar";
@@ -63,8 +64,19 @@ final class EmrSparkSteps {
     private static final String SPARK_HADOOP_PREFIX = "spark.hadoop.";
     // spark-submit gives the JVM it runs an application's main class in the Java options of this variable.
     private static final String SPARK_SUBMIT_OPTS = "SPARK_SUBMIT_OPTS";
-    // The Release Guide's command-runner.jar tools that the EMR Serverless image does not have.
-    private static final Set<String> UNAVAILABLE_TOOLS = Set.of("hive-script", "pig-script");
+    // The Release Guide's command-runner.jar tools that the EMR Serverless images do not have.
+    private static final Set<String> UNAVAILABLE_TOOLS = Set.of("pig-script");
+    // The AWS CLI's Hive step on a release is command-runner.jar running "hive-script --run-hive-script --args"
+    // and the step's arguments, the ones the image's hive-script runs hive with; a step can also run hive itself.
+    private static final String HIVE_SCRIPT = "hive-script";
+    private static final String HIVE_SCRIPT_ARGS = "--args";
+    private static final String HIVE = "hive";
+    // The Hive classifications a Hive step's hive gets, each property a --hiveconf, in the order Hive reads their
+    // files, a later one winning: core-site, tez-site, which will "Change values in Tez's tez-site.xml file", and
+    // hive-site, which will "Change values in Hive's hive-site.xml"; and hive-env's exports, which will "Change
+    // values in the Hive environment".
+    private static final List<String> HIVE_CLASSIFICATIONS = List.of(CORE_SITE, "tez-site", "hive-site");
+    private static final String HIVE_ENV = "hive-env";
     // EMR's MapReduce jars are in /usr/lib/hadoop-mapreduce, as the image's own hadoop-streaming script has it,
     // which the image does not have; its streaming jar is in /usr/lib/hadoop.
     private static final Map<String, String> IMAGE_JARS = Map.of(
@@ -153,6 +165,68 @@ final class EmrSparkSteps {
             return command;
         }
         return null;
+    }
+
+    /**
+     * How a step runs Hive, or null for a step that does not, or whose cluster does not install Hive (see
+     * {@link #installsHive}), where {@code hive-script} finds no {@code hive} as EMR's does without it: a
+     * {@code command-runner.jar} step running {@code hive-script}, up to its {@code --args} (added at the end of one
+     * without), or {@code hive}, and what its {@code hive} gets after
+     * Floci's settings: the cluster's Hive classifications, then the step's own arguments, so that a
+     * {@code --hiveconf} of the step's replaces a classification's property, as it replaces a hive-site.xml one.
+     */
+    static HiveCommand hive(EmrStep step, String applications, String configurations, ObjectMapper objectMapper) {
+        String jar = step.getJar();
+        List<String> args = step.getArgs() != null ? step.getArgs() : List.of();
+        if (jar == null || !named(jar, COMMAND_RUNNER) || args.isEmpty()
+                || !installsHive(applications, objectMapper)) {
+            return null;
+        }
+        List<String> runner;
+        List<String> own;
+        if (named(args.getFirst(), HIVE_SCRIPT)) {
+            int split = args.indexOf(HIVE_SCRIPT_ARGS);
+            runner = new ArrayList<>(split < 0 ? args : args.subList(0, split));
+            runner.add(HIVE_SCRIPT_ARGS);
+            own = split < 0 ? List.of() : args.subList(split + 1, args.size());
+        } else if (named(args.getFirst(), HIVE)) {
+            runner = List.of(args.getFirst());
+            own = args.subList(1, args.size());
+        } else {
+            return null;
+        }
+        List<String> arguments = new ArrayList<>();
+        for (String classification : HIVE_CLASSIFICATIONS) {
+            arguments.addAll(EmrServerlessSparkRunner.hiveSettings(properties(configurations, objectMapper,
+                    classification)));
+        }
+        arguments.addAll(own);
+        return new HiveCommand(List.copyOf(runner), arguments);
+    }
+
+    /**
+     * A step's Hive: {@code runner}, what runs in place of {@code hive}, and {@code arguments}, what follows Floci's
+     * settings.
+     */
+    record HiveCommand(List<String> runner, List<String> arguments) {
+    }
+
+    /** The variables a cluster's {@code hive-env} exports, which its Hive steps get. */
+    static Map<String, String> hiveEnvironment(String configurations, ObjectMapper objectMapper) {
+        return exports(configurations, objectMapper, HIVE_ENV);
+    }
+
+    /**
+     * Whether a cluster's {@code Applications}, the JSON array RunJobFlow was given, name Hive ("A case-insensitive
+     * list of applications for Amazon EMR to install").
+     */
+    static boolean installsHive(String applications, ObjectMapper objectMapper) {
+        for (JsonNode application : stored(applications, objectMapper)) {
+            if (HIVE.equalsIgnoreCase(application.path("Name").asText())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -273,20 +347,25 @@ final class EmrSparkSteps {
     private static List<JsonNode> classified(String configurations, ObjectMapper objectMapper,
                                              String classification) {
         List<JsonNode> matching = new ArrayList<>();
-        if (configurations == null) {
-            return matching;
-        }
-        try {
-            for (JsonNode configuration : objectMapper.readTree(configurations)) {
-                if (classification.equals(configuration.path("Classification").asText())) {
-                    matching.add(configuration);
-                }
+        for (JsonNode configuration : stored(configurations, objectMapper)) {
+            if (classification.equals(configuration.path("Classification").asText())) {
+                matching.add(configuration);
             }
-        } catch (JsonProcessingException ignored) {
-            // RunJobFlow stored the array as it came; one that does not parse holds no properties to apply.
-            return matching;
         }
         return matching;
+    }
+
+    // A JSON array of a cluster's, which RunJobFlow stored as it came, or an empty one for none: one that does not
+    // parse holds no properties to apply and names no application.
+    private static JsonNode stored(String json, ObjectMapper objectMapper) {
+        if (json == null) {
+            return objectMapper.createArrayNode();
+        }
+        try {
+            return objectMapper.readTree(json);
+        } catch (JsonProcessingException ignored) {
+            return objectMapper.createArrayNode();
+        }
     }
 
     private static List<String> withoutMasterOrDeployMode(List<String> arguments) {
