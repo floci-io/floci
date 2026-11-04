@@ -5887,8 +5887,9 @@ given()
             DeleteItem | {"TableName": "Missing", "ReturnValues": "BOGUS", "ReturnConsumedCapacity": "BOGUS"} | 3 validation errors detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value null at 'key' failed to satisfy constraint: Member must not be null
             PutItem    | {"TableName": "Missing", "Item": {"pk": {"S": "a"}}, "Expected": {"a": {"Value": "DEEP"}, "b": {"Exists": false}}, "ConditionalOperator": "XOR"} | 1 validation error detected: Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [OR, AND]
             DeleteItem | {"TableName": "Missing", "Key": {"pk": "DEEP"}, "ReturnValues": "UPDATED_NEW"} | ReturnValues can only be ALL_OLD or NONE
+            PutItem    | {"TableName": "Missing", "Item": {"pk": {"S": "a"}, "d": {"S": "x", "Foo": "y"}}, "ReturnValues": "BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]
             """)
-    void putAndDeleteItemWithoutTheItemOrKeyOrNestedTooDeepGetTheOlderChecks(String operation, String body,
+    void putAndDeleteItemGetTheOlderChecksWhenTheNewerValidatorGivesUp(String operation, String body,
             String message) {
         String deep = "{\"M\": {\"n\": ".repeat(63) + "{\"S\": \"leaf\"}" + "}}".repeat(63);
         given()

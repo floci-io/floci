@@ -2391,8 +2391,11 @@ class NativeDynamoDbJsonHandlerTest {
             DeleteItem | 63 | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"Expected":{"d":{"Value":"DEEP"}},"ConditionalOperator":"AND"} | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
             DeleteItem | 62 | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"Expected":{"d":{"Value":"DEEP"}},"ReturnValues":"BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]
             DeleteItem | 62 | {"TableName":"Missing","Key":{"pk":"DEEP"},"ReturnValues":"BOGUS"} | 1 validation error detected: Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]
+            PutItem    | 0  | {"TableName":"Missing","Item":{"pk":{"S":"a"},"d":{"L":[{"S":"x","Foo":"y"}]}},"ReturnValues":"BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]
+            DeleteItem | 0  | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"Expected":{"d":{"ComparisonOperator":"IN","AttributeValueList":[{"S":"x","Foo":"y"}]}},"ReturnValues":"BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]
+            DeleteItem | 63 | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"Expected":{"d":{"Value":{"S":"x"},"Foo":"DEEP"}},"ReturnValues":"BOGUS"} | 1 validation error detected: Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]
             """)
-    void theOlderValidatorChecksAPutOrDeleteWithoutItsItemOrKeyOrNestedTooDeep(String operation, int levels,
+    void theOlderValidatorChecksAPutOrDeleteTheNewerOneGivesUpOn(String operation, int levels,
             String request, String message) throws Exception {
         JsonNode body = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(levels))));
 

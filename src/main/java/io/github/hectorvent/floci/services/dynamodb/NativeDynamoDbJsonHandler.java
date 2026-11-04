@@ -615,17 +615,26 @@ public class NativeDynamoDbJsonHandler {
         throwValidationErrors(validationErrors);
     }
 
-    // DynamoDB leaves unknown members out when it measures how deep a request nests.
+    // DynamoDB's newer validator gives up on an attribute value with a member it does not know.
+    // It leaves the other unknown members out when it measures how deep a request nests.
     private static boolean readByOlderValidator(JsonNode request, String target) {
         if (!request.hasNonNull(target)) {
             return true;
         }
-        int deepest = 0;
-        for (String member : List.of(target, "ExpressionAttributeValues", "Expected")) {
-            deepest = Math.max(deepest, jsonDepth(request.path(member)));
+        List<JsonNode> values = new ArrayList<>();
+        request.path(target).forEach(values::add);
+        request.path("ExpressionAttributeValues").forEach(values::add);
+        int deepest = Math.max(jsonDepth(request.path(target)), jsonDepth(request.path("ExpressionAttributeValues")));
+        for (JsonNode condition : request.path("Expected")) {
+            values.add(condition.path("Value"));
+            condition.path("AttributeValueList").forEach(values::add);
+            int known = Math.max(jsonDepth(condition.path("Value")), jsonDepth(condition.path("AttributeValueList")));
+            // Expected and the condition hold these members.
+            deepest = Math.max(deepest, known + 2);
         }
         // The request holds these members.
-        return deepest + 1 >= OLDER_VALIDATOR_DEPTH;
+        return deepest + 1 >= OLDER_VALIDATOR_DEPTH
+                || values.stream().anyMatch(DynamoDbAttributeValueValidator::hasUnknownMember);
     }
 
     private static final List<String> OLDER_RETURN_VALUES =
