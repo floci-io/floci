@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.sun.net.httpserver.HttpServer;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.resteasy.reactive.server.core.Deployment;
@@ -10,8 +11,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -20,7 +27,10 @@ import static org.mockito.Mockito.when;
 class RequestUriRewriteTest {
 
     @ParameterizedTest
-    @ValueSource(strings = {"plain", "x%25y", "trailing%25", "a%252Fb", "a%2Fb", "a%20b", "a%3Fb%23c", "caf%C3%A9"})
+    @ValueSource(strings = {
+            "plain", "x%25y", "trailing%25", "a%252Fb", "a%2Fb", "a%20b", "a%3Fb%23c", "caf%C3%A9",
+            "a//b", "a/./b", "a/../b", "a//x%25y"
+    })
     void keepsDecodedPathsAndRawUrisConsistent(String suffix) {
         ContainerRequestContext context = requestContext();
         URI intendedUri = URI.create("http://example.test/files/" + suffix + "?q=a%2525%26b");
@@ -29,11 +39,40 @@ class RequestUriRewriteTest {
 
         UriInfo uriInfo = context.getUriInfo();
         assertEquals(intendedUri.getPath(), uriInfo.getPath());
+        assertEquals(intendedUri.getRawPath(), uriInfo.getRequestUri().getRawPath());
         assertEquals(intendedUri, uriInfo.getRequestUri());
         assertEquals(intendedUri, uriInfo.getRequestUriBuilder().buildFromEncoded());
         assertEquals(URI.create("http://example.test/files/" + suffix), uriInfo.getAbsolutePath());
         assertEquals(uriInfo.getAbsolutePath(), uriInfo.getAbsolutePathBuilder().buildFromEncoded());
         assertEquals(URI.create("http://example.test/"), uriInfo.getBaseUri());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"a//b", "a/./b", "a/../b", "a//x%25y"})
+    void backendReceivesTheUnmodifiedRewrittenPath(String suffix) throws IOException, InterruptedException {
+        AtomicReference<String> receivedPath = new AtomicReference<>();
+        HttpServer backend = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        backend.createContext("/", exchange -> {
+            receivedPath.set(exchange.getRequestURI().getRawPath());
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        backend.start();
+
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            ContainerRequestContext context = requestContext();
+            String rawPath = "/backend/" + suffix;
+            URI intendedUri = URI.create("http://127.0.0.1:" + backend.getAddress().getPort() + rawPath);
+            RequestUriRewrite.apply(context, intendedUri);
+
+            HttpRequest request = HttpRequest.newBuilder(context.getUriInfo().getRequestUri()).GET().build();
+            HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
+
+            assertEquals(204, response.statusCode());
+            assertEquals(rawPath, receivedPath.get());
+        } finally {
+            backend.stop(0);
+        }
     }
 
     @Test

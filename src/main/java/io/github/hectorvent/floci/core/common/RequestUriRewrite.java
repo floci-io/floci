@@ -42,7 +42,7 @@ public final class RequestUriRewrite {
 
         private RewrittenUriInfo(ResteasyReactiveRequestContext requestContext, URI requestUri) {
             super(requestContext);
-            this.requestUri = requestUri.normalize();
+            this.requestUri = requestUri;
         }
 
         @Override
