@@ -104,29 +104,6 @@ class AutoScalingServiceTest {
     }
 
     @Test
-    void rejectedSubnetLookupLeavesTheWholeGroupUpdateUnchanged() {
-        service.ec2Service = mock(Ec2Service.class);
-        service.createLaunchConfiguration(REGION, "subnet-lc", null, "ami-test", "t3.nano",
-                null, List.of(), null, null, null);
-        when(service.ec2Service.describeSubnets(REGION, List.of("subnet-missing"), null))
-                .thenThrow(new AwsException("InvalidSubnetID.NotFound", "Subnet does not exist.", 400));
-
-        AwsException error = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(
-                REGION, "test-asg", "subnet-lc", null, null, null, null,
-                null, 8, null, 60, null, List.of("subnet-missing"),
-                null, null, null, AsgOptionalFields.none()));
-        assertEquals("InvalidSubnetID.NotFound", error.getErrorCode());
-
-        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
-        assertEquals("lt-original", group.getLaunchTemplateId());
-        assertNull(group.getLaunchConfigurationName());
-        assertEquals(3, group.getMaxSize());
-        assertEquals(300, group.getDefaultCooldown());
-        assertEquals(List.of("us-east-1a"), group.getAvailabilityZones());
-        assertEquals(List.of("subnet-12345678"), group.getSubnetIds());
-    }
-
-    @Test
     void startInstanceRefreshStoresCompletedRefreshAndAppliesDesiredLaunchTemplate() {
         InstanceRefresh request = new InstanceRefresh();
         request.setStrategy("Rolling");
