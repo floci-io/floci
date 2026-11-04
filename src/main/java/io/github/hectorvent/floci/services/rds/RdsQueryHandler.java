@@ -1364,15 +1364,9 @@ public class RdsQueryHandler {
                             manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
                             requestedPort);
             }
-            Map<String, String> tags = parseTags(params);
             String kmsKeyId = params.getFirst("KmsKeyId");
-            if (!tags.isEmpty()) {
-                service.addTagsToResource(cluster.getDbClusterArn(), tags, region);
-            }
             if (kmsKeyId != null && !kmsKeyId.isBlank()) {
                 cluster = service.setNewDbClusterKmsKeyId(region, id, kmsKeyId);
-            } else if (!tags.isEmpty()) {
-                cluster = service.getDbCluster(id, region);
             }
             if (!associatedRoles.isEmpty()) {
                 try {
@@ -3558,9 +3552,6 @@ public class RdsQueryHandler {
         }
         xml.end("DBClusterMembers");
         writeAssociatedRoles(xml, c.getAssociatedRoles(), "DBClusterRole");
-        xml.start("TagList");
-        writeTags(xml, c.getTags());
-        xml.end("TagList");
         return xml.build();
     }
 
