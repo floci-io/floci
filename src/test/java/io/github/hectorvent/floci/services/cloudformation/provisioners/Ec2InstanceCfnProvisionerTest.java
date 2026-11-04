@@ -550,20 +550,21 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     @Test
-    void reusedInstanceReconcilesTagsInPlace() throws Exception {
+    void reusedInstanceRemovesOnlyTheTagKeysItOwns() throws Exception {
         Instance i1 = new Instance();
         i1.setInstanceId("i-1");
         i1.setImageId("ami-1");
         stubLaunch(i1);
         StackResource r = resource("Server");
         provisioner.provision(r, props("""
-                {"ImageId": "ami-1", "Tags": [{"Key": "env", "Value": "prod"}]}
+                {"ImageId": "ami-1", "Tags": [{"Key": "env", "Value": "prod"}, {"Key": "old", "Value": "stale"}]}
                 """), ctx(null));
 
         when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
                 .thenReturn(List.of(reservationOf(i1)));
+        // team was added through EC2, outside the stack, so AWS keeps it.
         when(ec2.describeTags(eq("us-east-1"), any())).thenReturn(List.of(
-                tagEntry("i-1", "env", "prod"), tagEntry("i-1", "old", "stale"),
+                tagEntry("i-1", "env", "prod"), tagEntry("i-1", "old", "stale"), tagEntry("i-1", "team", "core"),
                 tagEntry("i-1", "aws:autoscaling:groupName", "group"),
                 tagEntry("i-1", "AWS:cloudformation:stack-id", "stack")));
         provisioner.provision(r, props("""
@@ -575,6 +576,7 @@ class Ec2InstanceCfnProvisionerTest {
         verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("i-1")), removed.capture());
         assertEquals(1, removed.getValue().size());
         assertEquals("old", removed.getValue().get(0).getKey());
+        assertEquals("[\"env\"]", r.getAttributes().get(Ec2InstanceCfnProvisioner.DECLARED_TAG_KEYS_ATTR));
     }
 
     @Test
@@ -1117,7 +1119,7 @@ class Ec2InstanceCfnProvisionerTest {
 
     @Test
     void tagReconciliationValidatesBeforeDeletingStaleTags() {
-        assertThrows(AwsException.class, () -> Ec2Tags.reconcile(ec2, "us-east-1", "i-1",
+        assertThrows(AwsException.class, () -> Ec2Tags.reconcileOwned(ec2, "us-east-1", "i-1", Set.of("env"),
                 Map.of("env", "new", "aWs:reserved", "invalid")));
 
         verifyNoInteractions(ec2);

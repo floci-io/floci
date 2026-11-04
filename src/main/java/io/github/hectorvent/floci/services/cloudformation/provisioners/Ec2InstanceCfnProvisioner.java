@@ -50,6 +50,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
     // The MetadataOptions members declared last time, the instance's own or its launch template's, so
     // an update can return the ones it no longer declares to their launch defaults.
     private static final String DECLARED_METADATA_OPTIONS_ATTR = "__FlociDeclaredMetadataOptions";
+    // The tag keys the last deployment wrote, as Ec2Tags.recordKeys records them, so an update
+    // removes only those and keeps a tag added outside the stack.
+    static final String DECLARED_TAG_KEYS_ATTR = "__FlociDeclaredTagKeys";
     // The __FlociDeclared records as they stood before a replacing update, for rollbackUpdate to put
     // back with the instance it restores; ReplacementCleanup leaves __Floci attributes alone.
     private static final String PRIOR_DECLARATIONS_ATTR = "__FlociPriorDeclarations";
@@ -155,7 +158,8 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
                     && Ec2CfnMetadataOptions.changes(optionsBefore, metadataOptionsToApply);
             boolean otherChange = reconcileMutableProperties(region, prior, instanceType, securityGroupIds,
                     userData, iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
-            boolean tagsChanged = Ec2Tags.reconcile(ec2Service, region, prior.getInstanceId(), desiredTags);
+            boolean tagsChanged = Ec2Tags.reconcileOwned(ec2Service, region, prior.getInstanceId(),
+                    Ec2Tags.ownedKeys(r, DECLARED_TAG_KEYS_ATTR, ctx), desiredTags);
             // Saved on every update that keeps the instance, also one that changes no EC2 setting but
             // only what is declared, so a rollback can always put the declarations back.
             r.getAttributes().put(PRIOR_IN_PLACE_ATTR, priorInPlaceUpdate(region,
@@ -173,6 +177,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
             putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
             putOrRemove(r, DECLARED_METADATA_OPTIONS_ATTR, Ec2CfnMetadataOptions.declaredMembers(metadataOptions));
+            Ec2Tags.recordKeys(r, DECLARED_TAG_KEYS_ATTR, desiredTags);
             ReplacementCleanup.record(r, ctx, attributesBefore);
             return;
         }
@@ -216,6 +221,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         storeDeclaredCreateOnly(r, privateIpAddress, availabilityZone);
         putOrRemove(r, DECLARED_IAM_PROFILE_ATTR, iamInstanceProfileArn);
         putOrRemove(r, DECLARED_METADATA_OPTIONS_ATTR, Ec2CfnMetadataOptions.declaredMembers(metadataOptions));
+        Ec2Tags.recordKeys(r, DECLARED_TAG_KEYS_ATTR, desiredTags);
         // A createOnly change that landed a new instance id replaced the prior one: record it so
         // the stack cleans the displaced instance up after the update commits.
         ReplacementCleanup.record(r, ctx, attributesBefore);
