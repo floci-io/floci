@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -166,6 +167,7 @@ class CloudFormationAccountOwnershipIntegrationTest {
                 .formParam("StackName", name)
                 .formParam("TemplateBody", template)
                 .when().post("/").then().statusCode(200).extract().body().asString();
+        CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE", auth(account, region));
         return body.replaceFirst("(?s).*<StackId>([^<]+)</StackId>.*", "$1");
     }
 
@@ -178,6 +180,7 @@ class CloudFormationAccountOwnershipIntegrationTest {
                 .formParam("StackName", name)
                 .formParam("TemplateBody", template)
                 .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE", auth(account, region));
     }
 
     private static ValidatableResponse describeStack(

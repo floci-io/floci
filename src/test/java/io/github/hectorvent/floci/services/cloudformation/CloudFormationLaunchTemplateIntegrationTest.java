@@ -80,6 +80,7 @@ class CloudFormationLaunchTemplateIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -146,6 +147,7 @@ class CloudFormationLaunchTemplateIntegrationTest {
             .statusCode(200);
 
         // Stack completes, Ref resolves to a launch template id, GetAtt resolves the version.
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

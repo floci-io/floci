@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
@@ -150,6 +151,7 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
     }
 
     private static void assertStackStatus(String stackName, String status) {
+        CfnStackWaits.awaitStatus(stackName, status, CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

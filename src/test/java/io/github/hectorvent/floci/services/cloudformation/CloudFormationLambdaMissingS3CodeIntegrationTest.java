@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 
@@ -53,6 +55,8 @@ class CloudFormationLambdaMissingS3CodeIntegrationTest {
     }
 
     private static void assertStackFailed(String stackName) {
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName, CFN_AUTH);
+        assertThat(state.status(), not("CREATE_COMPLETE"));
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -95,6 +99,7 @@ class CloudFormationLambdaMissingS3CodeIntegrationTest {
         // handler is correct and present in the real package that was never fetched.
         createStack(stackName, template(fnName, "src/api.handler"));
 
+        assertStackFailed(stackName);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

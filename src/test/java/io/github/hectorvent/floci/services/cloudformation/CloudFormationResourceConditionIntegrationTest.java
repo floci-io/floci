@@ -1535,6 +1535,7 @@ class CloudFormationResourceConditionIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
     }
 
     private static void updateStack(String stackName, String template) {
@@ -1548,6 +1549,7 @@ class CloudFormationResourceConditionIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
     }
 
     private static void deleteStack(String stackName) {

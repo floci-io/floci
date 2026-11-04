@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -138,6 +139,7 @@ class CloudFormationIamInlinePolicyIntegrationTest {
     }
 
     private static void assertStackStatus(String stackName, String status) {
+        CfnStackWaits.awaitStatus(stackName, status, CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -310,6 +312,7 @@ class CloudFormationIamInlinePolicyIntegrationTest {
         createStack(stackName, template);
 
         // Managed policy has an ARN (unlike inline), surfaced through Ref.
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -559,6 +562,7 @@ class CloudFormationIamInlinePolicyIntegrationTest {
 
         createStack(stackName, template);
 
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
         String stack = describeStack(stackName, "DescribeStacks");
         assertTrue(stack.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"),
                 "stack should roll back after the inline attachment failure: " + stack);
@@ -767,6 +771,7 @@ class CloudFormationIamInlinePolicyIntegrationTest {
 
     private static void assertFailedResource(String stackName, String logicalId,
                                              String expectedSubject, String expectedReason) {
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
         String stack = describeStack(stackName, "DescribeStacks");
         assertTrue(
                 stack.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"),

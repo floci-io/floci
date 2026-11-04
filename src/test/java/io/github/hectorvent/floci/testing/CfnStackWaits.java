@@ -88,14 +88,21 @@ public final class CfnStackWaits {
      * seconds without the expected status.
      */
     public static StackState awaitStatus(String stackName, String expectedStatus) {
+        return awaitStatus(stackName, expectedStatus, null);
+    }
+
+    public static StackState awaitStatus(String stackName, String expectedStatus, String authorization) {
         long deadline = System.currentTimeMillis() + 10_000;
         StackState last = new StackState(null, "");
         while (System.currentTimeMillis() < deadline) {
-            Response response = given()
+            RequestSpecification request = given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-                .when().post("/");
+                .formParam("StackName", stackName);
+            if (authorization != null) {
+                request.header("Authorization", authorization);
+            }
+            Response response = request.when().post("/");
             if (response.statusCode() != 200) {
                 fail("DescribeStacks " + stackName + " answered " + response.statusCode() + ": " + response.asString());
             }

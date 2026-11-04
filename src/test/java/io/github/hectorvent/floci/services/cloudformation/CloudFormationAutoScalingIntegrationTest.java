@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -83,6 +84,7 @@ class CloudFormationAutoScalingIntegrationTest {
             .statusCode(200);
 
         // Stack completes and Fn::GetAtt(Asg, Arn) resolves to the real ASG ARN.
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -159,6 +161,7 @@ class CloudFormationAutoScalingIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // Redeploy with a changed DesiredCapacity: LaunchConfiguration is unchanged (immutable, so
         // must reconcile to a no-op) and the ASG's capacity must reconcile in place.
         given()
@@ -172,6 +175,7 @@ class CloudFormationAutoScalingIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

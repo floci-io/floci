@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -97,6 +98,7 @@ class CloudFormationGeneratedNameUniquenessIntegrationTest {
 
         createStack(stackName, template);
         try {
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
             String xml = describeStacks(stackName);
             assertTrue(xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
                     "stack should be CREATE_COMPLETE");

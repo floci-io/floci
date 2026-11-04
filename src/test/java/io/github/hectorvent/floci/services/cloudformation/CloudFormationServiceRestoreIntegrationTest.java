@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResour
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,12 +23,15 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.withSettings;
@@ -127,6 +131,49 @@ class CloudFormationServiceRestoreIntegrationTest {
         assertEquals("DELETE_COMPLETE", stack.getStatus());
     }
 
+    @Test
+    void rejectedProtectedCreateLeavesDeletablePlaceholder() throws Exception {
+        String targetStack = uniqueStackName("protected");
+        List<Future<?>> runningOperations = fillExecutor();
+        try {
+            Response rejected = cfn("CreateStack", targetStack)
+                    .formParam("TemplateBody", TEMPLATE)
+                    .formParam("EnableTerminationProtection", "true")
+                    .when().post("/");
+            assertEquals(400, rejected.statusCode(), rejected.asString());
+            assertTrue(rejected.asString().contains("LimitExceededException"), rejected.asString());
+
+            Stack placeholder = service.describeStacks(targetStack, REGION).getFirst();
+            assertEquals("REVIEW_IN_PROGRESS", placeholder.getStatus());
+            assertFalse(placeholder.isEnableTerminationProtection());
+        } finally {
+            release(runningOperations);
+        }
+
+        service.deleteStack(targetStack, REGION, regionResolver.getAccountId())
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    @Test
+    void rejectedCreateCleanupDoesNotUnprotectAnExecutingStack() throws Exception {
+        String targetStack = uniqueStackName("executing");
+        ChangeSet initial = service.createChangeSetForCreateStack(targetStack, "initial-create",
+                TEMPLATE, null, Map.of(), List.of(), Map.of(), REGION, true);
+        Future<?> execution = service.executeChangeSet(targetStack, "initial-create", REGION);
+        try {
+            service.clearProtectionAfterRejectedCreate(targetStack, initial, REGION);
+            Stack stack = service.describeStacks(targetStack, REGION).getFirst();
+            assertEquals("CREATE_IN_PROGRESS", stack.getStatus());
+            assertTrue(stack.isEnableTerminationProtection());
+        } finally {
+            releaseOperations.countDown();
+            execution.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            service.updateTerminationProtection(targetStack, false, REGION);
+            service.deleteStack(targetStack, REGION, regionResolver.getAccountId())
+                    .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        }
+    }
+
     /** Starts change set executions that block in provisioning until every thread and queue slot is taken. */
     private List<Future<?>> fillExecutor() throws InterruptedException {
         List<String> fillerStacks = new ArrayList<>();
@@ -189,6 +236,6 @@ class CloudFormationServiceRestoreIntegrationTest {
     }
 
     private static String uniqueStackName(String kind) {
-        return STACK_PREFIX + kind + "-" + System.nanoTime();
+        return STACK_PREFIX + kind + "-" + UUID.randomUUID();
     }
 }

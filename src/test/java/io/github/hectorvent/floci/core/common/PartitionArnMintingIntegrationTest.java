@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
@@ -67,6 +68,8 @@ class PartitionArnMintingIntegrationTest {
             .formParam("StackName", stackName)
         .when().post("/"));
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE",
+                PartitionMatrix.sigV4Auth(region, "cloudformation"));
         given()
             .header("Authorization", PartitionMatrix.sigV4Auth(region, "cloudformation"))
             .contentType("application/x-www-form-urlencoded")
