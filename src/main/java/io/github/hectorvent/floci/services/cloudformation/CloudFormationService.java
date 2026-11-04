@@ -1314,7 +1314,8 @@ public class CloudFormationService implements ResourceProvider {
     private record StackMutationSnapshot(String status, Instant lastUpdatedTime,
                                          List<StackEvent> events,
                                          Map<String, ChangeSet> changeSets,
-                                         Map<ChangeSet, ChangeSetState> changeSetStates) {}
+                                         Map<ChangeSet, ChangeSetState> changeSetStates,
+                                         String stackPolicyBody) {}
 
     // compute() holds the stack's per-key lock for the whole claim, so only one racing execution can win.
     private Future<?> claimAndSubmitExecution(String stackNameOrArn, String changeSetName, String region,
@@ -1360,6 +1361,9 @@ public class CloudFormationService implements ResourceProvider {
                         other.setExecutionStatus("OBSOLETE");
                     }
                 }
+            }
+            if (isCreate && cs.getStackPolicyBody() != null) {
+                existing.setStackPolicyBody(cs.getStackPolicyBody());
             }
             existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
             existing.setLastUpdatedTime(now());
@@ -1677,7 +1681,7 @@ public class CloudFormationService implements ResourceProvider {
             states.put(changeSet, new ChangeSetState(changeSet.getStatus(), changeSet.getExecutionStatus()));
         }
         return new StackMutationSnapshot(stack.getStatus(), stack.getLastUpdatedTime(),
-                stack.eventsSnapshot(), stack.changeSetsSnapshot(), states);
+                stack.eventsSnapshot(), stack.changeSetsSnapshot(), states, stack.getStackPolicyBody());
     }
 
     private void restore(Stack stack, StackMutationSnapshot snapshot) {
@@ -1686,6 +1690,7 @@ public class CloudFormationService implements ResourceProvider {
         }
         stack.setStatus(snapshot.status());
         stack.setLastUpdatedTime(snapshot.lastUpdatedTime());
+        stack.setStackPolicyBody(snapshot.stackPolicyBody());
         stack.setEvents(new ArrayList<>(snapshot.events()));
         stack.setChangeSets(new LinkedHashMap<>(snapshot.changeSets()));
         snapshot.changeSetStates().forEach((changeSet, state) -> {
@@ -2166,9 +2171,6 @@ public class CloudFormationService implements ResourceProvider {
         StackUpdateSnapshot previousState = snapshotForUpdate(stack);
         if (tags != null) {
             stack.replaceTags(tags);
-        }
-        if (isCreate && stackPolicy != null) {
-            stack.setStackPolicyBody(stackPolicy);
         }
         boolean updateCommitted = false;
         Set<String> attemptedResourceIds = new LinkedHashSet<>();

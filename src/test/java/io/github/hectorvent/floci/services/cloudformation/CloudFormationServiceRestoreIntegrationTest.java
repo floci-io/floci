@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.withSettings;
@@ -81,6 +82,8 @@ class CloudFormationServiceRestoreIntegrationTest {
     void rejectedExecutionRestoresStackAndChangeSetState() throws Exception {
         String targetStack = uniqueStackName("target");
         createChangeSet(targetStack);
+        String policy = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"Update:*\",\"Principal\":\"*\",\"Resource\":\"*\"}]}";
+        service.describeChangeSet(targetStack, "initial", REGION).setStackPolicyBody(policy);
 
         List<Future<?>> runningOperations = fillExecutor();
         try {
@@ -90,6 +93,7 @@ class CloudFormationServiceRestoreIntegrationTest {
 
             Stack restored = service.describeStacks(targetStack, REGION).getFirst();
             assertEquals("REVIEW_IN_PROGRESS", restored.getStatus());
+            assertNull(restored.getStackPolicyBody());
             ChangeSet restoredChangeSet = service.describeChangeSet(targetStack, "initial", REGION);
             assertEquals("CREATE_COMPLETE", restoredChangeSet.getStatus());
             assertEquals("AVAILABLE", restoredChangeSet.getExecutionStatus());
@@ -100,6 +104,7 @@ class CloudFormationServiceRestoreIntegrationTest {
         Future<?> retry = service.executeChangeSet(targetStack, "initial", REGION);
         retry.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
         assertEquals("CREATE_COMPLETE", service.describeStacks(targetStack, REGION).getFirst().getStatus());
+        assertEquals(policy, service.describeStacks(targetStack, REGION).getFirst().getStackPolicyBody());
         assertEquals("EXECUTE_COMPLETE",
                 service.describeChangeSet(targetStack, "initial", REGION).getExecutionStatus());
     }

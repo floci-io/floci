@@ -72,7 +72,7 @@ public class Stack {
     private Map<String, ChangeSet> changeSets = orderedMap();
     private Map<String, String> tags = orderedMap();
     private boolean enableTerminationProtection = false;
-    private String stackPolicyBody;
+    private volatile String stackPolicyBody;
     /**
      * Set when an update rollback fails, and kept until a rollback completes or the stack is
      * deleted: the state from before the failed update, and the logical ids whose rollback has not

@@ -36,7 +36,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-/** Covers that an update and SetStackPolicy store a stack policy only alongside a stack state that allows it. */
+/** Covers that a create, an update and SetStackPolicy store a stack policy only alongside a stack state that allows it. */
 class CloudFormationStackPolicyServiceTest {
 
     private static final String ACCOUNT = "000000000000";
@@ -81,6 +81,22 @@ class CloudFormationStackPolicyServiceTest {
                 resolver,
                 Clock.systemUTC(),
                 new InMemoryStorageFactory(ACCOUNT).withStore("cloudformation-stacks.json", stackStore));
+    }
+
+    @Test
+    void createChangeSet_storesItsStackPolicyBeforeCreateInProgressIsPersisted() throws Exception {
+        ChangeSet changeSet = service.createChangeSet("policy-create", "create", "CREATE", TEMPLATE, null,
+                Map.of(), List.of(), Map.of(), REGION, ACCOUNT);
+        changeSet.setStackPolicyBody(POLICY);
+
+        service.executeChangeSet("policy-create", "create", REGION, ACCOUNT).get(30, TimeUnit.SECONDS);
+
+        List<PersistedStack> inProgress = stackStore.puts.stream()
+                .filter(put -> "CREATE_IN_PROGRESS".equals(put.status()))
+                .toList();
+        assertFalse(inProgress.isEmpty());
+        assertTrue(inProgress.stream().allMatch(put -> POLICY.equals(put.stackPolicyBody())), inProgress::toString);
+        assertEquals(POLICY, service.describeStacks("policy-create", REGION, ACCOUNT).getFirst().getStackPolicyBody());
     }
 
     @Test
