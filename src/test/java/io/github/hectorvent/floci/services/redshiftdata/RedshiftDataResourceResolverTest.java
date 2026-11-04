@@ -69,7 +69,39 @@ class RedshiftDataResourceResolverTest {
     }
 
     @Test
-    void resolvesClusterProxyPortWhenProxyIsAvailable() {
+    void resolvesClusterProxyPortWhenSessionOrCopyRequested() {
+        Cluster c = cluster();
+        c.setProxyPort(5439);
+        RedshiftService redshift = mock(RedshiftService.class);
+        when(redshift.describeClusters("wh")).thenReturn(List.of(c));
+
+        ObjectNode sessionReq = mapper.createObjectNode();
+        sessionReq.put("ClusterIdentifier", "wh");
+        sessionReq.put("DbUser", "admin");
+        sessionReq.put("Database", "dev");
+        sessionReq.put("SessionKeepAliveSeconds", 60);
+
+        RedshiftDataResourceResolver.DatabaseTarget sessionTarget =
+                resolver(redshift, mock(SecretsManagerService.class)).resolve(sessionReq, REGION);
+
+        assertEquals("127.0.0.1", sessionTarget.host());
+        assertEquals(5439, sessionTarget.port());
+
+        ObjectNode copyReq = mapper.createObjectNode();
+        copyReq.put("ClusterIdentifier", "wh");
+        copyReq.put("DbUser", "admin");
+        copyReq.put("Database", "dev");
+        copyReq.put("Sql", "COPY tbl FROM 's3://bucket/key' IAM_ROLE 'arn:aws:iam::000000000000:role/Role'");
+
+        RedshiftDataResourceResolver.DatabaseTarget copyTarget =
+                resolver(redshift, mock(SecretsManagerService.class)).resolve(copyReq, REGION);
+
+        assertEquals("127.0.0.1", copyTarget.host());
+        assertEquals(5439, copyTarget.port());
+    }
+
+    @Test
+    void resolvesClusterContainerPortWhenNoProxyNeeded() {
         Cluster c = cluster();
         c.setProxyPort(5439);
         RedshiftService redshift = mock(RedshiftService.class);
@@ -79,12 +111,13 @@ class RedshiftDataResourceResolverTest {
         req.put("ClusterIdentifier", "wh");
         req.put("DbUser", "admin");
         req.put("Database", "dev");
+        req.put("Sql", "SELECT 1");
 
         RedshiftDataResourceResolver.DatabaseTarget target =
                 resolver(redshift, mock(SecretsManagerService.class)).resolve(req, REGION);
 
-        assertEquals("127.0.0.1", target.host());
-        assertEquals(5439, target.port());
+        assertEquals(c.getContainerHost(), target.host());
+        assertEquals(c.getContainerPort(), target.port());
     }
 
     @Test

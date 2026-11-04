@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.redshift.proxy.CopyStatementParser;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessRuntime;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
@@ -60,14 +61,15 @@ class RedshiftDataResourceResolver {
 
     DatabaseTarget resolve(JsonNode request, String region) {
         String database = requiredText(request, "Database");
+        boolean needsProxy = needsProxy(request);
         if (hasText(request, "WorkgroupName")) {
-            return resolveWorkgroup(request, region, database);
+            return resolveWorkgroup(request, region, database, needsProxy);
         }
 
         if (hasText(request, "SecretArn")) {
-            return resolveViaSecret(request, region, database);
+            return resolveViaSecret(request, region, database, needsProxy);
         }
-        return resolveViaDbUser(request, region, database);
+        return resolveViaDbUser(request, region, database, needsProxy);
     }
 
     /**
@@ -75,7 +77,7 @@ class RedshiftDataResourceResolver {
      * database user AWS derives from the signing identity. Floci connects the IAM path as the
      * namespace admin, the same stand-in GetClusterCredentialsWithIAM uses for a cluster.
      */
-    private DatabaseTarget resolveWorkgroup(JsonNode request, String region, String database) {
+    private DatabaseTarget resolveWorkgroup(JsonNode request, String region, String database, boolean needsProxy) {
         if (hasText(request, "ClusterIdentifier")) {
             throw validation("ClusterIdentifier and WorkgroupName cannot both be specified.");
         }
@@ -90,7 +92,7 @@ class RedshiftDataResourceResolver {
                     + "; the only database is " + workgroup.database() + ".");
         }
         int proxyPort = workgroup.endpoint() != null ? workgroup.endpoint().getPort() : 0;
-        boolean hasProxy = proxyPort > 0;
+        boolean hasProxy = needsProxy && proxyPort > 0;
         String host = hasProxy ? "127.0.0.1" : workgroup.host();
         int port = hasProxy ? proxyPort : workgroup.port();
         if (!hasText(request, "SecretArn")) {
@@ -142,22 +144,22 @@ class RedshiftDataResourceResolver {
         }
     }
 
-    private DatabaseTarget resolveViaSecret(JsonNode request, String region, String database) {
+    private DatabaseTarget resolveViaSecret(JsonNode request, String region, String database, boolean needsProxy) {
         String secretArn = request.get("SecretArn").asText();
         validateSecretRegion(secretArn, region);
         String clusterId = requiredText(request, "ClusterIdentifier");
         Cluster cluster = cluster(clusterId);
         DatabaseSecretCredentials creds = secretCredentials(secretArn, region);
-        return target(clusterArn(clusterId, region), cluster, database, creds.username(), creds.password());
+        return target(clusterArn(clusterId, region), cluster, database, creds.username(), creds.password(), needsProxy);
     }
 
-    private DatabaseTarget resolveViaDbUser(JsonNode request, String region, String database) {
+    private DatabaseTarget resolveViaDbUser(JsonNode request, String region, String database, boolean needsProxy) {
         String clusterId = requiredText(request, "ClusterIdentifier");
         String dbUser = requiredText(request, "DbUser");
         Cluster cluster = cluster(clusterId);
 
         if (dbUser.equals(cluster.getMasterUsername())) {
-            return target(clusterArn(clusterId, region), cluster, database, dbUser, cluster.getMasterPassword());
+            return target(clusterArn(clusterId, region), cluster, database, dbUser, cluster.getMasterPassword(), needsProxy);
         }
         boolean liveCredential = credentialBroker
                 .resolve(regionResolver.getAccountId(), clusterId, dbUser)
@@ -165,7 +167,7 @@ class RedshiftDataResourceResolver {
         if (liveCredential) {
             // The minted DbUser is nominal: connect as the cluster master.
             DatabaseTarget backend = target(clusterArn(clusterId, region), cluster, database,
-                    cluster.getMasterUsername(), cluster.getMasterPassword());
+                    cluster.getMasterUsername(), cluster.getMasterPassword(), needsProxy);
             return new DatabaseTarget(backend.arn(), backend.host(), backend.port(), backend.database(), backend.user(),
                     backend.password(), backend.spectrum(), cluster, dbUser);
         }
@@ -180,9 +182,10 @@ class RedshiftDataResourceResolver {
         }
     }
 
-    private static DatabaseTarget target(String arn, Cluster cluster, String database, String user, String password) {
+    private static DatabaseTarget target(String arn, Cluster cluster, String database, String user, String password,
+                                         boolean needsProxy) {
         int proxyPort = cluster.getProxyPort();
-        boolean hasProxy = proxyPort > 0;
+        boolean hasProxy = needsProxy && proxyPort > 0;
         String host = hasProxy ? "127.0.0.1" : cluster.getContainerHost();
         int port = hasProxy ? proxyPort : cluster.getContainerPort();
         if (host == null || host.isBlank() || port <= 0) {
@@ -192,6 +195,39 @@ class RedshiftDataResourceResolver {
         SpectrumSession spectrum = new SpectrumSession(accountId, accountId + ":" + cluster.getClusterIdentifier(),
                 database, cluster.getIamRoleArns(), false);
         return new DatabaseTarget(arn, host, port, database, user, password, spectrum, cluster);
+    }
+
+    private static boolean needsProxy(JsonNode request) {
+        if (request == null) {
+            return false;
+        }
+        if (request.has("SessionId") || request.path("SessionKeepAliveSeconds").asInt() > 0) {
+            return true;
+        }
+        if (hasText(request, "Sql") && isS3CopyOrUnload(request.get("Sql").asText())) {
+            return true;
+        }
+        JsonNode sqls = request.get("Sqls");
+        if (sqls != null && sqls.isArray()) {
+            for (JsonNode item : sqls) {
+                if (item.isTextual() && isS3CopyOrUnload(item.asText())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean isS3CopyOrUnload(String sql) {
+        if (sql == null || sql.isBlank()) {
+            return false;
+        }
+        String trimmed = sql.stripLeading();
+        if (trimmed.regionMatches(true, 0, "COPY", 0, 4)
+                || trimmed.regionMatches(true, 0, "UNLOAD", 0, 6)) {
+            return CopyStatementParser.parse(sql) != null;
+        }
+        return false;
     }
 
     private String clusterArn(String clusterId, String region) {
