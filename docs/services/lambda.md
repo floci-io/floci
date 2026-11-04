@@ -1009,10 +1009,13 @@ on create and on update with `InvalidParameterValueException` ("LogLevel is not 
 LogFormat is set to "Text". Remove LogLevel from your request or change the LogFormat to
 "JSON" and try again."), as Lambda refuses it (measured in eu-west-1, 2026-10-18).
 
-`VpcConfig` requires existing subnets and security groups in the request's account and
-region, all belonging to one VPC. Missing resources, mixed VPCs, or specifying only
-subnets or only security groups fail with `InvalidParameterValueException`. A rejected
-update preserves the function's configuration and revision. Empty subnet and security
+`VpcConfig` accepts placeholder subnet and security-group IDs that are unknown in
+Floci's request account and region. This local compatibility behavior preserves the
+requested IDs but omits `VpcId` whenever any requested resource is unknown. Known
+subnets and security groups must still belong to one VPC, even when the request also
+contains unknown IDs. Mixed known VPCs or specifying only subnets or only security
+groups fail with `InvalidParameterValueException` before the function is mutated.
+A rejected update preserves the configuration and revision. Empty subnet and security
 group lists detach the function, and the response then omits `VpcConfig`. Published
 versions retain their network configuration when `$LATEST` changes.
 

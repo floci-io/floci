@@ -1496,7 +1496,6 @@ class CloudFormationIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
             .formParam("StackName", stackName)
-            .formParam("LogicalResourceId", "MyFunction")
         .when()
             .post("/")
         .then()
@@ -1577,18 +1576,6 @@ class CloudFormationIntegrationTest {
         return """
             {
               "Resources": {
-                "Vpc": {
-                  "Type": "AWS::EC2::VPC",
-                  "Properties": {"CidrBlock": "10.92.0.0/16"}
-                },
-                "Subnet": {
-                  "Type": "AWS::EC2::Subnet",
-                  "Properties": {"VpcId": {"Ref": "Vpc"}, "CidrBlock": "10.92.1.0/24"}
-                },
-                "SecurityGroup": {
-                  "Type": "AWS::EC2::SecurityGroup",
-                  "Properties": {"VpcId": {"Ref": "Vpc"}, "GroupDescription": "Lambda test network"}
-                },
                 "MyFunction": {
                   "Type": "AWS::Lambda::Function",
                   "Properties": {
@@ -1597,8 +1584,8 @@ class CloudFormationIntegrationTest {
                     "Handler": "index.handler",
                     "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role",
                     "VpcConfig": {
-                      "SubnetIds": [{"Ref": "Subnet"}],
-                      "SecurityGroupIds": [{"Ref": "SecurityGroup"}]
+                      "SubnetIds": ["subnet-0123456789abcdef0"],
+                      "SecurityGroupIds": ["sg-0123456789abcdef0"]
                     }
                     %s
                   }

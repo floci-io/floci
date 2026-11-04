@@ -178,6 +178,24 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
     }
 
     @Test
+    void unknownSubnetStillRoundTripsWithoutVpcId() {
+        createFunction("vpc-unmanaged-subnet-fn", """
+            ,
+                "VpcConfig": {
+                    "SubnetIds": ["subnet-ffffffffffffffff0"],
+                    "SecurityGroupIds": ["%s"]
+                }""".formatted(securityGroupId));
+
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/vpc-unmanaged-subnet-fn/configuration")
+        .then()
+            .statusCode(200)
+            .body("VpcConfig.SubnetIds", contains("subnet-ffffffffffffffff0"))
+            .body("VpcConfig.VpcId", nullValue());
+    }
+
+    @Test
     void snapStartAndLoggingConfigDefaultsArePopulatedWhenUnset() {
         createFunction("defaults-fn", "");
 

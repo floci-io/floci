@@ -35,6 +35,7 @@ import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -106,22 +107,20 @@ class LambdaVpcResourceValidationIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"missing-subnet", "missing-group", "missing-second-subnet", "missing-second-group",
-            "mixed-subnets", "mixed-groups", "only-subnets", "only-groups"})
+    @ValueSource(strings = {"mixed-subnets", "mixed-groups", "only-subnets", "only-groups",
+            "unknown-with-mixed-subnets", "unknown-with-mixed-groups"})
     void invalidVpcResourcesCannotCreateAFunction(String kind) {
         VpcConfig config = switch (kind) {
-            case "missing-subnet" -> VpcConfig.builder().subnetIds("subnet-fffffffffffffffff")
-                    .securityGroupIds(first.group()).build();
-            case "missing-group" -> VpcConfig.builder().subnetIds(first.subnet())
-                    .securityGroupIds("sg-fffffffffffffffff").build();
-            case "missing-second-subnet" -> VpcConfig.builder()
-                    .subnetIds(first.subnet(), "subnet-fffffffffffffffff").securityGroupIds(first.group()).build();
-            case "missing-second-group" -> VpcConfig.builder().subnetIds(first.subnet())
-                    .securityGroupIds(first.group(), "sg-fffffffffffffffff").build();
             case "mixed-subnets" -> VpcConfig.builder().subnetIds(first.subnet(), second.subnet())
                     .securityGroupIds(first.group()).build();
             case "mixed-groups" -> VpcConfig.builder().subnetIds(first.subnet())
                     .securityGroupIds(first.group(), second.group()).build();
+            case "unknown-with-mixed-subnets" -> VpcConfig.builder()
+                    .subnetIds(first.subnet(), "subnet-fffffffffffffffff", second.subnet())
+                    .securityGroupIds(first.group()).build();
+            case "unknown-with-mixed-groups" -> VpcConfig.builder()
+                    .subnetIds("subnet-fffffffffffffffff")
+                    .securityGroupIds(first.group(), "sg-fffffffffffffffff", second.group()).build();
             case "only-subnets" -> VpcConfig.builder().subnetIds(first.subnet()).build();
             case "only-groups" -> VpcConfig.builder().securityGroupIds(first.group()).build();
             default -> throw new IllegalArgumentException(kind);
@@ -133,6 +132,44 @@ class LambdaVpcResourceValidationIntegrationTest {
                 () -> lambda.getFunctionConfiguration(r -> r.functionName(name)));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"both", "subnet", "group", "second-subnet", "second-group"})
+    void unknownVpcIdsRoundTripWithoutAnInferredVpc(String kind) {
+        VpcConfig config = switch (kind) {
+            case "both" -> VpcConfig.builder().subnetIds("subnet-fffffffffffffffff")
+                    .securityGroupIds("sg-fffffffffffffffff").build();
+            case "subnet" -> VpcConfig.builder().subnetIds("subnet-fffffffffffffffff")
+                    .securityGroupIds(first.group()).build();
+            case "group" -> VpcConfig.builder().subnetIds(first.subnet())
+                    .securityGroupIds("sg-fffffffffffffffff").build();
+            case "second-subnet" -> VpcConfig.builder().subnetIds(first.subnet(), "subnet-fffffffffffffffff")
+                    .securityGroupIds(first.group()).build();
+            case "second-group" -> VpcConfig.builder().subnetIds(first.subnet())
+                    .securityGroupIds(first.group(), "sg-fffffffffffffffff").build();
+            default -> throw new IllegalArgumentException(kind);
+        };
+        createFunction(config);
+        assertEquals(config.subnetIds(), configuration().vpcConfig().subnetIds());
+        assertEquals(config.securityGroupIds(), configuration().vpcConfig().securityGroupIds());
+        assertNull(configuration().vpcConfig().vpcId());
+    }
+
+    @Test
+    void unknownVpcUpdateClearsOnlyTheLatestInferredVpc() {
+        createFunction(first.config());
+        String version = lambda.publishVersion(r -> r.functionName(name)).version();
+        VpcConfig placeholders = VpcConfig.builder().subnetIds("subnet-fffffffffffffffff")
+                .securityGroupIds("sg-fffffffffffffffff").build();
+        lambda.updateFunctionConfiguration(r -> r.functionName(name).description("updated")
+                .vpcConfig(placeholders));
+        assertEquals("updated", configuration().description());
+        assertEquals(placeholders.subnetIds(), configuration().vpcConfig().subnetIds());
+        assertEquals(placeholders.securityGroupIds(), configuration().vpcConfig().securityGroupIds());
+        assertNull(configuration().vpcConfig().vpcId());
+        assertNetwork(first, lambda.getFunctionConfiguration(
+                r -> r.functionName(name).qualifier(version)).vpcConfig());
+    }
+
     @Test
     void rejectedVpcUpdatePreservesTheExistingConfigurationAndRevision() {
         createFunction(first.config());
@@ -141,7 +178,7 @@ class LambdaVpcResourceValidationIntegrationTest {
         InvalidParameterValueException failure = assertThrows(InvalidParameterValueException.class,
                 () -> lambda.updateFunctionConfiguration(r -> r.functionName(name)
                         .description("must-not-change").timeout(30).memorySize(256)
-                        .vpcConfig(VpcConfig.builder().subnetIds("subnet-fffffffffffffffff")
+                        .vpcConfig(VpcConfig.builder().subnetIds(first.subnet(), second.subnet())
                                 .securityGroupIds(first.group()).build())));
 
         assertEquals(400, failure.statusCode());

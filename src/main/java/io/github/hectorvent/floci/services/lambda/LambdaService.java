@@ -2746,30 +2746,23 @@ public class LambdaService implements ResourceProvider {
                     "VpcConfig requires both subnet IDs and security group IDs", 400);
         }
         if (ec2Service == null) {
-            throw new IllegalStateException("Lambda VPC configuration requires EC2");
+            return null;
         }
         List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
-        if (!Set.copyOf(subnetIds).equals(
-                subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toSet()))) {
-            throw new AwsException("InvalidParameterValueException",
-                    "One or more subnet IDs in VpcConfig do not exist", 400);
-        }
-        String vpcId = subnets.getFirst().getVpcId();
-        if (vpcId == null || subnets.stream().anyMatch(subnet -> !vpcId.equals(subnet.getVpcId()))) {
-            throw new AwsException("InvalidParameterValueException",
-                    "All subnets in VpcConfig must belong to the same VPC", 400);
-        }
         List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
-        if (!Set.copyOf(groupIds).equals(
+        Set<String> knownVpcIds = subnets.stream().map(Subnet::getVpcId).collect(Collectors.toSet());
+        groups.stream().map(SecurityGroup::getVpcId).forEach(knownVpcIds::add);
+        if (knownVpcIds.contains(null) || knownVpcIds.size() > 1) {
+            throw new AwsException("InvalidParameterValueException",
+                    "All known subnets and security groups in VpcConfig must belong to the same VPC", 400);
+        }
+        if (!Set.copyOf(subnetIds).equals(
+                subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toSet()))
+                || !Set.copyOf(groupIds).equals(
                 groups.stream().map(SecurityGroup::getGroupId).collect(Collectors.toSet()))) {
-            throw new AwsException("InvalidParameterValueException",
-                    "One or more security group IDs in VpcConfig do not exist", 400);
+            return null;
         }
-        if (groups.stream().anyMatch(group -> !vpcId.equals(group.getVpcId()))) {
-            throw new AwsException("InvalidParameterValueException",
-                    "All subnets and security groups in VpcConfig must belong to the same VPC", 400);
-        }
-        return vpcId;
+        return knownVpcIds.stream().findFirst().orElse(null);
     }
 
     private static List<String> vpcResourceIds(Map<String, Object> vpcConfig, String member) {
