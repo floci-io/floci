@@ -95,7 +95,7 @@ class CfnUnchangedResourceUpdateIntegrationTest {
         given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
             .formParam("Action", "DeleteStack").formParam("StackName", stackName)
         .when().post("/").then().statusCode(200);
-        CfnStackWaits.awaitStackDeleted(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName, CFN_AUTH);
     }
 
     /**
