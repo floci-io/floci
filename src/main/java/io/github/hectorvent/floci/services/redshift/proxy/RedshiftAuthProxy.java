@@ -268,7 +268,7 @@ public class RedshiftAuthProxy {
                             handshakeTimeoutMillis, false, true, (user, database, params) -> {
                                 login.username = user;
                                 login.database = database;
-                                login.dataApi = "floci-redshift-data".equals(params.get("application_name"));
+                                login.dataApi = RedshiftInternalAuth.consumeDataApiToken(params.get("application_name"));
                             });
             if (session != null) {
                 publishConnection(client, login, "authenticated");
