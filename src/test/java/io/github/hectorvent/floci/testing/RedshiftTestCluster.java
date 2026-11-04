@@ -1,15 +1,11 @@
 package io.github.hectorvent.floci.testing;
 
+import io.github.hectorvent.floci.services.redshift.RedshiftConnections;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
-import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionTimeoutException;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
-import java.time.Duration;
-import java.util.Objects;
 import java.util.UUID;
 
 /** A Docker-backed Redshift cluster for tests that need the cluster's own PostgreSQL. */
@@ -32,7 +28,7 @@ public final class RedshiftTestCluster implements AutoCloseable {
     }
 
     public String jdbcUrl() {
-        return "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev";
+        return RedshiftConnections.jdbcUrl(cluster);
     }
 
     /** Opens a connection as {@code user}, waiting for the cluster to accept connections first. */
@@ -43,13 +39,7 @@ public final class RedshiftTestCluster implements AutoCloseable {
     /** Opens a connection with the requested query mode, or the driver's default when it is null. */
     public Connection connect(String user, String queryMode) throws SQLException {
         String url = jdbcUrl() + (queryMode == null ? "" : "?preferQueryMode=" + queryMode);
-        try {
-            return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                    .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                    .until(() -> DriverManager.getConnection(url, user, PASSWORD), Objects::nonNull);
-        } catch (ConditionTimeoutException e) {
-            return DriverManager.getConnection(url, user, PASSWORD);
-        }
+        return RedshiftConnections.waitForConnection(url, user, PASSWORD);
     }
 
     @Override
