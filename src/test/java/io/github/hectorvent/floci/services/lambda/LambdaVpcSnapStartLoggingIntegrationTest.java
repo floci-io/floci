@@ -31,7 +31,6 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
 
     private static final String BASE_PATH = "/2015-03-31";
     private static final String REGION = "us-east-1";
-    private static final String SECURITY_GROUP_ID = "sg-0123456789abcdef0";
     private static final String LOG_LEVEL_UNDER_TEXT = "LogLevel is not supported when LogFormat is set to \"Text\". "
             + "Remove LogLevel from your request or change the LogFormat to \"JSON\" and try again.";
 
@@ -40,12 +39,14 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
 
     private String subnetId;
     private String expectedVpcId;
+    private String securityGroupId;
 
     @BeforeEach
     void resolveSubnet() {
         Subnet subnet = ec2Service.describeSubnets(REGION, List.of(), Map.of()).get(0);
         subnetId = subnet.getSubnetId();
         expectedVpcId = subnet.getVpcId();
+        securityGroupId = ec2Service.defaultSecurityGroupOf(REGION, expectedVpcId).orElseThrow().getGroupId();
     }
 
     private void createFunction(String name, String extraJson) {
@@ -80,7 +81,7 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
                 "VpcConfig": {
                     "SubnetIds": ["%s"],
                     "SecurityGroupIds": ["%s"]
-                }""".formatted(subnetId, SECURITY_GROUP_ID);
+                }""".formatted(subnetId, securityGroupId);
     }
 
     @Test
@@ -100,7 +101,7 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
         .then()
             .statusCode(201)
             .body("VpcConfig.SubnetIds", contains(subnetId))
-            .body("VpcConfig.SecurityGroupIds", contains(SECURITY_GROUP_ID))
+            .body("VpcConfig.SecurityGroupIds", contains(securityGroupId))
             .body("VpcConfig.VpcId", equalTo(expectedVpcId))
             .body("VpcConfig.Ipv6AllowedForDualStack", equalTo(false));
     }
@@ -115,7 +116,7 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
         .then()
             .statusCode(200)
             .body("VpcConfig.SubnetIds", contains(subnetId))
-            .body("VpcConfig.SecurityGroupIds", contains(SECURITY_GROUP_ID))
+            .body("VpcConfig.SecurityGroupIds", contains(securityGroupId))
             .body("VpcConfig.VpcId", equalTo(expectedVpcId));
     }
 
@@ -129,7 +130,7 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
         .then()
             .statusCode(200)
             .body("Configuration.VpcConfig.SubnetIds", contains(subnetId))
-            .body("Configuration.VpcConfig.SecurityGroupIds", contains(SECURITY_GROUP_ID))
+            .body("Configuration.VpcConfig.SecurityGroupIds", contains(securityGroupId))
             .body("Configuration.VpcConfig.VpcId", equalTo(expectedVpcId));
     }
 
@@ -146,7 +147,7 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
                         "SecurityGroupIds": ["%s"]
                     }
                 }
-                """.formatted(subnetId, SECURITY_GROUP_ID))
+                """.formatted(subnetId, securityGroupId))
         .when()
             .put(BASE_PATH + "/functions/vpc-update-fn/configuration")
         .then()
@@ -160,7 +161,7 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
         .then()
             .statusCode(200)
             .body("VpcConfig.SubnetIds", contains(subnetId))
-            .body("VpcConfig.SecurityGroupIds", contains(SECURITY_GROUP_ID))
+            .body("VpcConfig.SecurityGroupIds", contains(securityGroupId))
             .body("VpcConfig.VpcId", equalTo(expectedVpcId));
     }
 
@@ -183,7 +184,7 @@ class LambdaVpcSnapStartLoggingIntegrationTest {
                 "VpcConfig": {
                     "SubnetIds": ["subnet-ffffffffffffffff0"],
                     "SecurityGroupIds": ["%s"]
-                }""".formatted(SECURITY_GROUP_ID));
+                }""".formatted(securityGroupId));
 
         given()
         .when()
