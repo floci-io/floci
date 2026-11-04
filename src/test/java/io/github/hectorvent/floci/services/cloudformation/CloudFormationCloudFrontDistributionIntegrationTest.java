@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
 import io.github.hectorvent.floci.services.cloudfront.model.OriginAccessControl;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -112,6 +113,7 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // Stack completes and Fn::GetAtt(Dist, DomainName) resolves to a real *.cloudfront.net domain
         // (not the unresolved "Dist.DomainName" token).
         given()
@@ -172,6 +174,7 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         Distribution original = distributionsWithAlias(alias).getFirst();
 
         given()
@@ -185,6 +188,7 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
         List<Distribution> matching = distributionsWithAlias(alias);
         assertEquals(1, matching.size(), "UpdateStack must not leak a second distribution");
         Distribution updated = matching.getFirst();
@@ -257,6 +261,7 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus("cfn-cloudfront-private-" + suffix, "CREATE_COMPLETE");
         Distribution distribution = distributionsWithAlias(alias).getFirst();
         assertEquals(List.of(defaultKeyGroup.getId()),
                 distribution.getConfig().getDefaultCacheBehavior().getTrustedKeyGroups());
@@ -305,6 +310,7 @@ class CloudFormationCloudFrontDistributionIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
         // On AWS the stack fails because CloudFront rejects the out-of-range value; the
         // service-level check makes the CloudFormation path share that one copy.
         given()

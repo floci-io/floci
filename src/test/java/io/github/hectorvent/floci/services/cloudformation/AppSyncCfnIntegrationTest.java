@@ -321,6 +321,7 @@ class AppSyncCfnIntegrationTest {
     }
 
     private static String describeStacks(String stackName, String expectedStatus) {
+        CfnStackWaits.awaitStatus(stackName, expectedStatus, CFN_AUTH);
         return cfn("DescribeStacks", stackName).header("Authorization", CFN_AUTH)
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))

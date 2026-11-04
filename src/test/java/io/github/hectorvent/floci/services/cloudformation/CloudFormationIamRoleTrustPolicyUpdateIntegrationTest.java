@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -72,6 +73,7 @@ class CloudFormationIamRoleTrustPolicyUpdateIntegrationTest {
     }
 
     private static void assertStackStatus(String stackName, String status) {
+        CfnStackWaits.awaitStatus(stackName, status, CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

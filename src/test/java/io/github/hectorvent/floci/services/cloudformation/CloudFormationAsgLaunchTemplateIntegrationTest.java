@@ -110,6 +110,7 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
     }
 
     private void assertStackCreated(String stackName) {
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         String body = describeStacks(stackName);
         assertThat(body, containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
         assertThat(body, not(containsString("The specified launch template does not exist.")));
@@ -328,6 +329,7 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
                 }
                 """.formatted(suffix, ltName));
 
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
         assertThat(describeStacks(stackName), containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
         assertThat(CfnStackWaits.failedResourceReason(stackName, CFN_AUTH),
                 containsString("Value of property OnDemandBaseCapacity must be an integer."));
@@ -446,6 +448,7 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
         assertEquals("False", asgChange.get("Replacement"));
 
         updateStack(stackName, template2);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
         String describe = describeStacks(stackName);
         assertThat(describe, containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
         // ASG must have updated to version 2 because Fn::GetAtt on LatestVersionNumber changed
@@ -569,6 +572,7 @@ class CloudFormationAsgLaunchTemplateIntegrationTest {
         assertThat(describeAutoScalingGroup(asgName), containsString("<Version>1</Version>"));
 
         updateStack(stackName, template2);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
         String describe = describeStacks(stackName);
         assertThat(describe, containsString("<StackStatus>UPDATE_ROLLBACK_COMPLETE</StackStatus>"));
         // ASG must have rolled back to Version 1

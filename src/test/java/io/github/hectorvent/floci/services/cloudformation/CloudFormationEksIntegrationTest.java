@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -63,6 +64,7 @@ class CloudFormationEksIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

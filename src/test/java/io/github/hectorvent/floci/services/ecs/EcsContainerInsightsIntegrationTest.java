@@ -63,6 +63,7 @@ class EcsContainerInsightsIntegrationTest {
                 .formParam("StackName", cluster)
                 .formParam("TemplateBody", template)
                 .post("/").then().statusCode(200);
+        awaitStackStatus(cluster, "CREATE_COMPLETE");
         given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DescribeStacks")
                 .formParam("StackName", cluster)

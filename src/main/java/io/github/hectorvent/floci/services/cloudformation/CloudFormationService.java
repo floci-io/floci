@@ -234,6 +234,25 @@ public class CloudFormationService implements ResourceProvider {
         return stack;
     }
 
+    public void clearProtectionAfterRejectedCreate(String stackName, ChangeSet initial, String region) {
+        String accountId = currentAccount();
+        stacks.computeIfPresent(stackKey(accountId, stackName, region), (key, stack) -> {
+            ChangeSet current = stack.getChangeSets().get(initial.getChangeSetName());
+            if (stack.getStackId().equals(initial.getStackId())
+                    && "REVIEW_IN_PROGRESS".equals(stack.getStatus())
+                    && (current == null && stack.getChangeSets().isEmpty()
+                            || current != null && current.getChangeSetId().equals(initial.getChangeSetId())
+                            && ("AVAILABLE".equals(current.getExecutionStatus())
+                                    || "UNAVAILABLE".equals(current.getExecutionStatus())))
+                    && !runningExecutions.containsKey(stack.getStackId())) {
+                stack.setEnableTerminationProtection(false);
+                // Keep this rare rejection cleanup ordered before a concurrent delete unpersists it.
+                persistStack(stack);
+            }
+            return stack;
+        });
+    }
+
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
     public List<Stack> describeStacks(String stackName, String region) {
@@ -347,7 +366,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             String previousTemplate = previousTemplateOf(stack);
             created = createChangeSet(stackName, changeSetName, "UPDATE", previousTemplate, null,
-                    parameters, capabilities, tags, region, currentAccount(), false, true);
+                    parameters, capabilities, tags, region, currentAccount(), false, true, false);
         }
         return created;
     }
@@ -365,7 +384,17 @@ public class CloudFormationService implements ResourceProvider {
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, regionResolver.getAccountId(), false, false);
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), false, false, false);
+    }
+
+    public ChangeSet createChangeSetForCreateStack(String stackName, String changeSetName,
+                                                   String templateBody, String templateUrl,
+                                                   Map<String, String> parameters, List<String> capabilities,
+                                                   Map<String, String> tags, String region,
+                                                   boolean enableTerminationProtection) {
+        return createChangeSet(stackName, changeSetName, "CREATE", templateBody, templateUrl,
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), false, false,
+                enableTerminationProtection);
     }
 
     /**
@@ -389,7 +418,7 @@ public class CloudFormationService implements ResourceProvider {
                                                Map<String, String> parameters, List<String> capabilities,
                                                Map<String, String> tags, String region) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, regionResolver.getAccountId(), true, false);
+                parameters, capabilities, tags, region, regionResolver.getAccountId(), true, false, false);
     }
 
     /**
@@ -407,14 +436,15 @@ public class CloudFormationService implements ResourceProvider {
                                      Map<String, String> parameters, List<String> capabilities,
                                      Map<String, String> tags, String region, String accountId) {
         return createChangeSet(stackName, changeSetName, changeSetType, templateBody, templateUrl,
-                parameters, capabilities, tags, region, accountId, false, false);
+                parameters, capabilities, tags, region, accountId, false, false, false);
     }
 
     private ChangeSet createChangeSet(String stackName, String changeSetName, String changeSetType,
                                       String templateBody, String templateUrl,
                                       Map<String, String> parameters, List<String> capabilities,
                                       Map<String, String> tags, String region, String accountId,
-                                      boolean attachToReviewInProgressStack, boolean fromPreviousTemplate) {
+                                      boolean attachToReviewInProgressStack, boolean fromPreviousTemplate,
+                                      boolean enableTerminationProtection) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
         requireValidTemplate(resolvedTemplate);
         boolean isCreateType = "CREATE".equalsIgnoreCase(changeSetType);
@@ -511,6 +541,7 @@ public class CloudFormationService implements ResourceProvider {
                 target = newStack(stackName,
                         createdStackId != null ? createdStackId : newStackId(stackName, region, accountId),
                         region, accountId);
+                target.setEnableTerminationProtection(enableTerminationProtection);
                 if (tags != null) target.getTags().putAll(tags);
                 // A CREATE change set puts a brand-new stack into REVIEW_IN_PROGRESS. Record the
                 // matching stack-level event (as AWS and LocalStack do) so DescribeStackEvents is
@@ -1289,6 +1320,9 @@ public class CloudFormationService implements ResourceProvider {
                 cs.setExecutionStatus(status != null && (status.contains("ROLLBACK") || status.endsWith("_FAILED"))
                     ? "EXECUTE_FAILED" : "EXECUTE_COMPLETE");
                 persistStack(stack);
+            } catch (RuntimeException | Error e) {
+                LOG.errorv(e, "Stack {0} execution aborted unexpectedly", stack.getStackName());
+                throw e;
             } finally {
                 endExecution(stack, claimed.done(), region, accountId);
             }
@@ -1322,6 +1356,7 @@ public class CloudFormationService implements ResourceProvider {
             }
             done.complete(null);
         } catch (RuntimeException e) {
+            LOG.errorv(e, "Stack {0} execution cleanup failed", stack.getStackName());
             done.completeExceptionally(e);
         }
     }

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -164,6 +165,7 @@ class AutoScalingLaunchConfigurationMetadataIntegrationTest {
                         """.formatted(name);
                 request("cloudformation", "CreateStack").formParam("StackName", name)
                         .formParam("TemplateBody", template).post("/").then().statusCode(200);
+                CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE", EnforcementFixtures.auth(ACCOUNT, "cloudformation"));
             } else {
                 request("autoscaling", "CreateLaunchConfiguration")
                         .formParam("LaunchConfigurationName", name).formParam("ImageId", "ami-amazonlinux2023")
@@ -205,6 +207,7 @@ class AutoScalingLaunchConfigurationMetadataIntegrationTest {
                     .formParam("Parameters.member.1.ParameterKey", "Strict")
                     .formParam("Parameters.member.1.ParameterValue", strict ? "yes" : "no")
                     .post("/").then().statusCode(200);
+            CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE", EnforcementFixtures.auth(ACCOUNT, "cloudformation"));
             ValidatableResponse described = describeLaunchConfiguration(name);
             if (strict) {
                 described.body(LAUNCH_CONFIGURATION + ".MetadataOptions.HttpTokens", equalTo("required"))

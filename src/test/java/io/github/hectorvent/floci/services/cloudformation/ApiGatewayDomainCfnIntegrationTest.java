@@ -278,6 +278,7 @@ class ApiGatewayDomainCfnIntegrationTest {
     }
 
     private static String describeStacks(String stack, String expectedStatus) {
+        CfnStackWaits.awaitStatus(stack, expectedStatus, CFN_AUTH);
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
