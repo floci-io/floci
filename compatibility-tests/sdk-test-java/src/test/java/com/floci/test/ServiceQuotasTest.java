@@ -3,11 +3,15 @@ package com.floci.test;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.servicequotas.ServiceQuotasClient;
+import software.amazon.awssdk.services.servicequotas.model.InvalidPaginationTokenException;
+import software.amazon.awssdk.services.servicequotas.model.ServiceInfo;
 import software.amazon.awssdk.services.servicequotas.model.ServiceQuota;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 class ServiceQuotasTest {
@@ -65,12 +69,34 @@ class ServiceQuotasTest {
     }
 
     @Test
+    @DisplayName("ListServices rejects empty NextToken")
+    void listServicesRejectsEmptyNextToken() {
+        assumeFalse(TestFixtures.isRealAws(), "Tests the emulated service catalog");
+        try (ServiceQuotasClient client = TestFixtures.serviceQuotasClient()) {
+            assertThatThrownBy(
+                    () -> client.listServices(request -> request.nextToken("")))
+                    .isInstanceOf(InvalidPaginationTokenException.class);
+        }
+    }
+
+    @Test
+    @DisplayName("ListServices rejects fabricated NextToken")
+    void listServicesRejectsFabricatedNextToken() {
+        assumeFalse(TestFixtures.isRealAws(), "Tests the emulated service catalog");
+        try (ServiceQuotasClient client = TestFixtures.serviceQuotasClient()) {
+            assertThatThrownBy(
+                    () -> client.listServices(request -> request.nextToken("!!!")))
+                    .isInstanceOf(InvalidPaginationTokenException.class);
+        }
+    }
+
+    @Test
     @DisplayName("ListServices returns services with code and name, supports pagination")
     void listServicesReturnsServicesAndPaginates() {
         assumeFalse(TestFixtures.isRealAws(), "Tests the emulated service catalog");
         try (ServiceQuotasClient client = TestFixtures.serviceQuotasClient()) {
             // List all services
-            var allServices = client.listServicesPaginator(request -> request.maxResults(100))
+            List<ServiceInfo> allServices = client.listServicesPaginator(request -> request.maxResults(100))
                     .stream().flatMap(page -> page.services().stream()).toList();
             assertThat(allServices).hasSizeGreaterThanOrEqualTo(10);
             assertThat(allServices).anyMatch(s -> s.serviceCode().equals("ec2") && s.serviceName().equals("Amazon Elastic Compute Cloud (Amazon EC2)"));
@@ -78,15 +104,15 @@ class ServiceQuotasTest {
             assertThat(allServices).anyMatch(s -> s.serviceCode().equals("s3") && s.serviceName().equals("Amazon Simple Storage Service (Amazon S3)"));
 
             // Pagination
-            var firstPage = client.listServices(request -> request.maxResults(2)).services();
+            List<ServiceInfo> firstPage = client.listServices(request -> request.maxResults(2)).services();
             assertThat(firstPage).hasSize(2);
             String nextToken = client.listServices(request -> request.maxResults(2)).nextToken();
             assertThat(nextToken).isNotNull();
-            var secondPage = client.listServices(request -> request.nextToken(nextToken)).services();
+            List<ServiceInfo> secondPage = client.listServices(request -> request.nextToken(nextToken)).services();
             assertThat(secondPage.size()).isGreaterThanOrEqualTo(1);
 
             // Services sorted by ServiceCode (case-insensitive)
-            List<String> codes = allServices.stream().map(ServiceQuota::serviceCode).toList();
+            List<String> codes = allServices.stream().map(ServiceInfo::serviceCode).toList();
             List<String> sorted = new ArrayList<>(codes);
             sorted.sort(String::compareToIgnoreCase);
             assertThat(codes).isEqualTo(sorted);

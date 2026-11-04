@@ -52,7 +52,7 @@ public class ServiceQuotasJsonHandler {
     private Response handleListServices(JsonNode request, String region, String accountId) {
         String nextToken = stringOrNull(request, "NextToken");
         Integer maxResults = integerOrNull(request, "MaxResults");
-        return Response.ok(service.listServices(nextToken, maxResults, region, accountId)).build();
+        return Response.ok(service.listServices(nextToken, maxResults)).build();
     }
 
     private Response handleListServiceQuotas(JsonNode request, String region, String accountId, boolean awsDefault) {
