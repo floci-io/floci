@@ -19,12 +19,15 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -288,6 +291,82 @@ class Ec2FlowLogCfnProvisionerTest {
         assertThrows(AwsException.class, () -> provisioner.provision(resource(), props, ctx()));
 
         verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    void aTagValueTooLongCreatesNoFlowLog() {
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "v".repeat(257));
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(), props, ctx()));
+
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+    }
+
+    @Test
+    void aFailedTagWriteDeletesTheNewFlowLog() {
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
+                .thenReturn(flowLog("fl-0abc"));
+        doThrow(new AwsException("InternalError", "tag store down", 500))
+                .when(ec2).createTags(anyString(), any(), any());
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(), props, ctx()));
+
+        // Otherwise the log outlives the failed stack, which recorded no id to delete.
+        verify(flowLogs).deleteFlowLogs("us-east-1", List.of("fl-0abc"));
+    }
+
+    @Test
+    void rollbackPutsBackTheTagsAnUpdateChanged() {
+        StackResource r = reusedFlowLogWithTag("old", "gone");
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
+        provisioner.provision(r, props, ctx());
+        assertTrue(r.getAttributes().containsKey(Ec2FlowLogCfnProvisioner.PRIOR_TAGS_ATTR));
+
+        // A later resource failed the update, so the stack rolls this one back.
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(ec2).createTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("old", "gone"));
+        assertFalse(r.getAttributes().containsKey(Ec2FlowLogCfnProvisioner.PRIOR_TAGS_ATTR));
+    }
+
+    @Test
+    void anUnchangedReuseLeavesNoTagSnapshot() {
+        StackResource r = reusedFlowLogWithTag("team", "core");
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
+
+        provisioner.provision(r, props, ctx());
+
+        assertFalse(r.getAttributes().containsKey(Ec2FlowLogCfnProvisioner.PRIOR_TAGS_ATTR));
+        assertTrue(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
+    void aCommittedUpdateDropsTheTagSnapshot() {
+        StackResource r = reusedFlowLogWithTag("old", "gone");
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
+        provisioner.provision(r, props, ctx());
+
+        provisioner.completeUpdate(r);
+
+        assertFalse(r.getAttributes().containsKey(Ec2FlowLogCfnProvisioner.PRIOR_TAGS_ATTR));
+    }
+
+    /** A stack resource pointing at a stored flow log that EC2 reports one tag on. */
+    private StackResource reusedFlowLogWithTag(String key, String value) {
+        StackResource r = resource();
+        r.setPhysicalId("fl-0abc");
+        FlowLog existing = flowLog("fl-0abc");
+        existing.setResourceId("vpc-123");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
+        when(ec2.describeTags("us-east-1", Map.of("resource-id", List.of("fl-0abc"))))
+                .thenReturn(List.of(Map.of("key", key, "value", value)));
+        return r;
     }
 
     @Test
