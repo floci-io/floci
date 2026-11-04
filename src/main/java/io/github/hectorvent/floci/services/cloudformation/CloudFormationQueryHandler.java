@@ -886,6 +886,15 @@ public class CloudFormationQueryHandler {
                     .end("ManagedExecution");
             appendCapabilities(xml, ss.getCapabilities());
             appendParameters(xml, ss.getParameters());
+            appendStackSetTags(xml, ss.getTags());
+            if ("SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+                List<String> targets = stackSetService.organizationalUnitIds(ss.getStackSetName());
+                if (!targets.isEmpty()) {
+                    xml.start("OrganizationalUnitIds");
+                    targets.forEach(target -> xml.elem("member", target));
+                    xml.end("OrganizationalUnitIds");
+                }
+            }
             xml.end("StackSet").end("DescribeStackSetResult")
                .raw(AwsQueryResponse.responseMetadata())
                .end("DescribeStackSetResponse");
@@ -1132,6 +1141,18 @@ public class CloudFormationQueryHandler {
                .end("member");
         }
         xml.end("Parameters");
+    }
+
+    private void appendStackSetTags(XmlBuilder xml, Map<String, String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return;
+        }
+        xml.start("Tags");
+        tags.forEach((key, value) -> xml.start("member")
+                .elem("Key", key)
+                .elem("Value", value)
+                .end("member"));
+        xml.end("Tags");
     }
 
     private void awaitExecution(Future<?> future) {
