@@ -507,12 +507,17 @@ Floci provisions these AppSync resource types:
 
 | Type | `Ref` returns | `Fn::GetAtt` attributes Floci serves |
 |---|---|---|
-| `AWS::AppSync::GraphQLApi` | the API id (AWS: the API ARN) | `ApiId`, `Arn`, `GraphQLUrl`, `GraphQLDns`, `RealtimeUrl`, `RealtimeDns` |
+| `AWS::AppSync::GraphQLApi` | the API id (AWS: the API ARN) | `ApiId`, `Arn`, `GraphQLEndpointArn`, `GraphQLUrl`, `GraphQLDns`, `RealtimeUrl`, `RealtimeDns` |
 | `AWS::AppSync::GraphQLSchema` | `<ApiId>GraphQLSchema` | `Id` (AWS rejects it, see below) |
 | `AWS::AppSync::DataSource` | the data source ARN | `DataSourceArn`, `Name` |
 | `AWS::AppSync::FunctionConfiguration` | the function ARN | `FunctionArn`, `FunctionId`, `Name`, `DataSourceName` |
 | `AWS::AppSync::Resolver` | the resolver ARN | `ResolverArn`, `TypeName`, `FieldName` |
 | `AWS::AppSync::ApiKey` | the key id, `da2-...` (AWS: the key ARN) | `ApiKey`, `ApiKeyId`, `Arn` |
+
+`GraphQLEndpointArn` returns
+`arn:<partition>:appsync:<region>:<account>:endpoints/graphql-api/<apiId>`. Use it to
+configure an [EventBridge AppSync target](eventbridge.md#appsync-targets); the API's `Arn`
+continues to identify `apis/<apiId>` for IAM permissions.
 
 One template with all six types (an API with `API_KEY` plus `AWS_IAM` auth, `LogConfig`,
 `XrayEnabled`, an inline schema, an `AWS_LAMBDA` data source, a direct Lambda resolver, an
@@ -527,9 +532,6 @@ differences:
 - `Ref` on an `ApiKey` returns the key id. AWS returns the key ARN,
   `arn:<partition>:appsync:<region>:<account>:apis/<apiId>/apikeys/<keyId>`, the value of
   `Fn::GetAtt Arn`. `ApiKey` and `ApiKeyId` are the same `da2-` string on both.
-- `GraphQLEndpointArn` is not modeled. `Fn::GetAtt` on it resolves to the literal string
-  `<LogicalId>.GraphQLEndpointArn` and the stack still completes. AWS returns
-  `arn:<partition>:appsync:<region>:<account>:endpoints/graphql-api/<id>`.
 - `GraphQLUrl` and `RealtimeUrl` point at Floci: `<base-url>/v1/apis/<apiId>/graphql` and the
   matching WebSocket URL ending in `/graphql/realtime`. `GraphQLDns` and `RealtimeDns` are the
   host of `base-url`. AWS returns `https://<id>.appsync-api.<region>.amazonaws.com/graphql` and

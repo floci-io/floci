@@ -152,6 +152,57 @@ the state machine from the account and region in its ARN.
 
 State machine aliases and versions are not supported as EventBridge targets.
 
+## AppSync Targets
+
+A rule can invoke a mutation on a public AppSync GraphQL API configured for `AWS_IAM`,
+either as its default or an additional authorization mode. Schema authorization directives
+still apply. Set the target `Arn` to the GraphQL **endpoint ARN**,
+`arn:aws:appsync:us-east-1:000000000000:endpoints/graphql-api/<api-id>`.
+CloudFormation exposes this through `Fn::GetAtt: [Api, GraphQLEndpointArn]`.
+
+```bash
+aws events put-targets \
+  --rule order-placed-rule \
+  --targets '[{
+    "Id": "publish-order",
+    "Arn": "arn:aws:appsync:us-east-1:000000000000:endpoints/graphql-api/example",
+    "RoleArn": "arn:aws:iam::000000000000:role/EventBridgeAppSyncRole",
+    "AppSyncParameters": {
+      "GraphQLOperation": "mutation Publish($id: ID!) { publish(id: $id) { id } }"
+    },
+    "InputTransformer": {
+      "InputPathsMap": {"id": "$.detail.orderId"},
+      "InputTemplate": "{\"id\": <id>}"
+    }
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+The delivered input must be a JSON object containing the mutation's variables. `Input`,
+`InputPath`, and `InputTransformer` work as for other targets; with none, the full event is
+the variables object. `PutTargets`, `ListTargetsByRule`, persisted target settings, and
+`AWS::Events::Rule` preserve `AppSyncParameters.GraphQLOperation`. A provided operation
+must contain 1 to 1,048,576 characters; validation errors omit its sensitive contents.
+
+The target role must exist and trust `events.amazonaws.com`, including any trust conditions
+on the rule's `aws:SourceArn` and `aws:SourceAccount`. With IAM enforcement enabled, its
+policies, permissions boundary, and SCPs must allow `appsync:GraphQL` on the selected API
+fields. The permission resources use `apis/<api-id>/...`, rather than the endpoint ARN;
+`arn:aws:appsync:us-east-1:000000000000:apis/<api-id>/*` covers all fields of one API.
+Resolvers receive the target role's identity, and their data sources retain their own
+service-role authorization.
+
+Only mutations are delivered. Private APIs and cross-account or cross-partition targets
+are refused. The target ARN selects the API's region; an API with the same ID in another
+region is not used. AppSync must be enabled. This target does not add realtime subscription
+support to Floci's AppSync endpoint.
+
+Pre-execution validation and authorization failures use the target's dead-letter handling;
+retryable transport failures use its retry policy. Floci treats a returned GraphQL execution
+result, including field errors and partial data, as delivered so it does not retry a mutation
+that may have already written data. A GraphQL request error with no `data` member is a failed
+delivery. This error mapping has integration coverage but has not been compared with live AWS.
+
 ## Redshift Data API Targets
 
 A matching rule can submit one SQL statement to the Redshift Data API for a provisioned cluster, or

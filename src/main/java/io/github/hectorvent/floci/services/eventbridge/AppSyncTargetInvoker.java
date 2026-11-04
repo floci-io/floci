@@ -66,9 +66,18 @@ public class AppSyncTargetInvoker {
         if (!endpoint.accountId().equals(accountId)) {
             throw new AwsException("AccessDeniedException", "Cross-account AppSync targets are not supported.", 403);
         }
+        if (ruleArn != null) {
+            if (!AwsArnUtils.isArn(ruleArn)) {
+                throw new AwsException("AccessDeniedException", "Invalid AppSync target source rule.", 403);
+            }
+            AwsArnUtils.Arn source = AwsArnUtils.parse(ruleArn);
+            if (!endpoint.partition().equals(source.partition()) || !accountId.equals(source.accountId())) {
+                throw new AwsException("AccessDeniedException", "The AppSync target must share the rule's account and partition.", 403);
+            }
+        }
         Target.AppSyncParameters parameters = target.getAppSyncParameters();
         String operation = parameters == null ? null : parameters.graphQLOperation();
-        if (operation == null || operation.isBlank() || operation.length() > 1048576) {
+        if (operation == null || operation.isBlank() || operation.codePointCount(0, operation.length()) > 1048576) {
             throw new AwsException("ValidationException", "An AppSync target requires GraphQLOperation of length 1-1048576.", 400);
         }
         Map<String, Object> variables = variables(payload);

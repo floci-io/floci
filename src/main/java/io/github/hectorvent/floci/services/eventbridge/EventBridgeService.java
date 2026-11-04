@@ -507,6 +507,15 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private static void validateTargetSettings(List<Target> targets) {
         for (int i = 0; i < targets.size(); i++) {
             Target target = targets.get(i);
+            String operation = target.getAppSyncParameters() == null
+                    ? null : target.getAppSyncParameters().graphQLOperation();
+            if (operation != null) {
+                String violation = SmithyValidationErrors.Violations.WITHOUT_VALUES.lengthOutOfRange(
+                        "targets." + (i + 1) + ".member.appSyncParameters.graphQLOperation", operation, 1, 1048576);
+                if (violation != null) {
+                    throw SmithyValidationErrors.validationException(violation);
+                }
+            }
             Integer attempts = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumRetryAttempts() : null;
             Integer age = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumEventAgeInSeconds() : null;
             String arn = target.getDeadLetterConfig() != null ? target.getDeadLetterConfig().arn() : null;

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.PlanResult;
+import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.PlannedDirective;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.PlannedField;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
 import io.github.hectorvent.floci.services.appsync.graphql.resolver.AppSyncResolverExecutor;
@@ -35,7 +36,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -127,6 +130,53 @@ class EventBridgeAppSyncTargetIntegrationTest {
         Map<?, ?> caller = (Map<?, ?>) identity.get();
         assertEquals(ACCOUNT, caller.get("accountId"));
         assertEquals("arn:aws:sts::" + ACCOUNT + ":assumed-role/" + roleName + "/EventBridge", caller.get("userArn"));
+    }
+
+    @Test
+    void aRuleInAnotherPartitionCannotUseTheApiEvenWithAnUnconditionalTrustPolicy() {
+        RequestScopes.runAs(ACCOUNT, REGION, () -> iam.updateAssumeRolePolicy(roleName, """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
+                "Principal":{"Service":"events.amazonaws.com"}}]}"""));
+        AwsException error = assertThrows(AwsException.class, () -> RequestScopes.runAs(ACCOUNT, REGION,
+                () -> invoker.invokeTarget(target, "{}", REGION,
+                        "arn:aws-cn:events:cn-north-1:" + ACCOUNT + ":rule/publish")));
+        assertEquals("AccessDeniedException", error.getErrorCode());
+        assertEquals(null, variables.get());
+    }
+
+    @Test
+    void anImplicitFieldPermissionDenialCannotExecuteTheMutation() {
+        RequestScopes.runAs(ACCOUNT, REGION,
+                () -> iam.putRolePolicy(roleName, "invoke", policy("Allow", api.getArn() + "/unrelated/*")));
+        assertRefused("AccessDeniedException");
+    }
+
+    @Test
+    void additionalIamAuthorizationRequiresIamDirectivesOnTheSelectedFields() {
+        RequestScopes.runAs(ACCOUNT, REGION, () -> appSync.updateGraphqlApi(api.getApiId(),
+                Map.of("name", api.getName(), "authenticationType", "API_KEY", "additionalAuthenticationProviders",
+                        List.of(Map.of("authenticationType", "AWS_IAM"))), REGION));
+        assertRefused("AccessDeniedException");
+        PlannedDirective iamDirective = new PlannedDirective("aws_iam", Map.of());
+        lenient().when(sidecar.plan(any(), any(), any(), any())).thenReturn(new PlanResult("MUTATION", List.of(
+                new PlannedField("Mutation", "publish", List.of(iamDirective), List.of()),
+                new PlannedField("Result", "id", List.of(), List.of(iamDirective)))));
+        invoke("{\"id\":\"allowed\"}");
+        assertNotNull(variables.get());
+        assertEquals("allowed", variables.get().get("id"));
+    }
+
+    @Test
+    void aPrivateApiIsRejectedBeforePlanning() {
+        GraphqlApi privateApi = RequestScopes.callAs(ACCOUNT, REGION, () -> appSync.createGraphqlApi(
+                Map.of("name", "private-" + UUID.randomUUID(), "authenticationType", "AWS_IAM", "visibility", "PRIVATE"), REGION));
+        try {
+            target.setArn("arn:aws:appsync:" + REGION + ":" + ACCOUNT + ":endpoints/graphql-api/" + privateApi.getApiId());
+            assertRefused("AccessDeniedException");
+            verify(sidecar, never()).plan(any(), any(), any(), any());
+        } finally {
+            RequestScopes.runAs(ACCOUNT, REGION, () -> appSync.deleteGraphqlApi(privateApi.getApiId()));
+        }
     }
 
     @Test
