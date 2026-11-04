@@ -16,7 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.QueryRequests.request;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -28,9 +28,6 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
 
     private static final String ACCOUNT = "000000000000";
     private static final Region REGION = Region.US_EAST_1;
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20261104/us-east-1/elasticloadbalancing/aws4_request";
-
     private ElasticLoadBalancingV2Client elb;
     private AcmClient acm;
     private String loadBalancer;
@@ -156,7 +153,7 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
     }
 
     private static String rawDescribe(String action, Map<String, String> parameters) {
-        return given().header("Authorization", AUTH).formParam("Action", action)
+        return request(ACCOUNT, "elasticloadbalancing", action)
                 .formParam("Version", "2015-12-01").formParams(parameters)
                 .post("/").then().statusCode(200).extract().asString();
     }
