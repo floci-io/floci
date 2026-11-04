@@ -184,13 +184,15 @@ the variables object. `PutTargets`, `ListTargetsByRule`, persisted target settin
 `AWS::Events::Rule` preserve `AppSyncParameters.GraphQLOperation`. A provided operation
 must contain 1 to 1,048,576 characters; validation errors omit its sensitive contents.
 
-The target role must exist and trust `events.amazonaws.com`, including any trust conditions
-on the rule's `aws:SourceArn` and `aws:SourceAccount`. With IAM enforcement enabled, its
+With IAM enforcement enabled, the target role must exist and trust `events.amazonaws.com`,
+including any trust conditions on the rule's `aws:SourceArn` and `aws:SourceAccount`. Its
 policies, permissions boundary, and SCPs must allow `appsync:GraphQL` on the selected API
 fields. The permission resources use `apis/<api-id>/...`, rather than the endpoint ARN;
 `arn:aws:appsync:us-east-1:000000000000:apis/<api-id>/*` covers all fields of one API.
 Resolvers receive the target role's identity, and their data sources retain their own
 service-role authorization.
+With IAM enforcement off, target role existence, trust and permission checks are skipped,
+matching the other service-role integrations.
 
 Only mutations are delivered. Private APIs and cross-account or cross-partition targets
 are refused. The target ARN selects the API's region; an API with the same ID in another
@@ -267,10 +269,10 @@ cross-account event-bus target with the same ID and ARN retains its previous
 role, as documented by AWS.
 
 The value must be between 1 and 1600 characters when supplied.
-[AppSync targets](#appsync-targets) always require an existing role that trusts
-EventBridge, including source-rule conditions, even with IAM enforcement off.
-With enforcement on, AppSync and [Redshift Data API targets](#redshift-data-api-targets)
-also check the role's permissions. Other target types store the role as
+With IAM enforcement on, [AppSync targets](#appsync-targets) and
+[Redshift Data API targets](#redshift-data-api-targets) check the role's existence,
+trust and permissions, including source-rule conditions. With enforcement off,
+these checks are skipped. Other target types store the role as
 configuration without assuming it or enforcing its IAM policies.
 
 ## API Destination Targets

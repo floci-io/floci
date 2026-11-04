@@ -201,6 +201,13 @@ class EventBridgeAppSyncTargetIntegrationTest {
     }
 
     @Test
+    void aMissingRoleCannotBypassEnforcementWithAnEmptyFieldPlan() {
+        target.setRoleArn(null);
+        lenient().when(sidecar.plan(any(), any(), any(), any())).thenReturn(new PlanResult("MUTATION", List.of()));
+        assertRefused("AccessDeniedException");
+    }
+
+    @Test
     void anEndpointInAnotherRegionDoesNotResolveAnApiWithTheSameId() {
         target.setArn(target.getArn().replace(REGION, "us-west-2"));
         assertRefused("NotFoundException");

@@ -5,20 +5,17 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
@@ -28,7 +25,6 @@ import software.amazon.awssdk.services.eventbridge.model.Target;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.Message;
 
-import java.net.URI;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -91,14 +87,9 @@ class EventBridgeAppSyncSidecarIntegrationTest {
         table = stack + "-items";
         targetRoleName = stack + "-target";
         dataRoleName = stack + "-data";
-        URI endpoint = URI.create("http://localhost:" + RestAssured.port);
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
-        events = EventBridgeClient.builder().endpointOverride(endpoint).region(Region.of(REGION))
-                .credentialsProvider(credentials).httpClientBuilder(UrlConnectionHttpClient.builder()).build();
-        dynamo = DynamoDbClient.builder().endpointOverride(endpoint).region(Region.of(REGION))
-                .credentialsProvider(credentials).httpClientBuilder(UrlConnectionHttpClient.builder()).build();
-        sqs = SqsClient.builder().endpointOverride(endpoint).region(Region.of(REGION))
-                .credentialsProvider(credentials).httpClientBuilder(UrlConnectionHttpClient.builder()).build();
+        events = AwsTestClients.create(EventBridgeClient.builder(), "test", Region.of(REGION));
+        dynamo = AwsTestClients.create(DynamoDbClient.builder(), "test", Region.of(REGION));
+        sqs = AwsTestClients.create(SqsClient.builder(), "test", Region.of(REGION));
         RequestScopes.runAs(ACCOUNT, REGION, () -> {
             iam.createRole(targetRoleName, "/", trust("events", "arn:aws:events:" + REGION + ":" + ACCOUNT + ":rule/" + rule),
                     null, 3600, Map.of());

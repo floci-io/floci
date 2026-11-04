@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
@@ -16,15 +15,14 @@ import io.github.hectorvent.floci.services.appsync.graphql.AppSyncExecutionContr
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncTransportException;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuth;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuthContext;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.AuthMiddleware;
+import io.github.hectorvent.floci.services.appsync.graphql.auth.IamAuthValidator;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.IdentityBuilder;
 import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
-import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
-import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer;
 import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer.Permission;
-import io.github.hectorvent.floci.services.iam.model.IamRole;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -39,22 +37,20 @@ public class AppSyncTargetInvoker {
     private static final String EVENTS = ServicePrincipals.of("events");
     private final AppSyncService appSync;
     private final AppSyncExecutionController execution;
-    private final IamService iam;
-    private final AssumeRolePolicyEvaluator trust;
     private final ServiceRoleAuthorizer authorizer;
     private final ServiceRegistry registry;
+    private final RegionResolver regionResolver;
     private final ObjectMapper mapper;
 
     @Inject
-    public AppSyncTargetInvoker(AppSyncService appSync, AppSyncExecutionController execution, IamService iam,
-                               AssumeRolePolicyEvaluator trust, ServiceRoleAuthorizer authorizer,
-                               ServiceRegistry registry, ObjectMapper mapper) {
+    public AppSyncTargetInvoker(AppSyncService appSync, AppSyncExecutionController execution,
+                               ServiceRoleAuthorizer authorizer, ServiceRegistry registry,
+                               RegionResolver regionResolver, ObjectMapper mapper) {
         this.appSync = appSync;
         this.execution = execution;
-        this.iam = iam;
-        this.trust = trust;
         this.authorizer = authorizer;
         this.registry = registry;
+        this.regionResolver = regionResolver;
         this.mapper = mapper;
     }
 
@@ -82,7 +78,6 @@ public class AppSyncTargetInvoker {
         }
         Map<String, Object> variables = variables(payload);
         RequestScopes.runAs(accountId, endpoint.region(), () -> {
-            IamRole role = role(target.getRoleArn(), endpoint, ruleArn);
             String apiId = endpoint.resource().substring("endpoints/graphql-api/".length());
             GraphqlApi api = appSync.getGraphqlApi(apiId);
             String expected = new AwsArnUtils.Arn(endpoint.partition(), "appsync", endpoint.region(), accountId,
@@ -90,23 +85,26 @@ public class AppSyncTargetInvoker {
             if (!expected.equals(api.getArn())) {
                 throw new AwsException("NotFoundException", "GraphQL API not found in the target region.", 404);
             }
-            boolean iamConfigured = api.getAuthenticationType() == AuthenticationType.AWS_IAM
-                    || (api.getAdditionalAuthenticationProviders() != null
-                    && api.getAdditionalAuthenticationProviders().stream().anyMatch(provider -> provider != null
-                    && provider.getAuthenticationType() == AuthenticationType.AWS_IAM));
+            boolean iamConfigured = AuthMiddleware.configuredModes(api).contains(AuthenticationType.AWS_IAM);
             if (!iamConfigured || !"GLOBAL".equals(api.getVisibility())) {
                 throw new AwsException("AccessDeniedException", "AppSync targets require a public API with AWS_IAM authorization.", 403);
             }
-            String callerArn = AwsArnUtils.Arn.global(endpoint.partition(), "sts", accountId,
-                    "assumed-role/" + role.getRoleName() + "/EventBridge").toString();
+            authorizer.refusal(target.getRoleArn(), accountId, EVENTS, ruleArn, List.of()).ifPresent(reason -> {
+                throw new AwsException("AccessDeniedException", reason, 403);
+            });
+            String roleName = target.getRoleArn() == null ? null
+                    : target.getRoleArn().substring(target.getRoleArn().lastIndexOf('/') + 1);
+            String callerArn = roleName == null ? null : AwsArnUtils.Arn.global(endpoint.partition(), "sts", accountId,
+                    "assumed-role/" + roleName + "/EventBridge").toString();
             AppSyncAuthContext auth = new AppSyncAuthContext(
-                    IdentityBuilder.iam(accountId, null, role.getRoleName(), callerArn, List.of()),
+                    IdentityBuilder.iam(accountId, null, roleName, callerArn, List.of()),
                     AppSyncAuth.AUTH_TYPE_IAM, AuthenticationType.AWS_IAM, Set.of(), api, null, endpoint.region(), accountId);
             try {
                 Map<String, Object> result = execution.executeServiceMutation(apiId, operation, variables, auth,
                         field -> authorizer.refusal(
-                        role.getArn(), accountId, EVENTS, ruleArn, List.of(new Permission("appsync:GraphQL",
-                                api.getArn() + "/types/" + field.typeName() + "/fields/" + field.fieldName()))).isEmpty());
+                        target.getRoleArn(), accountId, EVENTS, ruleArn, List.of(new Permission("appsync:GraphQL",
+                                IamAuthValidator.fieldArn(endpoint.region(), accountId, apiId,
+                                        field.typeName(), field.fieldName())))).isEmpty());
                 // GraphQL request errors omit data; execution results include it even when null
                 // (spec section 7.1.3). Never retry a returned execution result after partial mutations.
                 if (!result.containsKey("data")) {
@@ -121,31 +119,13 @@ public class AppSyncTargetInvoker {
         });
     }
 
-    private IamRole role(String value, AwsArnUtils.Arn endpoint, String ruleArn) {
-        if (!AwsArnUtils.isArn(value)) {
-            throw new AwsException("AccessDeniedException", "An AppSync target requires an IAM role.", 403);
-        }
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(value);
-        if (!"iam".equals(arn.service()) || !arn.region().isEmpty() || !arn.resource().startsWith("role/")
-                || !endpoint.partition().equals(arn.partition()) || !endpoint.accountId().equals(arn.accountId())) {
-            throw new AwsException("AccessDeniedException", "The target role must belong to the rule's account and partition.", 403);
-        }
-        String name = arn.resource().substring(arn.resource().lastIndexOf('/') + 1);
-        IamRole role = iam.findRole(endpoint.accountId(), name).filter(found -> IamService.roleArnMatches(value, found))
-                .orElseThrow(() -> new AwsException("AccessDeniedException", "The target role does not exist.", 403));
-        if (!trust.allowsService(role.getAssumeRolePolicyDocument(), EVENTS, ruleArn, endpoint.accountId())) {
-            throw new AwsException("AccessDeniedException", "The target role does not trust EventBridge for this rule.", 403);
-        }
-        return role;
-    }
-
-    private static AwsArnUtils.Arn endpoint(String value) {
+    private AwsArnUtils.Arn endpoint(String value) {
         if (!AwsArnUtils.isArn(value)) {
             throw new AwsException("ValidationException", "Invalid AppSync GraphQL endpoint ARN.", 400);
         }
         AwsArnUtils.Arn arn = AwsArnUtils.parse(value);
         if (!"appsync".equals(arn.service()) || !arn.accountId().matches("[0-9]{12}")
-                || !RegionResolver.isKnownRegion(arn.region()) || !AwsRegions.partitionFor(arn.region()).equals(arn.partition())
+                || !RegionResolver.isKnownRegion(arn.region()) || !regionResolver.partitionForRegion(arn.region()).equals(arn.partition())
                 || !arn.resource().matches("endpoints/graphql-api/[A-Za-z0-9_-]+")) {
             throw new AwsException("ValidationException", "Invalid AppSync GraphQL endpoint ARN.", 400);
         }
