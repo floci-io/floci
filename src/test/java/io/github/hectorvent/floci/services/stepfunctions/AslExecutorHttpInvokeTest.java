@@ -37,6 +37,7 @@ import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -147,6 +148,16 @@ class AslExecutorHttpInvokeTest {
                     .onItem().transformToUni(ignore -> ctx.response()
                         .putHeader("Content-Type", "application/json")
                         .end(Buffer.newInstance(JsonObject.of("ok", "true").toBuffer())))
+                    .subscribe().with(it -> {
+                    });
+            });
+        router.post("/token-slow")
+            .handler(ctx -> {
+                Uni.createFrom().voidItem()
+                    .onItem().delayIt().by(Duration.ofSeconds(2))
+                    .onItem().transformToUni(ignore -> ctx.response()
+                        .putHeader("Content-Type", "application/json")
+                        .end(Buffer.newInstance(JsonObject.of("access_token", "token").toBuffer())))
                     .subscribe().with(it -> {
                     });
             });
@@ -443,7 +454,8 @@ class AslExecutorHttpInvokeTest {
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Http.Socket", execution.getError());
-        assertThat(execution.getCause(), startsWith("The timeout period of 1000ms has been exceeded while executing GET /jsonslow for server"));
+        assertThat(execution.getCause(), matchesPattern(
+                "The timeout period of \\d+ms has been exceeded while executing GET /jsonslow for server.*"));
     }
 
     @Test
@@ -599,6 +611,44 @@ class AslExecutorHttpInvokeTest {
 
         assertEquals("FAILED", execution.getStatus());
         assertEquals("States.Runtime", execution.getError());
+        assertEquals(0, receivedRequests.size());
+    }
+
+    @Test
+    void connectionQueryParameterReplacesOnlyTheSameCaseSensitiveName() {
+        String queryConnection = createConnection("BASIC", basicAuth("""
+                ,"InvocationHttpParameters":{"QueryStringParameters":[{"Key":"foo","Value":"connection"}]}"""));
+
+        Execution execution = run("""
+                {"StartAt":"CallHttp","States":{"CallHttp":{"Type":"Task",
+                 "Resource":"arn:aws:states:::http:invoke","Parameters":{
+                   "ApiEndpoint":"%s/json","Method":"GET",
+                   "InvocationConfig":{"ConnectionArn":"%s"},
+                   "QueryParameters":{"Foo":"task"}
+                 },"End":true}}}
+                """.formatted(baseUrl, queryConnection), "{}");
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertEquals("/json?Foo=task&foo=connection", onlyRequest().path());
+    }
+
+    @Test
+    void oauthTokenExchangeSpendsTheTasksTimeout() {
+        String oauthConnection = createConnection("OAUTH_CLIENT_CREDENTIALS", """
+                {"OAuthParameters":{"AuthorizationEndpoint":"%s/token-slow","HttpMethod":"POST",
+                 "ClientParameters":{"ClientID":"cid","ClientSecret":"csecret"}}}
+                """.formatted(baseUrl));
+
+        Execution execution = run("""
+                {"StartAt":"CallHttp","States":{"CallHttp":{"Type":"Task",
+                 "Resource":"arn:aws:states:::http:invoke","Parameters":{
+                   "ApiEndpoint":"%s/json","Method":"GET","TimeoutSeconds":1,
+                   "InvocationConfig":{"ConnectionArn":"%s"}
+                 },"End":true}}}
+                """.formatted(baseUrl, oauthConnection), "{}");
+
+        assertEquals("FAILED", execution.getStatus());
+        assertEquals("States.Http.Socket", execution.getError());
         assertEquals(0, receivedRequests.size());
     }
 

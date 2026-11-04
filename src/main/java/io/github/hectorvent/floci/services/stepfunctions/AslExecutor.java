@@ -5152,19 +5152,25 @@ public class AslExecutor {
         validateHttpMethod(method);
         String connectionArn = connectionArn(input);
         validateHttpHeaders(headers);
+        // The connection's OAuth token exchange spends the same TimeoutSeconds as the request.
+        long deadlineNanos = nanoTime.getAsLong() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         ConnectionHttpParameters connection = connectionHttpParameters(connectionArn, region);
+        long remainingMillis = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - nanoTime.getAsLong());
+        if (remainingMillis <= 0) {
+            throw new FailStateException("States.Http.Socket", "The timeout period of " + timeoutMillis
+                    + "ms has been exceeded while authorizing with the connection");
+        }
 
         HttpRequestPayload requestPayload = requestPayload(
                 mergeConnectionBody(requestBody, connection.bodyParameters()), requestBodyEncoding,
                 input.path("Transform").path("RequestEncodingOptions"));
         MultiMap requestHeaders = requestHeaders(headers, requestPayload.contentType());
         connection.headers().forEach(requestHeaders::set);
-        MultiMap requestQueryParameters = queryParameters(queryParameters);
-        connection.queryStringParameters().forEach(requestQueryParameters::set);
+        MultiMap requestQueryParameters = queryParameters(queryParameters, connection.queryStringParameters());
 
         try {
             HttpRequest<Buffer> request = webClient.requestAbs(HttpMethod.valueOf(method), rawUri)
-                .timeout(timeoutMillis)
+                .timeout(remainingMillis)
                 .putHeaders(requestHeaders)
                 .putHeader("User-Agent", "Amazon|StepFunctions|HttpInvoke|" + region);
             request.queryParams().addAll(requestQueryParameters);
@@ -5395,16 +5401,21 @@ public class AslExecutor {
         }
     }
 
-    private MultiMap queryParameters(JsonNode queryParameters) {
+    /**
+     * The task's query parameters with the connection's merged over them. Query names are
+     * case-sensitive, so a connection parameter replaces only a task parameter of the same name.
+     */
+    private MultiMap queryParameters(JsonNode queryParameters, Map<String, String> connectionParameters) {
         MultiMap params = MultiMap.caseInsensitiveMultiMap();
-        if (queryParameters.isMissingNode() || queryParameters.isNull()) {
-            return params;
+        if (!queryParameters.isMissingNode() && !queryParameters.isNull()) {
+            if (!queryParameters.isObject()) {
+                throw new FailStateException("States.Runtime", "QueryParameters must be a JSON object for HTTP task");
+            }
+            queryParameters.properties().stream()
+                    .filter(entry -> !connectionParameters.containsKey(entry.getKey()))
+                    .forEach(entry -> addQueryParameterValues(params, entry.getKey(), entry.getValue()));
         }
-        if (!queryParameters.isObject()) {
-            throw new FailStateException("States.Runtime", "QueryParameters must be a JSON object for HTTP task");
-        }
-
-        queryParameters.properties().forEach(entry -> addQueryParameterValues(params, entry.getKey(), entry.getValue()));
+        connectionParameters.forEach(params::add);
         return params;
     }
 
