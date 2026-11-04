@@ -396,6 +396,7 @@ AWS::KinesisFirehose::DeliveryStream	RedshiftDestinationConfiguration	documented
 AWS::KinesisFirehose::DeliveryStream	SnowflakeDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
 AWS::KinesisFirehose::DeliveryStream	SplunkDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
 AWS::Lambda::Alias	ProvisionedConcurrencyConfig	accepted and ignored
+AWS::Lambda::CodeSigningConfig	Tags	accepted and ignored
 AWS::Lambda::EventSourceMapping	AmazonManagedKafkaEventSourceConfig	accepted and ignored
 AWS::Lambda::EventSourceMapping	DocumentDBEventSourceConfig	accepted and ignored
 AWS::Lambda::EventSourceMapping	KmsKeyArn	accepted and ignored
@@ -408,7 +409,6 @@ AWS::Lambda::EventSourceMapping	SelfManagedKafkaEventSourceConfig	accepted and i
 AWS::Lambda::EventSourceMapping	Tags	accepted and ignored
 AWS::Lambda::EventSourceMapping	TumblingWindowInSeconds	documented as ignored (docs/services/cloudformation.md, Lambda)
 AWS::Lambda::Function	CapacityProviderConfig	accepted and ignored
-AWS::Lambda::Function	CodeSigningConfigArn	accepted and ignored
 AWS::Lambda::Function	FunctionScalingConfig	accepted and ignored
 AWS::Lambda::Function	KmsKeyArn	accepted and ignored
 AWS::Lambda::Function	PublishToLatestPublished	accepted and ignored
@@ -648,6 +648,7 @@ AWS::SecretsManager::Secret	Type	accepted and ignored
 AWS::ServiceDiscovery::PrivateDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::PublicDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::Service	ServiceAttributes	accepted and ignored
+AWS::Signer::SigningProfile	Tags	accepted and ignored: Floci has no Signer API to tag
 AWS::Transfer::Server	Certificate	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	CreateWithHostKey	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	IpAddressType	rejected with a ValidationError, not supported by Floci

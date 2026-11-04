@@ -141,6 +141,7 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         }
 
         applyLambdaReservedConcurrency(region, func, desired);
+        applyLambdaCodeSigningConfig(region, func, desired);
 
         r.setPhysicalId(desired.functionName());
         r.getAttributes().put("Arn", func.getFunctionArn());
@@ -280,6 +281,10 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
         LambdaService.validateTagKeys(tags);
         if (!tags.isEmpty()) {
             createRequest.put("Tags", tags);
+        }
+        String codeSigningConfigArn = ctx.resolveOrDefault(props, "CodeSigningConfigArn", null);
+        if (codeSigningConfigArn != null) {
+            createRequest.put("CodeSigningConfigArn", codeSigningConfigArn);
         }
         Integer reservedConcurrentExecutions = null;
         String reserved = ctx.resolveOptional(props, "ReservedConcurrentExecutions");
@@ -456,6 +461,19 @@ public class LambdaCfnProvisioner implements CfnResourceProvisioner {
             }
         } else if (fn.getReservedConcurrentExecutions() != null) {
             lambdaService.deleteFunctionConcurrency(region, fn.getFunctionName());
+        }
+    }
+
+    /** Attaches, replaces or detaches the function's code signing config to match the template. */
+    private void applyLambdaCodeSigningConfig(String region, LambdaFunction fn, LambdaDesiredState desired) {
+        Object codeSigningConfigArn = desired.createRequest().get("CodeSigningConfigArn");
+        if (codeSigningConfigArn == null) {
+            if (fn.getCodeSigningConfigArn() != null) {
+                lambdaService.deleteFunctionCodeSigningConfig(region, fn.getFunctionName());
+            }
+        } else if (!codeSigningConfigArn.equals(fn.getCodeSigningConfigArn())) {
+            lambdaService.attachFunctionCodeSigningConfig(region, fn.getFunctionName(),
+                    codeSigningConfigArn.toString());
         }
     }
 
