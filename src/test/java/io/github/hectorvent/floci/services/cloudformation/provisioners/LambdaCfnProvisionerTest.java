@@ -312,12 +312,33 @@ class LambdaCfnProvisionerTest {
     }
 
     @Test
+    void blankCodeSigningConfigArnIsLeftForLambdaToReject() {
+        when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("my-fn"));
+
+        provisioner.provision(function(null), props("my-fn").put("CodeSigningConfigArn", " "), ctx());
+
+        assertEquals(" ", capturedCreateRequest().get("CodeSigningConfigArn"));
+    }
+
+    @Test
     void inPlaceUpdateWithTheCodeSigningConfigGoneDetachesIt() {
+        stubInPlaceUpdate("my-fn", Map.of()).setCodeSigningConfigArn(CSC_ARN);
+        ProvisionContext update = updateCtx("my-fn");
+
+        provisioner.provision(function("my-fn"), props("my-fn"), new ProvisionContext(update.engine(), REGION,
+                update.accountId(), update.stackName(), "my-fn", event -> {},
+                props("my-fn").put("CodeSigningConfigArn", CSC_ARN)));
+
+        verify(lambda).deleteFunctionCodeSigningConfig(REGION, "my-fn");
+    }
+
+    @Test
+    void inPlaceUpdateKeepsACodeSigningConfigTheStackNeverDeclared() {
         stubInPlaceUpdate("my-fn", Map.of()).setCodeSigningConfigArn(CSC_ARN);
 
         provisioner.provision(function("my-fn"), props("my-fn"), updateCtx("my-fn"));
 
-        verify(lambda).deleteFunctionCodeSigningConfig(REGION, "my-fn");
+        verify(lambda, never()).deleteFunctionCodeSigningConfig(anyString(), anyString());
     }
 
     @SuppressWarnings("unchecked")

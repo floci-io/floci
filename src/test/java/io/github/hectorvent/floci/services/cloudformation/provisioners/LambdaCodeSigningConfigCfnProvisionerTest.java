@@ -204,6 +204,20 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
     }
 
     @Test
+    void blankPolicyIsLeftForLambdaToReject() {
+        when(configs.create(eq(REGION), eq(ACCOUNT), any(), any(), any())).thenReturn(stored());
+        ObjectNode props = props();
+        props.putObject("CodeSigningPolicies").put("UntrustedArtifactOnDeployment", " ");
+        ArgumentCaptor<CodeSigningConfig.CodeSigningPolicies> policies =
+                ArgumentCaptor.forClass(CodeSigningConfig.CodeSigningPolicies.class);
+
+        provisioner.provision(config(), props, ctx(null));
+
+        verify(configs).create(eq(REGION), eq(ACCOUNT), eq(""), any(), policies.capture());
+        assertEquals(" ", policies.getValue().getUntrustedArtifactOnDeployment());
+    }
+
+    @Test
     void updateOfAStubFromBeforeThisProvisionerCreatesTheConfig() {
         when(configs.create(eq(REGION), eq(ACCOUNT), any(), any(), any())).thenReturn(stored());
         StackResource r = config();

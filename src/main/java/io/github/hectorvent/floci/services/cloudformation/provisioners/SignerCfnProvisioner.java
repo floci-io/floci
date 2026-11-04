@@ -46,7 +46,7 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationError",
                     TYPE + " PlatformId must be one of " + PLATFORMS + ", got " + platformId, 400);
         }
-        String explicitName = ctx.resolveOrDefault(props, "ProfileName", null);
+        String explicitName = ctx.resolveOptional(props, "ProfileName");
         if (explicitName != null && !PROFILE_NAME.matcher(explicitName).matches()) {
             throw new AwsException("ValidationError",
                     TYPE + " ProfileName must be 2 to 64 characters from [0-9a-zA-Z_], got " + explicitName, 400);
@@ -66,21 +66,24 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
         ReplacementCleanup.record(r, ctx, attributesBefore);
     }
 
-    /** Signer's limits on a validity period, with its messages: a known unit, above zero, at most the unit's cap. */
+    /**
+     * Signer's checks on a supplied validity period, in its order and with its messages: a known unit,
+     * then a value above zero and at most the unit's cap. An omitted period keeps Signer's default.
+     */
     private static void validatePeriod(JsonNode period, ProvisionContext ctx) {
-        String type = period.path("Type").asText(null);
-        if (type != null && !MAX_VALIDITY.containsKey(type)) {
-            throw new AwsException("ValidationError",
-                    TYPE + " SignatureValidityPeriod Type must be DAYS, MONTHS or YEARS, got " + type, 400);
-        }
-        Integer value = ctx.resolveOptionalInt(period, "Value");
-        if (value == null) {
+        if (period.isMissingNode()) {
             return;
         }
-        if (value < 1) {
+        String type = period.path("Type").asText(null);
+        if (type == null || !MAX_VALIDITY.containsKey(type)) {
+            throw new AwsException("ValidationError",
+                    "Signature validity period type must be one of [DAYS, MONTHS, YEARS]", 400);
+        }
+        Integer value = ctx.resolveOptionalInt(period, "Value");
+        if (value == null || value < 1) {
             throw new AwsException("ValidationError", "Signature validity period value must be greater than 0.", 400);
         }
-        if (type != null && value > MAX_VALIDITY.get(type)) {
+        if (value > MAX_VALIDITY.get(type)) {
             throw new AwsException("ValidationError", "Signature validity period value for " + type
                     + " must be less than or equal to " + MAX_VALIDITY.get(type), 400);
         }

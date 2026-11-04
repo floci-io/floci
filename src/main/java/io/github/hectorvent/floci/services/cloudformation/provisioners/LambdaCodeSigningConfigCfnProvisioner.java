@@ -50,8 +50,8 @@ public class LambdaCodeSigningConfigCfnProvisioner implements CfnResourceProvisi
         publishers.setSigningProfileVersionArns(ctx.resolveStringList(
                 ctx.engine().resolveNode(props.path("AllowedPublishers")), "SigningProfileVersionArns"));
         CodeSigningConfig.CodeSigningPolicies policies = new CodeSigningConfig.CodeSigningPolicies();
-        policies.setUntrustedArtifactOnDeployment(ctx.resolveOrDefault(
-                ctx.engine().resolveNode(props.path("CodeSigningPolicies")), "UntrustedArtifactOnDeployment", "Warn"));
+        policies.setUntrustedArtifactOnDeployment(Objects.requireNonNullElse(ctx.resolveOptional(
+                ctx.engine().resolveNode(props.path("CodeSigningPolicies")), "UntrustedArtifactOnDeployment"), "Warn"));
 
         // A dispatcher stub from before this provisioner existed is not an ARN and names no config.
         String prior = ctx.priorPhysicalId();

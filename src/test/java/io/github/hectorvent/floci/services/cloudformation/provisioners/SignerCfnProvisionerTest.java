@@ -223,13 +223,23 @@ class SignerCfnProvisionerTest {
     }
 
     @Test
-    void unknownValidityPeriodTypeIsRejected() {
-        ObjectNode props = props(null);
-        props.putObject("SignatureValidityPeriod").put("Type", "WEEKS").put("Value", 30);
+    void validityPeriodWithoutAKnownTypeAndAValueIsRejectedAsSignerRejectsIt() throws Exception {
+        String noType = "Signature validity period type must be one of [DAYS, MONTHS, YEARS]";
+        Map<String, String> cases = Map.of(
+                "{\"Type\": \"WEEKS\", \"Value\": 30}", noType,
+                "{}", noType,
+                "{\"Value\": 999999}", noType,
+                "{\"Type\": \"DAYS\"}", "Signature validity period value must be greater than 0.");
+        for (Map.Entry<String, String> period : cases.entrySet()) {
+            ObjectNode props = props(null);
+            props.set("SignatureValidityPeriod", mapper.readTree(period.getKey()));
 
-        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(profile(), props, ctx(null)));
+            AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(profile(), props, ctx(null)),
+                    period.getKey());
 
-        assertEquals("ValidationError", e.getErrorCode());
+            assertEquals("ValidationError", e.getErrorCode(), period.getKey());
+            assertEquals(period.getValue(), e.getMessage(), period.getKey());
+        }
     }
 
     @Test
@@ -270,9 +280,11 @@ class SignerCfnProvisionerTest {
 
     @Test
     void profileNameOutsideThePatternIsRejected() {
-        AwsException e = assertThrows(AwsException.class,
-                () -> provisioner.provision(profile(), props("thiink-signing-profile"), ctx(null)));
+        for (String name : List.of("thiink-signing-profile", "", " ")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> provisioner.provision(profile(), props(name), ctx(null)), "'" + name + "'");
 
-        assertEquals("ValidationError", e.getErrorCode());
+            assertEquals("ValidationError", e.getErrorCode(), "'" + name + "'");
+        }
     }
 }
