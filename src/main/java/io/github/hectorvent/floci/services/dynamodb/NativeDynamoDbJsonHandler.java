@@ -678,9 +678,8 @@ public class NativeDynamoDbJsonHandler {
         }
         rejectMixedParameters(request, List.of("Expected"), List.of("ConditionExpression"));
         // Only the ExpressionAttributeValues message names the missing expression.
-        if (!request.has("ConditionExpression") && request.has("ExpressionAttributeNames")) {
-            throw new AwsException("ValidationException",
-                    "ExpressionAttributeNames can only be specified when using expressions", 400);
+        if (!request.has("ConditionExpression")) {
+            requireAbsentWithoutExpression(request.get("ExpressionAttributeNames"), "ExpressionAttributeNames");
         }
         rejectExprAttrsWithoutExpression(null, request.get("ExpressionAttributeValues"),
                 request.has("ConditionExpression"), "ConditionExpression is null");
