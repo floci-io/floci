@@ -37,12 +37,18 @@ public final class RedshiftTestCluster implements AutoCloseable {
 
     /** Opens a connection as {@code user}, waiting for the cluster to accept connections first. */
     public Connection connect(String user) throws SQLException {
+        return connect(user, null);
+    }
+
+    /** Opens a connection with the requested query mode, or the driver's default when it is null. */
+    public Connection connect(String user, String queryMode) throws SQLException {
+        String url = jdbcUrl() + (queryMode == null ? "" : "?preferQueryMode=" + queryMode);
         try {
             return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
                     .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                    .until(() -> DriverManager.getConnection(jdbcUrl(), user, PASSWORD), Objects::nonNull);
+                    .until(() -> DriverManager.getConnection(url, user, PASSWORD), Objects::nonNull);
         } catch (ConditionTimeoutException e) {
-            return DriverManager.getConnection(jdbcUrl(), user, PASSWORD);
+            return DriverManager.getConnection(url, user, PASSWORD);
         }
     }
 

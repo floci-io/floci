@@ -1,10 +1,9 @@
 package io.github.hectorvent.floci.services.redshift;
 
-import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.testing.DockerAvailability;
+import io.github.hectorvent.floci.testing.RedshiftTestCluster;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
-import org.awaitility.Awaitility;
-import org.awaitility.core.ConditionTimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -12,13 +11,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
-import java.util.Objects;
-import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -34,49 +29,27 @@ class RedshiftCopyJobIntegrationTest {
     @Inject
     RedshiftService service;
 
-    private String clusterId;
+    private RedshiftTestCluster cluster;
 
     @BeforeAll
-    static void requireDocker() {
-        Assumptions.assumeTrue(isDockerAvailable(), "Docker daemon must be available for Redshift copy job tests");
-    }
-
-    private static boolean isDockerAvailable() {
-        try {
-            Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
-                    .redirectErrorStream(true)
-                    .start();
-            return process.waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
+    static void requireDocker() throws InterruptedException {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker daemon must be available for Redshift copy job tests");
     }
 
     @AfterEach
     void cleanUp() {
-        if (clusterId != null) {
-            service.deleteCluster(clusterId);
-        }
-    }
-
-    private static Connection waitForConnection(Cluster cluster, String mode) throws SQLException {
-        String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev?preferQueryMode=" + mode;
-        try {
-            return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
-                    .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
-                    .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
-        } catch (ConditionTimeoutException e) {
-            return DriverManager.getConnection(url, "admin", "Secret123");
+        if (cluster != null) {
+            cluster.close();
         }
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"simple", "extended"})
     void createListShowAlterAndDropACopyJob(String mode) throws Exception {
-        clusterId = "copy-job-" + UUID.randomUUID().toString().substring(0, 8);
-        Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
+        cluster = RedshiftTestCluster.create(service, "copy-job");
 
-        try (Connection connection = waitForConnection(cluster, mode); Statement statement = connection.createStatement()) {
+        try (Connection connection = cluster.connect(RedshiftTestCluster.MASTER_USER, mode);
+                Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE public.events (id integer)");
             statement.execute(COPY + " JOB CREATE my_copy_job AUTO ON");
 
@@ -100,7 +73,7 @@ class RedshiftCopyJobIntegrationTest {
             statement.execute("CREATE USER job_owner PASSWORD 'Secret123'");
             statement.execute("GRANT USAGE ON SCHEMA public TO job_owner");
             statement.execute("GRANT INSERT ON public.events TO job_owner");
-            try (Connection user = DriverManager.getConnection(connection.getMetaData().getURL(), "job_owner", "Secret123");
+            try (Connection user = cluster.connect("job_owner", mode);
                     Statement userStatement = user.createStatement()) {
                 userStatement.execute(COPY + " JOB CREATE user_job");
                 try (ResultSet rows = userStatement.executeQuery("COPY JOB LIST")) {
