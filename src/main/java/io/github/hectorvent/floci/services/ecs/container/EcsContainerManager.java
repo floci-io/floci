@@ -1546,18 +1546,21 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
-        if (handle.allContainersRemoved()) {
-            cleanupProtectedNetwork(handle);
-            removeTaskVolumes(handle);
-            // Only now: a container that survived a failed removal still holds its address.
-            releaseTaskLinkLocalAddresses(handle.getTaskArn());
+        try {
+            if (handle.allContainersRemoved()) {
+                // Confirm the helper released its host ports before unregister forgets its identity.
+                if (firewallManager != null && handle.getNetworkInterfaceId() != null) {
+                    firewallManager.removeNamespaceStrict(handle.getNetworkInterfaceId());
+                }
+                cleanupProtectedNetwork(handle);
+                removeTaskVolumes(handle);
+                // Only now: a container that survived a failed removal still holds its address.
+                releaseTaskLinkLocalAddresses(handle.getTaskArn());
+            }
+        } finally {
+            // A failed container or helper removal must not keep the stopping task's credentials usable.
+            revokeTaskRoleCredentials(handle.getTaskArn());
         }
-        // Revoked whether or not removal succeeded, unlike everything above. A task being
-        // stopped must not keep usable credentials just because Docker could not remove one of
-        // its containers: the retry that would eventually revoke them depends on the handle
-        // being retained, which only happens while a log stream is still open, so a container
-        // without one (a FireLens router, say) would strand them for the life of the process.
-        revokeTaskRoleCredentials(handle.getTaskArn());
         return exitCodes;
     }
 
