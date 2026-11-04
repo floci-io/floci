@@ -652,7 +652,7 @@ class RedshiftSpectrumIntegrationTest {
             }
             SQLException unreadable = assertThrows(SQLException.class,
                     () -> statement.executeQuery("SELECT SUM(amount) FROM " + schemaName + ".events"));
-            assertEquals("22000", unreadable.getSQLState());
+            assertEquals("22P02", unreadable.getSQLState());
 
             s3Service.putObject(bucket, "events/day=2/part-1.csv", "3,40\n".getBytes(StandardCharsets.UTF_8),
                     "text/csv", null);
