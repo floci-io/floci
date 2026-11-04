@@ -384,6 +384,34 @@ class DelegationRequestIntegrationTest {
     }
 
     @Test
+    void aPolicyParameterListSentBareKeepsItsEntries() {
+        // The bare List.N spelling, which the constraints ahead of this operation read alongside
+        // the generic one: reading only the generic form left the parameters it carried unread.
+        String id = iam(PARTNER_AUTH)
+                .formParam("Action", "CreateDelegationRequest")
+                .formParam("Description", "d")
+                .formParam("NotificationChannel", TOPIC)
+                .formParam("RequestorWorkflowId", workflowId())
+                .formParam("SessionDuration", "3600")
+                .formParam("Permissions.PolicyTemplateArn", TEMPLATE)
+                .formParam("Permissions.Parameters.2.Name", "BucketName")
+                .formParam("Permissions.Parameters.2.Type", "string")
+                .formParam("Permissions.Parameters.2.Values.4", "reports")
+            .when().post("/").then().statusCode(200)
+                .extract().path("CreateDelegationRequestResponse.CreateDelegationRequestResult"
+                        + ".DelegationRequestId");
+
+        byId(PARTNER_AUTH, "GetDelegationRequest", id)
+            .statusCode(200)
+                .body("GetDelegationRequestResponse.GetDelegationRequestResult"
+                        + ".DelegationRequest.Permissions.Parameters.member.Name",
+                        equalTo("BucketName"))
+                .body("GetDelegationRequestResponse.GetDelegationRequestResult"
+                        + ".DelegationRequest.Permissions.Parameters.member.Values.member",
+                        equalTo("reports"));
+    }
+
+    @Test
     void theCustomerReleasesTheTokenAndTheRequestFinalizes() {
         String id = createdId();
         byId(CUSTOMER_AUTH, "AssociateDelegationRequest", id).statusCode(200);

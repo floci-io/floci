@@ -222,6 +222,29 @@ no members is how an absent list arrives, so a required one reads as null rather
 breaking a minimum of 1. A structure member arrives as `TaskPolicyArn.Arn` and is named
 `taskPolicyArn.arn`.
 
+The operations read their own lists the same way, off the indices the request numbers rather than
+off a run from 1 that stops at the first gap: tags and tag keys, a provider's client IDs and
+thumbprints, the namespaces `ListPoliciesGrantingServiceAccess` is asked for, each simulator's
+actions, resources and policy documents, and the context entries and delegation policy parameters
+with the values inside them. A request numbering tags 1 and 3 carries two tags, so the constraints
+held such a request to both and the operation then stored the first alone. The count a tag list
+and a tag key list are each held to is taken over the indices sent, a violation names the index
+the request spelled, and the bare `Tags.1.Key` spelling is read where only `Tags.member.1.Key`
+was. A member numbered only under a deeper key carries no value of its own and is no member of a
+list of values. A tag numbered with a value and no key, or with a key and no value, never reaches
+the operation at all: both members are required, so the constraints answer
+`Value at 'tags.1.member.key' failed to satisfy constraint: Member must not be null` under the index
+the request spelled. The reader skips such a member behind that gate, which is what a context entry
+numbered with values and no name meets, nothing in the model requiring a name of one. An action
+list whose first member is numbered 2 is a list with a member in it, where
+`At least one ActionNames member is required.` was the answer a list that never arrived got. A
+delegation request's policy parameters had a reader of their own that already read their indices,
+and it is gone: they are read through the shared one, which takes the bare spelling with the
+generic form, so this handler reads a list in one place rather than three. The tags a create is
+authorized with are read the same way, so a tag numbered only at 2, or spelled bare, meets a policy
+that requires that tag, and tags split across the two spellings are checked as the one list the
+resource gets rather than as a set each.
+
 A map is read the same way, from the entries the protocol numbers under its name:
 `ReplacementValues.entry.1.key` and `.entry.1.value`, which is the form `AcquireRole`'s own sample
 publishes, or the bare `ReplacementValues.1.key`. An entry's value is named under the key that
@@ -1061,6 +1084,15 @@ such message recorded against AWS carries it, including on map members: SNS's re
 `Value null at 'attributes'` and `Value null at 'messageAttributes.attr1.member.dataType'` both
 prefixed. What is not recorded anywhere is how AWS spells a map *key* constraint, so the
 "Map keys must satisfy constraint" tail is a reasonable shape rather than an attested one.
+
+**The entries are read off the indices the request carries**, not off a run from 1. The Query
+protocol numbers a map's entries rather than listing them, and the constraints read every index the
+request names, so a request numbering entries 1 and 3 stores both: reading them as a run held such a
+request to both entries and then stored only the first. The three spellings are read alike,
+`Properties.entry.1.key`, the generic `Properties.member.1.key` and the bare `Properties.1.key`,
+which is what the shared reader every other list and map here goes through already takes. An entry
+numbered with a value and no key is no entry the map could hold, so it is neither counted nor
+stored, and a request carrying only that one is a map that never arrived.
 
 **Enabling federation twice is an error, and so is disabling it twice**, which is the asymmetry
 worth noticing: `EnableOutboundWebIdentityFederation` answers `FeatureEnabled` with status 409,

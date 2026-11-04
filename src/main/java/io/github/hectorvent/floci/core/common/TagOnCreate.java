@@ -71,9 +71,10 @@ final class TagOnCreate {
 
     /**
      * How a Floci Query handler numbers a tag list: from 1 to the first number with no key, every number there
-     * is, or from 1 to the first number at which none of the prefixes has a key or a value.
+     * is, by {@link AwsQueryLists}'s own rule for a handler that reads one through it, or from 1 to the first
+     * number at which none of the prefixes has a key or a value.
      */
-    private enum Numbering { TO_FIRST_GAP, EVERY, EITHER_AT_EACH }
+    private enum Numbering { TO_FIRST_GAP, EVERY, AS_THE_SHARED_READER, EITHER_AT_EACH }
 
     /** The prefixes a handler numbers a tag list under, in the order it reads them, and its tags' key and value. */
     private record Reading(List<String> prefixes, Numbering numbering, String key, String value) {
@@ -303,6 +304,11 @@ final class TagOnCreate {
      */
     private static List<Reading> readings(String operation, TagOnCreateMembers.Member member, boolean ec2) {
         PassedRoleMembers.Step first = member.querySteps().getFirst();
+        // IamQueryHandler reads every list it serves through AwsQueryLists, so this reads the member the table
+        // names by that same rule rather than restating it: nothing here to keep in step with that handler.
+        if (operation.startsWith("iam:")) {
+            return List.of(sharedReader(member, first.name()));
+        }
         return switch (operation.substring(0, operation.indexOf(':') + 1) + first.name()) {
             // Ec2QueryHandler.parseTagsForResource
             case "ec2:TagSpecification", "ec2:TagSpecifications" ->
@@ -327,6 +333,12 @@ final class TagOnCreate {
 
     private static Reading gap(TagOnCreateMembers.Member member, String... prefixes) {
         return new Reading(List.of(prefixes), Numbering.TO_FIRST_GAP,
+                member.key() == null ? "key" : member.key(), member.value() == null ? "value" : member.value());
+    }
+
+    /** As {@link #gap} but by {@link AwsQueryLists}'s rule, for a handler that reads its lists through it. */
+    private static Reading sharedReader(TagOnCreateMembers.Member member, String... prefixes) {
+        return new Reading(List.of(prefixes), Numbering.AS_THE_SHARED_READER,
                 member.key() == null ? "key" : member.key(), member.value() == null ? "value" : member.value());
     }
 
@@ -366,6 +378,23 @@ final class TagOnCreate {
                         if (name.matcher(parameter).matches() && key != null && !key.isBlank()) {
                             String stem = parameter.substring(0, parameter.length() - reading.key().length());
                             tags.put(key, form.getOrDefault(stem + reading.value(), ""));
+                        }
+                    });
+                }
+            }
+            // The members AwsQueryLists reads, so a handler that reads a list through it needs nothing modelled
+            // here: the spellings it accepts and the indices it takes are read from the one rule both follow.
+            case AS_THE_SHARED_READER -> {
+                for (String prefix : reading.prefixes()) {
+                    Pattern members = AwsQueryLists.memberKeys(prefix, null);
+                    String suffix = "." + reading.key();
+                    form.forEach((parameter, key) -> {
+                        if (key == null || !parameter.endsWith(suffix)) {
+                            return;
+                        }
+                        String numbered = parameter.substring(0, parameter.length() - suffix.length());
+                        if (members.matcher(numbered).matches()) {
+                            tags.put(key, form.getOrDefault(numbered + "." + reading.value(), ""));
                         }
                     });
                 }

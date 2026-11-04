@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.*;
+import io.github.hectorvent.floci.core.common.AwsQueryLists;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -1559,16 +1560,25 @@ public class IamQueryHandler {
 
     /**
      * The Properties map arrives as {@code Properties.entry.N.key} and
-     * {@code Properties.entry.N.value}, which is how the API Reference spells the member.
+     * {@code Properties.entry.N.value}, which is how the API Reference spells the member, bare as
+     * {@code Properties.N.key}, or under the generic {@code Properties.member.N}. All three are
+     * read through the shared reader, off the indices the request carries rather than off a run
+     * from 1, which is what the protocol's numbering means and what the constraints ahead of this
+     * already read: a request numbering 1 and 3 was held to both entries and stored the first, and
+     * one sending the bare form was held to its entries and stored none, reaching the
+     * required-member refusal on an empty map.
+     *
+     * <p>An entry numbered with no key is not an entry the map could hold, the same reading the
+     * constraint walk takes, so it is skipped rather than stored under a null key.
      */
     private Response handlePutAccountProperties(MultivaluedMap<String, String> params) {
         Map<String, String> properties = new LinkedHashMap<>();
-        for (int i = 1; ; i++) {
-            String key = getParam(params, "Properties.entry." + i + ".key");
-            if (key == null) {
-                break;
+        for (AwsQueryLists.IndexedMember entry
+                : AwsQueryLists.members(params, "Properties", "entry")) {
+            String key = getParam(params, entry.prefix() + ".key");
+            if (key != null) {
+                properties.put(key, getParam(params, entry.prefix() + ".value"));
             }
-            properties.put(key, getParam(params, "Properties.entry." + i + ".value"));
         }
         iamService.putAccountProperties(properties);
         return Response.ok(AwsQueryResponse.envelopeNoResult("PutAccountProperties",
@@ -2165,14 +2175,14 @@ public class IamQueryHandler {
         Map<String, List<String>> context = extractContextEntries(params);
         // AWS accepts only one permissions boundary document per simulation; a request that
         // provides more than one is not modeled and only the first is applied.
-        List<String> boundaryInputList = extractIndexedValues(params, "PermissionsBoundaryPolicyInputList.member");
+        List<String> boundaryInputList = getMemberList(params, "PermissionsBoundaryPolicyInputList");
         String boundaryDocument = boundaryInputList.isEmpty() ? null : boundaryInputList.get(0);
         CallerContext caller = new CallerContext(policyInputList, null, boundaryDocument);
         return simulationResults("SimulateCustomPolicy", params, caller, actionNames, resourceArns, context);
     }
 
     private List<String> requireActionNames(MultivaluedMap<String, String> params) {
-        List<String> actionNames = extractIndexedValues(params, "ActionNames.member");
+        List<String> actionNames = getMemberList(params, "ActionNames");
         if (actionNames.isEmpty()) {
             throw new AwsException("ValidationError", "At least one ActionNames member is required.", 400);
         }
@@ -2180,7 +2190,7 @@ public class IamQueryHandler {
     }
 
     private List<String> requirePolicyInputList(MultivaluedMap<String, String> params) {
-        List<String> policyInputList = extractIndexedValues(params, "PolicyInputList.member");
+        List<String> policyInputList = getMemberList(params, "PolicyInputList");
         if (policyInputList.isEmpty()) {
             throw new AwsException("ValidationError", "At least one PolicyInputList member is required.", 400);
         }
@@ -2188,7 +2198,7 @@ public class IamQueryHandler {
     }
 
     private List<String> extractResourceArnsOrWildcard(MultivaluedMap<String, String> params) {
-        List<String> resourceArns = extractIndexedValues(params, "ResourceArns.member");
+        List<String> resourceArns = getMemberList(params, "ResourceArns");
         return resourceArns.isEmpty() ? List.of("*") : resourceArns;
     }
 
@@ -2234,7 +2244,7 @@ public class IamQueryHandler {
         // with it.
         CallerContext caller = iamService.resolveAttachedPrincipalContext(policySourceArn);
         List<String> allDocuments = new ArrayList<>(caller.identityPolicies());
-        allDocuments.addAll(extractIndexedValues(params, "PolicyInputList.member"));
+        allDocuments.addAll(getMemberList(params, "PolicyInputList"));
         List<String> keys = policyEvaluator.contextKeysReferencedIn(allDocuments);
         return Response.ok(AwsQueryResponse.envelope("GetContextKeysForPrincipalPolicy", AwsNamespaces.IAM,
                 contextKeyNamesXml(keys))).build();
@@ -2765,20 +2775,14 @@ public class IamQueryHandler {
     private DelegationPermission parseDelegationPermissions(MultivaluedMap<String, String> params) {
         String templateArn = getParam(params, "Permissions.PolicyTemplateArn");
         List<PolicyParameter> parameters = new ArrayList<>();
-        for (int index : memberIndices(params, "Permissions.Parameters.member.")) {
-            String prefix = "Permissions.Parameters.member." + index;
-            List<String> values = new ArrayList<>();
-            for (int valueIndex : memberIndices(params, prefix + ".Values.member.")) {
-                // An index is read off the keys, so one can be present through a key of its own
-                // that carries no value, as a dotted sub-member does. That is no value to store:
-                // AWS reads the member it knows and nothing from the key it does not.
-                String value = getParam(params, prefix + ".Values.member." + valueIndex);
-                if (value != null) {
-                    values.add(value);
-                }
-            }
-            parameters.add(new PolicyParameter(getParam(params, prefix + ".Name"),
-                    getParam(params, prefix + ".Type"), values));
+        for (AwsQueryLists.IndexedMember parameter
+                : AwsQueryLists.members(params, "Permissions.Parameters", null)) {
+            // The values are read through the same reader, which skips an index present through a
+            // key of its own that carries no value, as a dotted sub-member is: AWS reads the
+            // member it knows and nothing from the key it does not.
+            List<String> values = getMemberList(params, parameter.prefix() + ".Values");
+            parameters.add(new PolicyParameter(getParam(params, parameter.prefix() + ".Name"),
+                    getParam(params, parameter.prefix() + ".Type"), values));
         }
         if (templateArn == null && parameters.isEmpty()
                 && params.getFirst("Permissions") == null) {
@@ -2787,22 +2791,6 @@ public class IamQueryHandler {
             return null;
         }
         return new DelegationPermission(templateArn, parameters);
-    }
-
-    /**
-     * The indices a request supplied under an indexed member prefix, in order. Read from the keys
-     * the request carries rather than counted up from one, so a list numbered from two, or one
-     * with a gap in it, keeps every entry instead of being cut short at the first index missing.
-     */
-    private static List<Integer> memberIndices(MultivaluedMap<String, String> params, String prefix) {
-        return params.keySet().stream()
-                .filter(key -> key.startsWith(prefix))
-                .map(key -> key.substring(prefix.length()).split("\\.")[0])
-                .filter(segment -> segment.matches("\\d+"))
-                .map(Integer::valueOf)
-                .distinct()
-                .sorted()
-                .toList();
     }
 
     /**
@@ -3453,24 +3441,27 @@ public class IamQueryHandler {
      * binds the members as sent, so the count is taken here, before the map collapses repeated keys.
      * Duplicate keys in the request are rejected with InvalidInput (case-insensitively for users and
      * roles, and case-sensitively for other IAM resource types).
+     *
+     * <p>The members are read off the indices the request numbers them with rather than off a run
+     * from 1, which is what the protocol's numbering means and what the constraints ahead of this
+     * already read: a request numbering tags 1 and 3 is counted as two and stores both, where
+     * stopping at the gap held such a caller to a tag it was then not given and left the tag past
+     * the gap unchecked. A member numbered with a value and no key is no tag a map could hold, so
+     * nothing is stored for it, and the index a violation names is the one the request spelled.
      */
     private Map<String, String> extractTags(MultivaluedMap<String, String> params, boolean caseInsensitiveKeys) {
-        List<Map.Entry<String, String>> members = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String key = params.getFirst("Tags.member." + i + ".Key");
-            String value = params.getFirst("Tags.member." + i + ".Value");
-            if (key == null) {
-                break;
-            }
-            members.add(Map.entry(key, value != null ? value : ""));
-        }
+        List<AwsQueryLists.IndexedMember> members = AwsQueryLists.members(params, "Tags", null);
         checkListLength(members.size(), "tags");
         Set<String> seenKeys = new HashSet<>();
         Map<String, String> tags = new LinkedHashMap<>();
-        for (int i = 0; i < members.size(); i++) {
-            String key = members.get(i).getKey();
-            String value = members.get(i).getValue();
-            String at = "tags." + (i + 1) + ".member";
+        for (AwsQueryLists.IndexedMember member : members) {
+            String key = params.getFirst(member.prefix() + ".Key");
+            if (key == null) {
+                continue;
+            }
+            String sent = params.getFirst(member.prefix() + ".Value");
+            String value = sent != null ? sent : "";
+            String at = "tags." + member.index() + ".member";
             String keyViolation = tagKeyViolation(key);
             if (keyViolation != null) {
                 throw validationError(key, at + ".key", keyViolation);
@@ -3544,23 +3535,36 @@ public class IamQueryHandler {
         return IamValidationErrors.validationError(at, value, constraint);
     }
 
+    /**
+     * The values a list's members carry, off the indices the request numbers them with rather than
+     * off a run from 1: {@code <name>.member.N} and the bare {@code <name>.N} alike, as the shared
+     * reader takes them and as the constraints ahead of this already read them. A request numbering
+     * members 1 and 3 therefore carries both, where stopping at the gap carried the first alone.
+     *
+     * <p>An index numbered only under a deeper key carries no value of its own and is no member of
+     * a list of values, which is the reading the constraint walk takes for one. A member sent empty
+     * is a value the request carries, as it is to the constraints, so it is kept rather than left
+     * out to leave the list one member short.
+     */
     private List<String> getMemberList(MultivaluedMap<String, String> params, String name) {
         List<String> values = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String value = params.getFirst(name + ".member." + i);
-            if (value == null) break;
-            values.add(value);
+        for (AwsQueryLists.IndexedMember member : AwsQueryLists.members(params, name, null)) {
+            String value = params.getFirst(member.prefix());
+            if (value != null) {
+                values.add(value);
+            }
         }
         return values;
     }
 
+    /**
+     * {@code tagKeyListType} binds the keys as sent, the same as the tag list, so the count is
+     * taken over the indices the request numbers rather than over a run from 1: a request numbering
+     * keys 1 and 3 removes both and is held to both, where stopping at the gap removed the first
+     * alone and left the second neither counted nor checked.
+     */
     private List<String> extractTagKeys(MultivaluedMap<String, String> params) {
-        List<String> keys = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String key = params.getFirst("TagKeys.member." + i);
-            if (key == null) break;
-            keys.add(key);
-        }
+        List<String> keys = getMemberList(params, "TagKeys");
         checkListLength(keys.size(), "tagKeys");
         for (String key : keys) {
             String violation = tagKeyViolation(key);
@@ -3572,29 +3576,24 @@ public class IamQueryHandler {
         return keys;
     }
 
-    private List<String> extractIndexedValues(MultivaluedMap<String, String> params, String prefix) {
-        List<String> values = new ArrayList<>();
-        for (int i = 1; ; i++) {
-            String value = params.getFirst(prefix + "." + i);
-            if (value == null) break;
-            values.add(value);
-        }
-        return values;
-    }
-
     /**
      * Reads every {@code ContextEntries.member.N.ContextKeyValues.member.M}. AWS context keys
      * are set-typed, and the evaluator's set operators quantify over the whole set, so reading
      * only {@code member.1} silently dropped the values a ForAnyValue:/ForAllValues: condition
      * has to see. An entry that names a key but supplies no value is skipped.
+     *
+     * <p>Both levels are read off the indices the request numbers them with, so an entry past a gap
+     * is read with every value it carries: dropping it took its key and all of its values with it,
+     * which is the same class of loss one level up.
      */
     private Map<String, List<String>> extractContextEntries(MultivaluedMap<String, String> params) {
         Map<String, List<String>> context = new HashMap<>();
-        for (int i = 1; ; i++) {
-            String name = params.getFirst("ContextEntries.member." + i + ".ContextKeyName");
-            if (name == null) break;
-            List<String> values = extractIndexedValues(
-                    params, "ContextEntries.member." + i + ".ContextKeyValues.member");
+        for (AwsQueryLists.IndexedMember entry : AwsQueryLists.members(params, "ContextEntries", null)) {
+            String name = params.getFirst(entry.prefix() + ".ContextKeyName");
+            if (name == null) {
+                continue;
+            }
+            List<String> values = getMemberList(params, entry.prefix() + ".ContextKeyValues");
             if (!values.isEmpty()) {
                 context.put(name, values);
             }
