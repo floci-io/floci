@@ -21,7 +21,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
@@ -89,17 +89,16 @@ class TimestreamInfluxDbContainerManagerTest {
     }
 
     @ParameterizedTest
-    @NullSource
-    @ValueSource(strings = "service-network")
-    void restartResolvesTheCurrentEndpointAfterDockerCompletes(String network) {
+    @CsvSource({"service-network,resolved-network", ",resolved-network", ","})
+    void restartResolvesTheCurrentEndpointAfterDockerCompletes(String network, String resolvedNetwork) {
         DockerClient docker = mock(DockerClient.class);
         RestartContainerCmd restart = mock(RestartContainerCmd.class);
         when(lifecycleManager.getDockerClient()).thenReturn(docker);
         when(docker.restartContainerCmd("container-id")).thenReturn(restart);
         when(influx.dockerNetwork()).thenReturn(Optional.ofNullable(network));
         when(containerBuilder.resolveDockerNetwork(Optional.ofNullable(network)))
-                .thenReturn(Optional.of("resolved-network"));
-        when(lifecycleManager.resolveEndpoint("container-id", 8086, "resolved-network"))
+                .thenReturn(Optional.ofNullable(resolvedNetwork));
+        when(lifecycleManager.resolveEndpoint("container-id", 8086, resolvedNetwork))
                 .thenReturn(new EndpointInfo("reassigned-host", 18086));
 
         assertEquals(new InfluxDbEndpoint("container-id", "reassigned-host", 18086),
@@ -107,7 +106,7 @@ class TimestreamInfluxDbContainerManagerTest {
 
         InOrder order = inOrder(restart, lifecycleManager);
         order.verify(restart).exec();
-        order.verify(lifecycleManager).resolveEndpoint("container-id", 8086, "resolved-network");
+        order.verify(lifecycleManager).resolveEndpoint("container-id", 8086, resolvedNetwork);
         verify(containerBuilder).resolveDockerNetwork(Optional.ofNullable(network));
         verify(portAllocator, never()).allocate(anyInt(), anyInt());
     }
