@@ -9,21 +9,19 @@ import com.github.dockerjava.api.command.ExecStartCmd;
 import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.vertx.core.Vertx;
-import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpServer;
-import io.vertx.core.http.WebSocket;
 import io.vertx.ext.web.Router;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
+import java.net.URI;
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -83,27 +81,16 @@ class EcsExecChannelHandlerTest {
         HttpServer server = vertx.createHttpServer().requestHandler(router).listen(0)
                 .toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
 
-        CountDownLatch handshakeRequested = new CountDownLatch(1);
-        WebSocket client = vertx.createHttpClient()
-                .webSocket(server.actualPort(), "localhost",
-                        EcsExecChannelHandler.CHANNEL_PATH_PREFIX + session.sessionId())
-                .toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
-        client.binaryMessageHandler(buffer -> {
-            if (AgentMessage.decode(buffer.getBytes()).payloadType() == AgentMessage.PAYLOAD_HANDSHAKE_REQUEST) {
-                handshakeRequested.countDown();
-            }
-        });
-        client.writeTextMessage("{\"MessageSchemaVersion\":\"1.0\",\"RequestId\":\"" + UUID.randomUUID()
-                + "\",\"TokenValue\":\"" + session.tokenValue() + "\",\"ClientId\":\"" + UUID.randomUUID() + "\"}");
-        assertTrue(handshakeRequested.await(10, TimeUnit.SECONDS), "the agent must offer the handshake");
-
-        String payload = "{\"ClientVersion\":\"1.2.0.0\",\"ProcessedClientActions\":"
-                + "[{\"ActionType\":\"SessionType\",\"ActionStatus\":1}],\"Errors\":\"\"}";
-        client.writeBinaryMessage(Buffer.buffer(AgentMessage.outbound(AgentMessage.INPUT_STREAM_DATA, 0,
-                AgentMessage.PAYLOAD_HANDSHAKE_RESPONSE, payload.getBytes(StandardCharsets.UTF_8)).encode()));
-        assertTrue(attaching.await(10, TimeUnit.SECONDS), "the agent must attach to the exec");
-
-        client.close();
+        PluginClient client = new PluginClient(vertx, session, URI.create("http://localhost:" + server.actualPort()
+                + EcsExecChannelHandler.CHANNEL_PATH_PREFIX + session.sessionId()));
+        try {
+            client.open();
+            assertEquals(AgentMessage.PAYLOAD_HANDSHAKE_REQUEST, client.next().payloadType());
+            client.sendHandshakeResponse();
+            assertTrue(attaching.await(10, TimeUnit.SECONDS), "the agent must attach to the exec");
+        } finally {
+            client.close();
+        }
 
         verify(attach, timeout(10_000)).close();
     }
