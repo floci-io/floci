@@ -217,6 +217,33 @@ class ApiGatewayHttpProxyEncodedPathIntegrationTest {
     }
 
     @Test
+    void restEncodedSlashBeforeTheGreedyParameterKeepsItsWholeValue() {
+        String apiId = createRestApi("HTTP_PROXY", "/a/b/{proxy+}", "/backend/{proxy}", null);
+
+        getExpecting200("/execute-api/" + apiId + "/test/a%2Fb/c/d");
+
+        assertEquals("/backend/c/d", lastRawPath.get());
+    }
+
+    @Test
+    void restEncodedSlashAheadOfOnlyParametersKeepsTheirDecodedValues() {
+        String apiId = createRestApi("HTTP_PROXY", "/{x}/{y}/{z+}", "/backend/{y}/{z}", null);
+
+        getExpecting200("/execute-api/" + apiId + "/test/a%2Fb/c/d");
+
+        assertEquals("/backend/b/c/d", lastRawPath.get());
+    }
+
+    @Test
+    void restEncodedSlashInsideTheGreedyParameterAfterLiteralsIsKept() {
+        String apiId = createRestApi("HTTP_PROXY", "/a/b/{proxy+}", "/backend/{proxy}", null);
+
+        getExpecting200("/execute-api/" + apiId + "/test/a/b/c%2Fd");
+
+        assertEquals("/backend/c%2Fd", lastRawPath.get());
+    }
+
+    @Test
     void restIntegrationUriThatCannotBeParsedYields502() {
         String apiId = createRestApi("HTTP_PROXY", "/index/{proxy+}", "/not a uri/{proxy}", null);
 

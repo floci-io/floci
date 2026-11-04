@@ -971,7 +971,9 @@ public class ApiGatewayExecuteController {
 
         String rawPath = rawStagelessPath(path, uriInfo.getRequestUri().getRawPath());
         Map<String, String> rawPathMap = new HashMap<>();
-        if (rawPath != null && pathMap.containsKey("proxy")) rawPathMap.put("proxy", rawPath.substring(1));
+        if (rawPath != null && pathMap.containsKey("proxy")) {
+            rawPathMap.put("proxy", rawPath.substring(1));
+        }
         rawPathMap.putAll(extractPathParams(resource.getPath(), rawPath));
 
         String incomingContentType = headerMap.getOrDefault("Content-Type",
