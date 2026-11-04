@@ -1964,7 +1964,7 @@ public class Ec2QueryHandler {
             // Apply filters
             services = applyVpcEndpointServiceFilters(services, filters);
         } catch (AwsException e) {
-            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC2, e.getHttpStatus());
+            return ec2Error(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
 
         XmlBuilder xml = new XmlBuilder()
@@ -2020,8 +2020,9 @@ public class Ec2QueryHandler {
 
         List<String> baseNames;
         if (!requested.isEmpty()) {
+            // Keep requested full names unchanged; only strip+rebuild base names.
             baseNames = requested.stream()
-                    .map(name -> stripRegionPrefix(name, region))
+                    .map(name -> isFullName(name) ? name : stripRegionPrefix(name, region))
                     .toList();
         } else {
             baseNames = new ArrayList<>(INTERFACE_ENDPOINT_SERVICES);
@@ -2029,7 +2030,8 @@ public class Ec2QueryHandler {
         }
 
         for (String base : baseNames) {
-            String fullName = AwsRegionFacts.vpcEndpointServiceName(region, base);
+            String fullName = isFullName(base) ? base : AwsRegionFacts.vpcEndpointServiceName(region, base);
+            String baseName = isFullName(base) ? stripRegionPrefix(base, region) : base;
             List<String> serviceTypes;
             if (fullName.equals(s3Interface) && !s3Interface.equals(s3Gateway)) {
                 serviceTypes = List.of("Interface");
@@ -2047,12 +2049,31 @@ public class Ec2QueryHandler {
                     "amazon",
                     "false",
                     "false",
-                    base,
+                    baseName,
                     region,
                     List.of("ipv4", "ipv6")));
         }
 
+        // In partitions where S3 has distinct gateway and interface names (e.g. China),
+        // ensure the gateway offering is also listed.
+        if (!s3Interface.equals(s3Gateway) && baseNames.contains("s3")) {
+            services.add(new ServiceDetail(
+                    s3Gateway,
+                    List.of("Gateway"),
+                    azNames,
+                    "amazon",
+                    "false",
+                    "false",
+                    "s3",
+                    region,
+                    List.of("ipv4")));
+        }
+
         return services;
+    }
+
+    private boolean isFullName(String name) {
+        return name != null && (name.startsWith("com.") || name.startsWith("cn."));
     }
 
     private String stripRegionPrefix(String fullName, String region) {
@@ -2127,13 +2148,34 @@ public class Ec2QueryHandler {
     }
 
     private boolean wildcardMatch(String value, String pattern) {
-        // Convert AWS wildcard pattern to regex
-        String regex = "^" + pattern
-                .replace(".", "\\.")
-                .replace("*", ".*")
-                .replace("?", ".")
-                + "$";
-        return value.matches(regex);
+        // Treat characters other than * and ? literally to avoid regex injection / ReDoS.
+        int vi = 0;
+        int pi = 0;
+        int vLen = value.length();
+        int pLen = pattern.length();
+        // Simple iterative wildcard matcher (no regex, no backtracking explosion).
+        int starIdx = -1;
+        int match = 0;
+        while (vi < vLen) {
+            if (pi < pLen && (pattern.charAt(pi) == '?' || pattern.charAt(pi) == value.charAt(vi))) {
+                vi++;
+                pi++;
+            } else if (pi < pLen && pattern.charAt(pi) == '*') {
+                starIdx = pi;
+                match = vi;
+                pi++;
+            } else if (starIdx != -1) {
+                pi = starIdx + 1;
+                match++;
+                vi = match;
+            } else {
+                return false;
+            }
+        }
+        while (pi < pLen && pattern.charAt(pi) == '*') {
+            pi++;
+        }
+        return pi == pLen;
     }
 
     // ─── Flow Logs ────────────────────────────────────────────────────────────
