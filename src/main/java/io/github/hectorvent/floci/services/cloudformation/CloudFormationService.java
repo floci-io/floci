@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -43,6 +44,7 @@ import org.jboss.logging.Logger;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
@@ -232,6 +234,116 @@ public class CloudFormationService implements ResourceProvider {
         stack.setEnableTerminationProtection(enabled);
         persistStack(stack);
         return stack;
+    }
+
+    // ── Stack policy ──────────────────────────────────────────────────────────
+
+    /**
+     * Stores a stack's policy (CloudFormation {@code SetStackPolicy}). The checks run in AWS's order:
+     * the policy source, the stack, the stack's state, then the policy itself.
+     */
+    public void setStackPolicy(String stackName, String body, String url, String region) {
+        if (isNullOrEmpty(body) && isNullOrEmpty(url)) {
+            // AWS's own spelling.
+            throw new AwsException("ValidationError", "Ether StackPolicyURL or StackPolicyBody must be specified.", 400);
+        }
+        rejectBothPolicySources(body, url);
+        Stack stack = stackForPolicy(stackName, region);
+        String status = stack.getStatus();
+        if (refusesUpdate(status) || "DELETE_COMPLETE".equals(status)) {
+            throw new AwsException("ValidationError",
+                    "SetStackPolicy cannot be called when stack is in the " + status + " state", 400);
+        }
+        stack.setStackPolicyBody(resolveStackPolicy(body, url, ""));
+        persistStack(stack);
+    }
+
+    /** The stack's policy as it was submitted, or null when it has none. A deleted stack keeps it. */
+    public String getStackPolicy(String stackName, String region) {
+        return stackForPolicy(stackName, region).getStackPolicyBody();
+    }
+
+    /** Stores the policy CreateStack or UpdateStack carried; the caller already resolved and checked it. */
+    public void applyStackPolicy(String stackName, String policy, String region) {
+        Stack stack = getStackOrThrow(stackName, region);
+        stack.setStackPolicyBody(policy);
+        persistStack(stack);
+    }
+
+    /**
+     * The policy a request supplies as {@code StackPolicyBody} or, read from S3, as
+     * {@code StackPolicyURL}, or null when it supplies neither. {@code appliedWhen} completes AWS's
+     * message for a policy that is not one. The check is structural: Floci stores a policy but does
+     * not enforce it.
+     */
+    public String resolveStackPolicy(String body, String url, String appliedWhen) {
+        rejectBothPolicySources(body, url);
+        if (isNullOrEmpty(body) && isNullOrEmpty(url)) {
+            return null;
+        }
+        String policy = isNullOrEmpty(url) ? body : fetchTemplateFromS3(url);
+        if (!isStackPolicy(policy)) {
+            throw new AwsException("ValidationError",
+                    "Error validating stack policy" + appliedWhen + ": Invalid stack policy", 400);
+        }
+        return policy;
+    }
+
+    private static void rejectBothPolicySources(String body, String url) {
+        if (!isNullOrEmpty(body) && !isNullOrEmpty(url)) {
+            throw new AwsException("ValidationError", "You cannot specify both StackPolicyURL and StackPolicyBody", 400);
+        }
+    }
+
+    private Stack stackForPolicy(String stackName, String region) {
+        Stack stack = resolveStackForDescribe(stackName, region);
+        if (stack == null) {
+            throw new AwsException("ValidationError", CONTINUE_STACK_MISSING.formatted(stackName), 400);
+        }
+        return stack;
+    }
+
+    /**
+     * A JSON object that is empty or has a {@code Statement}: one statement object or a non-empty
+     * array of them, each with an Allow or Deny {@code Effect} and not both {@code Action} and
+     * {@code NotAction}. These are the shapes AWS refuses as "Invalid stack policy".
+     */
+    private boolean isStackPolicy(String policy) {
+        JsonNode root;
+        try {
+            root = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(policy);
+        } catch (IOException e) {
+            return false;
+        }
+        if (root == null || !root.isObject()) {
+            return false;
+        }
+        if (root.isEmpty()) {
+            return true;
+        }
+        JsonNode statements = root.path("Statement");
+        if (statements.isObject()) {
+            return isPolicyStatement(statements);
+        }
+        if (!statements.isArray() || statements.isEmpty()) {
+            return false;
+        }
+        for (JsonNode statement : statements) {
+            if (!isPolicyStatement(statement)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isPolicyStatement(JsonNode statement) {
+        String effect = statement.path("Effect").asText();
+        return ("Allow".equalsIgnoreCase(effect) || "Deny".equalsIgnoreCase(effect))
+                && !(statement.has("Action") && statement.has("NotAction"));
+    }
+
+    private static boolean isNullOrEmpty(String value) {
+        return value == null || value.isEmpty();
     }
 
     // ── DescribeStacks ────────────────────────────────────────────────────────
