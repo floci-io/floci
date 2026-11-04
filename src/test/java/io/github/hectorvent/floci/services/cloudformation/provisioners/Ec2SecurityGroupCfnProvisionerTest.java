@@ -424,6 +424,46 @@ class Ec2SecurityGroupCfnProvisionerTest {
     }
 
     @Test
+    void aSourceAPermissionOutsideTheStackAlreadyHoldsIsNeitherAuthorizedNorRolledBack() throws Exception {
+        StackResource r = resource("WebSg");
+        r.setPhysicalId("sg-1");
+        // One permission holding two sources, as an AuthorizeSecurityGroupIngress outside the stack
+        // can leave it; the template declares one of them.
+        SecurityGroup group = group("sg-1", "web", "web tier", "vpc-1");
+        IpPermission external = tcp(80, "0.0.0.0/0");
+        external.getIpRanges().add(new IpRange("10.0.0.0/8"));
+        group.getIpPermissions().add(external);
+        when(ec2.describeSecurityGroups("us-east-1", List.of("sg-1"), List.of(), Map.of())).thenReturn(List.of(group));
+
+        provisioner.provision(r, props(WEB_80_8080), ctx("sg-1"));
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(ec2, never()).authorizeSecurityGroupIngress(anyString(), anyString(), argThat(port(80)));
+        // A revoke of 80 would take 0.0.0.0/0 out of the permission that held it before the update.
+        verify(ec2, never()).revokeSecurityGroupIngress(anyString(), anyString(), argThat(port(80)));
+        verify(ec2).revokeSecurityGroupIngress(eq("us-east-1"), eq("sg-1"), argThat(port(8080)));
+    }
+
+    @Test
+    void aRollbackPutsBackATagThatHadNoValue() throws Exception {
+        StackResource r = resource("WebSg");
+        r.setPhysicalId("sg-1");
+        r.getAttributes().put(Ec2SecurityGroupCfnProvisioner.TAG_KEYS_ATTR, "[\"owner\"]");
+        when(ec2.describeSecurityGroups("us-east-1", List.of("sg-1"), List.of(), Map.of()))
+                .thenReturn(List.of(group("sg-1", "web", "web tier", "vpc-1")));
+        when(ec2.describeTags(eq("us-east-1"), any())).thenReturn(
+                List.of(tagEntry("sg-1", "owner", null)),
+                List.of(tagEntry("sg-1", "owner", null)),
+                List.of(tagEntry("sg-1", "owner", "platform")));
+
+        provisioner.provision(r, props(WEB_80_8080), ctx("sg-1"));
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(ec2).createTags(eq("us-east-1"), eq(List.of("sg-1")), argThat(actual -> actual.size() == 1
+                && "owner".equals(actual.getFirst().getKey()) && actual.getFirst().getValue() == null));
+    }
+
+    @Test
     void aFailedStepPutsAReusedGroupBackBeforeTheFailurePropagates() throws Exception {
         StackResource r = createdWeb();
         when(ec2.describeSecurityGroups("us-east-1", List.of("sg-1"), List.of(), Map.of()))

@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
@@ -189,8 +190,8 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Plans one direction's inline rules: authorizes each declared rule the group does not already
-     * carry (one call per rule so a reject cannot take its siblings down), and revokes a rule this
+     * Plans one direction's inline rules: authorizes each declared rule whose source the group does
+     * not already carry (one call per rule so a reject cannot take its siblings down), and revokes a rule this
      * resource authorized on a prior run that the template no longer declares. The keys this
      * resource declared were recorded in {@code storedKeys}, so only its own rules are revoked; a
      * rule a standalone SecurityGroupIngress/Egress resource added is never in that set.
@@ -208,9 +209,11 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
         for (IpPermission perm : declared) {
             declaredKeys.add(permissionKey(perm, peerGroupId));
         }
-        Set<String> present = existing.stream()
-                .map(p -> permissionKey(p, peerGroupId))
-                .collect(Collectors.toSet());
+        // Compared source by source: a declared rule names one source, while a stored permission can
+        // hold several, and a revoke removes its source from every permission that carries it. A
+        // source the group already holds is left alone, so neither a later revoke nor a rollback
+        // of this update can take it from the permission that held it first.
+        Set<String> present = sourceKeys(existing, peerGroupId);
         List<IpPermission> authorize = new ArrayList<>();
         for (IpPermission perm : declared) {
             if (present.add(permissionKey(perm, peerGroupId))) {
@@ -312,13 +315,50 @@ public class Ec2SecurityGroupCfnProvisioner implements CfnResourceProvisioner {
         return permissions;
     }
 
-    /** The saved rules the group does not carry now, so restoring them never adds a duplicate. */
+    /**
+     * The saved rules with a source the group does not carry now, so restoring them never adds a
+     * duplicate source.
+     */
     private static List<IpPermission> missing(List<IpPermission> saved, List<IpPermission> current,
                                               UnaryOperator<String> peerGroupId) {
-        Set<String> present = current.stream()
-                .map(p -> permissionKey(p, peerGroupId))
-                .collect(Collectors.toSet());
-        return saved.stream().filter(perm -> !present.contains(permissionKey(perm, peerGroupId))).toList();
+        Set<String> present = sourceKeys(current, peerGroupId);
+        return saved.stream()
+                .filter(perm -> !present.containsAll(sourceKeys(List.of(perm), peerGroupId)))
+                .toList();
+    }
+
+    /**
+     * One {@link #permissionKey} per source the permissions hold, each as if its source stood alone
+     * in its own permission, the shape an inline rule has. A permission with no source keeps its own
+     * key.
+     */
+    private static Set<String> sourceKeys(List<IpPermission> permissions, UnaryOperator<String> peerGroupId) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (IpPermission permission : permissions) {
+            List<IpPermission> sources = new ArrayList<>();
+            permission.getIpRanges().forEach(range -> sources.add(withSource(permission, single -> single
+                    .setIpRanges(List.of(range)))));
+            permission.getIpv6Ranges().forEach(range -> sources.add(withSource(permission, single -> single
+                    .setIpv6Ranges(List.of(range)))));
+            permission.getUserIdGroupPairs().forEach(pair -> sources.add(withSource(permission, single -> single
+                    .setUserIdGroupPairs(List.of(pair)))));
+            permission.getPrefixListIds().forEach(list -> sources.add(withSource(permission, single -> single
+                    .setPrefixListIds(List.of(list)))));
+            if (sources.isEmpty()) {
+                sources.add(permission);
+            }
+            sources.forEach(single -> keys.add(permissionKey(single, peerGroupId)));
+        }
+        return keys;
+    }
+
+    private static IpPermission withSource(IpPermission permission, Consumer<IpPermission> source) {
+        IpPermission single = new IpPermission();
+        single.setIpProtocol(permission.getIpProtocol());
+        single.setFromPort(permission.getFromPort());
+        single.setToPort(permission.getToPort());
+        source.accept(single);
+        return single;
     }
 
     private static void restoreRuleKeys(StackResource r, String attrKey, JsonNode direction) {
