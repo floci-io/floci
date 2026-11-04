@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -39,6 +41,13 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SNAPSHOT_ATTR = CfnRollback.FLOW_LOG_UPDATE_SNAPSHOT_ATTR;
 
+    /**
+     * The tag keys the last deployment resolved and wrote, as a JSON array: the keys the stack owns.
+     * Recorded rather than re-resolved from the previous template, because a key taken from a
+     * parameter resolves to the new value on the next update.
+     */
+    static final String TAG_KEYS_ATTR = "__FlociEc2FlowLogTagKeys";
+
     private final FlowLogService flowLogService;
     private final Ec2Service ec2Service;
 
@@ -73,12 +82,13 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
                 // report the stack complete while DescribeFlowLogs kept serving the old config.
                 requireUnchanged(existing, props, ctx);
                 r.getAttributes().put("Id", existingId);
-                // Only the keys the previous template declared are the stack's to remove.
-                Set<String> owned = ctx.resolveTags(ctx.priorProperties(), "Tags").keySet();
+                // Only the keys the last deployment wrote are the stack's to remove.
+                Set<String> owned = ownedTagKeys(r, ctx);
                 CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
                     snapshotTags(r, region, existingId, owned, desiredTags);
                     Ec2Tags.reconcileOwned(ec2Service, region, existingId, owned, desiredTags);
                 });
+                recordTagKeys(r, desiredTags);
                 return;
             }
         }
@@ -99,6 +109,7 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
         // A tag write that still fails deletes the new log rather than leaving it outside the stack.
         CfnRollback.guarded(r, ctx, true, () -> flowLogService.deleteFlowLogs(region, List.of(flowLogId)),
                 () -> { }, () -> Ec2Tags.reconcile(ec2Service, region, flowLogId, desiredTags));
+        recordTagKeys(r, desiredTags);
         if (ctx.isUpdate()) {
             // The stack's log was removed outside it, so a rollback deletes this one and names the
             // prior id again rather than keeping the failed update's log.
@@ -130,6 +141,31 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
         }
         undoInPlace(resource);
         return true;
+    }
+
+    /**
+     * The keys the last deployment recorded in {@link #TAG_KEYS_ATTR}. A log provisioned before
+     * that was recorded falls back to the previous template's keys, resolved as well as they still
+     * can be.
+     */
+    private Set<String> ownedTagKeys(StackResource r, ProvisionContext ctx) {
+        String recorded = r.getAttributes().get(TAG_KEYS_ATTR);
+        if (recorded == null) {
+            return ctx.resolveTags(ctx.priorProperties(), "Tags").keySet();
+        }
+        Set<String> keys = new LinkedHashSet<>();
+        try {
+            MAPPER.readTree(recorded).forEach(key -> keys.add(key.asText()));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Unreadable tag keys on " + r.getLogicalId(), e);
+        }
+        return keys;
+    }
+
+    private static void recordTagKeys(StackResource r, Map<String, String> desiredTags) {
+        ArrayNode keys = MAPPER.createArrayNode();
+        desiredTags.keySet().forEach(keys::add);
+        r.getAttributes().put(TAG_KEYS_ATTR, keys.toString());
     }
 
     /**

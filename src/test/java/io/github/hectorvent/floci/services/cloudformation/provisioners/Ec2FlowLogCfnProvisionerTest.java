@@ -294,6 +294,35 @@ class Ec2FlowLogCfnProvisionerTest {
     }
 
     @Test
+    void aTagKeyFromAChangedParameterRemovesTheKeyTheLastDeploymentWrote() {
+        // Key: {Ref: TagKey} with TagKey changed from team to owner. Re-resolving the previous
+        // template reads owner on both sides, so the recorded key is what says team is the stack's.
+        StackResource r = reusedFlowLogWithTags(Map.of("team", "core", "external", "preserve"));
+        r.getAttributes().put(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR, "[\"team\"]");
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "owner").put("Value", "core");
+
+        provisioner.provision(r, props, updateCtx("fl-0abc", "owner"));
+
+        verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("team", "core"));
+        verify(ec2).createTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("owner", "core"));
+        assertEquals("[\"owner\"]", r.getAttributes().get(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR));
+    }
+
+    @Test
+    void createRecordsTheTagKeysItWrote() {
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
+                .thenReturn(flowLog("fl-0abc"));
+        StackResource r = resource();
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
+
+        provisioner.provision(r, props, ctx());
+
+        assertEquals("[\"team\"]", r.getAttributes().get(Ec2FlowLogCfnProvisioner.TAG_KEYS_ATTR));
+    }
+
+    @Test
     void droppingTheTemplatesTagsKeepsATagAddedOutsideTheStack() {
         StackResource r = reusedFlowLogWithTags(Map.of("team", "core", "external", "preserve"));
 

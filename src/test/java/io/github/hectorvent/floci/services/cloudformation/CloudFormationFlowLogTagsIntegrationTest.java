@@ -69,6 +69,24 @@ class CloudFormationFlowLogTagsIntegrationTest {
         assertEquals(flowLogId, flowLogId());
     }
 
+    @Test
+    void aTagKeyFromAChangedParameterReplacesTheOldKey() {
+        String keyFromParameter = """
+                ,
+                        "Tags": [{"Key": {"Ref": "TagKey"}, "Value": "core"}]""";
+        cfn.createStack(request -> request.stackName(stackName).templateBody(template(keyFromParameter)));
+        stackCreated = true;
+        awaitStack("CREATE_COMPLETE");
+        String flowLogId = flowLogId();
+
+        cfn.updateStack(request -> request.stackName(stackName).templateBody(template(keyFromParameter))
+                .parameters(parameter -> parameter.parameterKey("TagKey").parameterValue("owner")));
+        awaitStack("UPDATE_COMPLETE");
+
+        // Re-resolving the previous template would read owner too and leave team behind.
+        assertEquals(Map.of("owner", "core"), tags(flowLogId));
+    }
+
     /** A stack whose flow log carries the template's {@code team=core} and an EC2-added tag. */
     private String createStackWithExternalTag() {
         cfn.createStack(request -> request.stackName(stackName).templateBody(template(tagsProperty("team", "core"))));
@@ -95,6 +113,7 @@ class CloudFormationFlowLogTagsIntegrationTest {
     private static String template(String tagsProperty) {
         return """
                 {
+                  "Parameters": {"TagKey": {"Type": "String", "Default": "team"}},
                   "Resources": {
                     "Vpc": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.40.0.0/16"}},
                     "Flow": {
