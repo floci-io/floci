@@ -2,6 +2,11 @@ package io.github.hectorvent.floci.services.emr;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerExec;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.ContainerDataPlaneProfile;
@@ -12,6 +17,7 @@ import io.github.hectorvent.floci.testing.S3TestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.junit.jupiter.api.BeforeAll;
@@ -27,6 +33,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -40,6 +47,7 @@ import static io.github.hectorvent.floci.testing.EmrServerlessRequests.awaitJobR
 import static io.github.hectorvent.floci.testing.EmrServerlessRequests.createSparkApplication;
 import static io.github.hectorvent.floci.testing.EmrServerlessRequests.deleteApplication;
 import static io.github.hectorvent.floci.testing.EmrServerlessRequests.startJobRun;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -75,6 +83,12 @@ class EmrDockerRunnerDockerIntegrationTest {
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
+
+    @Inject
+    ContainerLifecycleManager lifecycle;
+
+    @Inject
+    EmulatorConfig config;
 
     private S3Client s3;
     private String bucket;
@@ -128,6 +142,56 @@ class EmrDockerRunnerDockerIntegrationTest {
                 "--src", "hdfs:///input/", "--dest", s3Uri("copied/")));
         assertEquals(WORDS,
                 s3.getObjectAsBytes(request -> request.bucket(bucket).key("copied/words.txt")).asUtf8String());
+    }
+
+    @Test
+    void aSparkStepKeepsAHiveTableAndAStreamingQuerysCheckpointsInTheClustersHdfsWhichListsFromItsRoot() {
+        put("side/stream.py", """
+                import sys
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.enableHiveSupport().getOrCreate()
+                # Hive, which Spark writes the table through, looks up the HDFS encryption zone of its folder.
+                spark.sql("create table words (w string) stored as textfile location 'hdfs:///hive-format/words'")
+                spark.sql("insert into words values ('a'), ('b')")
+                spark.table("words").write.text("/stream/in")
+                query = spark.readStream.text("/stream/in").writeStream.format("parquet") \\
+                    .option("checkpointLocation", "hdfs:///stream/checkpoint").option("path", "hdfs:///stream/out") \\
+                    .trigger(availableNow=True).start()
+                query.awaitTermination()
+                rows = sorted(row.value for row in spark.read.parquet("/stream/out").collect())
+                spark.createDataFrame([(" ".join(rows),)], ["value"]).coalesce(1).write.text(sys.argv[1])
+                """);
+        startCluster("[]");
+
+        // The checkpoint and the sink are hdfs:// paths without a host, as the Management Guide's
+        // "hdfs:///path-to-data", which Hadoop's FileContext, behind Spark's default checkpoint manager, refuses.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit",
+                s3Uri("side/stream.py"), s3Uri("stream-out/")));
+        assertEquals("a b\n", partFiles("stream-out/"));
+        assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop", "fs", "-test", "-e",
+                "/stream/checkpoint/offsets/0"));
+        assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop", "fs", "-ls", "/"));
+    }
+
+    @Test
+    void aClustersHdfsWhoseDataNodeExitsStartsAgainOnItsDataForTheNextStep() {
+        startCluster("[]");
+        assertEquals("COMPLETED", runStep("command-runner.jar", "s3-dist-cp",
+                "--src", s3Uri("in/"), "--dest", "hdfs:///kept/"));
+        String hdfs = ContainerStorageHelper.dockerName(config, "emr-" + clusterId + "-hdfs");
+
+        // The DataNode exits, as one the kernel stops for memory does, and its container ends with it.
+        ContainerExec.run(lifecycle.getDockerClient(), hdfs,
+                new String[]{"pkill", "-f", "org.apache.hadoop.hdfs.server.datanode.DataNode"}, 10);
+        await("the HDFS container of " + clusterId + " to stop").atMost(Duration.ofMinutes(1))
+                .pollInterval(Duration.ofMillis(200))
+                .until(() -> lifecycle.probeContainer(hdfs) == ContainerLiveness.NOT_RUNNING);
+
+        // The next step starts it again on its volume, once the NameNode has left safe mode, with the file there.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "s3-dist-cp",
+                "--src", "hdfs:///kept/", "--dest", s3Uri("kept/")));
+        assertEquals(WORDS,
+                s3.getObjectAsBytes(request -> request.bucket(bucket).key("kept/words.txt")).asUtf8String());
     }
 
     @Test

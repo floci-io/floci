@@ -24,4 +24,13 @@ package io.github.hectorvent.floci.core.common;
 public interface ContainerTeardown {
 
     void stopManagedContainers();
+
+    /**
+     * Where this teardown runs among the others: {@link ContainerTeardowns#stopAll} runs them in ascending order,
+     * those of one order as CDI lists them. One whose containers others' containers use, as an EMR cluster's HDFS its
+     * steps' drivers, runs after them, so theirs are stopped first and do not fail against it.
+     */
+    default int teardownOrder() {
+        return 0;
+    }
 }

@@ -5,15 +5,20 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ConnectToNetworkCmd;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
+import com.github.dockerjava.api.command.CreateNetworkCmd;
 import com.github.dockerjava.api.command.DisconnectFromNetworkCmd;
 import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.command.InspectNetworkCmd;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.RemoveNetworkCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
+import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.Network;
 import com.github.dockerjava.api.model.NetworkSettings;
 import com.github.dockerjava.api.model.Ports;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -36,10 +41,12 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -413,6 +420,59 @@ class ContainerLifecycleManagerNetworkTest {
         ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
         verify(createCmd).withHostConfig(hostConfig.capture());
         return hostConfig.getValue();
+    }
+
+    @Test
+    void ensureNetworkMakesALabelledBridgeOnlyWhenDockerHasNoNetworkOfThatName() {
+        InspectNetworkCmd inspect = mock(InspectNetworkCmd.class, RETURNS_SELF);
+        when(dockerClient.inspectNetworkCmd()).thenReturn(inspect);
+        when(inspect.exec()).thenThrow(new NotFoundException("missing"));
+        CreateNetworkCmd create = mock(CreateNetworkCmd.class, RETURNS_SELF);
+        when(dockerClient.createNetworkCmd()).thenReturn(create);
+
+        manager().ensureNetwork("emr-j-1-hdfs", Map.of("io.floci.service", "emr"));
+
+        verify(inspect).withNetworkId("emr-j-1-hdfs");
+        verify(create).withName("emr-j-1-hdfs");
+        verify(create).withDriver("bridge");
+        verify(create).withLabels(argThat(labels -> "emr".equals(labels.get("io.floci.service"))
+                && "true".equals(labels.get("floci"))));
+        verify(create).exec();
+    }
+
+    @Test
+    void ensureNetworkUsesANetworkThatExistsAsItIs() {
+        InspectNetworkCmd inspect = mock(InspectNetworkCmd.class, RETURNS_SELF);
+        when(dockerClient.inspectNetworkCmd()).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(new Network());
+
+        manager().ensureNetwork("emr-j-1-hdfs", Map.of());
+
+        verify(dockerClient, never()).createNetworkCmd();
+    }
+
+    @Test
+    void connectToNetworkJoinsACreatedContainerToTheNetwork() {
+        manager().connectToNetwork("container-id", "emr-j-1-hdfs");
+
+        verify(connectCmd).withContainerId("container-id");
+        verify(connectCmd).withNetworkId("emr-j-1-hdfs");
+        verify(connectCmd).exec();
+    }
+
+    @Test
+    void removeNetworkSaysWhetherTheNetworkIsGone() {
+        when(dockerClient.removeNetworkCmd("removed")).thenReturn(mock(RemoveNetworkCmd.class));
+        RemoveNetworkCmd missing = mock(RemoveNetworkCmd.class);
+        when(dockerClient.removeNetworkCmd("missing")).thenReturn(missing);
+        when(missing.exec()).thenThrow(new NotFoundException("missing"));
+        RemoveNetworkCmd inUse = mock(RemoveNetworkCmd.class);
+        when(dockerClient.removeNetworkCmd("in-use")).thenReturn(inUse);
+        when(inUse.exec()).thenThrow(new ConflictException("network has active endpoints"));
+
+        assertTrue(manager().removeNetwork("removed"));
+        assertTrue(manager().removeNetwork("missing"));
+        assertFalse(manager().removeNetwork("in-use"));
     }
 
     private ContainerLifecycleManager manager() {

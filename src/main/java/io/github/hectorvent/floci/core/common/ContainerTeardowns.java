@@ -4,6 +4,7 @@ import jakarta.enterprise.inject.Instance;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -25,7 +26,12 @@ public final class ContainerTeardowns {
     }
 
     public static void stopAll(Instance<ContainerTeardown> teardowns, Logger log) {
+        List<ContainerTeardown> ordered = new ArrayList<>();
         for (ContainerTeardown teardown : teardowns) {
+            ordered.add(teardown);
+        }
+        ordered.sort(Comparator.comparingInt(ContainerTeardown::teardownOrder));
+        for (ContainerTeardown teardown : ordered) {
             try {
                 teardown.stopManagedContainers();
             } catch (Exception e) {
