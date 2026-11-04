@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.storage;
 
+import io.github.hectorvent.floci.core.common.RequestContext;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -20,10 +22,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class AccountAwareStorageBackendTest {
 
@@ -495,6 +499,34 @@ class AccountAwareStorageBackendTest {
         storage.load();
 
         assertEquals("333333333333", storage.findAnyAccountEntry("LOADED").orElseThrow().account());
+    }
+
+    @Test
+    void putAllForAccountIntoAnotherAccountIsTracked() {
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "111111111111");
+        storage.findAnyAccountEntry("MISSING");
+
+        storage.putAllForAccount("222222222222", Map.of("ASIAKEY", "session"));
+
+        assertEquals("222222222222", storage.findAnyAccountEntry("ASIAKEY").orElseThrow().account());
+    }
+
+    @Test
+    void putAllFromAnotherRequestAccountIsTracked() {
+        RequestContext request = new RequestContext();
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> context = mock(Instance.class);
+        when(context.get()).thenReturn(request);
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), context, "111111111111");
+        storage.findAnyAccountEntry("MISSING");
+
+        request.setAccountId("222222222222");
+        storage.putAll(Map.of("ASIAKEY", "session"));
+        request.setAccountId("111111111111");
+
+        assertEquals("222222222222", storage.findAnyAccountEntry("ASIAKEY").orElseThrow().account());
     }
 
     @Test
