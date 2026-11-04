@@ -400,7 +400,7 @@ Cluster metadata is stored in-process. No Docker containers are started. The clu
 
 Floci starts a **k3s** (`rancher/k3s`) container for each cluster. The k3s API server is exposed on a host port from the configured range (`6500-6599`). Once `/readyz` responds, the cluster transitions to `ACTIVE` and the CA certificate is extracted from the kubeconfig.
 
-By default `describe-cluster` returns a **host-reachable** endpoint (`https://localhost:<hostPort>`); the k3s server certificate includes a `localhost` SAN, so it verifies against the CA in `cluster.certificateAuthority.data`. Set `endpoint-mode: network` to return the container DNS name (`https://floci-eks-<name>:6443`) instead: reachable from other containers on the Docker network (the pre-#1118 behaviour). Set `endpoint-host` to advertise a hostname other than `localhost` in `host` mode, for example when `kubectl` runs on another machine; Floci adds it to the k3s certificate too. It takes a DNS name (letters, digits, hyphens and dots), a dotted IPv4 address, or an IPv6 address with or without brackets, without scheme, port or path; anything else stops Floci at startup with an error naming the setting, whenever EKS runs real clusters (even in `network` mode). The certificate is fixed when the k3s container is created, so when `endpoint-host` changes, Floci recreates a surviving container on its next restart (keeping its data volume and port). If that replacement fails, the old container is kept and keeps advertising the host its certificate carries. `network` mode ignores it when Floci runs in a container, and metadata-only clusters (mock mode, or no Docker daemon) do not use it. In `network` mode the endpoint falls back to the host-reachable form when Floci runs natively, since there is no container DNS name a host client could use.
+By default `describe-cluster` returns a **host-reachable** endpoint (`https://localhost:<hostPort>`); the k3s server certificate includes a `localhost` SAN, so it verifies against the CA in `cluster.certificateAuthority.data`. Set `endpoint-mode: network` to return the container DNS name (`https://floci-aws-eks-<name>:6443`) instead: reachable from other containers on the Docker network (the pre-#1118 behaviour). Set `endpoint-host` to advertise a hostname other than `localhost` in `host` mode, for example when `kubectl` runs on another machine; Floci adds it to the k3s certificate too. It takes a DNS name (letters, digits, hyphens and dots), a dotted IPv4 address, or an IPv6 address with or without brackets, without scheme, port or path; anything else stops Floci at startup with an error naming the setting, whenever EKS runs real clusters (even in `network` mode). The certificate is fixed when the k3s container is created, so when `endpoint-host` changes, Floci recreates a surviving container on its next restart (keeping its data volume and port). If that replacement fails, the old container is kept and keeps advertising the host its certificate carries. `network` mode ignores it when Floci runs in a container, and metadata-only clusters (mock mode, or no Docker daemon) do not use it. In `network` mode the endpoint falls back to the host-reachable form when Floci runs natively, since there is no container DNS name a host client could use.
 
 #### Connecting with `kubectl` (native AWS workflow)
 
@@ -450,8 +450,8 @@ With a persistent [storage mode](../configuration/storage.md) (the default), clu
 - A surviving container (for example after a Docker Desktop / daemon reboot) is adopted and
   started in place, keeping its published API server port and data volume: deployments come
   back as they were.
-- A missing container is recreated. Its named k3s data volume (`floci-eks-<name>`; for a
-  [non-default account](../configuration/multi-account.md), `floci-eks-<account>.<name>`) is
+- A missing container is recreated. Its named k3s data volume (`floci-aws-eks-<name>`; for a
+  [non-default account](../configuration/multi-account.md), `floci-aws-eks-<account>.<name>`) is
   reused if it survived; volumes follow the global prune policy
   (`FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE`, default `false`), so they are retained when the
   container is stopped or the cluster deleted, except in `memory` storage mode.
@@ -705,11 +705,15 @@ Requirements and limits:
   when Floci's container publishes `4566` on another one (see [ECR](ecr.md#docker-compose-port-mapping)).
 - Repository URIs using a non-default `registryId` (account) are not covered.
 - The mirror set is snapshotted when the cluster is created. Clusters created before this
-  feature can be fixed manually because the k3s container filesystem survives a restart:
+  feature can be fixed manually because the k3s container filesystem survives a restart. A surviving
+  container keeps the name it was created with, so those clusters are still `floci-eks-<cluster>`
+  while newer ones are `floci-aws-eks-<cluster>`, and a non-default account adds `<account>.` before
+  the cluster name. Look the name up first:
 
   ```bash
-  docker cp registries.yaml floci-eks-<cluster>:/etc/rancher/k3s/registries.yaml
-  docker restart floci-eks-<cluster>
+  docker ps --filter name=<cluster> --format '{{.Names}}'
+  docker cp registries.yaml <container>:/etc/rancher/k3s/registries.yaml
+  docker restart <container>
   ```
 
 ### DNS resolution and Route 53 private hosted zones

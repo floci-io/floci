@@ -50,7 +50,7 @@ When `mock` is set to `false` (default), Floci uses the Docker API to start a Re
 - **Networking**: Kafka clients connect to whatever address the broker advertises, so the advertised address has to be reachable from the client.
     - Floci on the host: the Kafka API (9092) is published on a host port from the `kafka-host-port` range and advertised as `localhost:<port>`.
     - Floci in a container: the broker has two listeners. `internal` (9092) advertises `<container-name>:9092` for containers on the same Docker network. `host` (9093) is published on a host port from the `kafka-host-port` range and advertised as `<bootstrap-hostname or localhost>:<port>` for clients on the Docker host. `GetBootstrapBrokers` returns the Docker-network address. When `FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME` is set, it returns both listeners, `<container-name>:9092,<hostname>:<port>`: a client connects through whichever entry it can reach, and the broker then advertises that listener's address. The two entries are two listeners on the same broker, not two brokers.
-- **Persistence**: Each cluster gets a named Docker volume (`floci-msk-{volumeId}`). In memory mode the volume is removed on cluster delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
+- **Persistence**: Each cluster gets a named Docker volume (`floci-aws-msk-{volumeId}`). In memory mode the volume is removed on cluster delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
 - **Readiness**: The cluster state transitions to `ACTIVE` once the Redpanda `/ready` endpoint is reachable.
 
 ## Cluster metadata

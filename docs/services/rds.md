@@ -981,7 +981,7 @@ promotes a remaining member, as Aurora does on its own.
 
 ## Persistence
 
-Each DB instance and cluster gets its own named Docker volume (`floci-rds-{volumeId}`) created
+Each DB instance and cluster gets its own named Docker volume (`floci-aws-rds-{resourceId}-{volumeId}`, with the instance's or cluster's resource id) created
 automatically. No configuration is required.
 
 | Scenario | Volume behavior |
