@@ -67,6 +67,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -6977,4 +6978,140 @@ class CodeArtifactServiceTest {
                 "my-pkg", "1.0.0");
         assertEquals(assetCount, pv.getAssets().size());
     }
+
+    @Test
+    void legacyNugetOriginRestrictionRemainsEffective() {
+        assertLegacyRestriction("nuget", "Newtonsoft.Json", "newtonsoft.json");
+    }
+
+    @Test
+    void legacyPypiOriginRestrictionRemainsEffective() {
+        assertLegacyRestriction("pypi", "My_Proj", "my-proj");
+    }
+
+    private void assertLegacyRestriction(String format, String original, String normalized) {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String legacyKey = REGION + "::dom::repo::" + format + "::::" + original;
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, legacyKey,
+                new PackageOriginConfig("BLOCK", "BLOCK", format, null, original));
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized));
+    }
+
+    @Test
+    void normalizedNugetOriginRestrictionControl() {
+        assertNormalizedRestriction("nuget", "Newtonsoft.Json", "newtonsoft.json");
+    }
+
+    @Test
+    void normalizedPypiOriginRestrictionControl() {
+        assertNormalizedRestriction("pypi", "My_Proj", "my-proj");
+    }
+
+    private void assertNormalizedRestriction(String format, String original, String normalized) {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", format, null, original, "BLOCK", "BLOCK");
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized));
+    }
+    @Test
+    void readingLegacyOriginConfigMigratesItBeforeRemovingTheOldKey() {
+        assertLegacyRestriction("nuget", "Newtonsoft.Json", "newtonsoft.json");
+        assertTrue(packageOriginConfigStore.getForAccount(ACCOUNT_ID,
+                REGION + "::dom::repo::nuget::::Newtonsoft.Json").isEmpty());
+        assertTrue(packageOriginConfigStore.getForAccount(ACCOUNT_ID,
+                REGION + "::dom::repo::nuget::::newtonsoft.json").isPresent());
+        assertEquals("BLOCK", service.describePackage(REGION, "dom", null, "repo", "nuget", null,
+                "NEWTONSOFT.JSON").publishRestriction());
+        assertThrows(AwsException.class, () -> service.requireContainerBackedPackagePublishAllowed(REGION,
+                "dom", null, "repo", "nuget", null, "NEWTONSOFT.JSON"));
+    }
+
+    @Test
+    void explicitOriginUpdateRetiresEveryLegacySpelling() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        for (String name : List.of("My_Proj", "MY.PROJ")) {
+            packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::" + name,
+                    new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, name));
+        }
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "my-proj",
+                "ALLOW", "ALLOW");
+        assertEquals(List.of(REGION + "::dom::repo::pypi::::my-proj"),
+                packageOriginConfigStore.keysForAccount(ACCOUNT_ID).stream().sorted().toList());
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "MY_PROJ"));
+    }
+
+    @Test
+    void migrationDoesNotReadOtherOwnersRepositoriesOrRegions() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        PackageOriginConfig config = new PackageOriginConfig("BLOCK", "BLOCK", "nuget", null, "Newtonsoft.Json");
+        packageOriginConfigStore.putForAccount("999999999999", REGION + "::dom::repo::nuget::::Newtonsoft.Json", config);
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::other::nuget::::Newtonsoft.Json", config);
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, OTHER_REGION + "::dom::repo::nuget::::Newtonsoft.Json", config);
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "nuget", null, "newtonsoft.json"));
+        assertTrue(packageOriginConfigStore.getForAccount(ACCOUNT_ID,
+                REGION + "::dom::repo::nuget::::newtonsoft.json").isEmpty());
+        assertEquals(2, packageOriginConfigStore.keysForAccount(ACCOUNT_ID).size());
+        assertEquals(1, packageOriginConfigStore.keysForAccount("999999999999").size());
+    }
+
+    @Test
+    void conflictingLegacySpellingsPreserveBothBlocks() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::My_Proj",
+                new PackageOriginConfig("BLOCK", "ALLOW", "pypi", null, "My_Proj"));
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::MY.PROJ",
+                new PackageOriginConfig("ALLOW", "BLOCK", "pypi", null, "MY.PROJ"));
+        CodeArtifactService.PackageDescription description = service.describePackage(REGION, "dom", null, "repo",
+                "pypi", null, "my-proj");
+        assertEquals("BLOCK", description.publishRestriction());
+        assertEquals("BLOCK", description.upstreamRestriction());
+        assertEquals(1, packageOriginConfigStore.keysForAccount(ACCOUNT_ID).size());
+    }
+
+    @Test
+    void deletingCanonicalPackageAlsoRemovesLegacyOriginEntries() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "my-proj",
+                "ALLOW", "ALLOW");
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::My_Proj",
+                new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "MY_PROJ"));
+        service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-proj");
+        assertTrue(packageOriginConfigStore.keysForAccount(ACCOUNT_ID).isEmpty());
+        assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
+                "pypi", null, "MY_PROJ"));
+    }
+
+    @Test
+    void failedMigrationSavePreservesLegacyRestrictionsForRetry() {
+        AccountAwareStorageBackend<PackageOriginConfig> store = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService failingService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                store, regionResolver, mock(EmulatorConfig.class), true, null,
+                new CodeArtifactSidecarRegistry(List.of()));
+        failingService.createDomain(REGION, "dom", null, Map.of());
+        failingService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String legacyKey = REGION + "::dom::repo::nuget::::Newtonsoft.Json";
+        String canonicalKey = REGION + "::dom::repo::nuget::::newtonsoft.json";
+        store.putForAccount(ACCOUNT_ID, legacyKey,
+                new PackageOriginConfig("BLOCK", "BLOCK", "nuget", null, "Newtonsoft.Json"));
+        doThrow(new IllegalStateException("save failed")).when(store)
+                .putForAccount(eq(ACCOUNT_ID), eq(canonicalKey), any(PackageOriginConfig.class));
+        assertThrows(IllegalStateException.class, () -> failingService.isUpstreamRetentionBlocked(REGION,
+                "dom", null, "repo", "nuget", null, "newtonsoft.json"));
+        assertTrue(store.getForAccount(ACCOUNT_ID, legacyKey).isPresent());
+        assertTrue(store.getForAccount(ACCOUNT_ID, canonicalKey).isEmpty());
+        doAnswer(invocation -> invocation.callRealMethod()).when(store)
+                .putForAccount(eq(ACCOUNT_ID), eq(canonicalKey), any(PackageOriginConfig.class));
+        assertTrue(failingService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "nuget", null,
+                "newtonsoft.json"));
+        assertTrue(store.getForAccount(ACCOUNT_ID, legacyKey).isEmpty());
+        assertTrue(store.getForAccount(ACCOUNT_ID, canonicalKey).isPresent());
+    }
+
 }
