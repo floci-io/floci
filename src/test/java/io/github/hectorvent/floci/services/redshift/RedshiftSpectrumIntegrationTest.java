@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.redshift.spectrum.ExternalCatalogRegi
 import io.github.hectorvent.floci.services.redshift.spectrum.ExternalStatement;
 import io.github.hectorvent.floci.services.redshift.spectrum.ExternalStatementParser;
 import io.github.hectorvent.floci.services.redshift.spectrum.GlueTableBuilder;
+import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumCatalog;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
@@ -79,6 +80,9 @@ class RedshiftSpectrumIntegrationTest {
     @Inject
     ExternalCatalogRegistry externalRegistry;
 
+    @Inject
+    SpectrumCatalog spectrumCatalog;
+
     private static final String ROLE_NAME = "SpectrumItRole";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/" + ROLE_NAME;
     private static final String TRUST_POLICY = """
@@ -123,6 +127,9 @@ class RedshiftSpectrumIntegrationTest {
         if (roleCreated) {
             iamService.deleteRolePolicy(ROLE_NAME, "AllowS3");
             iamService.deleteRole(ROLE_NAME);
+        }
+        if (spectrumCatalog != null) {
+            spectrumCatalog.clear();
         }
     }
 
@@ -602,6 +609,72 @@ class RedshiftSpectrumIntegrationTest {
         } finally {
             s3Service.deleteObject(bucket, "events/day=2026-01-01/part-1.parquet");
             s3Service.deleteObject(bucket, "events/day=2026-01-02/part-1.parquet");
+        }
+    }
+
+    @Test
+    @Timeout(120)
+    void readsOnlyThePartitionsTheWhereSelectsAndCompletesTheTableForALaterQuery() throws Exception {
+        bucket = "spectrum-pruning-" + System.nanoTime();
+        s3Service.createBucket(bucket, "us-east-1");
+        s3Service.putObject(bucket, "events/day=1/part-1.csv", "1,10\n2,20\n".getBytes(StandardCharsets.UTF_8),
+                "text/csv", null);
+        s3Service.putObject(bucket, "events/day=2/part-1.csv", "not-a-number,30\n".getBytes(StandardCharsets.UTF_8),
+                "text/csv", null);
+        glueDatabase = "spectrum_pruning_" + System.nanoTime();
+        Database database = new Database();
+        database.setName(glueDatabase);
+        glueService.createDatabase(database);
+        clusterId = "it-pruning-" + System.nanoTime();
+        Cluster cluster = createClusterWithRole(clusterId);
+        // a partition that cannot be read fails the query that reads it, which shows which partitions were read
+        String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
+                + "/dev?preferQueryMode=simple&socketTimeout=30";
+        String schemaName = "pruning_lake";
+
+        try (Connection connection = Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
+                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
+                .until(() -> DriverManager.getConnection(url, "admin", "Secret123"), Objects::nonNull);
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE EXTERNAL SCHEMA " + schemaName + " FROM DATA CATALOG DATABASE '" + glueDatabase
+                    + "' IAM_ROLE '" + ROLE_ARN + "'");
+            statement.execute("CREATE EXTERNAL TABLE " + schemaName + ".events (id INTEGER, amount INTEGER) "
+                    + "PARTITIONED BY (day INTEGER) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' "
+                    + "STORED AS TEXTFILE LOCATION 's3://" + bucket + "/events/'");
+            statement.execute("ALTER TABLE " + schemaName + ".events ADD "
+                    + "PARTITION (day='1') LOCATION 's3://" + bucket + "/events/day=1/' "
+                    + "PARTITION (day='2') LOCATION 's3://" + bucket + "/events/day=2/'");
+
+            try (ResultSet rows = statement.executeQuery(
+                    "SELECT SUM(amount) FROM " + schemaName + ".events WHERE day = 1")) {
+                assertTrue(rows.next());
+                assertEquals(30, rows.getLong(1));
+            }
+            SQLException unreadable = assertThrows(SQLException.class,
+                    () -> statement.executeQuery("SELECT SUM(amount) FROM " + schemaName + ".events"));
+            assertEquals("22P02", unreadable.getSQLState());
+
+            s3Service.putObject(bucket, "events/day=2/part-1.csv", "3,40\n".getBytes(StandardCharsets.UTF_8),
+                    "text/csv", null);
+            try (ResultSet rows = statement.executeQuery(
+                    "SELECT day, SUM(amount) FROM " + schemaName + ".events GROUP BY day ORDER BY day")) {
+                assertTrue(rows.next());
+                assertEquals(1, rows.getInt(1));
+                assertEquals(30, rows.getLong(2));
+                assertTrue(rows.next());
+                assertEquals(2, rows.getInt(1));
+                assertEquals(40, rows.getLong(2));
+                assertFalse(rows.next());
+            }
+            try (ResultSet rows = statement.executeQuery(
+                    "SELECT COUNT(*) FROM " + schemaName + ".events WHERE day = 1")) {
+                assertTrue(rows.next());
+                assertEquals(2, rows.getLong(1));
+            }
+            statement.execute("DROP SCHEMA IF EXISTS " + schemaName + " CASCADE");
+        } finally {
+            s3Service.deleteObject(bucket, "events/day=1/part-1.csv");
+            s3Service.deleteObject(bucket, "events/day=2/part-1.csv");
         }
     }
 

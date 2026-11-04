@@ -15,6 +15,15 @@ class ExternalReferenceScannerTest {
     private static final Set<String> SCHEMAS = Set.of("analytics", "Mixed");
 
     @Test
+    void aStringThatLooksLikePunctuationDoesNotEndTheTableContext() {
+        for (String text : new String[] {";", "(", ")", ","}) {
+            assertThat(text, ExternalReferenceScanner.scan(
+                    "SELECT e.id FROM (SELECT '" + text + "') s, analytics.events e", SCHEMAS),
+                    contains(new Reference("analytics", "events")));
+        }
+    }
+
+    @Test
     void findsQualifiedReferencesAndIgnoresOtherSchemas() {
         assertThat(ExternalReferenceScanner.scan("SELECT * FROM analytics.events e JOIN public.users u ON true", SCHEMAS),
                 contains(new Reference("analytics", "events")));
@@ -181,6 +190,21 @@ class ExternalReferenceScannerTest {
                 "SELECT EXTRACT(year FROM (SELECT max(ts) FROM analytics.events)) FROM public.t", SCHEMAS),
                 contains(new Reference("analytics", "events")));
         assertThat(ExternalReferenceScanner.scan("SELECT EXTRACT(year FROM ts) FROM analytics.events", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+    }
+
+    @Test
+    void findsReferencesPastNestedBlockComments() {
+        assertThat(ExternalReferenceScanner.scan(
+                "SELECT * FROM /* outer /* nested */ */ analytics.events", SCHEMAS),
+                contains(new Reference("analytics", "events")));
+    }
+
+    @Test
+    void ignoresReferencesInsideDollarQuotesWithCustomTag() {
+        assertThat(ExternalReferenceScanner.scan("SELECT $sql$ FROM analytics.events $sql$", SCHEMAS), empty());
+        assertThat(ExternalReferenceScanner.scan(
+                "SELECT $sql$ FROM analytics.events $sql$ FROM analytics.events", SCHEMAS),
                 contains(new Reference("analytics", "events")));
     }
 }

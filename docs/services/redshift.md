@@ -716,8 +716,24 @@ runtime when container management is unsuitable.
 Tables declared `STORED AS PARQUET` (or with a Parquet input format or SerDe in Glue) are read the same
 way. Columns are matched to the Parquet files by name, ignoring case. A declared column that a partition's
 files do not carry, as when the column was added to the table after those files were written, reads as
-`NULL`. A value that cannot be converted to the declared type fails the query. Partition pruning is not
-supported: every registered partition is listed, authorized and loaded.
+`NULL`. A value that cannot be converted to the declared type fails the query.
+
+A partitioned table is loaded partition by partition, and a query loads only the partitions its `WHERE`
+can select, as Spectrum reads only those. Only these are listed, checked against the role's S3 access and
+read, so a partition that no predicate of the query selects can be unreadable without failing the query.
+A predicate selects partitions when it is a top-level `AND` term of the `WHERE` of the block that names the
+table, uses only partition keys, literals, comparisons, `IN`, `BETWEEN`, `IS [NOT] NULL`, `AND`, `OR` and
+`NOT`, covers an integer, date or string key (a string key only for `=`, `<>` and `IN`), and is false for a
+row whose keys are all NULL, so that a table on the nullable side of an outer join keeps its rows. Any
+other predicate leaves every partition in. The query still runs unchanged on the rows loaded, so pruning
+never changes a result. Partitions loaded by one query stay for the next: a later query adds the ones it
+needs, reloads the ones whose objects or Glue entry changed and drops the ones Glue no longer lists.
+When two partitions hold key values that PostgreSQL casts to the same value, such as integer `1` and `01`,
+rows can no longer be told apart by partition, so a query on that table loads every partition and replaces
+the whole table when any of them changes.
+Pruning applies to the simple query protocol and the Data API. A session in a transaction block, and a client
+on the extended query protocol (the default of the PostgreSQL JDBC driver, unless `preferQueryMode=simple`),
+load every partition.
 
 Materialized relations are cached in the cluster database. Each new query checks the associated
 role, trust policy and S3 access before using cached data, following the existing S3 enforcement
