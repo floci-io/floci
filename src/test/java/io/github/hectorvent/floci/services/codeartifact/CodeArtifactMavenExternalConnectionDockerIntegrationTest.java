@@ -12,6 +12,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.nio.charset.StandardCharsets;
 
+import static io.github.hectorvent.floci.testing.CodeArtifactRequests.putPackageOriginConfiguration;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -144,11 +145,7 @@ class CodeArtifactMavenExternalConnectionDockerIntegrationTest {
     @Test
     @Order(4)
     void upstreamBlockPreventsRetentionEvenThoughTheRealArtifactExists() {
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"restrictions\":{\"publish\":\"ALLOW\",\"upstream\":\"BLOCK\"}}")
-                .post("/v1/package?domain=" + DOMAIN + "&repository=" + BLOCKED_REPO + "&format=maven"
-                        + "&namespace=junit&package=junit")
-                .then().statusCode(200);
+        putPackageOriginConfiguration(AUTH, DOMAIN, BLOCKED_REPO, "maven", "junit", "junit", "ALLOW", "BLOCK");
 
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/maven/" + DOMAIN + "/" + BLOCKED_REPO + "/" + JUNIT_JAR)
