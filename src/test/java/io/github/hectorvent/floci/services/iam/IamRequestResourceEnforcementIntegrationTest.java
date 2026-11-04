@@ -1510,7 +1510,8 @@ class IamRequestResourceEnforcementIntegrationTest {
     /**
      * An IAM Identity Center permission set provisioned to all the accounts it is provisioned to, with no
      * {@code TargetId}, or a null one, is checked on each of those accounts, so a grant on one does not reach the
-     * others, a deny on one holds, and a grant on all of them lets it through.
+     * others, a deny on one holds, and a grant on all of them lets it through. Each request finds the accounts
+     * afresh, so one provisioned to since is checked too.
      */
     @Test
     void aPermissionSetProvisionedToAllItsAccountsIsCheckedOnEachOfThem() {
@@ -1544,6 +1545,10 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/222222222222"));
         ssoAdmin(user, "ProvisionPermissionSet", provision + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\","
                 + "\"TargetId\":null}").statusCode(200);
+        String third = assignment(instance, permissionSet, "333333333333");
+        adminJson("sso", "SWBExternalService.CreateAccountAssignment").body(third).post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("sso", "SWBExternalService.DeleteAccountAssignment").body(third).post("/"));
+        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
     }
 
     /**
