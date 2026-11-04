@@ -794,7 +794,13 @@ public class EksClusterManager
         try {
             info = lifecycleManager.startCreated(containerId, spec);
         } catch (Exception e) {
-            lifecycleManager.removeIfExists(containerName);
+            try {
+                lifecycleManager.removeIfExistsStrict(containerName, true);
+            } catch (RuntimeException cleanup) {
+                e.addSuppressed(cleanup);
+                LOG.warnv("Could not remove failed EKS container {0}; retaining it for cleanup retry: {1}",
+                        containerName, cleanup.getMessage());
+            }
             throw e;
         }
 

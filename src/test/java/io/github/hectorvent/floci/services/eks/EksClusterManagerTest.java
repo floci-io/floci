@@ -61,6 +61,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import java.io.ByteArrayInputStream;
@@ -866,22 +867,37 @@ class EksClusterManagerTest {
             verify(dockerClient).stopContainerCmd("cid-old");
         }
 
-        @Test
-        void restoresOldSurvivorWhenCapacityReplacementFails() {
+        @ParameterizedTest
+        @ValueSource(booleans = {false, true})
+        void restoresOldSurvivorWhenCapacityReplacementFails(boolean firstCleanupFails) {
             when(lifecycleManager.findByName("floci-eks-demo"))
                     .thenReturn(Optional.of(containerFromJson("{\"Id\":\"cid-old\"}")));
             when(lifecycleManager.adopt("cid-old", List.of(6443), Optional.empty()))
                     .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
             when(lifecycleManager.create(any())).thenReturn("cid-new");
-            when(lifecycleManager.startCreated(any(), any()))
-                    .thenThrow(new RuntimeException("replacement failed"));
+            RuntimeException startup = new RuntimeException("replacement failed");
+            RuntimeException cleanup = new IllegalStateException("temporary removal failure");
+            when(lifecycleManager.startCreated(any(), any())).thenThrow(startup);
+            if (firstCleanupFails) {
+                Mockito.doThrow(cleanup).doNothing().when(lifecycleManager)
+                        .removeIfExistsStrict("floci-eks-demo", true);
+            }
 
             Cluster cluster = cluster();
             manager.restoreCluster(cluster);
 
             assertEquals("cid-old", cluster.getContainerId());
             assertEquals(6440, cluster.getHostPort());
-            verify(lifecycleManager).removeIfExistsStrict("floci-eks-demo", true);
+            InOrder order = Mockito.inOrder(lifecycleManager, dockerClient);
+            order.verify(lifecycleManager).removeIfExists("floci-eks-demo");
+            order.verify(lifecycleManager).startCreated(any(), any());
+            order.verify(lifecycleManager, Mockito.times(2)).removeIfExistsStrict("floci-eks-demo", true);
+            order.verify(dockerClient).renameContainerCmd("cid-old");
+            verify(lifecycleManager).removeIfExists("floci-eks-demo");
+            assertEquals(firstCleanupFails ? 1 : 0, startup.getSuppressed().length);
+            if (firstCleanupFails) {
+                assertEquals(cleanup, startup.getSuppressed()[0]);
+            }
             verify(dockerClient).stopContainerCmd("cid-old");
             verify(portAllocator, never()).allocate(6440, 6499);
         }
@@ -3434,7 +3450,8 @@ class EksClusterManagerTest {
             cluster.setVersion("1.30");
 
             assertThrows(RuntimeException.class, () -> manager.startCluster(cluster));
-            verify(lifecycleManager, Mockito.times(2)).removeIfExists("floci-aws-eks-fail-cluster");
+            verify(lifecycleManager).removeIfExists("floci-aws-eks-fail-cluster");
+            verify(lifecycleManager).removeIfExistsStrict("floci-aws-eks-fail-cluster", true);
         }
     }
 
