@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerPresence;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerNetworks;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
@@ -723,21 +724,8 @@ public class EcrRegistryManager {
 
     // Floci in a container reaches the registry over the Docker network; on the host it uses the loopback port.
     private boolean onAnotherNetwork(Container survivor) {
-        if (!containerDetector.isRunningInContainer()) {
-            return false;
-        }
-        Optional<String> network = containerBuilder.resolveDockerNetwork(resolveRegistryDockerNetwork());
-        if (network.isEmpty() || survivor.getNetworkSettings() == null
-                || survivor.getNetworkSettings().getNetworks() == null
-                || survivor.getNetworkSettings().getNetworks().isEmpty()) {
-            return false;
-        }
-        boolean moved = !survivor.getNetworkSettings().getNetworks().containsKey(network.get());
-        if (moved) {
-            LOG.infov("Surviving ECR backing registry {0} is not on Docker network {1}; replacing it (its data is kept)",
-                    survivor.getId(), network.get());
-        }
-        return moved;
+        return containerDetector.isRunningInContainer() && ContainerNetworks.onAnotherNetwork(
+                survivor, containerBuilder.resolveDockerNetwork(resolveRegistryDockerNetwork()).orElse(null));
     }
 
     private static boolean hasLoopbackBinding(Container container) {
