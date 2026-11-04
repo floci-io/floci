@@ -108,6 +108,7 @@ public class Ec2QueryHandler {
                 case "StartInstances" -> handleStartInstances(params, region);
                 case "StopInstances" -> handleStopInstances(params, region);
                 case "RebootInstances" -> handleRebootInstances(params, region);
+                case "GetConsoleOutput" -> handleGetConsoleOutput(params, region);
                 case "MonitorInstances" -> handleMonitoring(params, region, "MonitorInstances", true);
                 case "UnmonitorInstances" -> handleMonitoring(params, region, "UnmonitorInstances", false);
                 case "DescribeInstanceStatus" -> handleDescribeInstanceStatus(params, region);
@@ -1556,6 +1557,26 @@ public class Ec2QueryHandler {
         List<String> ids = getList(p, "InstanceId");
         List<Map<String, String>> changes = service.stopInstances(region, ids);
         return xmlResponse(buildInstanceStateChangeXml("StopInstancesResponse", changes));
+    }
+
+    private Response handleGetConsoleOutput(MultivaluedMap<String, String> p, String region) {
+        // AWS answers a dry run before it looks at the instance, even for an empty or malformed id.
+        checkDryRun(p);
+        String instanceId = p.getFirst("InstanceId");
+        if (instanceId == null || instanceId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter InstanceId", 400);
+        }
+        String output = service.getConsoleOutput(region, instanceId);
+        String encoded = Base64.getEncoder().encodeToString(
+                output.getBytes(StandardCharsets.UTF_8));
+        XmlBuilder xml = new XmlBuilder()
+                .start("GetConsoleOutputResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("instanceId", instanceId)
+                .elem("timestamp", Instant.now().toString())
+                .elem("output", encoded)
+                .end("GetConsoleOutputResponse");
+        return xmlResponse(xml.build());
     }
 
     private Response handleRebootInstances(MultivaluedMap<String, String> p, String region) {
