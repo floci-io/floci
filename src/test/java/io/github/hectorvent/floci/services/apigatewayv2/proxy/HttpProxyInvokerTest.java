@@ -478,4 +478,27 @@ class HttpProxyInvokerTest {
         thread.start();
         return server;
     }
+
+    @Test
+    void encodesADecodedPathParameterWithNoRawValue() {
+        Integration integration = httpProxyIntegration(
+                "http://127.0.0.1:" + backendPort + "/public/{proxy}", null);
+        RequestContext ctx = ctxFor("GET", "/wallet/NIFTY 50", "NIFTY 50", Map.of(), Map.of(), null, Map.of());
+
+        ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals(200, result.statusCode());
+        assertEquals("/public/NIFTY 50", received.get().path());
+    }
+
+    @Test
+    void integrationUriThatCannotBeParsedYields502() {
+        Integration integration = httpProxyIntegration("http://127.0.0.1:" + backendPort + "/not a uri", null);
+        RequestContext ctx = ctxFor("GET", "/wallet/x", "x", Map.of(), Map.of(), null, Map.of());
+
+        ProxyResult result = new HttpProxyInvoker().invoke(integration, ctx);
+
+        assertEquals(502, result.statusCode());
+        assertNull(received.get());
+    }
 }

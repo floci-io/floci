@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigatewayv2.proxy;
 
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -23,6 +24,10 @@ import java.util.regex.Pattern;
 public final class PathTemplateResolver {
     private static final Pattern PLACEHOLDER = Pattern.compile("\\{([a-zA-Z_][a-zA-Z0-9_]*)\\+?\\}");
 
+    /** RFC 3986 pchar without pct-encoded, plus the {@code /} a greedy value carries between segments. */
+    private static final String PATH_SAFE = "-._~!$&'()*+,;=:@/";
+    private static final char[] HEX = "0123456789ABCDEF".toCharArray();
+
     private PathTemplateResolver() {}
 
     public static String resolve(String template, Map<String, String> pathParams) {
@@ -36,5 +41,26 @@ public final class PathTemplateResolver {
         }
         m.appendTail(out);
         return out.toString();
+    }
+
+    /** Percent-encodes a decoded value for a URL path, keeping the {@code /} between its segments. */
+    public static String encodePathValue(String value) {
+        if (value == null) {
+            return null;
+        }
+        StringBuilder out = new StringBuilder(value.length());
+        for (byte b : value.getBytes(StandardCharsets.UTF_8)) {
+            char c = (char) (b & 0xFF);
+            if (isAsciiAlphanumeric(c) || PATH_SAFE.indexOf(c) >= 0) {
+                out.append(c);
+            } else {
+                out.append('%').append(HEX[c >> 4]).append(HEX[c & 0xF]);
+            }
+        }
+        return out.toString();
+    }
+
+    private static boolean isAsciiAlphanumeric(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
     }
 }

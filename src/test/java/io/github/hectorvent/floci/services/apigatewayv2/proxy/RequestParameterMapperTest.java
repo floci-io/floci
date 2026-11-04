@@ -129,4 +129,39 @@ class RequestParameterMapperTest {
         mapper.apply(Map.of("not-a-valid-key", "value"), builder, ctx);
         assertEquals("http://backend.local/foo", builder.url());
     }
+
+    @Test
+    void overwritePathKeepsTheCallersEncodingOfAPathParameter() {
+        RequestContext encoded = new RequestContext("api1", "$default", "GET", "/index/a/b c", "a/b c",
+                "ANY /index/{proxy+}", "req-1", "1.2.3.4", Map.of(), Map.of(),
+                Map.of("proxy", "a/b c"), null, Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of("proxy", "a%2Fb%20c"));
+
+        mapper.apply(Map.of("overwrite:path", "/public/$request.path.proxy"), builder, encoded);
+
+        assertEquals("http://backend.local/public/a%2Fb%20c", builder.url());
+    }
+
+    @Test
+    void overwritePathEncodesAValueThatDidNotComeFromTheRequestPath() {
+        RequestContext withClaim = new RequestContext("api1", "$default", "GET", "/wallet/balance", "balance",
+                "ANY /wallet/{proxy+}", "req-1", "1.2.3.4", Map.of(), Map.of(), Map.of(), null,
+                Map.of("tenant", "acme corp?x"), Map.of());
+
+        mapper.apply(Map.of("overwrite:path", "/t/$context.authorizer.claims.tenant"), builder, withClaim);
+
+        assertEquals("http://backend.local/t/acme%20corp%3Fx", builder.url());
+    }
+
+    @Test
+    void headerMappingKeepsTheDecodedPathParameter() {
+        RequestContext encoded = new RequestContext("api1", "$default", "GET", "/index/b c", "b c",
+                "ANY /index/{proxy+}", "req-1", "1.2.3.4", Map.of(), Map.of(),
+                Map.of("proxy", "b c"), null, Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of("proxy", "b%20c"));
+
+        mapper.apply(Map.of("overwrite:header.x-name", "$request.path.proxy"), builder, encoded);
+
+        assertEquals("b c", builder.headers().get("x-name").get(0));
+    }
 }
