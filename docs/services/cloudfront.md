@@ -154,7 +154,8 @@ PUT, PATCH and DELETE).
 - Viewer requests addressed to an enabled distribution's generated domain or alias are routed to the
   matching S3 or custom origin when the matched cache behavior's `AllowedMethods` includes the
   method; any other method returns 403 `Invalid method.`. A behavior without `AllowedMethods` allows
-  GET and HEAD. Origin forwarding preserves the raw path; custom-origin redirects are not followed.
+  GET and HEAD. Origin forwarding preserves the raw path, including `%25` for a literal percent
+  sign, on generated domains and aliases. Custom-origin redirects are not followed.
 - POST, PUT, PATCH and DELETE are forwarded to custom origins with the viewer request body and its
   `Content-Type`. The body is streamed to the origin with the viewer's `Content-Length`, or chunked
   when the viewer sent it chunked or, as HTTP/2 allows, with no length, so it is never held in
