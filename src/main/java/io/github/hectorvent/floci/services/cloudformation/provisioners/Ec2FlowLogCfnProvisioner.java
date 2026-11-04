@@ -3,18 +3,22 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
 /**
  * CloudFormation provisioning for {@code AWS::EC2::FlowLog}, backed by {@link FlowLogService}.
- * Ref and {@code Fn::GetAtt [Flow, Id]} both yield the {@code fl-} id, matching AWS.
+ * Ref and {@code Fn::GetAtt [Flow, Id]} both yield the {@code fl-} id, matching AWS. {@code Tags}
+ * live in the EC2 tag store, as a {@code CreateFlowLogs} TagSpecification's do, and an update
+ * reconciles them on the reused log.
  */
 @ApplicationScoped
 public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
@@ -27,10 +31,12 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
     private static final String DEFAULT_TRAFFIC_TYPE = "ALL";
 
     private final FlowLogService flowLogService;
+    private final Ec2Service ec2Service;
 
     @Inject
-    public Ec2FlowLogCfnProvisioner(FlowLogService flowLogService) {
+    public Ec2FlowLogCfnProvisioner(FlowLogService flowLogService, Ec2Service ec2Service) {
         this.flowLogService = flowLogService;
+        this.ec2Service = ec2Service;
     }
 
     @Override
@@ -43,15 +49,19 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
         // An update re-invokes provision with the prior physical id. Creating unconditionally
         // would leave a second flow log on every update and orphan the first, which then outlives
         // the stack, since delete only knows the id recorded last.
+        Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
+        // Rejects a reserved aws: key before anything is created, so a bad tag leaves no log behind.
+        Ec2Tags.validatedTags(desiredTags);
         String existingId = r.getPhysicalId();
         if (existingId != null && !existingId.isBlank()) {
             FlowLog existing = flowLogService.describeFlowLogs(ctx.region(), List.of(existingId))
                     .stream().findFirst().orElse(null);
             if (existing != null) {
-                // Every property except Tags is createOnly, so there is nothing to modify on the
-                // reused log and a change to any of them is a replacement. Reusing regardless would
+                // Every property except Tags is createOnly, so only the tags change on the reused
+                // log and a change to any other property is a replacement. Reusing regardless would
                 // report the stack complete while DescribeFlowLogs kept serving the old config.
                 requireUnchanged(existing, props, ctx);
+                Ec2Tags.reconcile(ec2Service, ctx.region(), existingId, desiredTags);
                 r.getAttributes().put("Id", existingId);
                 return;
             }
@@ -67,6 +77,7 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
                 props != null && props.hasNonNull("MaxAggregationInterval")
                         ? props.get("MaxAggregationInterval").asInt()
                         : DEFAULT_MAX_AGGREGATION_INTERVAL);
+        Ec2Tags.reconcile(ec2Service, ctx.region(), fl.getFlowLogId(), desiredTags);
         r.setPhysicalId(fl.getFlowLogId());
         r.getAttributes().put("Id", fl.getFlowLogId());
     }

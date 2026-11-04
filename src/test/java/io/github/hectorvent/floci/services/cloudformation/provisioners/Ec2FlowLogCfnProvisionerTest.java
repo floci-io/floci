@@ -9,18 +9,21 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -28,11 +31,12 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-/** The EC2 flow-log CFN provisioner in isolation, with only FlowLogService mocked. */
+/** The EC2 flow-log CFN provisioner in isolation, with FlowLogService and Ec2Service mocked. */
 class Ec2FlowLogCfnProvisionerTest {
 
     private final FlowLogService flowLogs = mock(FlowLogService.class);
-    private final Ec2FlowLogCfnProvisioner provisioner = new Ec2FlowLogCfnProvisioner(flowLogs);
+    private final Ec2Service ec2 = mock(Ec2Service.class);
+    private final Ec2FlowLogCfnProvisioner provisioner = new Ec2FlowLogCfnProvisioner(flowLogs, ec2);
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
@@ -41,7 +45,14 @@ class Ec2FlowLogCfnProvisionerTest {
             JsonNode node = inv.getArgument(0);
             return node == null ? null : node.asText();
         });
+        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+    }
+
+    /** Tag has no equals, so a tag list is matched on its one key and value. */
+    private static List<Tag> tags(String key, String value) {
+        return argThat(tags -> tags.size() == 1 && key.equals(tags.get(0).getKey())
+                && value.equals(tags.get(0).getValue()));
     }
 
     private StackResource resource() {
@@ -206,7 +217,7 @@ class Ec2FlowLogCfnProvisionerTest {
         // compare must default the template the same way or an unchanged update is rejected.
         FlowLogService real = new FlowLogService(mock(Ec2Service.class), mock(S3Service.class),
                 new InMemoryStorageFactory("000000000000"));
-        Ec2FlowLogCfnProvisioner p = new Ec2FlowLogCfnProvisioner(real);
+        Ec2FlowLogCfnProvisioner p = new Ec2FlowLogCfnProvisioner(real, ec2);
         ObjectNode props = mapper.createObjectNode()
                 .put("ResourceId", "vpc-123")
                 .put("LogDestination", "arn:aws:logs:us-east-1:000000000000:log-group:flows")
@@ -235,6 +246,48 @@ class Ec2FlowLogCfnProvisionerTest {
 
         assertEquals("fl-new", r.getPhysicalId());
         assertEquals("fl-new", r.getAttributes().get("Id"));
+    }
+
+    @Test
+    void createTagsTheNewFlowLog() {
+        when(flowLogs.createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt()))
+                .thenReturn(flowLog("fl-0abc"));
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
+
+        provisioner.provision(resource(), props, ctx());
+
+        verify(ec2).createTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("team", "core"));
+    }
+
+    @Test
+    void updateReconcilesTheTagsOfTheReusedFlowLog() {
+        StackResource r = resource();
+        r.setPhysicalId("fl-0abc");
+        FlowLog existing = flowLog("fl-0abc");
+        existing.setResourceId("vpc-123");
+        when(flowLogs.describeFlowLogs("us-east-1", List.of("fl-0abc"))).thenReturn(List.of(existing));
+        when(ec2.describeTags("us-east-1", Map.of("resource-id", List.of("fl-0abc"))))
+                .thenReturn(List.of(Map.of("key", "old", "value", "gone")));
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "core");
+
+        provisioner.provision(r, props, ctx());
+
+        // Tags are the one property an update changes in place, so the log is kept, not replaced.
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
+        verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("old", "gone"));
+        verify(ec2).createTags(eq("us-east-1"), eq(List.of("fl-0abc")), tags("team", "core"));
+    }
+
+    @Test
+    void aReservedTagKeyCreatesNoFlowLog() {
+        ObjectNode props = mapper.createObjectNode().put("ResourceId", "vpc-123");
+        props.putArray("Tags").addObject().put("Key", "aws:reserved").put("Value", "x");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(resource(), props, ctx()));
+
+        verify(flowLogs, never()).createFlowLog(anyString(), any(), any(), any(), any(), any(), any(), any(), anyInt());
     }
 
     @Test
