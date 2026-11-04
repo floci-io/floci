@@ -437,8 +437,20 @@ $$;
 
 CREATE OR REPLACE PROCEDURE floci_internal.create_copy_job(
     name text, iam_role text, job_text text, is_auto boolean, target_table text, bucket text, prefix text)
+LANGUAGE plpgsql SECURITY INVOKER AS $$
+BEGIN
+    -- PostgreSQL rejects COMMIT inside an explicit transaction, including a saved Parse executed later.
+    -- Keep transaction control outside SECURITY DEFINER and SET clauses, which forbid it unconditionally.
+    COMMIT;
+    CALL floci_internal.insert_copy_job(name, iam_role, job_text, is_auto, target_table, bucket, prefix);
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE floci_internal.insert_copy_job(
+    name text, iam_role text, job_text text, is_auto boolean, target_table text, bucket text, prefix text)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
+    LOCK TABLE floci_internal.copy_job IN SHARE ROW EXCLUSIVE MODE;
     IF (SELECT count(*) FROM floci_internal.copy_job) >= 200 THEN
         RAISE EXCEPTION 'A cluster or workgroup can have at most 200 copy jobs' USING ERRCODE = '54000';
     END IF;
@@ -463,6 +475,14 @@ END;
 $$;
 
 CREATE OR REPLACE PROCEDURE floci_internal.drop_copy_job(name text)
+LANGUAGE plpgsql SECURITY INVOKER AS $$
+BEGIN
+    COMMIT;
+    CALL floci_internal.delete_copy_job(name);
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE floci_internal.delete_copy_job(name text)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
 BEGIN
     DELETE FROM floci_internal.copy_job j
@@ -484,5 +504,9 @@ FROM floci_internal.copy_job j
 WHERE j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user);
 
 GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;
+GRANT USAGE ON SCHEMA floci_internal TO PUBLIC;
+-- Schema access for COPY JOB must not expose the unrelated privileged catalog writers.
+REVOKE EXECUTE ON FUNCTION floci_internal.refresh_external_catalog(text, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION floci_internal.purge_external_schema(text) FROM PUBLIC;
 GRANT ALL ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO PUBLIC;

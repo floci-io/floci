@@ -639,7 +639,7 @@ public class RedshiftInterceptingBridge {
 
     /** A COPY JOB statement becomes a call on the cluster catalog, then Redshift DDL is made PostgreSQL's. */
     private String rewriteSql(String sql) {
-        String statement = CopyJobSql.rewrite(sql, coordinator.lastReadyStatus() != 'I');
+        String statement = CopyJobSql.rewrite(sql, false);
         return RedshiftSqlInterceptor.rewrite(statement);
     }
 

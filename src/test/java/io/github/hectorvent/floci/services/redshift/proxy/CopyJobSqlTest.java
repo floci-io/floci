@@ -104,4 +104,75 @@ class CopyJobSqlTest {
         assertThat(CopyJobSql.rewrite(COPY, false), not(containsString("floci_internal")));
         assertThat(CopyJobSql.rewrite("SELECT 1", false), equalTo("SELECT 1"));
     }
+
+    @Test
+    void targetAndColumnNamesAreNotOptions() {
+        for (String target : new String[]{"public.manifest", "public.\"maxerror\"", "t (credentials)"}) {
+            assertThat(CopyJobSql.rewrite("COPY " + target + " FROM 's3://b/p' IAM_ROLE '" + ROLE
+                    + "' JOB CREATE j", false), startsWith("CALL floci_internal.create_copy_job("));
+        }
+    }
+
+    @Test
+    void storesOptionsThatAreOnlyValidatedWhenTheJobRuns() {
+        assertThat(create("FORMAT AS PARQUET JOB CREATE j"), startsWith("CALL floci_internal.create_copy_job("));
+    }
+
+    @Test
+    void commentsAndEscapedIdentifiersAreSupported() {
+        assertThat(CopyJobSql.rewrite("/* jobs */ COPY /* comment */ JOB SHOW \"a\"\"b\"; -- end", false),
+                equalTo("SELECT * FROM pg_catalog.sys_copy_job WHERE job_name = 'a\"b'"));
+        assertThat(CopyJobSql.rewrite(COPY + " /* MAXERROR */ JOB CREATE j -- end", false),
+                startsWith("CALL floci_internal.create_copy_job("));
+    }
+
+    @Test
+    void quotedJobCreateTextDoesNotTurnAnOrdinaryCopyIntoAJob() {
+        String sql = "COPY t FROM 's3://b/JOB CREATE j'";
+        assertThat(CopyJobSql.matches(sql), equalTo(false));
+        assertThat(CopyJobSql.rewrite(sql, false), equalTo(sql));
+    }
+
+    @Test
+    void rewritesEachStatementWithoutAbsorbingOtherStatementsIntoTheJob() {
+        assertThat(CopyJobSql.rewrite("COPY JOB LIST; SELECT 1", false),
+                equalTo("SELECT * FROM pg_catalog.sys_copy_job ORDER BY job_id; SELECT 1"));
+        assertThat(CopyJobSql.rewrite(COPY + "; SELECT 1 JOB CREATE j", false),
+                equalTo(COPY + "; SELECT 1 JOB CREATE j"));
+        assertThat(CopyJobSql.rewrite("BEGIN; " + COPY + " JOB CREATE j; COMMIT", false),
+                containsString("reject_copy_job('25001'"));
+    }
+
+    @Test
+    void unterminatedQuotedNamesCannotReferToAnExistingJob() {
+        for (String name : new String[]{"\"jobx", "\"jobx\"\""}) {
+            assertThat(CopyJobSql.rewrite("COPY JOB DROP " + name, false),
+                    containsString("reject_copy_job('42601'"));
+            assertThat(create("JOB CREATE " + name), containsString("reject_copy_job('42601'"));
+        }
+    }
+
+    @Test
+    void unterminatedCommentsCannotExecuteAJobCommand() {
+        assertThat(CopyJobSql.rewrite("COPY JOB DROP j /* unfinished", false),
+                containsString("reject_copy_job('42601'"));
+        assertThat(create("JOB CREATE j /* outer /* nested */"),
+                containsString("reject_copy_job('42601'"));
+    }
+
+    @Test
+    void invalidCopyTargetsAreRejectedBeforeRegisteringAJob() {
+        for (String target : new String[]{"t bogus", "t (a b)", "t (a,)", "t."}) {
+            assertThat(CopyJobSql.rewrite("COPY " + target + " FROM 's3://b/p' IAM_ROLE '" + ROLE
+                    + "' JOB CREATE j", false), containsString("reject_copy_job("));
+        }
+    }
+
+    @Test
+    void jobNameLengthIsLimitedInUtf8Bytes() {
+        assertThat(create("JOB CREATE " + "a".repeat(127)), startsWith("CALL floci_internal.create_copy_job("));
+        assertThat(create("JOB CREATE " + "a".repeat(129)), containsString("reject_copy_job('42602'"));
+        assertThat(create("JOB CREATE \"" + "é".repeat(64) + "\""), containsString("reject_copy_job('42602'"));
+        assertThat(create("JOB CREATE \"" + "a".repeat(8192) + "\""), containsString("reject_copy_job('42602'"));
+    }
 }

@@ -311,8 +311,14 @@ COPY JOB DROP my_copy_job;
 
 Jobs live in the cluster database and are listed in `sys_copy_job`, with AWS's columns. `JOB CREATE` and
 `COPY JOB DROP` are refused inside a transaction block. A job needs an S3 source and an explicit `IAM_ROLE`,
-and cannot use `MANIFEST`, access keys, `MAXERROR` or `IGNOREALLERRORS`. The name cannot contain a hyphen,
-and a database holds at most 200 jobs. Simple Query and Extended Query are both supported.
+and cannot use `MANIFEST`, access keys, `MAXERROR` or `IGNOREALLERRORS`. Names cannot contain a hyphen and
+must fit in 127 UTF-8 bytes. A database holds at most 200 jobs, including when jobs are created concurrently.
+Simple Query, Extended Query and the Redshift Data API are supported. Transaction restrictions are checked when a job
+command executes, including when a prepared statement is reused. Regular users can manage their own jobs
+and see their own rows in `sys_copy_job`; superusers can see all rows.
+
+COPY options are stored for execution time, including formats the ordinary COPY simulator does not yet
+implement. The COPY JOB restrictions above are checked at creation time.
 
 Jobs only record the COPY for now: nothing loads files automatically, and `COPY JOB RUN` is refused. The
 SQLSTATEs and messages of the refusals are Floci's own, not captured from AWS.

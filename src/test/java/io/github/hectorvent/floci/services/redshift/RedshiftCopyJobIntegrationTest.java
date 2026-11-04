@@ -8,7 +8,8 @@ import org.awaitility.core.ConditionTimeoutException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -58,8 +59,8 @@ class RedshiftCopyJobIntegrationTest {
         }
     }
 
-    private static Connection waitForConnection(Cluster cluster) throws SQLException {
-        String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev";
+    private static Connection waitForConnection(Cluster cluster, String mode) throws SQLException {
+        String url = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev?preferQueryMode=" + mode;
         try {
             return Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
                     .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
@@ -69,12 +70,13 @@ class RedshiftCopyJobIntegrationTest {
         }
     }
 
-    @Test
-    void createListShowAlterAndDropACopyJob() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"simple", "extended"})
+    void createListShowAlterAndDropACopyJob(String mode) throws Exception {
         clusterId = "copy-job-" + UUID.randomUUID().toString().substring(0, 8);
         Cluster cluster = service.createCluster(clusterId, "dc2.large", "admin", "Secret123");
 
-        try (Connection connection = waitForConnection(cluster); Statement statement = connection.createStatement()) {
+        try (Connection connection = waitForConnection(cluster, mode); Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE public.events (id integer)");
             statement.execute(COPY + " JOB CREATE my_copy_job AUTO ON");
 
@@ -93,6 +95,21 @@ class RedshiftCopyJobIntegrationTest {
             }
             try (ResultSet rows = statement.executeQuery("SELECT job_name FROM sys_copy_job")) {
                 assertTrue(rows.next());
+            }
+
+            statement.execute("CREATE USER job_owner PASSWORD 'Secret123'");
+            statement.execute("GRANT USAGE ON SCHEMA public TO job_owner");
+            statement.execute("GRANT INSERT ON public.events TO job_owner");
+            try (Connection user = DriverManager.getConnection(connection.getMetaData().getURL(), "job_owner", "Secret123");
+                    Statement userStatement = user.createStatement()) {
+                userStatement.execute(COPY + " JOB CREATE user_job");
+                try (ResultSet rows = userStatement.executeQuery("COPY JOB LIST")) {
+                    assertTrue(rows.next());
+                    assertEquals("user_job", rows.getString("job_name").trim());
+                    assertFalse(rows.next());
+                }
+                userStatement.execute("COPY JOB ALTER user_job AUTO OFF");
+                userStatement.execute("COPY JOB DROP user_job");
             }
 
             SQLException duplicate = assertThrows(SQLException.class,

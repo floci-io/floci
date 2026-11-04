@@ -1,128 +1,224 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.Kind;
+import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.Token;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
-/**
- * Turns the COPY JOB statements into calls on the {@code floci_internal} procedures that
- * {@code bootstrap-catalog.sql} defines, so the jobs live in the cluster database and
- * {@code sys_copy_job} reads them like any other catalog view.
- *
- * <p>The checks AWS documents for a job (an S3 source, an explicit {@code IAM_ROLE}, no manifest, no access
- * keys, no {@code MAXERROR} or {@code IGNOREALLERRORS}, a name without a hyphen, no transaction block) are made
- * here, and a statement that breaks one is rewritten to a call that raises the error. The text of the
- * errors and their SQLSTATEs are not captured from AWS.
- */
+/** Rewrites COPY JOB SQL to the cluster catalog, without executing or validating the stored COPY options. */
 public final class CopyJobSql {
-
-    private static final String NAME = "[A-Za-z_][A-Za-z0-9_$]*|\"[^\"]+\"";
-
-    private static final Pattern JOB_COMMAND = Pattern.compile(
-            "(?is)^\\s*COPY\\s+JOB\\s+(LIST|SHOW|RUN|DROP|ALTER)\\b\\s*(.*?)\\s*;?\\s*$");
-    private static final Pattern JOB_CREATE = Pattern.compile(
-            "(?is)^\\s*(COPY\\s+.+?)\\s+JOB\\s+CREATE\\s+(" + NAME + ")(?:\\s+AUTO\\s+(ON|OFF))?\\s*;?\\s*$");
-    private static final Pattern NAME_ONLY = Pattern.compile("(" + NAME + ")");
-    private static final Pattern NAME_AUTO = Pattern.compile("(" + NAME + ")\\s+AUTO\\s+(ON|OFF)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern ERROR_TOLERANCE = Pattern.compile("(?i)\\b(MAXERROR|IGNOREALLERRORS)\\b");
-    private static final Pattern MANIFEST = Pattern.compile("(?i)\\bMANIFEST\\b");
-    private static final Pattern ACCESS_KEYS = Pattern.compile(
-            "(?i)\\b(CREDENTIALS|ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN)\\b");
-    private static final Pattern STRING_LITERAL = Pattern.compile("'(?:[^']|'')*'");
-
     private static final String SYS_COPY_JOB = "SELECT * FROM pg_catalog.sys_copy_job";
 
     private CopyJobSql() {
     }
 
-    /** Whether the statement is one COPY JOB form, so that it is not read as an ordinary S3 COPY. */
+    /** Identifies job clauses outside strings, quoted identifiers and comments. */
     public static boolean matches(String sql) {
+        return sql != null && RedshiftAuditSql.statements(sql).stream()
+                .anyMatch(statement -> jobClause(RedshiftAuditSql.tokens(statement)) >= 0);
+    }
+
+    /** CREATE and DROP need a standalone, auto-committed execution, including on the Data API path. */
+    public static boolean requiresAutoCommit(String sql) {
         if (sql == null) {
             return false;
         }
-        return JOB_COMMAND.matcher(sql).matches() || JOB_CREATE.matcher(sql).matches();
+        for (String statement : RedshiftAuditSql.statements(sql)) {
+            List<Token> tokens = RedshiftAuditSql.tokens(statement);
+            int job = jobClause(tokens);
+            if (job >= 0 && job + 1 < tokens.size()
+                    && (tokens.get(job + 1).keyword("CREATE") || tokens.get(job + 1).keyword("DROP"))) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    /** The statement to send to PostgreSQL in place of a COPY JOB statement, or the statement itself otherwise. */
+    /** The backend also checks transaction restrictions at execution, since a prepared statement may be reused. */
     public static String rewrite(String sql, boolean inTransaction) {
         if (sql == null) {
             return null;
         }
-        Matcher create = JOB_CREATE.matcher(sql);
-        if (create.matches()) {
-            return create(create.group(1), create.group(2), create.group(3), inTransaction);
+        List<String> statements = RedshiftAuditSql.statements(sql);
+        List<String> rewritten = new ArrayList<>();
+        boolean changed = false;
+        for (String statement : statements) {
+            List<Token> tokens = RedshiftAuditSql.tokens(statement);
+            int job = jobClause(tokens);
+            String replacement = job < 0 ? statement
+                    : rewriteStatement(statement, tokens, job, inTransaction || statements.size() > 1);
+            rewritten.add(replacement);
+            changed |= !replacement.equals(statement);
         }
-        Matcher command = JOB_COMMAND.matcher(sql);
-        if (command.matches()) {
-            return command(command.group(1).toUpperCase(Locale.ROOT), command.group(2), inTransaction);
-        }
-        return sql;
+        return changed ? String.join("; ", rewritten.stream().map(String::stripLeading).toList()) : sql;
     }
 
-    private static String command(String verb, String arguments, boolean inTransaction) {
-        Matcher name = NAME_ONLY.matcher(arguments);
-        Matcher alter = NAME_AUTO.matcher(arguments);
+    private static int jobClause(List<Token> tokens) {
+        if (tokens.size() < 3 || !tokens.getFirst().keyword("COPY")) {
+            return -1;
+        }
+        if (tokens.get(1).keyword("JOB") && (tokens.get(2).keyword("LIST") || tokens.get(2).keyword("SHOW")
+                || tokens.get(2).keyword("DROP") || tokens.get(2).keyword("ALTER") || tokens.get(2).keyword("RUN"))) {
+            return 1;
+        }
+        for (int i = 2; i + 1 < tokens.size(); i++) {
+            if (tokens.get(i).keyword("JOB") && tokens.get(i + 1).keyword("CREATE")) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static String rewriteStatement(String sql, List<Token> tokens, int job, boolean inTransaction) {
+        if (tokens.stream().anyMatch(token -> token.kind() == Kind.INVALID)) {
+            return reject("42601", "Unterminated comment in COPY JOB statement");
+        }
+        if (job > 1) {
+            return create(sql, tokens, job, inTransaction);
+        }
+        String verb = tokens.get(2).text().toUpperCase(Locale.ROOT);
+        List<Token> arguments = tokens.subList(3, tokens.size());
+        boolean hasName = !arguments.isEmpty() && isName(arguments.getFirst());
         return switch (verb) {
             case "LIST" -> arguments.isEmpty() ? SYS_COPY_JOB + " ORDER BY job_id"
                     : reject("42601", "COPY JOB LIST takes no arguments");
-            case "SHOW" -> name.matches()
-                    ? SYS_COPY_JOB + " WHERE job_name = " + literal(jobName(name.group(1)))
+            case "SHOW" -> hasName && arguments.size() == 1
+                    ? SYS_COPY_JOB + " WHERE job_name = " + literal(arguments.getFirst().identifier())
                     : reject("42601", "COPY JOB SHOW needs a job name");
             case "DROP" -> {
-                if (!name.matches()) {
+                if (!hasName || arguments.size() != 1) {
                     yield reject("42601", "COPY JOB DROP needs a job name");
                 }
                 yield inTransaction ? reject("25001", "COPY JOB DROP cannot run inside a transaction block")
-                        : "CALL floci_internal.drop_copy_job(" + literal(jobName(name.group(1))) + ")";
+                        : "CALL floci_internal.drop_copy_job(" + literal(arguments.getFirst().identifier()) + ")";
             }
-            case "ALTER" -> alter.matches()
-                    ? "CALL floci_internal.alter_copy_job(" + literal(jobName(alter.group(1))) + ", "
-                            + isAuto(alter.group(2)) + ")"
+            case "ALTER" -> hasName && arguments.size() == 3 && arguments.get(1).keyword("AUTO")
+                    && isAutoValue(arguments.get(2))
+                    ? "CALL floci_internal.alter_copy_job(" + literal(arguments.getFirst().identifier()) + ", "
+                            + arguments.get(2).keyword("ON") + ")"
                     : reject("42601", "COPY JOB ALTER needs a job name and AUTO ON or AUTO OFF");
-            default -> reject("0A000", "COPY JOB RUN is not supported");
+            case "RUN" -> reject("0A000", "COPY JOB RUN is not supported");
+            default -> reject("42601", "Unknown COPY JOB command");
         };
     }
 
-    private static String create(String copy, String quotedName, String auto, boolean inTransaction) {
+    private static String create(String sql, List<Token> tokens, int job, boolean inTransaction) {
         if (inTransaction) {
             return reject("25001", "COPY JOB CREATE cannot run inside a transaction block");
         }
-        String name = jobName(quotedName);
+        List<Token> arguments = tokens.subList(job + 2, tokens.size());
+        if (arguments.isEmpty() || !isName(arguments.getFirst())
+                || !(arguments.size() == 1 || arguments.size() == 3 && arguments.get(1).keyword("AUTO")
+                && isAutoValue(arguments.get(2)))) {
+            return reject("42601", "COPY JOB CREATE needs a job name and optional AUTO ON or AUTO OFF");
+        }
+        String name = arguments.getFirst().identifier();
         if (name.indexOf('-') >= 0) {
             return reject("42602", "A copy job name cannot contain a hyphen");
         }
-        // the parser declines some of these options, so they are named before it is asked to read the COPY
-        String withoutLiterals = STRING_LITERAL.matcher(copy).replaceAll("''");
-        if (ERROR_TOLERANCE.matcher(withoutLiterals).find()) {
-            return reject("0A000", "A copy job cannot use MAXERROR or IGNOREALLERRORS");
+        if (name.getBytes(StandardCharsets.UTF_8).length > 127) {
+            return reject("42602", "A copy job name cannot exceed 127 bytes");
         }
-        if (MANIFEST.matcher(withoutLiterals).find()) {
-            return reject("0A000", "A copy job cannot use a manifest");
+        int from = 2;
+        while (from < job && !tokens.get(from).keyword("FROM")) {
+            from++;
         }
-        if (ACCESS_KEYS.matcher(withoutLiterals).find()) {
-            return reject("0A000", "A copy job authorizes with IAM_ROLE, not access keys");
-        }
-        CopyStatementParser.S3Statement statement = CopyStatementParser.parse(copy);
-        if (!(statement instanceof CopyStatementParser.S3CopyFrom from)) {
+        if (from + 1 >= job || tokens.get(from + 1).kind() != Kind.STRING) {
             return reject("0A000", "A copy job needs a COPY from an Amazon S3 location");
         }
-        if (from.iamRoleArn() == null || from.iamRoleArn().isBlank() || from.defaultIamRoleRequested()) {
+        String table = targetTable(sql, tokens, from);
+        if (table == null) {
+            return reject("42601", "Invalid COPY target table or column list");
+        }
+        String source = stringValue(tokens.get(from + 1));
+        if (source == null || !source.startsWith("s3://") || source.length() <= 5) {
+            return reject("0A000", "A copy job needs a COPY from an Amazon S3 location");
+        }
+        String role = null;
+        for (int i = from + 2; i < job; i++) {
+            Token token = tokens.get(i);
+            if (token.keyword("MAXERROR") || token.keyword("IGNOREALLERRORS")) {
+                return reject("0A000", "A copy job cannot use MAXERROR or IGNOREALLERRORS");
+            }
+            if (token.keyword("MANIFEST")) {
+                return reject("0A000", "A copy job cannot use a manifest");
+            }
+            if (token.keyword("CREDENTIALS") || token.keyword("ACCESS_KEY_ID")
+                    || token.keyword("SECRET_ACCESS_KEY") || token.keyword("SESSION_TOKEN")) {
+                return reject("0A000", "A copy job authorizes with IAM_ROLE, not access keys");
+            }
+            if (token.keyword("IAM_ROLE")) {
+                int value = i + 1;
+                if (value < job && tokens.get(value).keyword("AS")) {
+                    value++;
+                }
+                role = value < job ? stringValue(tokens.get(value)) : null;
+            }
+        }
+        if (role == null || role.isBlank() || "default".equalsIgnoreCase(role)) {
             return reject("0A000", "A copy job needs an IAM_ROLE in its COPY command");
         }
-        String prefix = from.keyOrPrefix() == null ? "" : from.keyOrPrefix();
-        return "CALL floci_internal.create_copy_job(" + literal(name) + ", " + literal(from.iamRoleArn()) + ", "
-                + literal(copy) + ", " + isAuto(auto) + ", " + literal(from.targetTable()) + ", "
-                + literal(from.bucket()) + ", " + literal(prefix) + ")";
+        int slash = source.indexOf('/', 5);
+        String bucket = slash < 0 ? source.substring(5) : source.substring(5, slash);
+        String prefix = slash < 0 ? "" : source.substring(slash + 1);
+        if (bucket.isEmpty()) {
+            return reject("0A000", "A copy job needs a COPY from an Amazon S3 location");
+        }
+        String copy = sql.substring(tokens.getFirst().start(), tokens.get(job).start()).trim();
+        boolean auto = arguments.size() == 1 || arguments.get(2).keyword("ON");
+        return "CALL floci_internal.create_copy_job(" + literal(name) + ", " + literal(role) + ", "
+                + literal(copy) + ", " + auto + ", " + literal(table) + ", " + literal(bucket) + ", "
+                + literal(prefix) + ")";
     }
 
-    /** AUTO ON is the default. */
-    private static String isAuto(String auto) {
-        return auto == null || "ON".equalsIgnoreCase(auto) ? "true" : "false";
+    private static String targetTable(String sql, List<Token> tokens, int from) {
+        int index = 1;
+        if (!isName(tokens.get(index++))) {
+            return null;
+        }
+        while (index < from && ".".equals(tokens.get(index).text())) {
+            index++;
+            if (index >= from || !isName(tokens.get(index++))) {
+                return null;
+            }
+        }
+        int end = index;
+        if (index < from && "(".equals(tokens.get(index).text())) {
+            index++;
+            while (true) {
+                if (index >= from || !isName(tokens.get(index++))) {
+                    return null;
+                }
+                if (index >= from || !",".equals(tokens.get(index).text())) {
+                    break;
+                }
+                index++;
+            }
+            if (index >= from || !")".equals(tokens.get(index++).text())) {
+                return null;
+            }
+        }
+        return index == from ? sql.substring(tokens.get(1).start(), tokens.get(end - 1).end()) : null;
     }
 
-    /** An unquoted name folds to lower case as PostgreSQL does, a quoted one is taken as written. */
-    private static String jobName(String name) {
-        return name.startsWith("\"") ? name.substring(1, name.length() - 1) : name.toLowerCase(Locale.ROOT);
+    private static boolean isName(Token token) {
+        return token.kind() == Kind.IDENTIFIER && token.text().length() > 2
+                && token.text().matches("\"(?:[^\"]|\"\")*+\"")
+                || token.kind() == Kind.WORD && token.text().matches("[\\p{L}_][\\p{L}\\p{N}_$]*");
+    }
+
+    private static boolean isAutoValue(Token token) {
+        return token.keyword("ON") || token.keyword("OFF");
+    }
+
+    private static String stringValue(Token token) {
+        String text = token.text();
+        return token.kind() == Kind.STRING && text.length() >= 2 && text.startsWith("'") && text.endsWith("'")
+                ? text.substring(1, text.length() - 1).replace("''", "'") : null;
     }
 
     private static String reject(String sqlState, String message) {
@@ -130,6 +226,7 @@ public final class CopyJobSql {
     }
 
     private static String literal(String value) {
-        return "'" + value.replace("'", "''") + "'";
+        String escaped = value.replace("'", "''");
+        return value.indexOf('\\') < 0 ? "'" + escaped + "'" : "E'" + escaped.replace("\\", "\\\\") + "'";
     }
 }
