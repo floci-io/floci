@@ -266,8 +266,11 @@ class AppSyncExecutionControllerTest {
         when(sidecarClient.execute(any(), any(), any(), any(), any(), any(), any())).thenAnswer(call -> {
             GraphqlSidecarClient.ResolveSpec spec = call.getArgument(6);
             token.set(spec.token());
+            ResolverCallbackSessions.Session session = callbackSessions.find(spec.token()).orElseThrow();
+            assertEquals("000000000000", session.accountId());
+            assertEquals("us-east-1", session.region());
             // What a resolver calling util.appendError does, by way of the callback.
-            callbackSessions.find(spec.token()).orElseThrow().appendErrors(List.of(
+            session.appendErrors(List.of(
                     new AppSyncResolverError("one row was dropped", "Partial", null, Map.of("rows", 1),
                             List.of("getMessages"))));
             return Map.of("data", Map.of("getMessages", "partial"));

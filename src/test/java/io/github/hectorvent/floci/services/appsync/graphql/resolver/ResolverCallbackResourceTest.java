@@ -38,7 +38,7 @@ class ResolverCallbackResourceTest {
     @BeforeEach
     void setUp() {
         resource = new ResolverCallbackResource(sessions, executor, new ObjectMapper());
-        session = sessions.open(API_ID, Map.of("sub", "u-1"), "AWS_IAM");
+        session = sessions.open(API_ID, Map.of("sub", "u-1"), "AWS_IAM", "000000000000", "us-east-1");
     }
 
     private String body(String... invocations) {
