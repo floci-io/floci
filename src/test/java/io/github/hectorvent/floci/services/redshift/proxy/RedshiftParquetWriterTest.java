@@ -11,18 +11,9 @@ import org.mockito.ArgumentCaptor;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -68,8 +59,8 @@ class RedshiftParquetWriterTest {
             when(s3.openObjectStream(eq(RedshiftParquetWriter.STAGING_BUCKET), anyString(), isNull()))
                     .thenReturn(new ByteArrayInputStream(parquet), new ByteArrayInputStream(parquet));
             when(duck.query(anyString(), anyString(), eq("123456789012")))
-                    .thenReturn(List.of(Map.of("filename", "s3://floci-redshift-unload-staging/output/data_0.parquet"),
-                            Map.of("filename", "s3://floci-redshift-unload-staging/output/data_1.parquet")));
+                    .thenReturn(List.of(Map.of("filename", "s3://floci-internal-redshift-unload-staging/output/data_0.parquet"),
+                            Map.of("filename", "s3://floci-internal-redshift-unload-staging/output/data_1.parquet")));
             if (failure) {
                 when(duck.query(anyString(), anyString(), eq("123456789012")))
                         .thenThrow(new IllegalStateException("sidecar unavailable"));
@@ -102,7 +93,7 @@ class RedshiftParquetWriterTest {
         S3Service s3 = mock(S3Service.class);
         FlociDuckClient duck = mock(FlociDuckClient.class);
         when(duck.query(anyString(), anyString(), anyString()))
-                .thenReturn(List.of(Map.of("filename", "s3://floci-redshift-unload-staging/output/data_0.parquet")));
+                .thenReturn(List.of(Map.of("filename", "s3://floci-internal-redshift-unload-staging/output/data_0.parquet")));
         when(s3.openObjectStream(anyString(), anyString(), isNull()))
                 .thenReturn(new ByteArrayInputStream(new byte[0]));
         writer(s3, duck).convert(new byte[0], List.of(new RedshiftParquetWriter.Column("id", "INTEGER")),
@@ -118,7 +109,7 @@ class RedshiftParquetWriterTest {
         S3Service s3 = mock(S3Service.class);
         FlociDuckClient duck = mock(FlociDuckClient.class);
         when(duck.query(anyString(), anyString(), eq("access"), eq("secret"), eq("token")))
-                .thenReturn(List.of(Map.of("filename", "s3://floci-redshift-unload-staging/output/data_0.parquet")));
+                .thenReturn(List.of(Map.of("filename", "s3://floci-internal-redshift-unload-staging/output/data_0.parquet")));
         when(s3.openObjectStream(anyString(), anyString(), isNull()))
                 .thenReturn(new ByteArrayInputStream(new byte[0]));
         RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("access", "secret", "token");
@@ -141,10 +132,10 @@ class RedshiftParquetWriterTest {
                 List.of(new RedshiftParquetWriter.Column("id", "INTEGER")), "123456789012",
                 new RedshiftRoleAccess.RoleSession("access", "secret", "token"), 8192));
         ArgumentCaptor<String> scopes = ArgumentCaptor.forClass(String.class);
-        verify(iam, times(2)).registerUnloadScratchPrefix(eq("access"), scopes.capture());
+        verify(iam).registerScratchResource(eq("access"), scopes.capture());
+        verify(iam).clearScratchResource("access");
         assertTrue(scopes.getAllValues().get(0).matches(
-                "arn:aws:s3:::floci-redshift-unload-staging/unload/[0-9a-f-]{36}/"));
-        assertNull(scopes.getAllValues().get(1));
+                "arn:aws:s3:::floci-internal-redshift-unload-staging/unload/[0-9a-f-]{36}/"));
         verify(s3).deleteObjectsWithPrefix(eq(RedshiftParquetWriter.STAGING_BUCKET), anyString(), any());
     }
 
@@ -159,43 +150,6 @@ class RedshiftParquetWriterTest {
         verifyNoInteractions(duck);
         verify(s3, never()).putBucketTagging(anyString(), any());
         verify(s3, never()).putObject(anyString(), anyString(), any(byte[].class), anyString(), any());
-    }
-
-    @Test
-    void concurrentInitializationWaitsForTheInternalTag() throws Exception {
-        S3Service s3 = mock(S3Service.class);
-        RedshiftParquetWriter writer = writer(s3, mock(FlociDuckClient.class));
-        CountDownLatch tagging = new CountDownLatch(1);
-        CountDownLatch releaseTag = new CountDownLatch(1);
-        AtomicBoolean tagged = new AtomicBoolean();
-        when(s3.createInternalBucket(anyString(), anyString())).thenReturn(null).thenThrow(
-                new AwsException("BucketAlreadyOwnedByYou", "exists", 409));
-        doAnswer(invocation -> {
-            tagging.countDown();
-            assertTrue(releaseTag.await(10, TimeUnit.SECONDS));
-            tagged.set(true);
-            return null;
-        }).when(s3).putBucketTagging(anyString(), any());
-        when(s3.isUnloadStagingBucket(anyString())).thenAnswer(invocation -> tagged.get());
-        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
-            Future<?> first = executor.submit(() -> { writer.ensureStagingBucket(); return null; });
-            assertTrue(tagging.await(10, TimeUnit.SECONDS));
-            AtomicReference<Thread> secondThread = new AtomicReference<>();
-            Future<?> second = executor.submit(() -> {
-                secondThread.set(Thread.currentThread());
-                writer.ensureStagingBucket();
-                return null;
-            });
-            try {
-                await().atMost(Duration.ofSeconds(5)).until(() -> secondThread.get() != null
-                        && secondThread.get().getState() == Thread.State.BLOCKED);
-                verify(s3, times(1)).createInternalBucket(anyString(), anyString());
-            } finally {
-                releaseTag.countDown();
-            }
-            first.get(10, TimeUnit.SECONDS);
-            second.get(10, TimeUnit.SECONDS);
-        }
     }
 
     private RedshiftParquetWriter writer(S3Service s3, FlociDuckClient duck) {

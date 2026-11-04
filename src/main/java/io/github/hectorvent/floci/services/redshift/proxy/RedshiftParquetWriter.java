@@ -2,12 +2,12 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.s3.S3ScratchSpace;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
@@ -168,33 +168,18 @@ public class RedshiftParquetWriter {
         }
     }
 
-    synchronized void ensureStagingBucket() throws IOException {
-        try {
-            s3.createInternalBucket(STAGING_BUCKET, region);
-            s3.putBucketTagging(STAGING_BUCKET,
-                    Map.of(S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_UNLOAD_STAGING_TAG_VALUE));
-        } catch (AwsException exception) {
-            if (!"BucketAlreadyOwnedByYou".equals(exception.getErrorCode())) {
-                throw exception;
-            }
-            if (!s3.isUnloadStagingBucket(STAGING_BUCKET)) {
-                throw new IOException("Bucket " + STAGING_BUCKET + " already exists and is not Floci UNLOAD staging");
-            }
-        }
-    }
-
     private List<byte[]> convertScoped(byte[] csv, List<Column> columns, String accountId,
                                        RedshiftRoleAccess.RoleSession session, long maxFileSizeBytes) throws IOException {
         if (columns.isEmpty()) {
             throw new IOException("UNLOAD query has no Parquet columns");
         }
-        ensureStagingBucket();
+        S3ScratchSpace.UNLOAD.ensureBucket(s3, region);
         String root = "unload/" + UUID.randomUUID() + "/";
         String inputKey = root + "input.csv";
         String outputKey = root + "output.parquet";
         try {
             if (session != null) {
-                iam.registerUnloadScratchPrefix(session.accessKeyId(), AwsArnUtils.Arn.global(
+                iam.registerScratchResource(session.accessKeyId(), AwsArnUtils.Arn.global(
                         AwsRegions.partitionFor(region), "s3", "", STAGING_BUCKET + "/" + root).toString());
             }
             s3.putObject(STAGING_BUCKET, inputKey, csv, "text/csv", null);
@@ -241,7 +226,7 @@ public class RedshiftParquetWriter {
             return result;
         } finally {
             if (session != null) {
-                iam.registerUnloadScratchPrefix(session.accessKeyId(), null);
+                iam.clearScratchResource(session.accessKeyId());
             }
             try {
                 s3.deleteObjectsWithPrefix(STAGING_BUCKET, root, ignored -> {

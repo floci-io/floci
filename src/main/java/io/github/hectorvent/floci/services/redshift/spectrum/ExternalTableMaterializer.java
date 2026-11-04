@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess;
 import io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator;
+import io.github.hectorvent.floci.services.s3.S3ScratchSpace;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -787,7 +788,7 @@ public class ExternalTableMaterializer {
                     String partition = AwsRegions.partitionFor(config.defaultRegion());
                     String scratchArn = AwsArnUtils.Arn.global(partition, "s3", "",
                             SCRATCH_BUCKET + "/" + scratchKey).toString();
-                    iamService.registerSpectrumScratchResource(roleSession.accessKeyId(), scratchArn);
+                    iamService.registerScratchResource(roleSession.accessKeyId(), scratchArn);
                 }
                 readWithDuckDb(session.accountId(), roleSession, table, sources,
                         config.services().redshift().spectrumMaxRows(), scratchKey);
@@ -831,7 +832,7 @@ public class ExternalTableMaterializer {
             throw exception;
         } finally {
             if (roleSession != null && roleSession.accessKeyId() != null) {
-                iamService.clearSpectrumScratchResource(roleSession.accessKeyId());
+                iamService.clearScratchResource(roleSession.accessKeyId());
             }
             if (scratchKey != null) {
                 String cleanupKey = scratchKey;
@@ -963,7 +964,11 @@ public class ExternalTableMaterializer {
 
     private void prepareScratchBucket(String accountId) {
         RequestScopes.runAs(accountId, () -> {
-            ensureScratchBucket();
+            try {
+                S3ScratchSpace.SPECTRUM.ensureBucket(s3Service, config.defaultRegion());
+            } catch (IOException exception) {
+                throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, exception.getMessage(), exception);
+            }
             if (sweptAccounts.add(accountId)) {
                 sweepStaleScratchObjects();
             }
@@ -1055,30 +1060,6 @@ public class ExternalTableMaterializer {
         if (roleSession == null || roleSession.accessKeyId() == null || roleSession.secretAccessKey() == null) {
             throw new SpectrumReadException(SQLSTATE_LOAD_FAILED,
                     "Unable to load external table: no signed role session for the S3 transfer");
-        }
-    }
-
-    /**
-     * Creates the scratch bucket and tags it as ours. A bucket of that name that carries no tag belongs to
-     * the user: it is neither written to nor swept, and the load fails instead of mixing with it.
-     */
-    private void ensureScratchBucket() {
-        boolean created = true;
-        try {
-            s3Service.createInternalBucket(SCRATCH_BUCKET, config.defaultRegion());
-        } catch (AwsException exception) {
-            if (!"BucketAlreadyOwnedByYou".equals(exception.getErrorCode())) {
-                throw exception;
-            }
-            created = false;
-        }
-        if (created) {
-            s3Service.putBucketTagging(SCRATCH_BUCKET,
-                    Map.of(S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE));
-        } else if (!S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE.equals(
-                s3Service.getBucketTagging(SCRATCH_BUCKET).get(S3Service.INTERNAL_BUCKET_TAG_KEY))) {
-            throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "Bucket \"" + SCRATCH_BUCKET
-                    + "\" already exists and is not the Spectrum scratch bucket");
         }
     }
 

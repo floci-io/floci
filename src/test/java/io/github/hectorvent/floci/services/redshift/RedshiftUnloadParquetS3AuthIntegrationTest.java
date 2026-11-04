@@ -52,8 +52,8 @@ class RedshiftUnloadParquetS3AuthIntegrationTest {
                 {"Version":"2012-10-17","Statement":[
                 {"Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::%s"},
                 {"Effect":"Allow","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*"},
-                {"Effect":"Deny","Action":"s3:*","Resource":["arn:aws:s3:::floci-redshift-unload-staging",
-                "arn:aws:s3:::floci-redshift-unload-staging/*"]}]}
+                {"Effect":"Deny","Action":"s3:*","Resource":["arn:aws:s3:::floci-internal-redshift-unload-staging",
+                "arn:aws:s3:::floci-internal-redshift-unload-staging/*"]}]}
                 """.formatted(name, name));
         try {
             Cluster cluster = redshift.createCluster(name, "dc2.large", "admin", "Secret123", null, List.of(), List.of(role));

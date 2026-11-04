@@ -34,10 +34,8 @@ public class SessionCredential {
     /** Exact object action and ARN for an internally generated S3 presigned URL. */
     private String presignedAction;
     private String presignedResourceArn;
-    /** Exact scratch object ARN permitted for an internal Redshift Spectrum transfer session. */
-    private String spectrumScratchResourceArn;
-    /** Exact UUID-scoped prefix for an internal Redshift UNLOAD conversion. */
-    private String unloadScratchPrefixArn;
+    /** Exact object ARN or UUID-scoped prefix permitted for an internal S3 transfer. */
+    private String scratchResourceArn;
     /**
      * The long-term identity whose key minted this session through GetSessionToken or
      * GetFederationToken: an IAM user's ARN, or the account root's. Null for every other session.
@@ -143,13 +141,10 @@ public class SessionCredential {
     public String getPresignedResourceArn() { return presignedResourceArn; }
     public void setPresignedResourceArn(String presignedResourceArn) { this.presignedResourceArn = presignedResourceArn; }
 
-    public String getSpectrumScratchResourceArn() { return spectrumScratchResourceArn; }
-    public void setSpectrumScratchResourceArn(String spectrumScratchResourceArn) {
-        this.spectrumScratchResourceArn = spectrumScratchResourceArn;
+    public String getScratchResourceArn() { return scratchResourceArn; }
+    public void setScratchResourceArn(String scratchResourceArn) {
+        this.scratchResourceArn = scratchResourceArn;
     }
-
-    public String getUnloadScratchPrefixArn() { return unloadScratchPrefixArn; }
-    public void setUnloadScratchPrefixArn(String prefixArn) { this.unloadScratchPrefixArn = prefixArn; }
 
     public boolean isLambdaExecutionRole() { return lambdaExecutionRole; }
     public void setLambdaExecutionRole(boolean lambdaExecutionRole) { this.lambdaExecutionRole = lambdaExecutionRole; }
