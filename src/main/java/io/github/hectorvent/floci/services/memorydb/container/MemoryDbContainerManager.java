@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -85,8 +86,13 @@ public class MemoryDbContainerManager {
 
     public MemoryDbContainerHandle tryStart(String clusterName, String image, String volumeId,
                                             String accountId, String region) {
+        return tryStart(clusterName, image, volumeId, accountId, region, clusterName);
+    }
+
+    public MemoryDbContainerHandle tryStart(String runtimeIdentity, String image, String volumeId,
+                                            String accountId, String region, String logicalName) {
         try {
-            MemoryDbContainerHandle handle = start(clusterName, image, volumeId, accountId, region);
+            MemoryDbContainerHandle handle = start(runtimeIdentity, image, volumeId, accountId, region, logicalName);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -124,22 +130,27 @@ public class MemoryDbContainerManager {
 
     public MemoryDbContainerHandle start(String clusterName, String image, String volumeId,
                                          String accountId, String region) {
+        return start(clusterName, image, volumeId, accountId, region, clusterName);
+    }
+
+    public MemoryDbContainerHandle start(String runtimeIdentity, String image, String volumeId,
+                                         String accountId, String region, String logicalName) {
         runtimeAdmission.readLock().lock();
         try {
             if (stopping) {
                 throw new IllegalStateException("MemoryDB is shutting down");
             }
-            return startAdmitted(clusterName, image, volumeId, accountId, region);
+            return startAdmitted(runtimeIdentity, image, volumeId, accountId, region, logicalName);
         } finally {
             runtimeAdmission.readLock().unlock();
         }
     }
 
     private MemoryDbContainerHandle startAdmitted(String clusterName, String image, String volumeId,
-                                                   String accountId, String region) {
+                                                   String accountId, String region, String logicalName) {
         LOG.infov("Starting MemoryDB backend container for cluster: {0}", clusterName);
 
-        String containerName = containerName(clusterName);
+        String containerName = containerName(accountId, region, logicalName);
 
         lifecycleManager.removeIfExistsStrict(containerName, true);
 
@@ -182,7 +193,8 @@ public class MemoryDbContainerManager {
         String shortId = info.containerId().length() >= 8
                 ? info.containerId().substring(0, 8)
                 : info.containerId();
-        String logGroup = "/aws/memorydb/cluster/" + clusterName + "/engine-log";
+        String logName = isDefaultScope(accountId, region) ? logicalName : clusterName;
+        String logGroup = "/aws/memorydb/cluster/" + logName + "/engine-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
         Closeable logHandle = logStreamer.attach(
                 info.containerId(), logGroup, logStream, region, "memorydb:" + clusterName);
@@ -261,16 +273,26 @@ public class MemoryDbContainerManager {
      * registered. Idempotent — a no-op when nothing is running for the name.
      */
     public void stopByClusterName(String clusterName) {
+        stopByClusterName(clusterName, regionResolver.getAccountId(), resolvedRegion(), clusterName);
+    }
+
+    public void stopByClusterName(String clusterName, String accountId, String region, String logicalName) {
         MemoryDbContainerHandle handle = activeContainers.get(clusterName);
         if (handle != null) {
             stop(handle);
             return;
         }
-        lifecycleManager.removeIfExistsStrict(containerName(clusterName), true);
+        lifecycleManager.removeIfExistsStrict(containerName(accountId, region, logicalName), true);
     }
 
-    private String containerName(String clusterName) {
-        return ContainerStorageHelper.resourceName(config, "memorydb", null, clusterName);
+    private String containerName(String accountId, String region, String logicalName) {
+        String name = isDefaultScope(accountId, region) ? logicalName : accountId + "_" + region + "_" + logicalName;
+        return ContainerStorageHelper.resourceName(config, "memorydb", null, name);
+    }
+
+    private boolean isDefaultScope(String accountId, String region) {
+        return Objects.equals(accountId, regionResolver.getDefaultAccountId())
+                && Objects.equals(region, regionResolver.getDefaultRegion());
     }
 
     private String resolvedRegion() {

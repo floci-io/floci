@@ -53,6 +53,13 @@ Restoration failures are logged and do not leave a reachable-Docker failure adve
 as `available`. As on creation, an unreachable Docker daemon permits metadata-only
 operation; mock mode starts no backend.
 
+Clusters in the configured default account and region keep the short Docker name
+`floci-aws-memorydb-<name>` and engine log group
+`/aws/memorydb/cluster/<name>/engine-log`. Internal runtime and proxy keys remain
+account- and region-scoped. Other scopes use `<account>_<region>_<name>` in Docker
+names to distinguish them from default-scope cluster names containing the old
+hyphenated owner prefix. Docker resource namespaces still apply.
+
 Named volumes follow `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE`. Recreating a deleted
 cluster uses fresh storage even when its previous volume was retained. Memory storage
 mode remains ephemeral. Previously unpersisted data cannot be recovered from metadata.

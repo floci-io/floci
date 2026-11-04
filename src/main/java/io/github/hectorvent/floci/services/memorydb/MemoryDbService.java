@@ -225,7 +225,8 @@ public class MemoryDbService {
             containerManager.stop(new MemoryDbContainerHandle(
                     cluster.getContainerId(), identity, cluster.getContainerHost(), cluster.getContainerPort()));
         } else if (pendingBackend && !config.services().memorydb().mock()) {
-            containerManager.stopByClusterName(identity);
+            containerManager.stopByClusterName(identity, cluster.getAccountId(),
+                        cluster.getRegion(), cluster.getName());
         }
 
         containerManager.removeStorage(identity, cluster.getVolumeId());
@@ -406,10 +407,8 @@ public class MemoryDbService {
                 }
             }
             if (!unavailable) {
-                handle = cluster.getVolumeId() == null
-                        ? containerManager.tryStart(identity, image)
-                        : containerManager.tryStart(identity, image, cluster.getVolumeId(),
-                                entry.accountId(), cluster.getRegion());
+                handle = containerManager.tryStart(identity, image, cluster.getVolumeId(),
+                        entry.accountId(), cluster.getRegion(), cluster.getName());
             }
             boolean lost;
             synchronized (clusterLocks.lockFor(ownerKey)) {
@@ -447,7 +446,8 @@ public class MemoryDbService {
                 if (handle != null) {
                     containerManager.stop(handle);
                 } else {
-                    containerManager.stopByClusterName(identity);
+                    containerManager.stopByClusterName(identity, cluster.getAccountId(),
+                        cluster.getRegion(), cluster.getName());
                 }
             } catch (RuntimeException cleanupFailure) {
                 e.addSuppressed(cleanupFailure);
@@ -886,10 +886,8 @@ public class MemoryDbService {
             // from configuration and need no Docker, so the cluster is created and reaches
             // 'available' even when no daemon is reachable. Only connecting to the cache needs
             // the container.
-            handle = cluster.getVolumeId() == null
-                    ? containerManager.tryStart(identity, image)
-                    : containerManager.tryStart(identity, image, cluster.getVolumeId(),
-                            cluster.getAccountId(), cluster.getRegion());
+            handle = containerManager.tryStart(identity, image, cluster.getVolumeId(),
+                    cluster.getAccountId(), cluster.getRegion(), cluster.getName());
             synchronized (clusterLocks.lockFor(ownerKey)) {
                 if (clusters.getForAccount(cluster.getAccountId(), key(cluster.getRegion(), name))
                         .filter(current -> current == cluster && current.getStatus() != ClusterStatus.DELETING)
@@ -916,7 +914,7 @@ public class MemoryDbService {
                         Map.of(key(cluster.getRegion(), name), cluster));
             }
         } catch (RuntimeException e) {
-            boolean cleaned = rollbackBackend(identity, handle, cluster.getVolumeId(), e);
+            boolean cleaned = rollbackBackend(identity, handle, cluster, e);
             synchronized (clusterLocks.lockFor(ownerKey)) {
                 try {
                     if (cluster.getStatus() != ClusterStatus.DELETING) {
@@ -941,7 +939,7 @@ public class MemoryDbService {
         }
     }
 
-    private boolean rollbackBackend(String name, MemoryDbContainerHandle handle, String volumeId,
+    private boolean rollbackBackend(String name, MemoryDbContainerHandle handle, Cluster cluster,
                                     RuntimeException failure) {
         boolean cleaned = true;
         try {
@@ -956,7 +954,8 @@ public class MemoryDbService {
             if (handle != null) {
                 containerManager.stop(handle);
             } else {
-                containerManager.stopByClusterName(name);
+                containerManager.stopByClusterName(name, cluster.getAccountId(),
+                        cluster.getRegion(), cluster.getName());
             }
         } catch (RuntimeException e) {
             failure.addSuppressed(e);
@@ -964,7 +963,7 @@ public class MemoryDbService {
         }
         if (cleaned) {
             try {
-                containerManager.removeStorage(name, volumeId);
+                containerManager.removeStorage(name, cluster.getVolumeId());
             } catch (RuntimeException e) {
                 failure.addSuppressed(e);
                 cleaned = false;

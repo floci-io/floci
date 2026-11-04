@@ -68,7 +68,7 @@ class MemoryDbRuntimeRestoreTest {
 
     @Test
     void creationPersistsItsOwnerVolumeAndPortBeforeStartingDocker() {
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> {
                     Cluster pending = clusters.getForAccount(DEFAULT_ACCOUNT, "us-east-1:new").orElseThrow();
                     assertEquals(ClusterStatus.CREATING, pending.getStatus());
@@ -93,7 +93,7 @@ class MemoryDbRuntimeRestoreTest {
         verifyNoInteractions(containers, proxies);
         assertTrue(clusters.getForAccount(DEFAULT_ACCOUNT, "us-east-1:new").isEmpty());
         doCallRealMethod().when(clusters).putAllAtomicallyForAccount(eq(DEFAULT_ACCOUNT), anyMap());
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("retry-cid", "retry", "localhost", 6379));
         assertEquals(17400, service.createCluster(spec("retry"), "us-east-1").getProxyPort());
     }
@@ -102,7 +102,7 @@ class MemoryDbRuntimeRestoreTest {
     void failedCleanupRetainsOwnershipAndPortUntilDeletionRetries() {
         MemoryDbContainerHandle handle = new MemoryDbContainerHandle("failed-cid",
                 "000000000000-us-east-1-failed", "localhost", 6379);
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(handle);
         doThrow(new IllegalStateException("proxy rejected")).when(proxies)
                 .startProxy(eq(handle.getClusterName()), anyBoolean(), anyInt(), anyString(), anyInt(), any());
@@ -135,7 +135,7 @@ class MemoryDbRuntimeRestoreTest {
         }).when(clusters).putAllAtomicallyForAccount(anyString(), anyMap());
         doThrow(new IllegalStateException("rollback record deletion rejected"))
                 .when(clusters).deleteAllAtomicallyForAccounts(anyMap());
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> new MemoryDbContainerHandle("owned-cid", inv.getArgument(0),
                         "localhost", 6379));
 
@@ -164,7 +164,7 @@ class MemoryDbRuntimeRestoreTest {
             validators.put(inv.getArgument(2), inv.getArgument(5));
             return null;
         }).when(proxies).startProxy(anyString(), eq(true), anyInt(), anyString(), anyInt(), any());
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> new MemoryDbContainerHandle(inv.getArgument(2), inv.getArgument(0),
                         "127.0.0.1", 6379));
 
@@ -178,10 +178,10 @@ class MemoryDbRuntimeRestoreTest {
         assertFalse(validators.get(17400).authenticate("user", "second-secret"));
         assertTrue(validators.get(17401).authenticate("user", "second-secret"));
         assertFalse(validators.get(17401).authenticate("user", "first-secret"));
-        verify(containers).tryStart("000000000000-us-east-1-same", "valkey/valkey:8", first.getVolumeId(),
-                DEFAULT_ACCOUNT, "us-east-1");
-        verify(containers).tryStart("111111111111-eu-west-1-same", "valkey/valkey:8", second.getVolumeId(),
-                "111111111111", "eu-west-1");
+        verify(containers).tryStart(eq("000000000000-us-east-1-same"), eq("valkey/valkey:8"), eq(first.getVolumeId()),
+                eq(DEFAULT_ACCOUNT), eq("us-east-1"), eq("same"));
+        verify(containers).tryStart(eq("111111111111-eu-west-1-same"), eq("valkey/valkey:8"), eq(second.getVolumeId()),
+                eq("111111111111"), eq("eu-west-1"), eq("same"));
     }
 
     @Test
@@ -189,7 +189,7 @@ class MemoryDbRuntimeRestoreTest {
         persisted(DEFAULT_ACCOUNT, "us-east-1", "111111111111-eu-west-1-same", 17400);
         persisted("111111111111", "eu-west-1", "same", 17401);
         Map<String, String> backendOwners = new ConcurrentHashMap<>();
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> {
                     String identity = inv.getArgument(0);
                     String account = inv.getArgument(3);
@@ -210,13 +210,13 @@ class MemoryDbRuntimeRestoreTest {
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch finish = new CountDownLatch(1);
         MemoryDbContainerHandle oldHandle = new MemoryDbContainerHandle("old-cid", "old", "localhost", 6379);
-        when(containers.tryStart(eq("000000000000-us-east-1-old"), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(eq("000000000000-us-east-1-old"), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> {
                     started.countDown();
                     assertTrue(finish.await(5, TimeUnit.SECONDS));
                     return oldHandle;
                 });
-        when(containers.tryStart(eq("000000000000-us-east-1-replacement"), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(eq("000000000000-us-east-1-replacement"), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("new-cid", "replacement", "localhost", 6379));
         CompletableFuture<Void> restored = service.restorePersistedRuntime();
         try {
@@ -249,13 +249,13 @@ class MemoryDbRuntimeRestoreTest {
         CountDownLatch finish = new CountDownLatch(1);
         MemoryDbContainerHandle oldHandle = new MemoryDbContainerHandle("old-cid",
                 "000000000000-us-east-1-old", "localhost", 6379);
-        when(containers.tryStart(eq(oldHandle.getClusterName()), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(eq(oldHandle.getClusterName()), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenAnswer(inv -> {
                     started.countDown();
                     assertTrue(finish.await(5, TimeUnit.SECONDS));
                     return oldHandle;
                 });
-        when(containers.tryStart(eq("000000000000-us-east-1-other"), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(eq("000000000000-us-east-1-other"), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("other-cid", "other", "localhost", 6379));
         CompletableFuture<Cluster> creation = CompletableFuture.supplyAsync(
                 () -> service.createCluster(spec("old"), "us-east-1"));
@@ -281,9 +281,9 @@ class MemoryDbRuntimeRestoreTest {
     void failedBackendIsNotAdvertisedAsAvailableAndOtherClustersStillRestore() throws Exception {
         Cluster failed = persisted(DEFAULT_ACCOUNT, "us-east-1", "failed", 17400);
         Cluster healthy = persisted(DEFAULT_ACCOUNT, "us-east-1", "healthy", 17401);
-        when(containers.tryStart(eq("000000000000-us-east-1-failed"), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(eq("000000000000-us-east-1-failed"), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenThrow(new IllegalStateException("backend rejected"));
-        when(containers.tryStart(eq("000000000000-us-east-1-healthy"), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(eq("000000000000-us-east-1-healthy"), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("healthy-cid", "healthy", "localhost", 6379));
 
         assertThrows(ExecutionException.class, () -> service.restorePersistedRuntime().get(5, TimeUnit.SECONDS));
@@ -299,7 +299,7 @@ class MemoryDbRuntimeRestoreTest {
         Cluster legacy = spec("legacy");
         legacy.setArn("arn:aws:memorydb:eu-west-1:111111111111:cluster/legacy");
         rawClusters.put("legacy", legacy);
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("legacy-cid", "legacy", "localhost", 6379));
 
         service.restorePersistedRuntime().get(5, TimeUnit.SECONDS);
@@ -309,8 +309,8 @@ class MemoryDbRuntimeRestoreTest {
         assertEquals("eu-west-1", legacy.getRegion());
         assertTrue(rawClusters.get("legacy").isEmpty());
         assertTrue(service.describeClusters(null, "eu-west-1").isEmpty());
-        verify(containers).tryStart("111111111111-eu-west-1-legacy", "valkey/valkey:8",
-                legacy.getVolumeId(), "111111111111", "eu-west-1");
+        verify(containers).tryStart(eq("111111111111-eu-west-1-legacy"), eq("valkey/valkey:8"), eq(legacy.getVolumeId()),
+                eq("111111111111"), eq("eu-west-1"), eq("legacy"));
     }
 
     @Test
@@ -342,7 +342,7 @@ class MemoryDbRuntimeRestoreTest {
         assertEquals(List.of(legacy), rawClusters.scan(
                 key -> key.startsWith(DEFAULT_ACCOUNT + "/legacy-clusters/")));
         assertTrue(rawClusters.get("same").isEmpty());
-        verify(containers, times(1)).tryStart(anyString(), anyString(), anyString(), anyString(), anyString());
+        verify(containers, times(1)).tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
     }
 
     @Test
@@ -364,14 +364,14 @@ class MemoryDbRuntimeRestoreTest {
         Cluster cluster = persisted(DEFAULT_ACCOUNT, "eu-west-1", "legacy", 17400);
         cluster.setRegion(null);
         cluster.setArn("arn:aws:memorydb:eu-west-1:000000000000:cluster/legacy");
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("restored-cid", "legacy", "localhost", 6379));
 
         service.restorePersistedRuntime().get(5, TimeUnit.SECONDS);
 
         assertEquals("eu-west-1", cluster.getRegion());
-        verify(containers).tryStart("000000000000-eu-west-1-legacy", "valkey/valkey:8",
-                cluster.getVolumeId(), DEFAULT_ACCOUNT, "eu-west-1");
+        verify(containers).tryStart(eq("000000000000-eu-west-1-legacy"), eq("valkey/valkey:8"), eq(cluster.getVolumeId()),
+                eq(DEFAULT_ACCOUNT), eq("eu-west-1"), eq("legacy"));
     }
 
     @Test
@@ -397,7 +397,7 @@ class MemoryDbRuntimeRestoreTest {
         cluster.setContainerHost("localhost");
         cluster.setContainerPort(6379);
         when(containers.isDockerReachable()).thenReturn(true);
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("replacement-cid", "legacy", "localhost", 6379));
 
         service.restorePersistedRuntime().get(5, TimeUnit.SECONDS);
@@ -405,8 +405,8 @@ class MemoryDbRuntimeRestoreTest {
         InOrder ordering = inOrder(containers);
         ordering.verify(containers).isDockerReachable();
         ordering.verify(containers).stop(argThat(handle -> "legacy-cid".equals(handle.getContainerId())));
-        ordering.verify(containers).tryStart("000000000000-us-east-1-legacy", "valkey/valkey:8",
-                cluster.getVolumeId(), DEFAULT_ACCOUNT, "us-east-1");
+        ordering.verify(containers).tryStart(eq("000000000000-us-east-1-legacy"), eq("valkey/valkey:8"),
+                eq(cluster.getVolumeId()), eq(DEFAULT_ACCOUNT), eq("us-east-1"), eq("legacy"));
         assertEquals("replacement-cid", cluster.getContainerId());
         assertEquals(ClusterStatus.AVAILABLE, cluster.getStatus());
     }
@@ -426,7 +426,7 @@ class MemoryDbRuntimeRestoreTest {
         assertEquals(volumeId, cluster.getVolumeId());
         assertEquals(ClusterStatus.AVAILABLE, cluster.getStatus());
         verify(containers, never()).stop(any(MemoryDbContainerHandle.class));
-        verify(containers, never()).tryStart(anyString(), anyString(), anyString(), anyString(), anyString());
+        verify(containers, never()).tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
         verifyNoInteractions(proxies);
     }
 
@@ -445,7 +445,7 @@ class MemoryDbRuntimeRestoreTest {
         assertEquals("legacy-cid", cluster.getContainerId());
         assertEquals(ClusterStatus.CREATING, cluster.getStatus());
         assertNull(cluster.getClusterEndpoint());
-        verify(containers, never()).tryStart(anyString(), anyString(), anyString(), anyString(), anyString());
+        verify(containers, never()).tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString());
         assertEquals(17401, service.createCluster(spec("other"), "us-east-1").getProxyPort());
     }
 
@@ -455,9 +455,9 @@ class MemoryDbRuntimeRestoreTest {
         String volumeId = failed.getVolumeId();
         MemoryDbContainerHandle handle = new MemoryDbContainerHandle("restore-cid",
                 "000000000000-us-east-1-failed", "localhost", 6379);
-        when(containers.tryStart(eq(handle.getClusterName()), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(eq(handle.getClusterName()), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(handle);
-        when(containers.tryStart(eq("000000000000-us-east-1-other"), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(eq("000000000000-us-east-1-other"), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("other-cid", "other", "localhost", 6379));
         doThrow(new IllegalStateException("proxy rejected")).when(proxies)
                 .startProxy(eq(handle.getClusterName()), anyBoolean(), anyInt(), anyString(), anyInt(), any());
@@ -484,7 +484,7 @@ class MemoryDbRuntimeRestoreTest {
         Cluster failed = persisted(DEFAULT_ACCOUNT, "us-east-1", "failed", 17400);
         MemoryDbContainerHandle handle = new MemoryDbContainerHandle("restore-cid",
                 "000000000000-us-east-1-failed", "localhost", 6379);
-        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(handle);
         doThrow(new IllegalStateException("proxy rejected")).when(proxies)
                 .startProxy(eq(handle.getClusterName()), anyBoolean(), anyInt(), anyString(), anyInt(), any());
