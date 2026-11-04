@@ -169,16 +169,6 @@ if starts RdsParameterGroupEngineIntegrationTest; then
         [ -n "$MYSQL_DEFAULT" ] && pull "${MYSQL_DEFAULT%:*}:$version"
     done
 fi
-# The OpenSearch option fixture names its versions; the production catalog maps
-# those versions to concrete image tags. Keep the test and catalog as the source.
-if starts OpenSearchDomainOptionsIntegrationTest; then
-    OPENSEARCH_TEST="$(find src/test/java -name OpenSearchDomainOptionsIntegrationTest.java -print -quit)"
-    OPENSEARCH_VERSIONS="$(grep -oE 'OpenSearch_[0-9]+\.[0-9]+' "${OPENSEARCH_TEST:-/dev/null}" | sort -u)"
-    for version in $OPENSEARCH_VERSIONS; do
-        image="$(awk -F'"' -v version="$version" '/VERSION_TO_IMAGE.put/ && $2 == version { print $4; exit }' src/main/java/io/github/hectorvent/floci/services/opensearch/OpenSearchVersions.java)"
-        [ -n "$image" ] && pull "$image"
-    done
-fi
 # The InfluxDB and k3s pins live in application.yml like the sidecars above.
 INFLUX_IMAGE="$(grep -oE 'default-image: *"influxdb:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 grep -q '/timestreaminfluxdb/' "$SHARD_FILE" && [ -n "$INFLUX_IMAGE" ] && pull "$INFLUX_IMAGE"
