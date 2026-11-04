@@ -49,9 +49,9 @@ class IamActionRegistryTest {
      * A REST request no rule maps is checked as the operation whose vendored route it matches, as that operation's
      * action, when Floci checks it on the resources AWS does: built by hand for its namespace ({@code Invoke} as
      * {@code lambda:InvokeFunction}), read by the vendored request resources ({@code DescribeRepositories}, and
-     * {@code DescribeDomain} from its path), or none, AWS authorizing its action on no resource type
-     * ({@code ListDomainNames}). One AWS checks on a resource Floci does not read stays unmapped ({@code GetAnalyzer}),
-     * as does a request matching no route, and a rule still decides a route it maps.
+     * {@code DescribeDomain} and {@code GetAnalyzer} from their paths), or none, AWS authorizing its action on no
+     * resource type ({@code ListDomainNames}). One AWS checks on a resource Floci does not read stays unmapped
+     * ({@code GetBackupPlan}), as does a request matching no route, and a rule still decides a route it maps.
      */
     @Test
     void aRouteNoRuleMapsIsCheckedAsItsOperationWhenFlociChecksItAsAwsDoes() throws IOException {
@@ -65,6 +65,9 @@ class IamActionRegistryTest {
                    "accessanalyzer": {"credentialScope": "access-analyzer", "operations": {
                      "GetAnalyzer": {"method": "GET", "requestUri": "/unmapped/analyzer/{analyzerName}"}
                    }},
+                   "backup": {"credentialScope": "backup", "operations": {
+                     "GetBackupPlan": {"method": "GET", "requestUri": "/unmapped/backup/plans/{backupPlanId}"}
+                   }},
                    "ecr": {"credentialScope": "ecr", "operations": {
                      "DescribeRepositories": {"method": "GET", "requestUri": "/unmapped/repositories"}
                    }},
@@ -77,7 +80,9 @@ class IamActionRegistryTest {
         MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
         assertEquals("es:ListDomainNames", routed.resolveRoute("es", mockCtx("GET", "/unmapped/domain", none, null, "")));
         assertEquals("es:DescribeDomain", routed.resolveRoute("es", mockCtx("GET", "/unmapped/domain/logs", none, null, "")));
-        assertNull(routed.resolveRoute("access-analyzer", mockCtx("GET", "/unmapped/analyzer/a", none, null, "")));
+        assertEquals("access-analyzer:GetAnalyzer", routed.resolveRoute("access-analyzer",
+                mockCtx("GET", "/unmapped/analyzer/a", none, null, "")));
+        assertNull(routed.resolveRoute("backup", mockCtx("GET", "/unmapped/backup/plans/p", none, null, "")));
         assertNull(routed.resolveRoute("es", mockCtx("GET", "/other/domain", none, null, "")));
         assertNull(routed.resolveRoute("other", mockCtx("GET", "/unmapped/domain", none, null, "")));
         assertEquals("lambda:InvokeFunction", routed.resolveRoute("lambda",
@@ -90,8 +95,7 @@ class IamActionRegistryTest {
 
     /**
      * With the vendored routes, OpenSearch's and Access Analyzer's requests whose actions act on no resource type
-     * are checked as their operations, the OpenSearch VPC endpoint operations among them, in both API versions;
-     * those AWS checks on an analyzer stay unmapped, so a grant scoped to one is not refused.
+     * are checked as their operations, the OpenSearch VPC endpoint operations among them, in both API versions.
      */
     @ParameterizedTest
     @CsvSource({"es,GET,/2021-01-01/domain,es:ListDomainNames",
@@ -111,11 +115,22 @@ class IamActionRegistryTest {
         assertEquals(action, registry.resolveRoute(scope, mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
     }
 
+    /**
+     * Access Analyzer's analyzer routes are checked as their operations, the vendored request resources reading the
+     * analyzer from the path or the body, and so are those of its archive rules, findings and access previews, which
+     * Floci does not serve.
+     */
     @ParameterizedTest
-    @CsvSource({"access-analyzer,PUT,/analyzer", "access-analyzer,GET,/analyzer/default",
-            "access-analyzer,DELETE,/analyzer/default"})
-    void aVendoredRouteAwsChecksOnAResourceStaysUnmapped(String scope, String method, String path) {
-        assertNull(registry.resolveRoute(scope, mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
+    @CsvSource({"PUT,/analyzer,access-analyzer:CreateAnalyzer",
+            "GET,/analyzer/default,access-analyzer:GetAnalyzer",
+            "DELETE,/analyzer/default,access-analyzer:DeleteAnalyzer",
+            "PUT,/analyzer/default/archive-rule,access-analyzer:CreateArchiveRule",
+            "GET,/analyzer/default/archive-rule/rule,access-analyzer:GetArchiveRule",
+            "POST,/finding,access-analyzer:ListFindings",
+            "GET,/access-preview/preview,access-analyzer:GetAccessPreview"})
+    void anAccessAnalyzerAnalyzerRouteIsCheckedAsItsOperation(String method, String path, String action) {
+        assertEquals(action, registry.resolveRoute("access-analyzer",
+                mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
     }
 
     /**

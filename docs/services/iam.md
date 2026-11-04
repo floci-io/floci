@@ -1708,7 +1708,7 @@ Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kine
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
 Timestream for InfluxDB, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
-Amazon Rekognition, IAM Identity Center and Amazon OpenSearch Service they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Amazon Rekognition, IAM Identity Center, Amazon OpenSearch Service and IAM Access Analyzer they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1886,17 +1886,22 @@ the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`,
 `resourceArn` query parameter on the other bare routes.
 
 A REST request names its resources in its path and its query as well as its body. For OpenSearch
-Service, the one REST service the table reads, a member its path carries, the `DomainName` of
-`/2021-01-01/opensearch/domain/{DomainName}`, is read from the route the request matches in the
-vendored routes below, and one its query carries, the `arn` of `ListTags`, from the query, as members of
-the body are: `DescribeDomain` is checked on `domain/<DomainName>` and `ListTags` on the ARN it gives.
-A member its path or query carries is read from there alone, as OpenSearch reads it, never from a
+Service and IAM Access Analyzer, the REST services the table reads, a member its path carries, the
+`DomainName` of `/2021-01-01/opensearch/domain/{DomainName}` or the `analyzerName` of
+`/analyzer/{analyzerName}`, is read from the route the request matches in the vendored routes below,
+and one its query carries, the `arn` of `ListTags`, from the query, as members of the body are:
+`DescribeDomain` is checked on `domain/<DomainName>`, `GetAnalyzer` on `analyzer/<analyzerName>` and
+`ListTags` on the ARN it gives.
+A member its path or query carries is read from there alone, as the service reads it, never from a
 JSON body or a form: a `GetCompatibleVersions` naming a domain in its body and none in its query
 names no domain.
 The table reads both API versions' operations, `2015-01-01` and `2021-01-01`, the Service Reference
 listing the first's alone, each the action of its own name. A request of an operation whose resource
 the table does not find, an outbound connection's or an OpenSearch application's, is checked on `*`;
-Floci serves neither.
+Floci serves neither. Of Access Analyzer's, Floci serves the analyzer operations: `CreateAnalyzer`
+is checked on the analyzer its body names, and so are its tags, which also need
+`access-analyzer:TagResource` (below), and `GetAnalyzer` and `DeleteAnalyzer` on the one their path
+names.
 
 A route no rule maps is the operation whose route it matches in botocore's model of its service,
 vendored in `src/main/resources/aws/rest-routes.json` (`make aws-data-sync` regenerates it): of the
@@ -1909,10 +1914,10 @@ The actions of no resource type are vendored in `src/main/resources/aws/iam-auth
 for each scope whose routes are read (`make iam-authorized-actions-sync` regenerates them). So
 OpenSearch Service's `ListDomainNames`, `ListVersions` and VPC endpoint operations, in both API
 versions, and Access Analyzer's `ListAnalyzers` and `ValidatePolicy` are checked by their routes, and
-so are OpenSearch Service's domain operations, the table of request resources reading the domain they
-name. A route whose action AWS checks on a resource Floci neither builds nor reads, Access Analyzer's
-analyzer operations among them, is not checked: checked on `*`, a grant scoped to the analyzer would
-be refused. The routes of
+so are OpenSearch Service's domain operations and Access Analyzer's analyzer operations, the table of
+request resources reading the domain or the analyzer they name. A route whose action AWS checks on a
+resource Floci neither builds nor reads would not be checked, since checked on `*` a grant scoped to
+the resource would be refused; no vendored route is one now. The routes of
 Lambda, EKS, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL are all mapped by their rules,
 so none is checked differently. S3 and API Gateway are routed by their rules alone: S3 tells apart the
 operations of one route by their query and headers, and API Gateway is checked by HTTP method. A route
@@ -2185,7 +2190,8 @@ on: Lambda's `CreateFunction` is checked on the function its body names, in the 
 Region, as the Service Reference gives it the `function` resource, so a function's tags are checked
 there too, and a create of a service the table of request resources reads is checked on the resource
 it creates (a target group on `targetgroup/<Name>/*`, an application load balancer on
-`loadbalancer/app/<Name>/*`). A create of a resource under a parent its action acts on tags the new
+`loadbalancer/app/<Name>/*`, an Access Analyzer analyzer on `analyzer/<analyzerName>`). A create of
+a resource under a parent its action acts on tags the new
 resource, so its tags are checked on that one, built from the parent's ARN with its own id open:
 `CreateListener` acts on a load balancer and its tags are checked on
 `listener/app/<load balancer name>/<load balancer id>/*`, and `CreateRule`'s on the new
@@ -2200,7 +2206,7 @@ its namespace's `CreateAction` key, as `ec2:CreateTags`, `ecs:TagResource`, Clou
 `TagResource` and Elastic Load Balancing's `AddTags` do, the key is the operation's name:
 `ec2:CreateAction` is `RunInstances` for an instance launched with tags. The operation's own action
 is checked with the same `aws:RequestTag/<key>` and `aws:TagKeys`, once for each resource's tags,
-wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 542 of the operations read, so
+wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 546 of the operations read, so
 "allow `sqs:CreateQueue` only with `aws:RequestTag/team`" and "deny it when `aws:RequestTag/team` is
 null" hold as on AWS; keys a service's own condition keys already give, as EC2's `RunInstances`
 does, are kept. It is checked once for each reading of the tags and refused if any is denied: the
