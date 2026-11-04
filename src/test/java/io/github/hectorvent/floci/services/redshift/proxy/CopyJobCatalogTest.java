@@ -1,23 +1,25 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.services.redshift.RedshiftService;
+import io.github.hectorvent.floci.testing.DockerAvailability;
+import io.github.hectorvent.floci.testing.RedshiftTestCluster;
+import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.postgresql.Driver;
 import org.postgresql.PGStatement;
 
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -26,58 +28,66 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-/** Runs the real catalog against a dedicated PostgreSQL database supplied with test.postgres.url. */
+/** Runs the real catalog on a cluster's PostgreSQL, so it needs a Docker daemon. */
+@QuarkusTest
 class CopyJobCatalogTest {
     private static final String COPY = "COPY public.events FROM 's3://bucket/prefix/' IAM_ROLE 'load-role'";
-    private static String url;
+    private static final String READER = "copy_job_reader";
+    private static RedshiftTestCluster cluster;
+
+    @Inject
+    RedshiftService service;
 
     @BeforeAll
-    static void bootstrap() throws Exception {
-        url = System.getProperty("test.postgres.url");
-        assumeTrue(url != null, "Supply a dedicated PostgreSQL database with test.postgres.url");
-        try (Connection connection = open(); Statement statement = connection.createStatement()) {
-            statement.execute("SET allow_system_table_mods = on");
-            try (InputStream input = CopyJobCatalogTest.class.getResourceAsStream("/redshift/bootstrap-catalog.sql")) {
-                statement.execute(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+    static void requireDocker() throws InterruptedException {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker daemon must be available for Redshift copy job tests");
+    }
+
+    @BeforeEach
+    void startClusterAndReset() throws SQLException {
+        if (cluster == null) {
+            cluster = RedshiftTestCluster.create(service, "copy-job-catalog");
+            try (Connection connection = open(RedshiftTestCluster.MASTER_USER);
+                    Statement statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE public.events (id integer)");
+                statement.execute("CREATE USER " + READER + " PASSWORD '" + RedshiftTestCluster.PASSWORD + "'");
+                statement.execute("GRANT USAGE ON SCHEMA public TO " + READER);
+                statement.execute("GRANT INSERT ON public.events TO " + READER);
             }
-            statement.execute("CREATE ROLE copy_job_reader LOGIN");
         }
+        truncateJobs();
     }
 
     @AfterAll
-    static void cleanup() throws SQLException {
-        if (url != null) {
-            try (Connection connection = open(); Statement statement = connection.createStatement()) {
-                statement.execute("DROP ROLE IF EXISTS copy_job_reader");
-            }
+    static void stopCluster() {
+        if (cluster != null) {
+            cluster.close();
+            cluster = null;
         }
     }
 
     private static Connection open() throws SQLException {
-        return open("postgres");
+        return open(RedshiftTestCluster.MASTER_USER);
     }
 
     private static Connection open(String user) throws SQLException {
-        Properties properties = new Properties();
-        properties.setProperty("user", user);
-        properties.setProperty("password", "");
-        return new Driver().connect(url, properties);
+        return cluster.connect(user);
     }
 
-    @BeforeEach
     @AfterEach
-    void reset() throws SQLException {
-        try (Connection connection = open(); Statement statement = connection.createStatement()) {
-            statement.execute("TRUNCATE floci_internal.copy_job");
+    void truncateJobs() throws SQLException {
+        if (cluster != null) {
+            try (Connection connection = open(); Statement statement = connection.createStatement()) {
+                statement.execute("TRUNCATE floci_internal.copy_job");
+            }
         }
     }
 
     @Test
     void ordinaryUserCanManageOwnJobsButCannotSeeAnotherUsersJobs() throws SQLException {
         try (Connection admin = open(); Statement adminStatement = admin.createStatement();
-                Connection user = open("copy_job_reader");
+                Connection user = open(READER);
                 Statement statement = user.createStatement()) {
             adminStatement.execute(CopyJobSql.rewrite(COPY + " JOB CREATE admin_job", false));
             statement.execute(CopyJobSql.rewrite(COPY + " JOB CREATE user_job", false));
@@ -93,7 +103,7 @@ class CopyJobCatalogTest {
 
     @Test
     void grantingJobAccessDoesNotExposeExternalCatalogMutation() throws SQLException {
-        try (Connection user = open("copy_job_reader");
+        try (Connection user = open(READER);
                 Statement statement = user.createStatement()) {
             for (String sql : new String[]{"SELECT floci_internal.purge_external_schema('other_schema')",
                     "SELECT floci_internal.refresh_external_catalog('other_schema', '{}'::jsonb)"}) {

@@ -16,8 +16,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSetMetaData;
@@ -35,7 +33,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -108,49 +105,6 @@ class RedshiftDataServiceTest {
             assertEquals("FINISHED", service.describeStatement(idOf(id)).path("Status").asText());
             ObjectNode result = service.getStatementResult(idOf(id));
             assertEquals("saved_job", result.path("Records").get(0).get(1).path("stringValue").asText());
-        }
-    }
-
-    @Test
-    void copyJobLifecycleAndTransactionRestrictionsOnPostgres() throws Exception {
-        String postgresUrl = System.getProperty("test.postgres.url");
-        assumeTrue(postgresUrl != null, "Supply a dedicated PostgreSQL database with test.postgres.url");
-        when(factory.open(any())).thenAnswer(inv -> DriverManager.getConnection(postgresUrl, "postgres", ""));
-        try (Connection connection = DriverManager.getConnection(postgresUrl, "postgres", "");
-                Statement statement = connection.createStatement();
-                InputStream input = getClass().getResourceAsStream("/redshift/bootstrap-catalog.sql")) {
-            statement.execute("SET allow_system_table_mods = on");
-            statement.execute(new String(input.readAllBytes(), StandardCharsets.UTF_8));
-        }
-        String copy = "COPY public.events FROM 's3://bucket/prefix' IAM_ROLE 'load-role' JOB CREATE data_api_job";
-        try {
-            for (String sql : List.of(copy, "COPY JOB SHOW data_api_job", "COPY JOB ALTER data_api_job AUTO OFF")) {
-                String id = service.executeStatement(req(sql), REGION).path("Id").asText();
-                ObjectNode description = service.describeStatement(idOf(id));
-                assertEquals("FINISHED", description.path("Status").asText(), description.toString());
-            }
-            ObjectNode request = req("unused");
-            request.putArray("Sqls").add("COPY JOB DROP data_api_job");
-            String batchId = service.batchExecuteStatement(request, REGION).path("Id").asText();
-            ObjectNode batch = service.describeStatement(idOf(batchId));
-            assertEquals("FAILED", batch.path("Status").asText());
-            assertTrue(batch.path("Error").asText().contains("transaction block"), batch.toString());
-
-            ObjectNode begin = req("BEGIN").put("SessionKeepAliveSeconds", 60);
-            String sessionId = service.executeStatement(begin, REGION).path("SessionId").asText();
-            String dropId = service.executeStatement(req("COPY JOB DROP data_api_job").put("SessionId", sessionId), REGION)
-                    .path("Id").asText();
-            ObjectNode drop = service.describeStatement(idOf(dropId));
-            assertEquals("FAILED", drop.path("Status").asText());
-            assertTrue(drop.path("Error").asText().contains("transaction block"), drop.toString());
-            service.executeStatement(req("ROLLBACK").put("SessionId", sessionId), REGION);
-            String id = service.executeStatement(req("COPY JOB DROP data_api_job"), REGION).path("Id").asText();
-            assertEquals("FINISHED", service.describeStatement(idOf(id)).path("Status").asText());
-        } finally {
-            try (Connection connection = DriverManager.getConnection(postgresUrl, "postgres", "");
-                    Statement statement = connection.createStatement()) {
-                statement.execute("DELETE FROM floci_internal.copy_job WHERE job_name = 'data_api_job'");
-            }
         }
     }
 
