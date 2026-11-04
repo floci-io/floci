@@ -849,8 +849,18 @@ Floci currently supports object roots and scalar `COMMAS` arrays. Non-object roo
 (other than an absent or null body) and `COMMAS` arrays containing objects or arrays
 fail explicitly instead of being silently coerced. These are Floci limitations,
 not documented AWS restrictions; their exact AWS behavior has not been verified.
-EventBridge connection lookup and connection-level parameter merging are not
-implemented by the HTTP Task.
+
+## HTTP Task connections
+
+The EventBridge connection named by `InvocationConfig.ConnectionArn` or
+`Authentication.ConnectionArn` authorizes the request: `BASIC` and `OAUTH_CLIENT_CREDENTIALS`
+set the `Authorization` header and `API_KEY` sets the named header, as for an API destination.
+The connection's `InvocationHttpParameters` are merged over the task's `Headers`,
+`QueryParameters` and `RequestBody`, and the connection's value wins on a duplicate key, as
+[AWS merges them](https://docs.aws.amazon.com/step-functions/latest/dg/call-https-apis.html#http-task-data-merge).
+Body parameters are merged before `Transform` encodes the body. A `RequestBody` that is not a
+JSON object fails the task with `States.Runtime` when the connection has body parameters, and a
+connection that does not exist fails it with `Events.ConnectionResource.ResourceNotFound`.
 
 ## Executions abandoned by a restart
 
