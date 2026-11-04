@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.AwsTestClients;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -11,13 +12,11 @@ import software.amazon.awssdk.services.cloudformation.model.Output;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Tag;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -58,7 +57,7 @@ class CloudFormationEc2OwnedTagsIntegrationTest {
         Map<String, String> ids = createStackWithExternalTags();
 
         cfn.updateStack(request -> request.stackName(stackName).templateBody(template(false)));
-        awaitStack("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
 
         for (String output : OUTPUTS) {
             assertEquals(Map.of("external", "preserve"), tags(ids.get(output)), output);
@@ -72,7 +71,7 @@ class CloudFormationEc2OwnedTagsIntegrationTest {
 
         cfn.updateStack(request -> request.stackName(stackName).templateBody(template(true))
                 .parameters(parameter -> parameter.parameterKey("TagKey").parameterValue("owner")));
-        awaitStack("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
 
         // Re-resolving the previous template would read owner too and leave team behind.
         for (String output : OUTPUTS) {
@@ -84,7 +83,7 @@ class CloudFormationEc2OwnedTagsIntegrationTest {
     private Map<String, String> createStackWithExternalTags() {
         cfn.createStack(request -> request.stackName(stackName).templateBody(template(true)));
         stackCreated = true;
-        awaitStack("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         Map<String, String> ids = outputs();
         for (String output : OUTPUTS) {
             String id = ids.get(output);
@@ -122,12 +121,6 @@ class CloudFormationEc2OwnedTagsIntegrationTest {
                   }
                 }
                 """.formatted(tags);
-    }
-
-    private void awaitStack(String status) {
-        await().atMost(Duration.ofSeconds(30)).untilAsserted(() ->
-                assertEquals(status, cfn.describeStacks(request -> request.stackName(stackName))
-                        .stacks().getFirst().stackStatusAsString()));
     }
 
     private Map<String, String> outputs() {
