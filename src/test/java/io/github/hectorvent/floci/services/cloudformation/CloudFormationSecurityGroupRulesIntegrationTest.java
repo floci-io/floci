@@ -90,6 +90,7 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
             .extract().asString();
         String stackId = between(created, "<StackId>", "</StackId>");
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         String describe = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -383,6 +384,7 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
             .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200).extract().asString();
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -402,6 +404,7 @@ class CloudFormationSecurityGroupRulesIntegrationTest {
             .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
     }
 
     private static String output(String stackName, String key) {

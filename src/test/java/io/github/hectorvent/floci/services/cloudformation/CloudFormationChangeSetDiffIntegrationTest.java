@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
@@ -81,6 +82,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // Same template, only the parameter value changes.
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -142,6 +144,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // Same template, and the parameter says UsePreviousValue instead of resubmitting its value.
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -202,6 +205,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // Same template, but the update omits Suffix entirely - real CloudFormation falls back to
         // the template Default ("fallback"), which differs from the deployed value ("override").
         given()
@@ -262,6 +266,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // Same template, but the update omits Suffix entirely and the template has no Default. An
         // update does not carry the deployed value over, so CloudFormation refuses the change set
         // rather than preview, or apply, the parameter without a value.
@@ -330,6 +335,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // The update points QueueSuffix at an SSM parameter that was never put. ExecuteChangeSet
         // would fail resolving it, but DescribeChangeSet is only a preview - it must not 400 just
         // because the current value can't be resolved.
@@ -388,6 +394,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // Byte-identical re-submission of the same SAM source: the deployed template is the
         // *expanded* form, so diffing the raw SAM source against it must not report the
         // SAM-generated IAM role as removed or the function as modified.
@@ -454,6 +461,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateChangeSet")
@@ -528,6 +536,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // The SSM parameter's value changes in Parameter Store; the referencing template parameter
         // (the SSM parameter *name*) is resubmitted unchanged. Real CloudFormation re-resolves the
         // SSM value at CreateChangeSet time, so ExecuteChangeSet would apply "two" to the queue —
@@ -610,6 +619,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // Q's definition text is unchanged, but Env flips IsProd from false to true - Q was never
         // created, and ExecuteChangeSet would create it now.
         given()
@@ -674,6 +684,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // Q's definition text is unchanged, but Env flips IsProd from true to false - Q was created,
         // and ExecuteChangeSet would delete it now.
         given()
@@ -820,6 +831,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateChangeSet")

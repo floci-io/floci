@@ -366,6 +366,7 @@ class CloudFormationRollbackCompleteUpdateIntegrationTest {
     }
 
     private static void assertStackStatus(String stackName, String status) {
+        CfnStackWaits.awaitStatus(stackName, status);
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")

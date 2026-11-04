@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
@@ -31,6 +32,7 @@ class CloudFormationUsePreviousTemplateIntegrationTest {
             .formParam("TemplateBody", TEMPLATE.formatted(queueName))
         .when().post("/")
         .then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
     }
 
     private String visibilityTimeout(String queueName) {
@@ -60,6 +62,7 @@ class CloudFormationUsePreviousTemplateIntegrationTest {
         .when().post("/")
         .then().statusCode(200);
 
+        CfnStackWaits.awaitStatus("use-prev-update", "UPDATE_COMPLETE");
         assertEquals("60", visibilityTimeout("use-prev-update-q"));
 
         given().contentType(FORM)
@@ -88,6 +91,7 @@ class CloudFormationUsePreviousTemplateIntegrationTest {
         .when().post("/")
         .then().statusCode(200);
 
+        CfnStackWaits.awaitStatus("use-prev-sam", "CREATE_COMPLETE");
         given().contentType(FORM)
             .formParam("Action", "UpdateStack")
             .formParam("StackName", "use-prev-sam")
@@ -97,6 +101,7 @@ class CloudFormationUsePreviousTemplateIntegrationTest {
         .when().post("/")
         .then().statusCode(200);
 
+        CfnStackWaits.awaitStatus("use-prev-sam", "UPDATE_COMPLETE");
         given().contentType(FORM)
             .formParam("Action", "GetTemplate")
             .formParam("StackName", "use-prev-sam")

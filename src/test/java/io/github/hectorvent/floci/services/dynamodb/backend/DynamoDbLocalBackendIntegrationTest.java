@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.RecordsPage;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Shard;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader.Stream;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.TestAccounts;
 import io.quarkus.test.junit.QuarkusTest;
@@ -282,6 +283,7 @@ class DynamoDbLocalBackendIntegrationTest {
         cloudFormation(A_EAST, "CreateStack", stack, template);
         // The stack stays in Floci; its table is removed from Local with the others.
         created.add(new CreatedTable(A_EAST, table));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", A_EAST.authorization("cloudformation"));
         cloudFormation(A_EAST, "DescribeStacks", stack, null)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 

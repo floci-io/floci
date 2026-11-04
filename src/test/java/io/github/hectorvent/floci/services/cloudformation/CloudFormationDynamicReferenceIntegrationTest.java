@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.hamcrest.Matchers;
@@ -77,6 +78,7 @@ class CloudFormationDynamicReferenceIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus("cfn-dynref-ssm-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -143,6 +145,7 @@ class CloudFormationDynamicReferenceIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus("cfn-dynref-sm-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -203,6 +206,7 @@ class CloudFormationDynamicReferenceIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus("cfn-dynref-sns-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -250,6 +254,7 @@ class CloudFormationDynamicReferenceIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus("cfn-dynref-ssm-secure-non-rds-stack", "ROLLBACK_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -296,6 +301,7 @@ class CloudFormationDynamicReferenceIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus("cfn-dynref-literal-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -64,6 +65,7 @@ class CloudFormationEc2InstanceIntegrationTest {
                 .formParam("TemplateBody", template.formatted(original, original))
                 .when().post("/").then().statusCode(200);
         try {
+            awaitStackStatus(stackName, "CREATE_COMPLETE");
             String stack = given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
                     .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
                     .when().post("/").then().statusCode(200)
@@ -81,6 +83,7 @@ class CloudFormationEc2InstanceIntegrationTest {
                         .formParam("Action", "UpdateStack").formParam("StackName", stackName)
                         .formParam("TemplateBody", template.formatted(desired, desired))
                         .when().post("/").then().statusCode(200);
+                awaitStackStatus(stackName, "UPDATE_COMPLETE");
                 String updated = given().contentType("application/x-www-form-urlencoded").header("Authorization", CFN_AUTH)
                         .formParam("Action", "DescribeStacks").formParam("StackName", stackName)
                         .when().post("/").then().statusCode(200)
@@ -137,6 +140,7 @@ class CloudFormationEc2InstanceIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String describeStacks = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -458,6 +462,7 @@ class CloudFormationEc2InstanceIntegrationTest {
     }
 
     private static String describeStacks(String stackName, String expectedStatus) {
+        awaitStackStatus(stackName, expectedStatus);
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -466,6 +471,11 @@ class CloudFormationEc2InstanceIntegrationTest {
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();
+    }
+
+    private static void awaitStackStatus(String stackName, String expectedStatus) {
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName, CFN_AUTH);
+        assertEquals(expectedStatus, state.status(), state.reason());
     }
 
     private static String instanceIdFrom(String stackXml) {

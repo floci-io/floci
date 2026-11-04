@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -46,6 +47,8 @@ class CloudFormationListStacksIntegrationTest {
                 }
                 """.formatted(suffix));
 
+        CfnStackWaits.awaitStatus(completeStack, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(rolledBackStack, "ROLLBACK_COMPLETE");
         String response = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "ListStacks")

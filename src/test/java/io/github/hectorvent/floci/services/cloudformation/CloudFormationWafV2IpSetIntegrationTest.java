@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.CfnRequests;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
@@ -44,6 +45,7 @@ class CloudFormationWafV2IpSetIntegrationTest {
         String nameB = "cfn-ipset-b-" + suffix;
 
         cfn("CreateStack", stackName, template(nameA, "\"192.0.2.1/32\""));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         String created = describeStack(stackName)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
             .extract().asString();
@@ -58,6 +60,7 @@ class CloudFormationWafV2IpSetIntegrationTest {
             .body("IPSet.Addresses", contains("192.0.2.1/32"));
 
         cfn("UpdateStack", stackName, template(nameA, "\"198.51.100.0/24\""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
         String addressesUpdated = describeStack(stackName)
             .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
             .extract().asString();
@@ -67,6 +70,7 @@ class CloudFormationWafV2IpSetIntegrationTest {
         ipSet(nameA, id).body("IPSet.Addresses", contains("198.51.100.0/24"));
 
         cfn("UpdateStack", stackName, template(nameB, "\"198.51.100.0/24\""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
         String replaced = describeStack(stackName)
             .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
             .body(not(containsString("ROLLBACK")))
@@ -107,6 +111,7 @@ class CloudFormationWafV2IpSetIntegrationTest {
 
         cfn("CreateStack", stackName, template);
 
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
         describeStackEvents(stackName)
             .body(containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"))
             .body(containsString(
@@ -138,6 +143,7 @@ class CloudFormationWafV2IpSetIntegrationTest {
                 """;
 
         cfn("CreateStack", stackName, template);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         String created = describeStack(stackName)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
             .extract().asString();

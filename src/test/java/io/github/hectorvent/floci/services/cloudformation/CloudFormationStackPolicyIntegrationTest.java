@@ -145,7 +145,7 @@ class CloudFormationStackPolicyIntegrationTest {
     void setIsRefusedOnAStackThatFailedToCreate() {
         String stackName = uniqueName();
         cfn("CreateStack", stackName, "TemplateBody", FAILING_TEMPLATE).then().statusCode(200);
-        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
         try {
             cfn("SetStackPolicy", stackName, "StackPolicyBody", "nope").then().statusCode(400)
                     .body(containsString("<Message>SetStackPolicy cannot be called when stack is in the"
@@ -177,7 +177,8 @@ class CloudFormationStackPolicyIntegrationTest {
         cfn("CreateStack", stackName, "TemplateBody", TEMPLATE, "StackPolicyBody", POLICY)
                 .then().statusCode(200);
         try {
-            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            assertEquals(POLICY, storedPolicy(stackName));
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
             assertEquals(POLICY, storedPolicy(stackName));
         } finally {
             CfnStackWaits.deleteStack(stackName);
@@ -204,7 +205,7 @@ class CloudFormationStackPolicyIntegrationTest {
         try {
             cfn("UpdateStack", stackName, "TemplateBody", UPDATED_TEMPLATE, "StackPolicyBody", POLICY)
                     .then().statusCode(200);
-            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
             assertEquals(POLICY, storedPolicy(stackName));
         } finally {
             CfnStackWaits.deleteStack(stackName);
@@ -218,7 +219,7 @@ class CloudFormationStackPolicyIntegrationTest {
             cfn("SetStackPolicy", stackName, "StackPolicyBody", POLICY).then().statusCode(200);
             cfn("UpdateStack", stackName, "TemplateBody", FAILING_TEMPLATE, "StackPolicyBody", OTHER_POLICY)
                     .then().statusCode(200);
-            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE", CFN_AUTH);
             assertEquals(POLICY, storedPolicy(stackName));
         } finally {
             CfnStackWaits.deleteStack(stackName);
@@ -233,7 +234,7 @@ class CloudFormationStackPolicyIntegrationTest {
             assertNotEquals(0, resourceEvents);
             cfn("UpdateStack", stackName, "UsePreviousTemplate", "true", "StackPolicyBody", POLICY)
                     .then().statusCode(200);
-            assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
             assertEquals(POLICY, storedPolicy(stackName));
             assertEquals(resourceEvents, resourceEvents(stackName));
             cfn("ListChangeSets", stackName).then().statusCode(200)
@@ -259,7 +260,7 @@ class CloudFormationStackPolicyIntegrationTest {
                     .then().statusCode(400)
                     .body(containsString("<Message>Error validating stack policy to be applied after stack update:"
                             + " Invalid stack policy</Message>"));
-            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         } finally {
             CfnStackWaits.deleteStack(stackName);
         }
@@ -272,7 +273,7 @@ class CloudFormationStackPolicyIntegrationTest {
     private static String createdStack() {
         String stackName = uniqueName();
         cfn("CreateStack", stackName, "TemplateBody", TEMPLATE).then().statusCode(200);
-        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         return stackName;
     }
 

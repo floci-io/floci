@@ -301,6 +301,39 @@ class AslExecutorHttpInvokeTest {
     }
 
     @Test
+    void emptyResponseBodyStillReturnsEveryResultField() throws Exception {
+        Execution execution = run("""
+                {
+                  "StartAt": "CallHttp",
+                  "States": {
+                    "CallHttp": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::http:invoke",
+                      "Parameters": {
+                        "ApiEndpoint": "%s/text",
+                        "Method": "POST",
+                        "InvocationConfig": {
+                          "ConnectionArn": "%s"
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(baseUrl, connectionArn), "{}");
+
+        assertEquals("SUCCEEDED", execution.getStatus());
+        JsonNode output = objectMapper.readTree(execution.getOutput());
+        List<String> fields = new ArrayList<>();
+        output.fieldNames().forEachRemaining(fields::add);
+        assertEquals(List.of("StatusCode", "StatusText", "Headers", "ResponseBody"), fields);
+        assertEquals(201, output.path("StatusCode").asInt());
+        assertEquals("Created", output.path("StatusText").asText());
+        assertTrue(output.path("Headers").path("Content-Type").isArray());
+        assertTrue(output.path("ResponseBody").isNull());
+    }
+
+    @Test
     void jsonataArgumentsSendAnExplicitNull() throws Exception {
         // AWS keeps the null in the arguments a Task is invoked with: TestState TRACE reports
         // afterArguments {"FunctionName":"nope","Payload":{"v":null}} for Payload {"v":"{% null %}"}.

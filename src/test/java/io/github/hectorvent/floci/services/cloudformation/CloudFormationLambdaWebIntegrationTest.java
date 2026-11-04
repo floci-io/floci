@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.lambdaweb.LambdaWebCodeBuckets;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebRoles;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebZips;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -306,6 +307,7 @@ class CloudFormationLambdaWebIntegrationTest {
     }
 
     private static String describeStacks(String stackName, String expectedStatus) {
+        assertEquals(expectedStatus, CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

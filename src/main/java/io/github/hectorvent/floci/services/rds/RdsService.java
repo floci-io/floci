@@ -1748,9 +1748,6 @@ public class RdsService implements Resettable, ResourceProvider {
 
     /** AWS's default retention for replicated automated backups, in days. */
     static final int DEFAULT_REPLICATED_BACKUP_RETENTION_DAYS = 7;
-    /** Floci does not model a cluster's backup retention period; one day is the AWS default. */
-    static final int CLUSTER_BACKUP_RETENTION_DAYS = 1;
-
     public record AutomatedBackupPage<T>(List<T> backups, String marker) {}
 
     /**
@@ -2010,7 +2007,7 @@ public class RdsService implements Resettable, ResourceProvider {
         backup.setRegion(region);
         backup.setEarliestTime(cluster.getCreatedAt() != null ? cluster.getCreatedAt() : now);
         backup.setLatestTime(now);
-        backup.setBackupRetentionPeriod(CLUSTER_BACKUP_RETENTION_DAYS);
+        backup.setBackupRetentionPeriod(cluster.getBackupRetentionPeriod());
         String dataKey = clusterBackupDataKey(region, cluster.getDbClusterResourceId());
         if (cluster.getStatus() == DbInstanceStatus.DELETING && snapshotData.get(dataKey).isPresent()) {
             backup.setDataSaved(true);
@@ -11402,6 +11399,23 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
+    public static void validateBackupRetentionPeriod(int backupRetentionPeriod) {
+        if (backupRetentionPeriod < 1 || backupRetentionPeriod > 35) {
+            throw new AwsException("InvalidParameterValue",
+                    "BackupRetentionPeriod must be between 1 and 35.", 400);
+        }
+    }
+
+    public synchronized DbCluster setBackupRetentionPeriod(String region, String clusterId, int backupRetentionPeriod) {
+        validateBackupRetentionPeriod(backupRetentionPeriod);
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        cluster.setBackupRetentionPeriod(backupRetentionPeriod);
+        putClusterForScope(currentAccountId(), effectiveRegion, cluster.getDbClusterIdentifier(), cluster);
+        LOG.infov("Backup retention period set to {0} for DB cluster {1}", backupRetentionPeriod,
+                cluster.getDbClusterIdentifier());
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
     private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql");
 
     /**

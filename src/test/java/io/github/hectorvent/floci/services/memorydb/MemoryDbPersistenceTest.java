@@ -24,6 +24,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class MemoryDbPersistenceTest {
 
     @Test
+    void persistsBackendVolumeIdentityAcrossReload(@TempDir Path dir) {
+        Path file = dir.resolve("memorydb-clusters.json");
+        PersistentStorage<String, Cluster> original =
+                new PersistentStorage<>(file, new TypeReference<Map<String, Cluster>>() {});
+        Cluster cluster = new Cluster();
+        cluster.setName("durable");
+        cluster.setVolumeId("incarnation-a");
+        original.put("durable", cluster);
+        original.flush();
+
+        PersistentStorage<String, Cluster> reloaded =
+                new PersistentStorage<>(file, new TypeReference<Map<String, Cluster>>() {});
+        reloaded.load();
+
+        assertEquals("incarnation-a", reloaded.get("durable").orElseThrow().getVolumeId());
+    }
+
+    @Test
     void loadsLegacySnapshotContainingRemovedAuthFields(@TempDir Path dir) throws Exception {
         Path file = dir.resolve("memorydb-clusters.json");
         Files.writeString(file, """

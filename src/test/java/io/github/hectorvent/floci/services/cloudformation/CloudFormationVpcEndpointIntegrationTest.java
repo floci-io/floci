@@ -160,6 +160,7 @@ class CloudFormationVpcEndpointIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         String stackDescription = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -239,6 +240,7 @@ class CloudFormationVpcEndpointIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         String stackDescription = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

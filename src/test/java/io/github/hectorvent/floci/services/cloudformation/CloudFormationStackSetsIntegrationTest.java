@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -130,15 +131,18 @@ class CloudFormationStackSetsIntegrationTest {
     @Test
     void singleStackProvisioningLandsInCallerAccount() {
         String queue = "single-" + UUID.randomUUID().toString().substring(0, 8);
+        String stackName = "stack-" + queue;
 
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
-            .formParam("StackName", "stack-" + queue)
+            .formParam("StackName", stackName)
             .formParam("TemplateBody", queueTemplate(queue))
             .header("Authorization", auth(ACCOUNT_B, "cloudformation"))
         .when().post("/")
         .then().statusCode(200);
+
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", auth(ACCOUNT_B, "cloudformation"));
 
         // Resource lands in the caller's account, not the default account.
         assertQueueVisible(ACCOUNT_B, queue);

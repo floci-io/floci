@@ -42,6 +42,8 @@ class LambdaCfnProvisionerTest {
     private static final String REGION = "us-east-1";
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:";
     private static final String TEMPLATE_TAG_KEYS_ATTR = "FlociLambdaTemplateTagKeys";
+    private static final String CSC_ARN =
+            "arn:aws:lambda:us-east-1:000000000000:code-signing-config:csc-0123456789abcdef0";
 
     private final LambdaService lambda = mock(LambdaService.class);
     private final LambdaCfnProvisioner provisioner = new LambdaCfnProvisioner(
@@ -103,12 +105,13 @@ class LambdaCfnProvisionerTest {
         return fn;
     }
 
-    private void stubInPlaceUpdate(String name, Map<String, String> currentTags) {
+    private LambdaFunction stubInPlaceUpdate(String name, Map<String, String> currentTags) {
         LambdaFunction existing = lambdaFunction(name);
         when(lambda.getFunction(REGION, name)).thenReturn(existing);
         when(lambda.updateFunctionConfiguration(anyString(), anyString(), anyMap())).thenReturn(existing);
         when(lambda.updateFunctionCode(anyString(), anyString(), anyMap())).thenReturn(existing);
         when(lambda.listTags(FUNCTION_ARN + name)).thenReturn(new HashMap<>(currentTags));
+        return existing;
     }
 
     @Test
@@ -273,6 +276,69 @@ class LambdaCfnProvisionerTest {
         verify(lambda).updateFunctionConfiguration(eq(REGION), eq("my-fn"),
                 argThat(request -> "".equals(((Map<?, ?>) request.get("DurableConfig")).get("KMSKeyArn"))));
         verify(lambda, times(1)).getFunction(REGION, "my-fn");
+    }
+
+    @Test
+    void codeSigningConfigFromTheTemplateReachesCreateFunction() {
+        LambdaFunction created = lambdaFunction("my-fn");
+        created.setCodeSigningConfigArn(CSC_ARN);
+        when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(created);
+
+        provisioner.provision(function(null), props("my-fn").put("CodeSigningConfigArn", CSC_ARN), ctx());
+
+        assertEquals(CSC_ARN, capturedCreateRequest().get("CodeSigningConfigArn"));
+        verify(lambda, never()).attachFunctionCodeSigningConfig(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void inPlaceUpdateAttachesANewCodeSigningConfig() {
+        stubInPlaceUpdate("my-fn", Map.of());
+
+        provisioner.provision(function("my-fn"), props("my-fn").put("CodeSigningConfigArn", CSC_ARN),
+                updateCtx("my-fn"));
+
+        verify(lambda).attachFunctionCodeSigningConfig(REGION, "my-fn", CSC_ARN);
+    }
+
+    @Test
+    void inPlaceUpdateWithTheSameCodeSigningConfigLeavesItAttached() {
+        stubInPlaceUpdate("my-fn", Map.of()).setCodeSigningConfigArn(CSC_ARN);
+
+        provisioner.provision(function("my-fn"), props("my-fn").put("CodeSigningConfigArn", CSC_ARN),
+                updateCtx("my-fn"));
+
+        verify(lambda, never()).attachFunctionCodeSigningConfig(anyString(), anyString(), anyString());
+        verify(lambda, never()).deleteFunctionCodeSigningConfig(anyString(), anyString());
+    }
+
+    @Test
+    void blankCodeSigningConfigArnIsLeftForLambdaToReject() {
+        when(lambda.createFunction(eq(REGION), anyMap())).thenReturn(lambdaFunction("my-fn"));
+
+        provisioner.provision(function(null), props("my-fn").put("CodeSigningConfigArn", " "), ctx());
+
+        assertEquals(" ", capturedCreateRequest().get("CodeSigningConfigArn"));
+    }
+
+    @Test
+    void inPlaceUpdateWithTheCodeSigningConfigGoneDetachesIt() {
+        stubInPlaceUpdate("my-fn", Map.of()).setCodeSigningConfigArn(CSC_ARN);
+        ProvisionContext update = updateCtx("my-fn");
+
+        provisioner.provision(function("my-fn"), props("my-fn"), new ProvisionContext(update.engine(), REGION,
+                update.accountId(), update.stackName(), "my-fn", event -> {},
+                props("my-fn").put("CodeSigningConfigArn", CSC_ARN)));
+
+        verify(lambda).deleteFunctionCodeSigningConfig(REGION, "my-fn");
+    }
+
+    @Test
+    void inPlaceUpdateKeepsACodeSigningConfigTheStackNeverDeclared() {
+        stubInPlaceUpdate("my-fn", Map.of()).setCodeSigningConfigArn(CSC_ARN);
+
+        provisioner.provision(function("my-fn"), props("my-fn"), updateCtx("my-fn"));
+
+        verify(lambda, never()).deleteFunctionCodeSigningConfig(anyString(), anyString());
     }
 
     @SuppressWarnings("unchecked")

@@ -37,17 +37,14 @@ import jakarta.ws.rs.core.Response;
 public class LambdaCodeSigningController {
 
     private final LambdaService lambdaService;
-    private final LambdaCodeSigningConfigService configService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public LambdaCodeSigningController(LambdaService lambdaService,
-                                       LambdaCodeSigningConfigService configService,
                                        RegionResolver regionResolver,
                                        ObjectMapper objectMapper) {
         this.lambdaService = lambdaService;
-        this.configService = configService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -74,16 +71,12 @@ public class LambdaCodeSigningController {
         String region = regionResolver.resolveRegion(headers);
         String arn = body == null || !body.hasNonNull("CodeSigningConfigArn")
                 ? null : body.get("CodeSigningConfigArn").asText();
-        LambdaCodeSigningConfigService.validateArn(arn);
-        return configService.withConfigLock(arn, () -> {
-            configService.requireForAttachment(region, regionResolver.getAccountId(), arn);
-            LambdaFunction fn = lambdaService.putFunctionCodeSigningConfig(region, functionName, arn);
+        LambdaFunction fn = lambdaService.attachFunctionCodeSigningConfig(region, functionName, arn);
 
-            ObjectNode root = objectMapper.createObjectNode();
-            root.put("CodeSigningConfigArn", arn);
-            root.put("FunctionName", fn.getFunctionName());
-            return Response.ok(root).build();
-        });
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("CodeSigningConfigArn", arn);
+        root.put("FunctionName", fn.getFunctionName());
+        return Response.ok(root).build();
     }
 
     @DELETE

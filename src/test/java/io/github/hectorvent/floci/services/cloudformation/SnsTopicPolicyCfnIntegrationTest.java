@@ -120,6 +120,8 @@ class SnsTopicPolicyCfnIntegrationTest {
     }
 
     private static String describeStacks(String expectedStatus) {
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(STACK, CFN_AUTH);
+        assertEquals(expectedStatus, state.status(), state.reason());
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

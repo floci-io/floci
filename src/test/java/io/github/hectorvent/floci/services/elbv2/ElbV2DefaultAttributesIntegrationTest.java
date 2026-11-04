@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
@@ -202,6 +203,7 @@ class ElbV2DefaultAttributesIntegrationTest {
             given().formParam("Action", "CreateStack").formParam("StackName", stack)
                     .formParam("TemplateBody", template.formatted(arn, "200"))
                     .when().post("/").then().statusCode(200);
+            CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE");
             given().formParam("Action", "DescribeStacks").formParam("StackName", stack)
                     .when().post("/").then().statusCode(200)
                     .body("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus", equalTo("CREATE_COMPLETE"));
@@ -214,6 +216,7 @@ class ElbV2DefaultAttributesIntegrationTest {
             given().formParam("Action", "UpdateStack").formParam("StackName", stack)
                     .formParam("TemplateBody", template.formatted(arn, "201"))
                     .when().post("/").then().statusCode(200);
+            CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE");
             given().formParam("Action", "DescribeStacks").formParam("StackName", stack)
                     .when().post("/").then().statusCode(200)
                     .body("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus", equalTo("UPDATE_COMPLETE"));
@@ -228,6 +231,7 @@ class ElbV2DefaultAttributesIntegrationTest {
             try {
                 given().formParam("Action", "DeleteStack").formParam("StackName", stack)
                         .when().post("/").then().statusCode(200);
+                CfnStackWaits.awaitStackDeleted(stack);
                 given().header("Authorization", AUTH).formParam("Action", "DescribeListeners")
                         .formParam("LoadBalancerArn", arn).when().post("/").then().statusCode(200)
                         .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.size()", equalTo(0));
