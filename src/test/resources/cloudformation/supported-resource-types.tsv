@@ -66,6 +66,7 @@ AWS::Cognito::UserPool	CognitoCfnProvisioner
 AWS::Cognito::UserPoolClient	CognitoCfnProvisioner
 AWS::Cognito::UserPoolDomain	CognitoCfnProvisioner
 AWS::Cognito::UserPoolGroup	CognitoUserPoolGroupCfnProvisioner
+AWS::Cognito::UserPoolIdentityProvider	CognitoIdentityProviderCfnProvisioner
 AWS::Cognito::UserPoolResourceServer	CognitoResourceServerCfnProvisioner
 AWS::Cognito::UserPoolUser	CognitoUserPoolUserCfnProvisioner
 AWS::Cognito::UserPoolUserToGroupAttachment	CognitoUserPoolUserToGroupAttachmentCfnProvisioner
@@ -116,6 +117,8 @@ AWS::Events::Archive	EventsArchiveCfnProvisioner
 AWS::Events::EventBus	EventsCfnProvisioner
 AWS::Events::EventBusPolicy	EventsCfnProvisioner
 AWS::Events::Rule	EventsCfnProvisioner
+AWS::EventsV2::EventBus	EventsV2CfnProvisioner
+AWS::EventsV2::Subscriber	EventsV2CfnProvisioner
 AWS::GuardDuty::MalwareProtectionPlan	GuardDutyMalwareProtectionPlanCfnProvisioner
 AWS::IAM::AccessKey	IamAccessKeyCfnProvisioner
 AWS::IAM::InstanceProfile	IamInstanceProfileCfnProvisioner

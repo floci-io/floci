@@ -786,6 +786,37 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void deliveryActionsAreAuthorizedOnTheSourceDestinationOrDeliveryTheyName() {
+        String prefix = "arn:aws:logs:us-east-1:" + ACCOUNT + ":";
+        for (String action : List.of("logs:PutDeliverySource", "logs:GetDeliverySource", "logs:DeleteDeliverySource")) {
+            setJsonBody("{\"name\":\"bus-source\"}");
+            assertEquals(List.of(prefix + "delivery-source:bus-source"),
+                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+        }
+        for (String action : List.of("logs:PutDeliveryDestination", "logs:GetDeliveryDestination",
+                "logs:DeleteDeliveryDestination")) {
+            setJsonBody("{\"name\":\"bus-logs\"}");
+            assertEquals(List.of(prefix + "delivery-destination:bus-logs"),
+                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+        }
+        for (String action : List.of("logs:GetDelivery", "logs:DeleteDelivery", "logs:UpdateDeliveryConfiguration")) {
+            setJsonBody("{\"id\":\"AbCdEfGh12345678\"}");
+            assertEquals(List.of(prefix + "delivery:AbCdEfGh12345678"),
+                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+        }
+        setJsonBody("{\"deliverySourceName\":\"bus-source\",\"deliveryDestinationArn\":\""
+                + prefix + "delivery-destination:bus-logs\"}");
+        assertEquals(List.of(prefix + "delivery-destination:bus-logs", prefix + "delivery:*",
+                        prefix + "delivery-source:bus-source"),
+                builder.buildLogResources("logs:CreateDelivery", ctx, "us-east-1", ACCOUNT, "aws"));
+        for (String action : List.of("logs:DescribeDeliverySources", "logs:DescribeDeliveryDestinations",
+                "logs:DescribeDeliveries")) {
+            setJsonBody("{}");
+            assertEquals(List.of("*"), builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+        }
+    }
+
+    @Test
     void excludedLogsActionsKeepWildcardResources() {
         for (String action : List.of("logs:PutLogEvents")) {
             setJsonBody("{\"logGroupName\":\"group\",\"logStreamName\":\"stream\"}");

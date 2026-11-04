@@ -930,7 +930,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
 
         resource.setPhysicalId(id);
         resource.getAttributes().put("Id", id);
-        resource.getAttributes().put("NameServers", String.join(",", route53Service.getNameServers()));
+        resource.getAttributes().put("NameServers", String.join(",", route53Service.getAssignedNameServers(id)));
 
         List<Map<String, String>> tags = parseTags(resolved.path("HostedZoneTags"));
         if (!tags.isEmpty()) {

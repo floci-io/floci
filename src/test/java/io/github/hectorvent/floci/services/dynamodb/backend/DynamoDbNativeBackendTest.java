@@ -76,7 +76,7 @@ class DynamoDbNativeBackendTest {
         NativeDynamoDbTableService tables = new NativeDynamoDbTableService(service, streams, mock(KinesisService.class));
         backend = new NativeDynamoDbBackend(new NativeDynamoDbJsonHandler(service, tables, mapper),
                 new NativeDynamoDbStreamsJsonHandler(streams, service, new RegionResolver(REGION, ACCOUNT), mapper),
-                service, streams, ttl, mapper);
+                tables, service, streams, ttl, mapper);
     }
 
     private Reply call(Api api, String action, JsonNode body) throws Exception {

@@ -26,12 +26,23 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
@@ -39,8 +50,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class ExternalTableMaterializer {
@@ -53,6 +66,10 @@ public class ExternalTableMaterializer {
             "\\bHTTP(?:/[0-9.]+)?\\s+(?:Error:\\s+)?(?:HTTP(?:/[0-9.]+)?\\s+)?403\\b|\\b403\\s*\\(Forbidden\\)|\\b403\\s+Forbidden\\b");
     private static final long LOCK_TIMEOUT_SECONDS = 30;
     private static final String SCRATCH_KEY_PREFIX = "spectrum-";
+    private static final String HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__";
+    private static final String NULL_KEY = "\u0000null";
+    private static final Set<String> INTEGER_TYPES = Set.of("tinyint", "smallint", "int", "integer", "bigint");
+    private static final Pattern DECIMAL_SCALE = Pattern.compile("^decimal\\(\\d+,(\\d+)\\)$");
     private static final Duration STALE_SCRATCH_AGE = Duration.ofHours(1);
     private static final String ICEBERG_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
     private static final String ICEBERG_MANIFESTS = "SELECT DISTINCT manifest_path FROM read_avro(%s)";
@@ -74,8 +91,13 @@ public class ExternalTableMaterializer {
     private final Set<String> sweptAccounts = ConcurrentHashMap.newKeySet();
     private final Map<BackendSql, Map<String, PendingLoad>> pendingLoads = new ConcurrentHashMap<>();
     private final Map<String, PendingLoad> latestLoads = new ConcurrentHashMap<>();
+    /** The partitions each partitioned table holds in PostgreSQL, so a query loads only the ones it reads. */
+    private final ConcurrentHashMap<String, LoadedPartitions> loadedPartitions = new ConcurrentHashMap<>();
 
     private record PendingLoad(String fingerprint, String definitions) { }
+
+    /** What a partitioned table holds: the table it was loaded for, and a fingerprint per loaded partition. */
+    private record LoadedPartitions(String identity, Map<List<String>, String> partitions) { }
 
     public void finishCycle(BackendSql backend) {
         pendingLoads.remove(backend);
@@ -121,14 +143,23 @@ public class ExternalTableMaterializer {
 
     public Outcome ensureCurrent(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                                  String tableName) {
+        return ensureCurrent(backend, session, binding, tableName, null);
+    }
+
+    /**
+     * Loads the table the way the query needs it. Given the text of the query, a partitioned table loads only
+     * the partitions its WHERE can select, as Spectrum reads only those; without it every partition loads.
+     */
+    public Outcome ensureCurrent(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
+                                 String tableName, String sql) {
         try (ExternalCatalogLocks.Guard ignored = catalogLocks.read(binding,
                 session.inTransaction() || !backend.permitsCachePublication())) {
-            return ensureCurrentLocked(backend, session, binding, tableName);
+            return ensureCurrentLocked(backend, session, binding, tableName, sql);
         }
     }
 
     private Outcome ensureCurrentLocked(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
-                                        String tableName) {
+                                        String tableName, String sql) {
         Table table;
         try {
             table = RequestScopes.callAs(session.accountId(), () -> glueService.getTable(binding.glueDatabase(), tableName));
@@ -147,6 +178,9 @@ public class ExternalTableMaterializer {
             authorizeIcebergMetadata(session.accountId(), binding, roleSession, table, location);
             authorizeIcebergManifests(session.accountId(), binding, roleSession, table, location);
             List<Partition> partitions = partitions(session.accountId(), binding, table);
+            if (holdsPartitions(table, session, backend, partitions)) {
+                return ensurePartitions(backend, session, binding, roleSession, table, location, partitions, sql);
+            }
             List<ReadSource> sources = readSources(session.accountId(), binding, roleSession, table, location, partitions);
             List<S3Object> objects = sources.stream().flatMap(source -> source.objects().stream()).toList();
             authorizeObjects(session.accountId(), binding, roleSession, sources);
@@ -173,7 +207,9 @@ public class ExternalTableMaterializer {
                 }
                 String previousSignature = local == null ? schemaSignatures.get(cacheKey) : local.definitions();
                 latestLoads.remove(cacheKey);
-                String definitions = load(backend, session, binding, roleSession, table, sources, previousSignature);
+                // a load of every partition replaces what the table held, so the partitions it holds are no longer known
+                loadedPartitions.remove(cacheKey);
+                String definitions = load(backend, session, binding, roleSession, table, sources, previousSignature, null);
                 if (!backend.permitsCachePublication()) {
                     fingerprints.remove(cacheKey);
                     PendingLoad loaded = new PendingLoad(fingerprint, definitions);
@@ -218,6 +254,99 @@ public class ExternalTableMaterializer {
     }
 
     /**
+     * Whether the table is loaded partition by partition: a partitioned table that has partitions, for a session
+     * whose loads are published at once. A transaction may roll its load back and an Extended Query load is
+     * published only when its cycle commits, so those keep loading every partition.
+     */
+    private static boolean holdsPartitions(Table table, SpectrumSession session, BackendSql backend,
+                                           List<Partition> partitions) {
+        return hasPartitionKeys(table) && !partitions.isEmpty() && !session.inTransaction()
+                && backend.permitsCachePublication();
+    }
+
+    /**
+     * The table in PostgreSQL holds the partitions loaded so far, and a query adds the ones it reads that are
+     * missing or have changed and drops the ones Glue no longer has. A query never removes a partition another
+     * query loaded, so concurrent queries with different predicates cannot take each other's rows away, and the
+     * predicates of each query still run on the rows in PostgreSQL.
+     */
+    private Outcome ensurePartitions(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
+                                     RedshiftRoleAccess.RoleSession roleSession, Table table, Location location,
+                                     List<Partition> partitions, String sql) {
+        String accountId = session.accountId();
+        Optional<PartitionPruner.Filter> filter = PartitionPruner.filterFor(sql, binding.schemaName(),
+                table.getName(), table.getPartitionKeys());
+        // partitions that PostgreSQL's casts make equal cannot be told apart by key value, so they are all read
+        boolean overlapping = hasOverlappingPartitions(table, partitions);
+        List<Partition> qualified = filter.isEmpty() || overlapping ? partitions
+                : partitions.stream().filter(partition -> filter.get().matches(partition.getValues())).toList();
+        List<ReadSource> sources = readSources(accountId, binding, roleSession, table, location, qualified);
+        authorizeObjects(accountId, binding, roleSession, sources);
+        String definitions = columnDefinitions(readPlanWithColumns(binding, table));
+        String identity = Digests.sha256Hex(table.getVersionId() + "|" + table.getUpdateTime() + "|" + definitions);
+        String cacheKey = cacheKey(session, binding, table.getName());
+        String label = binding.schemaName() + "." + table.getName();
+        ReentrantLock lock = locks.computeIfAbsent(cacheKey, ignored -> new ReentrantLock());
+        acquire(lock, label, false);
+        try {
+            LoadedPartitions state = loadedPartitions.get(cacheKey);
+            String previousSignature = schemaSignatures.get(cacheKey);
+            boolean reset = state == null || !state.identity().equals(identity) || !definitions.equals(previousSignature);
+            Map<List<String>, String> held = reset ? Map.of() : state.partitions();
+            Set<List<String>> existing = partitions.stream().map(Partition::getValues).collect(Collectors.toSet());
+            List<List<String>> deletions = new ArrayList<>(held.keySet().stream()
+                    .filter(values -> !existing.contains(values)).toList());
+            List<ReadSource> toLoad = new ArrayList<>();
+            Map<List<String>, String> loaded = new HashMap<>(held);
+            deletions.forEach(loaded::remove);
+            for (ReadSource source : sources) {
+                List<String> values = source.partition().getValues();
+                String fingerprint = partitionFingerprint(table, source);
+                if (!fingerprint.equals(held.get(values))) {
+                    toLoad.add(source);
+                    if (held.containsKey(values)) {
+                        deletions.add(values);
+                    }
+                    loaded.put(values, fingerprint);
+                }
+            }
+            if (overlapping && !reset && (!deletions.isEmpty() || !toLoad.isEmpty())) {
+                // a delete by key value cannot tell overlapping partitions apart, so the whole table is replaced
+                reset = true;
+                toLoad.clear();
+                toLoad.addAll(sources);
+                loaded.clear();
+                for (ReadSource source : sources) {
+                    loaded.put(source.partition().getValues(), partitionFingerprint(table, source));
+                }
+            }
+            if (!reset && deletions.isEmpty() && toLoad.isEmpty()) {
+                return Outcome.CURRENT;
+            }
+            // what the table holds is about to change, so no fingerprint of a full load can vouch for it
+            fingerprints.remove(cacheKey);
+            latestLoads.remove(cacheKey);
+            pendingLoads.values().forEach(loads -> loads.remove(cacheKey));
+            loadedPartitions.remove(cacheKey);
+            load(backend, session, binding, roleSession, table, toLoad, previousSignature, reset ? null : deletions);
+            schemaSignatures.put(cacheKey, definitions);
+            loadedPartitions.put(cacheKey, new LoadedPartitions(identity, Map.copyOf(loaded)));
+            return Outcome.LOADED;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /** What a partition was loaded from: its descriptor and the objects it listed, with their sizes and ETags. */
+    private static String partitionFingerprint(Table table, ReadSource source) {
+        StringBuilder value = new StringBuilder(partitionEntry(table, source.partition())).append('|');
+        for (S3Object object : source.objects()) {
+            value.append(object.getKey()).append(':').append(object.getSize()).append(':').append(object.getETag()).append(';');
+        }
+        return Digests.sha256Hex(value.toString());
+    }
+
+    /**
      * A session inside a transaction can hold a PostgreSQL lock on the table until it commits, so
      * waiting forever on the Java lock here could deadlock in a way PostgreSQL's detector cannot see.
      * A session outside a transaction holds no PostgreSQL lock, so it can wait out a slow load.
@@ -248,6 +377,7 @@ public class ExternalTableMaterializer {
         lock.lock();
         try {
             fingerprints.remove(key);
+            loadedPartitions.remove(key);
             latestLoads.remove(key);
             pendingLoads.values().forEach(loads -> loads.remove(key));
         } finally {
@@ -267,6 +397,7 @@ public class ExternalTableMaterializer {
                 lock.lock();
                 try {
                     fingerprints.remove(key);
+                    loadedPartitions.remove(key);
                     schemaSignatures.remove(key);
                     latestLoads.remove(key);
                     pendingLoads.values().forEach(loads -> loads.remove(key));
@@ -281,7 +412,8 @@ public class ExternalTableMaterializer {
     /** Tables of one external schema this materializer has loaded into PostgreSQL and still tracks. */
     public Set<String> loadedTables(String clusterKey, String databaseName, String schemaName) {
         String prefix = schemaPrefix(clusterKey, databaseName, schemaName);
-        return fingerprints.keySet().stream().filter(key -> key.startsWith(prefix))
+        return Stream.concat(fingerprints.keySet().stream(), loadedPartitions.keySet().stream())
+                .filter(key -> key.startsWith(prefix))
                 .map(key -> key.substring(prefix.length())).collect(Collectors.toSet());
     }
 
@@ -634,16 +766,13 @@ public class ExternalTableMaterializer {
      */
     private String load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                         RedshiftRoleAccess.RoleSession roleSession, Table table,
-                        List<ReadSource> sources, String loadedDefinitions) {
-        GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
-        if (plan.columns().isEmpty()) {
-            throw new SpectrumSqlException("0A000", "Glue table \"" + binding.schemaName() + "." + table.getName() + "\" declares no columns");
-        }
+                        List<ReadSource> sources, String loadedDefinitions, List<List<String>> deletions) {
+        GlueTableResolver.ReadPlan plan = readPlanWithColumns(binding, table);
         String schema = quote(binding.schemaName());
         String target = schema + "." + quote(table.getName());
         String stagingName = "floci_spectrum_stg_" + UUID.randomUUID().toString().replace("-", "");
         String staging = "pg_temp." + quote(stagingName);
-        String definitions = plan.columns().stream().map(column -> quote(column.getName()) + " " + GlueTypeMapper.toPostgres(column.getType())).collect(Collectors.joining(", "));
+        String definitions = columnDefinitions(plan);
         boolean stagingCreated = false;
         String scratchKey = null;
         try {
@@ -675,7 +804,14 @@ public class ExternalTableMaterializer {
                     throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "External table \"" + binding.schemaName() + "." + table.getName() + "\" exceeds configured row limit");
                 }
             }
-            if (definitions.equals(loadedDefinitions)) {
+            if (deletions != null) {
+                // the table already holds other partitions, so only the ones named here are replaced
+                String delete = deletions.isEmpty() ? "" : "DELETE FROM " + target + " WHERE "
+                        + deletions.stream().map(values -> "(" + partitionCondition(table, values) + ")")
+                        .distinct().collect(Collectors.joining(" OR ")) + "; ";
+                backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); " + delete
+                        + "INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
+            } else if (definitions.equals(loadedDefinitions)) {
                 backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); TRUNCATE " + target
                         + "; INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
             } else {
@@ -708,6 +844,123 @@ public class ExternalTableMaterializer {
         }
     }
 
+    private static GlueTableResolver.ReadPlan readPlanWithColumns(ExternalSchemaBinding binding, Table table) {
+        GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
+        if (plan.columns().isEmpty()) {
+            throw new SpectrumSqlException("0A000", "Glue table \"" + binding.schemaName() + "." + table.getName() + "\" declares no columns");
+        }
+        return plan;
+    }
+
+    private static String columnDefinitions(GlueTableResolver.ReadPlan plan) {
+        return plan.columns().stream().map(column -> quote(column.getName()) + " " + GlueTypeMapper.toPostgres(column.getType()))
+                .collect(Collectors.joining(", "));
+    }
+
+    /**
+     * Matches the rows a partition loaded: its key columns hold the partition values cast to the column types,
+     * with the Hive default partition and a value wider than its column as NULL, as {@link #readSelect} projects them.
+     */
+    private static String partitionCondition(Table table, List<String> values) {
+        List<Column> keys = table.getPartitionKeys();
+        List<String> terms = new ArrayList<>();
+        for (int index = 0; index < keys.size(); index++) {
+            Column key = keys.get(index);
+            String value = partitionValue(key, values, index);
+            terms.add(value == null ? quote(key.getName()) + " IS NULL"
+                    : quote(key.getName()) + " = CAST('" + value.replace("'", "''") + "' AS "
+                            + GlueTypeMapper.toPostgres(key.getType()) + ")");
+        }
+        return String.join(" AND ", terms);
+    }
+
+    /** A partition key value as it is loaded: null when it is missing, the Hive default partition or too wide. */
+    private static String partitionValue(Column key, List<String> values, int index) {
+        String value = index < values.size() ? values.get(index) : null;
+        if (value == null || HIVE_DEFAULT_PARTITION.equals(value) || GlueTypeMapper.exceedsWidth(key.getType(), value)) {
+            return null;
+        }
+        return value;
+    }
+
+    /** Whether two partitions hold key values that PostgreSQL casts to the same value, or may do so. */
+    static boolean hasOverlappingPartitions(Table table, List<Partition> partitions) {
+        Set<List<String>> seen = new HashSet<>();
+        for (Partition partition : partitions) {
+            List<String> canonical = canonicalPartitionValues(table, partition.getValues());
+            if (canonical == null || !seen.add(canonical)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The key values as PostgreSQL holds them after the cast to the column types, or null when a value cannot be
+     * reduced with confidence, which counts as an overlap so that the table is read whole.
+     */
+    private static List<String> canonicalPartitionValues(Table table, List<String> values) {
+        List<Column> keys = table.getPartitionKeys();
+        List<String> canonical = new ArrayList<>();
+        for (int index = 0; index < keys.size(); index++) {
+            Column key = keys.get(index);
+            String value = partitionValue(key, values, index);
+            String converted = value == null ? NULL_KEY
+                    : canonicalKeyValue(GlueTypeMapper.canonicalGlueType(key.getType()), value);
+            if (converted == null) {
+                return null;
+            }
+            canonical.add(converted);
+        }
+        return canonical;
+    }
+
+    private static String canonicalKeyValue(String type, String value) {
+        String trimmed = value.trim();
+        try {
+            if (INTEGER_TYPES.contains(type)) {
+                return new BigInteger(trimmed).toString();
+            }
+            if (type.startsWith("decimal")) {
+                BigDecimal number = new BigDecimal(trimmed);
+                Matcher scale = DECIMAL_SCALE.matcher(type);
+                if (scale.find()) {
+                    number = number.setScale(Integer.parseInt(scale.group(1)), RoundingMode.HALF_UP);
+                }
+                return number.signum() == 0 ? "0" : number.stripTrailingZeros().toPlainString();
+            }
+            if (type.equals("float") || type.equals("real") || type.equals("double")) {
+                // the narrowest float makes the most values equal, so it finds every overlap of the wider ones
+                return Float.toString(Float.parseFloat(trimmed));
+            }
+            return switch (type) {
+                case "boolean" -> booleanKey(trimmed);
+                case "date" -> LocalDate.parse(trimmed).toString();
+                case "timestamp" -> LocalDateTime.parse(trimmed.replace(' ', 'T')).truncatedTo(ChronoUnit.MICROS).toString();
+                default -> type.startsWith("char") ? value.stripTrailing() : value;
+            };
+        } catch (NumberFormatException | DateTimeParseException unparseable) {
+            LOG.debugv("Partition key value {0} of type {1} is not reduced, so the table is read whole", value, type);
+            return null;
+        }
+    }
+
+    /** PostgreSQL reads any unique prefix of true, false, yes, no, on and off, and 1 and 0. */
+    private static String booleanKey(String value) {
+        String lower = value.toLowerCase(Locale.ROOT);
+        if (lower.isEmpty()) {
+            return null;
+        }
+        if (lower.equals("1") || "true".startsWith(lower) || "yes".startsWith(lower) || lower.equals("on")) {
+            return "true";
+        }
+        if (lower.equals("0") || "false".startsWith(lower) || "no".startsWith(lower) || lower.equals("of")
+                || lower.equals("off")) {
+            return "false";
+        }
+        return null;
+    }
+
     private void prepareScratchBucket(String accountId) {
         RequestScopes.runAs(accountId, () -> {
             ensureScratchBucket();
@@ -720,8 +973,13 @@ public class ExternalTableMaterializer {
     private void readWithDuckDb(String accountId, RedshiftRoleAccess.RoleSession roleSession,
                                 Table table, List<ReadSource> sources, long maxRows,
                                 String scratchKey) {
-        List<String> selects = sources.stream().filter(source -> source.partition() == null || !source.objects().isEmpty())
-                .map(this::readSelect).toList();
+        Map<String, Set<String>> columnsByObject = parquetColumnsByObject(accountId, roleSession, sources);
+        List<String> selects = new ArrayList<>();
+        for (ReadSource source : sources) {
+            if (source.partition() == null || !source.objects().isEmpty()) {
+                selects.add(readSelect(source, fileColumns(source, columnsByObject)));
+            }
+        }
         if (selects.isEmpty() && GlueTableResolver.isIcebergTable(table)) {
             GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
             selects = List.of("SELECT " + projection(plan.columns()) + " FROM " + fromClause(plan, table));
@@ -749,17 +1007,22 @@ public class ExternalTableMaterializer {
 
     private List<Map<String, Object>> duckQuery(String accountId, RedshiftRoleAccess.RoleSession roleSession,
                                                 String sql) {
+        return duckQuery(accountId, roleSession, sql, ICEBERG_SETUP);
+    }
+
+    private List<Map<String, Object>> duckQuery(String accountId, RedshiftRoleAccess.RoleSession roleSession,
+                                                String sql, String setup) {
         try {
             if (!s3Service.isAuthEnforced()) {
-                return duckClient.query(sql, ICEBERG_SETUP, accountId);
+                return duckClient.query(sql, setup, accountId);
             }
             requireSignedSession(roleSession);
-            return duckClient.query(sql, ICEBERG_SETUP,
+            return duckClient.query(sql, setup,
                     roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
         } catch (RuntimeException exception) {
             if (isAccessDenied(exception)) {
                 throw new SpectrumReadException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
-                        "Access denied during Iceberg metadata scan", exception);
+                        "Access denied during external table metadata scan", exception);
             }
             throw exception;
         }
@@ -842,27 +1105,84 @@ public class ExternalTableMaterializer {
         }
     }
 
-    private String readSelect(ReadSource source) {
-        List<String> objectUris = source.objects().stream()
+    /**
+     * The field names, lower-cased, that each Parquet object of the read carries, from one query over all of
+     * them. A Parquet file written before a column was added to the table lacks it, and Spectrum reads that
+     * column as NULL, where naming it in the SELECT would fail the whole query. Nested field names are
+     * listed too, so a nested field that shares the name of a missing column leaves the column to be read,
+     * and fail, as before. Empty when no source is Parquet or the files cannot be described, which leaves
+     * every declared column to be read as declared.
+     */
+    private Map<String, Set<String>> parquetColumnsByObject(String accountId,
+                                                            RedshiftRoleAccess.RoleSession roleSession,
+                                                            List<ReadSource> sources) {
+        List<String> objectUris = new ArrayList<>();
+        for (ReadSource source : sources) {
+            if (GlueTableResolver.readsParquet(source.table())) {
+                objectUris.addAll(objectUris(source));
+            }
+        }
+        if (objectUris.isEmpty()) {
+            return Map.of();
+        }
+        List<Map<String, Object>> rows;
+        try {
+            rows = duckQuery(accountId, roleSession, GlueTableResolver.parquetSchemaSql(objectUris), null);
+        } catch (SpectrumSqlException | SpectrumReadException exception) {
+            throw exception;
+        } catch (RuntimeException exception) {
+            // the read that follows names the same files, so a file that is really unreadable still fails there
+            LOG.warnv(exception, "Unable to describe the Parquet files of a read of {0} objects, "
+                    + "reading every declared column", objectUris.size());
+            return Map.of();
+        }
+        Map<String, Set<String>> columnsByObject = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            if (row.get("file_name") instanceof String file && row.get("name") instanceof String name) {
+                columnsByObject.computeIfAbsent(file, ignored -> new HashSet<>()).add(name.toLowerCase(Locale.ROOT));
+            }
+        }
+        return columnsByObject;
+    }
+
+    /** The columns the objects of one source carry; null when they are unknown, so every column is read. */
+    private static Set<String> fileColumns(ReadSource source, Map<String, Set<String>> columnsByObject) {
+        if (!GlueTableResolver.readsParquet(source.table())) {
+            return null;
+        }
+        Set<String> columns = new HashSet<>();
+        for (String uri : objectUris(source)) {
+            Set<String> described = columnsByObject.get(uri);
+            if (described == null) {
+                return null;
+            }
+            columns.addAll(described);
+        }
+        return columns.isEmpty() ? null : columns;
+    }
+
+    private static List<String> objectUris(ReadSource source) {
+        return source.objects().stream()
                 .map(object -> "s3://" + source.location().bucket() + "/" + object.getKey()).toList();
-        GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(source.table(), objectUris);
+    }
+
+    private String readSelect(ReadSource source, Set<String> fileColumns) {
+        GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(source.table(), objectUris(source));
         String projection;
         if (source.partition() == null) {
-            projection = projection(plan.columns());
+            projection = plan.columns().stream().map(column -> dataProjection(column, fileColumns))
+                    .collect(Collectors.joining(", "));
         } else {
             List<Column> dataColumns = source.table().getStorageDescriptor().getColumns();
             List<String> parts = new ArrayList<>(dataColumns.stream()
-                    .map(column -> GlueTypeMapper.duckProjection(column.getName(), column.getType())).toList());
+                    .map(column -> dataProjection(column, fileColumns)).toList());
             List<Column> partitionKeys = source.table().getPartitionKeys();
             List<String> values = source.partition().getValues();
             for (int index = 0; index < partitionKeys.size(); index++) {
                 Column key = partitionKeys.get(index);
-                String value = index < values.size() ? values.get(index) : null;
-                if (value != null && GlueTypeMapper.exceedsWidth(key.getType(), value)) {
-                    // a data column wider than its width is NULL, so a partition value is as well
-                    value = null;
-                }
-                String expression = value == null || "__HIVE_DEFAULT_PARTITION__".equals(value)
+                // a data column wider than its width is NULL, so a partition value is as well
+                String value = partitionValue(key, values, index);
+                String expression = value == null
                         ? "CAST(NULL AS VARCHAR)"
                         : "CAST('" + value.replace("'", "''") + "' AS VARCHAR)";
                 parts.add("COALESCE(" + expression + ", '\\N') AS " + quote(key.getName()));
@@ -881,6 +1201,13 @@ public class ExternalTableMaterializer {
             return plan.fromClause();
         }
         return "iceberg_scan(" + sqlPathLiteral(GlueTableResolver.icebergMetadataLocation(table)) + ")";
+    }
+
+    private static String dataProjection(Column column, Set<String> fileColumns) {
+        if (fileColumns != null && !fileColumns.contains(column.getName().toLowerCase(Locale.ROOT))) {
+            return GlueTypeMapper.nullProjection(column.getName());
+        }
+        return GlueTypeMapper.duckProjection(column.getName(), column.getType());
     }
 
     private static String projection(List<Column> columns) {

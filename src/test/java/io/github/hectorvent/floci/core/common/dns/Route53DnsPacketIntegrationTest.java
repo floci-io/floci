@@ -13,6 +13,8 @@ import io.vertx.core.datagram.DatagramSocketOptions;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -39,6 +41,43 @@ class Route53DnsPacketIntegrationTest {
     Vertx vertx;
 
     private final List<String> zoneIds = new ArrayList<>();
+
+    @ParameterizedTest
+    @CsvSource({"1,1", "2,1", "1,28", "2,28"})
+    void privateCnamePreservesMissingTargetResponseAcrossTheWire(int depth, int type) throws Exception {
+        String name = uniqueName() + ".example";
+        String id = route53.createHostedZone(name, UUID.randomUUID().toString(), null,
+                new VpcAssociation("vpc-cname-negative", "us-east-1")).zone().getId();
+        zoneIds.add(id);
+        String missing = "missing." + name;
+        for (int hop = 0; hop < depth; hop++) {
+            String target = hop + 1 == depth ? missing : "alias" + (hop + 1) + "." + name;
+            change(id, "CREATE", record("alias" + hop + "." + name, "CNAME", 30, target + "."));
+        }
+
+        assertEquals(3, ByteBuffer.wrap(query(request(missing, type))).getShort(2) & 15);
+        byte[] response = query(request("alias0." + name, type));
+        assertEquals(3, ByteBuffer.wrap(response).getShort(2) & 15,
+                "A private CNAME must preserve its target's NXDOMAIN response");
+        assertEquals(0, ByteBuffer.wrap(response).getShort(6));
+
+        ResourceRecordSet text = record(missing, "TXT", 60, "\"present\"");
+        change(id, "CREATE", text);
+        byte[] noData = query(request("alias0." + name, type));
+        assertEquals(0, ByteBuffer.wrap(noData).getShort(2) & 15);
+        assertEquals(0, ByteBuffer.wrap(noData).getShort(6));
+        change(id, "DELETE", text);
+        assertEquals(3, ByteBuffer.wrap(query(request("alias0." + name, type))).getShort(2) & 15);
+
+        change(id, "CREATE", record(missing, "A", 600, "192.0.2.17"));
+        byte[] request = request("alias0." + name, 1);
+        byte[] restored = query(request);
+        assertEquals(0, ByteBuffer.wrap(restored).getShort(2) & 15);
+        assertEquals(1, ByteBuffer.wrap(restored).getShort(6));
+        assertEquals(30, ByteBuffer.wrap(restored).getInt(request.length + 6));
+        assertArrayEquals(new DnsRecord.Address(1, "192.0.2.17").data(),
+                Arrays.copyOfRange(restored, restored.length - 4, restored.length));
+    }
 
     @AfterEach
     void deleteOwnedZones() {
@@ -85,7 +124,7 @@ class Route53DnsPacketIntegrationTest {
     void delegationNamesAndSoaUseTheStoredZone() throws Exception {
         String name = uniqueName() + ".example";
         String id = createZone(name);
-        List<String> expected = route53.getNameServers();
+        List<String> expected = route53.getAssignedNameServers(id);
         byte[] request = request(name, 2);
         byte[] response = query(request);
         assertHeader(response, 0, true, 4, 0);

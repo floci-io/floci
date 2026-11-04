@@ -5,6 +5,7 @@
     "terraform": "terraform-provider-aws internal/service/elb/hosted_zone_id_data_source.go, internal/service/elbv2/hosted_zone_id_data_source.go, internal/service/s3/hosted_zones.go, internal/conns/awsclient.go",
     "cdk": "aws-cdk packages/aws-cdk-lib/region-info/build-tools/fact-tables.ts, packages/aws-cdk-lib/aws-route53-targets/lib/cloudfront-target.ts, packages/aws-cdk-lib/aws-ec2/lib/vpc-endpoint.ts",
     "docs": "aws-docs/partition-guides (snapshots of AWS guides and CLI examples) cn/cloudfront.md, cn/console.md, gov/configure-account.md, gov/govcloud-abp.md, gov/govcloud-organizations.md, rds/describe-db-instances.txt",
+    "apiGatewayRegionalHostedZones": "https://docs.aws.amazon.com/general/latest/gr/apigateway.html (data plane table, snapshot aws-docs/gr-apigateway.md)",
     "botocore": "botocore cloudfront/2020-05-31/service-2.json (Distribution$DomainName, DistributionSummary$DomainName)",
     "s3WebsiteConflicts": "terraform wins over the CDK where they disagree (it cites the S3 website-endpoint table)"
   },
@@ -51,79 +52,92 @@
       "albHostedZoneId": "Z268VQBMOI5EKX",
       "classicElbHostedZoneId": "Z268VQBMOI5EKX",
       "nlbHostedZoneId": "Z203XCE67M25HM",
-      "s3WebsiteHostedZoneId": "Z83WF9RJE8B12"
+      "s3WebsiteHostedZoneId": "Z83WF9RJE8B12",
+      "apiGatewayRegionalHostedZoneId": "Z2DHW2332DAMTN"
     },
     "ap-east-1": {
       "albHostedZoneId": "Z3DQVH9N71FHZ0",
       "classicElbHostedZoneId": "Z3DQVH9N71FHZ0",
       "nlbHostedZoneId": "Z12Y7K3UBGUAD1",
-      "s3WebsiteHostedZoneId": "ZNB98KWMFR0R6"
+      "s3WebsiteHostedZoneId": "ZNB98KWMFR0R6",
+      "apiGatewayRegionalHostedZoneId": "Z3FD1VL90ND7K5"
     },
     "ap-east-2": {
       "albHostedZoneId": "Z02789141MW7T1WBU19PO",
       "classicElbHostedZoneId": "Z02789141MW7T1WBU19PO",
       "nlbHostedZoneId": "Z09176273OC2HWIAUNYW",
-      "s3WebsiteHostedZoneId": "Z064739330DAH7WJVOO93"
+      "s3WebsiteHostedZoneId": "Z064739330DAH7WJVOO93",
+      "apiGatewayRegionalHostedZoneId": "Z02909591O7FG9Q56HWB1"
     },
     "ap-northeast-1": {
       "albHostedZoneId": "Z14GRHDCWA56QT",
       "classicElbHostedZoneId": "Z14GRHDCWA56QT",
       "nlbHostedZoneId": "Z31USIVHYNEOWT",
-      "s3WebsiteHostedZoneId": "Z2M4EHUR26P7ZW"
+      "s3WebsiteHostedZoneId": "Z2M4EHUR26P7ZW",
+      "apiGatewayRegionalHostedZoneId": "Z1YSHQZHG15GKL"
     },
     "ap-northeast-2": {
       "albHostedZoneId": "ZWKZPGTI48KDX",
       "classicElbHostedZoneId": "ZWKZPGTI48KDX",
       "nlbHostedZoneId": "ZIBE1TIR4HY56",
-      "s3WebsiteHostedZoneId": "Z3W03O7B5YMIYP"
+      "s3WebsiteHostedZoneId": "Z3W03O7B5YMIYP",
+      "apiGatewayRegionalHostedZoneId": "Z20JF4UZKIW1U8"
     },
     "ap-northeast-3": {
       "albHostedZoneId": "Z5LXEXXYW11ES",
       "classicElbHostedZoneId": "Z5LXEXXYW11ES",
       "nlbHostedZoneId": "Z1GWIQ4HH19I5X",
-      "s3WebsiteHostedZoneId": "Z2YQB5RD63NC85"
+      "s3WebsiteHostedZoneId": "Z2YQB5RD63NC85",
+      "apiGatewayRegionalHostedZoneId": "Z22ILHG95FLSZ2"
     },
     "ap-south-1": {
       "albHostedZoneId": "ZP97RAFLXTNZK",
       "classicElbHostedZoneId": "ZP97RAFLXTNZK",
       "nlbHostedZoneId": "ZVDDRBQ08TROA",
-      "s3WebsiteHostedZoneId": "Z11RGJOFQNVJUP"
+      "s3WebsiteHostedZoneId": "Z11RGJOFQNVJUP",
+      "apiGatewayRegionalHostedZoneId": "Z3VO1THU9YC4UR"
     },
     "ap-south-2": {
       "albHostedZoneId": "Z0173938T07WNTVAEPZN",
       "classicElbHostedZoneId": "Z0173938T07WNTVAEPZN",
       "nlbHostedZoneId": "Z0711778386UTO08407HT",
-      "s3WebsiteHostedZoneId": "Z02976202B4EZMXIPMXF7"
+      "s3WebsiteHostedZoneId": "Z02976202B4EZMXIPMXF7",
+      "apiGatewayRegionalHostedZoneId": "Z0853509Q1135NJ66RUH"
     },
     "ap-southeast-1": {
       "albHostedZoneId": "Z1LMS91P8CMLE5",
       "classicElbHostedZoneId": "Z1LMS91P8CMLE5",
       "nlbHostedZoneId": "ZKVM4W9LS7TM",
-      "s3WebsiteHostedZoneId": "Z3O0J2DXBE1FTB"
+      "s3WebsiteHostedZoneId": "Z3O0J2DXBE1FTB",
+      "apiGatewayRegionalHostedZoneId": "ZL327KTPIQFUL"
     },
     "ap-southeast-2": {
       "albHostedZoneId": "Z1GM3OXH4ZPM65",
       "classicElbHostedZoneId": "Z1GM3OXH4ZPM65",
       "nlbHostedZoneId": "ZCT6FZBF4DROD",
-      "s3WebsiteHostedZoneId": "Z1WCIGYICN2BYD"
+      "s3WebsiteHostedZoneId": "Z1WCIGYICN2BYD",
+      "apiGatewayRegionalHostedZoneId": "Z2RPCDW04V8134"
     },
     "ap-southeast-3": {
       "albHostedZoneId": "Z08888821HLRG5A9ZRTER",
       "classicElbHostedZoneId": "Z08888821HLRG5A9ZRTER",
       "nlbHostedZoneId": "Z01971771FYVNCOVWJU1G",
-      "s3WebsiteHostedZoneId": "Z01846753K324LI26A3VV"
+      "s3WebsiteHostedZoneId": "Z01846753K324LI26A3VV",
+      "apiGatewayRegionalHostedZoneId": "Z10132843TYUYSLUG4HA3"
     },
     "ap-southeast-4": {
       "albHostedZoneId": "Z09517862IB2WZLPXG76F",
       "classicElbHostedZoneId": "Z09517862IB2WZLPXG76F",
       "nlbHostedZoneId": "Z01156963G8MIIL7X90IV",
-      "s3WebsiteHostedZoneId": "Z0312387243XT5FE14WFO"
+      "s3WebsiteHostedZoneId": "Z0312387243XT5FE14WFO",
+      "apiGatewayRegionalHostedZoneId": "Z092189423Y7RJK61311D"
     },
     "ap-southeast-5": {
       "albHostedZoneId": "Z06010284QMVVW7WO5J",
       "classicElbHostedZoneId": "Z06010284QMVVW7WO5J",
       "nlbHostedZoneId": "Z026317210H9ACVTRO6FB",
-      "s3WebsiteHostedZoneId": "Z08660063OXLMA7F1FJHU"
+      "s3WebsiteHostedZoneId": "Z08660063OXLMA7F1FJHU",
+      "apiGatewayRegionalHostedZoneId": "Z0314042F0KBUTZ3X5HF"
     },
     "ap-southeast-6": {
       "albHostedZoneId": "Z023301818UFJ50CIO0MV",
@@ -135,19 +149,22 @@
       "albHostedZoneId": "Z0390008CMBRTHFGWBCB",
       "classicElbHostedZoneId": "Z0390008CMBRTHFGWBCB",
       "nlbHostedZoneId": "Z054363131YWATEMWRG5L",
-      "s3WebsiteHostedZoneId": "Z0031014GXUMRZG6I14G"
+      "s3WebsiteHostedZoneId": "Z0031014GXUMRZG6I14G",
+      "apiGatewayRegionalHostedZoneId": "Z048508712PZLK5NKG8R0"
     },
     "ca-central-1": {
       "albHostedZoneId": "ZQSVJUPU6J1EY",
       "classicElbHostedZoneId": "ZQSVJUPU6J1EY",
       "nlbHostedZoneId": "Z2EPGBW3API2WT",
-      "s3WebsiteHostedZoneId": "Z1QDHH18159H29"
+      "s3WebsiteHostedZoneId": "Z1QDHH18159H29",
+      "apiGatewayRegionalHostedZoneId": "Z19DQILCV0OWEC"
     },
     "ca-west-1": {
       "albHostedZoneId": "Z06473681N0SF6OS049SD",
       "classicElbHostedZoneId": "Z06473681N0SF6OS049SD",
       "nlbHostedZoneId": "Z02754302KBB00W2LKWZ9",
-      "s3WebsiteHostedZoneId": "Z03565811Z33SLEZTHOUL"
+      "s3WebsiteHostedZoneId": "Z03565811Z33SLEZTHOUL",
+      "apiGatewayRegionalHostedZoneId": "Z04745493436AWVTG1OQY"
     },
     "cn-north-1": {
       "albHostedZoneId": "Z1GDH35T77C1KE",
@@ -282,13 +299,15 @@
       "albHostedZoneId": "Z215JYRZR1TBD5",
       "classicElbHostedZoneId": "Z215JYRZR1TBD5",
       "nlbHostedZoneId": "Z3F0SRJ5LGBH90",
-      "s3WebsiteHostedZoneId": "Z21DNDUVLTQW6Q"
+      "s3WebsiteHostedZoneId": "Z21DNDUVLTQW6Q",
+      "apiGatewayRegionalHostedZoneId": "Z1U9ULNL0V5AJ3"
     },
     "eu-central-2": {
       "albHostedZoneId": "Z06391101F2ZOEP8P5EB3",
       "classicElbHostedZoneId": "Z06391101F2ZOEP8P5EB3",
       "nlbHostedZoneId": "Z02239872DOALSIDCX66S",
-      "s3WebsiteHostedZoneId": "Z030506016YDQGETNASS"
+      "s3WebsiteHostedZoneId": "Z030506016YDQGETNASS",
+      "apiGatewayRegionalHostedZoneId": "Z09222482MK253X48U76H"
     },
     "eu-isoe-west-1": {
       "vpcEndpointExceptionPrefix": "uk.adc-e.cloud",
@@ -303,37 +322,43 @@
       "albHostedZoneId": "Z23TAZ6LKFMNIO",
       "classicElbHostedZoneId": "Z23TAZ6LKFMNIO",
       "nlbHostedZoneId": "Z1UDT6IFJ4EJM",
-      "s3WebsiteHostedZoneId": "Z3BAZG2TWCNX0D"
+      "s3WebsiteHostedZoneId": "Z3BAZG2TWCNX0D",
+      "apiGatewayRegionalHostedZoneId": "Z3UWIKFBOOGXPP"
     },
     "eu-south-1": {
       "albHostedZoneId": "Z3ULH7SSC9OV64",
       "classicElbHostedZoneId": "Z3ULH7SSC9OV64",
       "nlbHostedZoneId": "Z23146JA1KNAFP",
-      "s3WebsiteHostedZoneId": "Z30OZKI7KPW7MI"
+      "s3WebsiteHostedZoneId": "Z30OZKI7KPW7MI",
+      "apiGatewayRegionalHostedZoneId": "Z3BT4WSQ9TDYZV"
     },
     "eu-south-2": {
       "albHostedZoneId": "Z0956581394HF5D5LXGAP",
       "classicElbHostedZoneId": "Z0956581394HF5D5LXGAP",
       "nlbHostedZoneId": "Z1011216NVTVYADP1SSV",
-      "s3WebsiteHostedZoneId": "Z0081959F7139GRJC19J"
+      "s3WebsiteHostedZoneId": "Z0081959F7139GRJC19J",
+      "apiGatewayRegionalHostedZoneId": "Z02499852UI5HEQ5JVWX3"
     },
     "eu-west-1": {
       "albHostedZoneId": "Z32O12XQLNTSW2",
       "classicElbHostedZoneId": "Z32O12XQLNTSW2",
       "nlbHostedZoneId": "Z2IFOLAFXWLO4F",
-      "s3WebsiteHostedZoneId": "Z1BKCTXD74EZPE"
+      "s3WebsiteHostedZoneId": "Z1BKCTXD74EZPE",
+      "apiGatewayRegionalHostedZoneId": "ZLY8HYME6SFDD"
     },
     "eu-west-2": {
       "albHostedZoneId": "ZHURV8PSTC4K8",
       "classicElbHostedZoneId": "ZHURV8PSTC4K8",
       "nlbHostedZoneId": "ZD4D7Y8KGAS4G",
-      "s3WebsiteHostedZoneId": "Z3GKZC51ZF0DB4"
+      "s3WebsiteHostedZoneId": "Z3GKZC51ZF0DB4",
+      "apiGatewayRegionalHostedZoneId": "ZJ5UAJN8Y3Z2Q"
     },
     "eu-west-3": {
       "albHostedZoneId": "Z3Q77PNBQS71R4",
       "classicElbHostedZoneId": "Z3Q77PNBQS71R4",
       "nlbHostedZoneId": "Z1CMS0P5QUZ6D5",
-      "s3WebsiteHostedZoneId": "Z3R1K369G5AVDG"
+      "s3WebsiteHostedZoneId": "Z3R1K369G5AVDG",
+      "apiGatewayRegionalHostedZoneId": "Z3KY65QIEKYHQQ"
     },
     "eusc-de-east-1": {
       "vpcEndpointExceptionPrefix": "eu.amazonaws",
@@ -348,44 +373,51 @@
       "albHostedZoneId": "Z09170902867EHPV2DABU",
       "classicElbHostedZoneId": "Z09170902867EHPV2DABU",
       "nlbHostedZoneId": "Z0313266YDI6ZRHTGQY4",
-      "s3WebsiteHostedZoneId": "Z09640613K4A3MN55U7GU"
+      "s3WebsiteHostedZoneId": "Z09640613K4A3MN55U7GU",
+      "apiGatewayRegionalHostedZoneId": "Z07264553HBI44N5X2CKP"
     },
     "me-central-1": {
       "albHostedZoneId": "Z08230872XQRWHG2XF6I",
       "classicElbHostedZoneId": "Z08230872XQRWHG2XF6I",
       "nlbHostedZoneId": "Z00282643NTTLPANJJG2P",
-      "s3WebsiteHostedZoneId": "Z06143092I8HRXZRUZROF"
+      "s3WebsiteHostedZoneId": "Z06143092I8HRXZRUZROF",
+      "apiGatewayRegionalHostedZoneId": "Z08780021BKYYY8U0YHTV"
     },
     "me-south-1": {
       "albHostedZoneId": "ZS929ML54UICD",
       "classicElbHostedZoneId": "ZS929ML54UICD",
       "nlbHostedZoneId": "Z3QSRYVP46NYYV",
-      "s3WebsiteHostedZoneId": "Z1MPMWCPA7YB62"
+      "s3WebsiteHostedZoneId": "Z1MPMWCPA7YB62",
+      "apiGatewayRegionalHostedZoneId": "Z20ZBPC0SS8806"
     },
     "mx-central-1": {
       "albHostedZoneId": "Z023552324OKD1BB28BH5",
       "classicElbHostedZoneId": "Z023552324OKD1BB28BH5",
       "nlbHostedZoneId": "Z02031231H3ID6HYJ9A7U",
-      "s3WebsiteHostedZoneId": "Z057606446ZNVQJJ8WOP"
+      "s3WebsiteHostedZoneId": "Z057606446ZNVQJJ8WOP",
+      "apiGatewayRegionalHostedZoneId": "Z00020171WIGL5M88SHRM"
     },
     "sa-east-1": {
       "albHostedZoneId": "Z2P70J7HTTTPLU",
       "classicElbHostedZoneId": "Z2P70J7HTTTPLU",
       "nlbHostedZoneId": "ZTK26PT1VY4CU",
-      "s3WebsiteHostedZoneId": "Z7KQH4QJS55SO"
+      "s3WebsiteHostedZoneId": "Z7KQH4QJS55SO",
+      "apiGatewayRegionalHostedZoneId": "ZCMLWB8V5SYIT"
     },
     "us-east-1": {
       "albHostedZoneId": "Z35SXDOTRQ7X7K",
       "classicElbHostedZoneId": "Z35SXDOTRQ7X7K",
       "nlbHostedZoneId": "Z26RNL4JYFTOTI",
       "s3WebsiteHostedZoneId": "Z3AQBSTGFYJSTF",
+      "apiGatewayRegionalHostedZoneId": "Z1UJRXOUMOOFQ8",
       "rdsHostedZoneId": "Z2R2ITUGPM61AM"
     },
     "us-east-2": {
       "albHostedZoneId": "Z3AADJGX6KTTL2",
       "classicElbHostedZoneId": "Z3AADJGX6KTTL2",
       "nlbHostedZoneId": "ZLMOA37VPKANP",
-      "s3WebsiteHostedZoneId": "Z2O1EMRO9K5GLX"
+      "s3WebsiteHostedZoneId": "Z2O1EMRO9K5GLX",
+      "apiGatewayRegionalHostedZoneId": "ZOJJZC49E0EPZ"
     },
     "us-gov-east-1": {
       "albHostedZoneId": "Z166TLBEWOO7G0",
@@ -498,13 +530,15 @@
       "albHostedZoneId": "Z368ELLRRE2KJ0",
       "classicElbHostedZoneId": "Z368ELLRRE2KJ0",
       "nlbHostedZoneId": "Z24FKFUX50B4VW",
-      "s3WebsiteHostedZoneId": "Z2F56UZL2M1ACD"
+      "s3WebsiteHostedZoneId": "Z2F56UZL2M1ACD",
+      "apiGatewayRegionalHostedZoneId": "Z2MUQ32089INYE"
     },
     "us-west-2": {
       "albHostedZoneId": "Z1H1FL5HABSF5",
       "classicElbHostedZoneId": "Z1H1FL5HABSF5",
       "nlbHostedZoneId": "Z18D5FSROUN65G",
-      "s3WebsiteHostedZoneId": "Z3BJ6K6RIION7M"
+      "s3WebsiteHostedZoneId": "Z3BJ6K6RIION7M",
+      "apiGatewayRegionalHostedZoneId": "Z2OJLYMUO9EFXC"
     }
   }
 }

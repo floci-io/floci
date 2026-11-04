@@ -1,10 +1,16 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
+import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.github.hectorvent.floci.testing.PartitionMatrix;
+import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.List;
 
@@ -28,6 +34,9 @@ class PaymentCryptographyIntegrationTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String TARGET = "PaymentCryptographyControlPlane.";
 
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -35,6 +44,15 @@ class PaymentCryptographyIntegrationTest {
 
     private static Response call(String action, String body) {
         return given()
+                .header("X-Amz-Target", TARGET + action)
+                .contentType(CONTENT_TYPE)
+                .body(body)
+            .when().post("/");
+    }
+
+    private static Response callIn(String region, String action, String body) {
+        return given()
+                .header("Authorization", PartitionMatrix.sigV4Auth(region, "payment-cryptography"))
                 .header("X-Amz-Target", TARGET + action)
                 .contentType(CONTENT_TYPE)
                 .body(body)
@@ -63,6 +81,36 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(200)
                     .body("Key.KeyArn", equalTo(arn))
                     .body("Key.KeyAttributes.KeyAlgorithm", equalTo("AES_256"));
+    }
+
+    @Test
+    void aDerivationKeySaysWhatItDerivesFor() {
+        // The usage a derivation key derives for sits beside the attributes, and it comes
+        // back with the key.
+        String arn = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_B0_BASE_DERIVATION_KEY\","
+                + "\"KeyModesOfUse\":{\"DeriveKey\":true}},"
+                + "\"DeriveKeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"Exportable\":true}")
+                .then().statusCode(200)
+                    .body("Key.DeriveKeyUsage", equalTo("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"))
+                    .extract().path("Key.KeyArn");
+
+        call("GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.DeriveKeyUsage", equalTo("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
+    }
+
+    @Test
+    void aKeyThatAsksForACheckValueOfAnotherKindIsRefused() {
+        // The kind follows the algorithm, so a request that names another is refused
+        // rather than answered with a value of another kind.
+        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},"
+                + "\"KeyCheckValueAlgorithm\":\"CMAC\"}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"));
     }
 
     @Test
@@ -410,5 +458,61 @@ class PaymentCryptographyIntegrationTest {
         call("ListKeys", "{\"MaxResults\":1,\"NextToken\":\"" + first + "\"}")
                 .then().statusCode(200)
                     .body("Keys", hasSize(1));
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void aKeyOutsideTheCommercialPartitionIsNamedByTheArnItWasMintedWith(PartitionCase partitionCase) {
+        String region = partitionCase.region();
+        String arn = callIn(region, "CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        cleanup.register(() -> callIn(region, "DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+
+        callIn(region, "GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.KeyArn", equalTo(arn));
+
+        callIn(region, "TagResource", "{\"ResourceArn\":\"" + arn + "\","
+                + "\"Tags\":[{\"Key\":\"Origin\",\"Value\":\"PRIMARY\"}]}")
+                .then().statusCode(200);
+        callIn(region, "ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Tags.Key", contains(equalTo("Origin")));
+
+        callIn(region, "CreateAlias", "{\"AliasName\":\"alias/team/partition\",\"KeyArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Alias.KeyArn", equalTo(arn));
+        cleanup.register(() -> callIn(region, "DeleteAlias", "{\"AliasName\":\"alias/team/partition\"}"));
+        callIn(region, "GetAlias", "{\"AliasName\":\"alias/team/partition\"}")
+                .then().statusCode(200)
+                    .body("Alias.KeyArn", equalTo(arn));
+
+        String aliasArn = arn.substring(0, arn.lastIndexOf(":key/")) + ":alias/team/partition";
+        callIn(region, "GetKey", "{\"KeyIdentifier\":\"" + aliasArn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.KeyArn", equalTo(arn));
+    }
+
+    @Test
+    void anArnWhoseRegionIsNotARegionIsRefusedByEveryMemberThatTakesOne() {
+        for (String region : List.of("us-gov", "us-gov-west-", "u-gov-west-1", "europe-de-east-1", "US-GOV-WEST-1")) {
+            String arn = "arn:aws-us-gov:payment-cryptography:" + region + ":000000000000:key/"
+                    + "0123456789abcdef0123456789abcdef";
+
+            call("GetKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                    .then().statusCode(400)
+                        .body("__type", containsString("ValidationException"))
+                        .body("message", containsString("regular expression"));
+            call("CreateAlias", "{\"AliasName\":\"alias/team/refused\",\"KeyArn\":\"" + arn + "\"}")
+                    .then().statusCode(400)
+                        .body("__type", containsString("ValidationException"))
+                        .body("message", containsString("regular expression"));
+            call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\"}")
+                    .then().statusCode(400)
+                        .body("__type", containsString("ValidationException"))
+                        .body("message", containsString("regular expression"));
+        }
     }
 }

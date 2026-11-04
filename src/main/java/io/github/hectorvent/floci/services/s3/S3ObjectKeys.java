@@ -34,11 +34,17 @@ public final class S3ObjectKeys {
             rawKey = rawPath.substring(prefixIndex + bucketPrefix.length());
         }
         try {
-            return URLDecoder.decode(rawKey.replace("+", "%2B"), StandardCharsets.UTF_8);
+            return decodePath(rawKey);
         } catch (IllegalArgumentException ignored) {
             // A malformed escape names no key; S3Controller refuses the request as BadRequest.
             return null;
         }
+    }
+
+    /** Decodes a URL path, skipping the decoder when it holds no escape and no plus. */
+    static String decodePath(String raw) {
+        return raw.indexOf('%') < 0 && raw.indexOf('+') < 0
+                ? raw : URLDecoder.decode(raw.replace("+", "%2B"), StandardCharsets.UTF_8);
     }
 
     /**

@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.s3.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -29,6 +31,8 @@ public class Bucket {
     private String publicAccessBlockConfiguration; // XML string
     private boolean publicAccessBlockDeleted;
     private String ownershipControlsConfiguration; // XML string
+    @JsonIgnore
+    private boolean ownershipEnforced;
     private String requestPaymentPayer; // "BucketOwner" (default) or "Requester"; null until first PUT
     private String accelerateStatus; // "Enabled" or "Suspended"; null until first PUT
     private String region;
@@ -123,8 +127,14 @@ public class Bucket {
     public String getOwnershipControlsConfiguration() { return ownershipControlsConfiguration; }
     public void setOwnershipControlsConfiguration(String ownershipControlsConfiguration) {
         this.ownershipControlsConfiguration = ownershipControlsConfiguration;
+        this.ownershipEnforced = ownershipControlsConfiguration != null
+                && XmlParser.containsValue(ownershipControlsConfiguration, "ObjectOwnership", "BucketOwnerEnforced");
     }
 
+    @JsonIgnore
+    public boolean isObjectOwnershipEnforced() {
+        return ownershipEnforced;
+    }
 
     public String getRequestPaymentPayer() { return requestPaymentPayer; }
     public void setRequestPaymentPayer(String requestPaymentPayer) { this.requestPaymentPayer = requestPaymentPayer; }

@@ -43,6 +43,12 @@ public interface BootstrapRunner {
      */
     record Bootstrap(String clusterId, String accountId, String region, String releaseLabel, String imageTemplate,
                      String dockerNetwork, String role, List<Action> actions, String logFolder) {
+
+        /** This bootstrap, run in {@code image}. */
+        Bootstrap inImage(String image) {
+            return new Bootstrap(clusterId, accountId, region, releaseLabel, image, dockerNetwork, role, actions,
+                    logFolder);
+        }
     }
 
     /** A bootstrap action: its name, the script it runs, and that script's arguments. */

@@ -264,6 +264,30 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
+    void controlTowerTaggingIsChecked() {
+        // Control Tower requests name their resources in the path, which RequestResources does not read yet,
+        // so its tagging is checked on *.
+        String user = user("route-controltower-tags");
+        String landingZone = "arn:aws:controltower:us-east-1:" + ACCOUNT + ":landingzone/ROUTE" + suffix();
+
+        refused(as(user, "controltower").get("/tags/" + landingZone).then(), "controltower:ListTagsForResource");
+        refused(as(user, "controltower").body("{\"tags\":{\"team\":\"a\"}}").post("/tags/" + landingZone).then(),
+                "controltower:TagResource");
+        refused(as(user, "controltower").queryParam("tagKeys", "team").delete("/tags/" + landingZone).then(),
+                "controltower:UntagResource");
+        // The shared controller also serves the bare /tags path, naming the ARN in the query or the body.
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).get("/tags").then(),
+                "controltower:ListTagsForResource");
+        refused(as(user, "controltower").body("{\"resourceArn\":\"" + landingZone + "\",\"tags\":{\"team\":\"a\"}}")
+                .post("/tags").then(), "controltower:TagResource");
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).queryParam("tagKeys", "team")
+                .delete("/tags").then(), "controltower:UntagResource");
+
+        policy(user, allow("controltower:ListTagsForResource", "*"));
+        as(user, "controltower").get("/tags/" + landingZone).then().statusCode(not(403));
+    }
+
+    @Test
     void aTrailingSlashDoesNotLetARouteThroughUnchecked() {
         // The router matches /clusters/ as /clusters, so the request is checked as the route it reaches.
         String user = user("route-trailing-slash");
@@ -466,6 +490,52 @@ class IamRestRouteEnforcementIntegrationTest {
         as(user, "lambda").body("{\"Tags\":{\"team\":\"a\"}}").post(target).then()
                 .statusCode(400).body(containsString("InvalidParameterValueException"));
         admin().get("/2017-03-31/tags/" + image).then().statusCode(200).body("Tags.size()", equalTo(0));
+    }
+
+    /**
+     * A route no rule maps is checked as the operation of its vendored route when AWS authorizes that operation's
+     * action on no resource type, in both OpenSearch API versions and for Access Analyzer; one AWS checks on a domain
+     * stays unchecked, so a grant scoped to the domain is not refused for want of reading it.
+     */
+    @Test
+    void aVendoredRouteIsCheckedWhenAwsAuthorizesItsActionOnNoResourceType() {
+        String user = user("route-vendored");
+
+        policy(user, allow("es:ListVpcEndpoints", "*"));
+        refused(as(user, "es").get("/2021-01-01/domain").then(), "es:ListDomainNames");
+        refused(as(user, "es").get("/2015-01-01/domain").then(), "es:ListDomainNames");
+        refused(as(user, "es").get("/2021-01-01/opensearch/versions").then(), "es:ListVersions");
+        refused(as(user, "access-analyzer").get("/analyzer").then(), "access-analyzer:ListAnalyzers");
+        as(user, "es").get("/2021-01-01/opensearch/domain/route-missing-" + suffix()).then().statusCode(409)
+                .body(containsString("ResourceNotFoundException"));
+
+        policy(user, allow("es:ListDomainNames", "*"));
+        as(user, "es").get("/2021-01-01/domain").then().statusCode(200);
+        as(user, "es").get("/2015-01-01/domain").then().statusCode(200);
+    }
+
+    /**
+     * A segment ending in a matrix parameter, which the router ignores, is checked as the route it reaches, on the
+     * resource its path names: the routed path carries no matrix parameter, so the rule matches and the ARN is the
+     * named resource's, and a grant scoped to it lets the request through while a caller with none is refused.
+     */
+    @Test
+    void aMatrixParameterLeavesARouteCheckedOnTheResourceItNames() {
+        String scheduler = user("route-matrix-scheduler");
+        String lambda = user("route-matrix-lambda");
+        String nobody = user("route-matrix-nobody");
+        policy(scheduler, allow("scheduler:GetScheduleGroup",
+                "arn:aws:scheduler:us-east-1:" + ACCOUNT + ":schedule-group/default"));
+        policy(lambda, allow("lambda:GetFunction", "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:route-matrix-fn"));
+        for (String path : new String[]{"/schedule-groups;ignored=yes/default", "/schedule-groups/default;ignored=yes"}) {
+            as(scheduler, "scheduler").urlEncodingEnabled(false).get(path).then().statusCode(200);
+            refused(as(nobody, "scheduler").urlEncodingEnabled(false).get(path).then(), "scheduler:GetScheduleGroup");
+        }
+        for (String path : new String[]{"/2015-03-31/functions;ignored=yes/route-matrix-fn",
+                "/2015-03-31/functions/route-matrix-fn;ignored=yes"}) {
+            as(lambda, "lambda").urlEncodingEnabled(false).get(path).then().statusCode(404);
+            refused(as(nobody, "lambda").urlEncodingEnabled(false).get(path).then(), "lambda:GetFunction");
+        }
     }
 
     /** Creates a MicroVM image as the account's admin, removed afterwards, and returns its ARN. */

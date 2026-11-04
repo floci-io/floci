@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -96,6 +97,29 @@ class KinesisServiceTest {
     void describeStreamNotFound() {
         assertThrows(AwsException.class, () ->
                 kinesisService.describeStream("missing", REGION));
+    }
+
+    @Test
+    void describeStreamByArnFindsTheStreamWithThatExactArn() {
+        KinesisStream created = kinesisService.createStream("orders-events", 1, REGION);
+
+        assertEquals(created.getStreamArn(),
+                kinesisService.describeStreamByArn(created.getStreamArn(), REGION).getStreamArn());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "orders-events",
+        "arn:aws:kinesis:eu-west-1:000000000000:stream/orders-events",
+        "arn:aws:kinesis:us-east-1:111111111111:stream/orders-events",
+        "arn:aws:kinesis:us-east-1:000000000000:not-a-stream/orders-events"
+    })
+    void describeStreamByArnNamesNoStreamForAnotherIdentityWithTheSameName(String streamArn) {
+        kinesisService.createStream("orders-events", 1, REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> kinesisService.describeStreamByArn(streamArn, REGION));
+
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 
     @Test

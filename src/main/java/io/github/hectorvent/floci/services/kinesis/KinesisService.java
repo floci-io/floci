@@ -207,6 +207,19 @@ public class KinesisService implements ResourceProvider {
         return resolveStreamForAccount(accountId, streamName, region);
     }
 
+    /**
+     * The stream whose own ARN is {@code streamArn}, in the caller's account and {@code region}. A
+     * name alone, or an ARN for another account, region or resource type, names no stream here.
+     */
+    public KinesisStream describeStreamByArn(String streamArn, String region) {
+        String streamName = streamArn.substring(streamArn.lastIndexOf('/') + 1);
+        KinesisStream stream = resolveStream(streamName, region);
+        if (!streamArn.equals(stream.getStreamArn())) {
+            throw new AwsException("ResourceNotFoundException", "Stream " + streamName + " not found", 400);
+        }
+        return stream;
+    }
+
     public KinesisConsumer registerStreamConsumer(String streamArn, String consumerName, String region) {
         String consumerArn = streamArn + "/consumer/" + consumerName + ":" + System.currentTimeMillis();
         KinesisConsumer consumer = new KinesisConsumer(consumerName, consumerArn, streamArn);

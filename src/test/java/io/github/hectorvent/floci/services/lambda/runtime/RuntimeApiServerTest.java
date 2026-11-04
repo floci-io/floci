@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda.runtime;
 
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
+import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.RoutingContext;
@@ -28,14 +29,13 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -50,7 +50,6 @@ class RuntimeApiServerTest {
     private RuntimeApiServer server;
     private int port;
     private HttpClient httpClient;
-    private ScheduledExecutorService scheduler;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -61,13 +60,11 @@ class RuntimeApiServerTest {
         httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
                 .build();
-        scheduler = Executors.newSingleThreadScheduledExecutor();
     }
 
     @AfterEach
     void tearDown() throws Exception {
         server.stop().get(5, TimeUnit.SECONDS);
-        scheduler.shutdownNow();
         httpClient.close();
         // Await the close rather than firing it and moving on: Vertx.close() is asynchronous, so
         // an unawaited call lets the next test's setUp() create a new Vertx and bind a port while
@@ -116,19 +113,20 @@ class RuntimeApiServerTest {
                 "arn:aws:lambda:us-east-1:000000000000:function:test",
                 new CompletableFuture<>());
 
-        scheduler.schedule(() -> server.enqueue(invocation), 2, TimeUnit.SECONDS);
-
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
                 .GET()
                 .build();
 
-        long start = System.currentTimeMillis();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        long elapsed = System.currentTimeMillis() - start;
+        CompletableFuture<HttpResponse<String>> asyncResponse =
+                httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+        awaitWaitingContexts(1);
+        assertFalse(asyncResponse.isDone(), "GET /next must wait for an invocation");
+
+        server.enqueue(invocation);
+        HttpResponse<String> response = asyncResponse.get(5, TimeUnit.SECONDS);
 
         assertEquals(200, response.statusCode());
-        assertTrue(elapsed >= 1500, "should have blocked ~2s waiting for invocation");
         assertEquals("req-1", response.headers().firstValue("Lambda-Runtime-Aws-Request-Id").orElse(""));
         assertTrue(response.body().contains("key"));
     }
@@ -222,7 +220,7 @@ class RuntimeApiServerTest {
         CompletableFuture<HttpResponse<String>> asyncResponse =
                 httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
 
-        Thread.sleep(300);
+        awaitWaitingContexts(1);
         assertFalse(asyncResponse.isDone(), "GET /next should be parked, not returned");
 
         PendingInvocation invocation = new PendingInvocation(
@@ -607,19 +605,21 @@ class RuntimeApiServerTest {
 
     /**
      * Replaces the default {@code server} with a subclass whose test-only overrides
-     * gate the four race points on the caller-supplied Runnables. Used only by the
+     * gate and observe race points through the caller-supplied Runnables. Used only by the
      * race tests below; other tests keep the plain server. Rebinds the port because
      * start() binds on construction.
      */
     private void installGatedServer(Runnable beforeEnqueueDispatch,
                                     Runnable beforeNextPathGuard,
-                                    Runnable afterQuiesceStoppedFlag) throws Exception {
+                                    Runnable afterQuiesceStoppedFlag,
+                                    Runnable onStoppedDispatchSkipped) throws Exception {
         server.stop().get(5, TimeUnit.SECONDS);
         port = findFreePort();
         server = new RuntimeApiServer(vertx, port) {
             @Override protected void beforeEnqueueDeferredDispatch() { beforeEnqueueDispatch.run(); }
             @Override protected void beforeNextPathDispatchGuard() { beforeNextPathGuard.run(); }
             @Override protected void afterQuiesceStoppedFlagSet() { afterQuiesceStoppedFlag.run(); }
+            @Override protected void onStoppedDispatchSkipped() { onStoppedDispatchSkipped.run(); }
         };
         server.start().get(5, TimeUnit.SECONDS);
     }
@@ -671,6 +671,7 @@ class RuntimeApiServerTest {
         CountDownLatch holdDispatch = new CountDownLatch(1);
         CountDownLatch quiesceReachedHook = new CountDownLatch(1);
         CountDownLatch releaseQuiesce = new CountDownLatch(1);
+        CountDownLatch dispatchSkipped = new CountDownLatch(1);
         installGatedServer(
                 () -> {
                     dispatchEntered.countDown();
@@ -681,10 +682,15 @@ class RuntimeApiServerTest {
                 () -> { /* NEXT_PATH not exercised here */ },
                 () -> {
                     quiesceReachedHook.countDown();
-                    try { releaseQuiesce.await(5, TimeUnit.SECONDS); } catch (InterruptedException e) {
+                    try {
+                        assertTrue(releaseQuiesce.await(10, TimeUnit.SECONDS),
+                                "the test must explicitly release quiesce after observing the stopped guard");
+                    } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
+                        throw new AssertionError("Interrupted while holding quiesce", e);
                     }
-                });
+                },
+                dispatchSkipped::countDown);
 
         HttpRequest parkedRequest = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
@@ -709,10 +715,14 @@ class RuntimeApiServerTest {
         // NOW release the dispatch while quiesce is frozen post-lock — the exact window
         // the pre-fix code was vulnerable in. Guard's `stopped=true` under fix must
         // atomically imply inFlight empty.
-        holdDispatch.countDown();
-        // Give the guard time to run (blocking on releaseQuiesce first).
-        Thread.sleep(200);
-        releaseQuiesce.countDown();
+        try {
+            holdDispatch.countDown();
+            assertTrue(dispatchSkipped.await(5, TimeUnit.SECONDS),
+                    "deferred dispatch must observe stopped while quiesce is held");
+            assertFalse(quiesceDone.isDone(), "quiesce must still be held when the guard runs");
+        } finally {
+            releaseQuiesce.countDown();
+        }
         quiesceDone.get(5, TimeUnit.SECONDS);
 
         try {
@@ -742,6 +752,7 @@ class RuntimeApiServerTest {
         CountDownLatch holdDispatch = new CountDownLatch(1);
         CountDownLatch quiesceReachedHook = new CountDownLatch(1);
         CountDownLatch releaseQuiesce = new CountDownLatch(1);
+        CountDownLatch dispatchSkipped = new CountDownLatch(1);
         installGatedServer(
                 () -> { /* enqueue path not exercised here */ },
                 () -> {
@@ -752,10 +763,15 @@ class RuntimeApiServerTest {
                 },
                 () -> {
                     quiesceReachedHook.countDown();
-                    try { releaseQuiesce.await(5, TimeUnit.SECONDS); } catch (InterruptedException e) {
+                    try {
+                        assertTrue(releaseQuiesce.await(10, TimeUnit.SECONDS),
+                                "the test must explicitly release quiesce after observing the stopped guard");
+                    } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
+                        throw new AssertionError("Interrupted while holding quiesce", e);
                     }
-                });
+                },
+                dispatchSkipped::countDown);
 
         PendingInvocation invocation = new PendingInvocation(
                 "req-latch-nextpath", "{}".getBytes(), System.currentTimeMillis() + 60_000,
@@ -775,9 +791,14 @@ class RuntimeApiServerTest {
         assertTrue(quiesceReachedHook.await(5, TimeUnit.SECONDS),
                 "quiesce should have released its lock and reached the post-lock hook");
 
-        holdDispatch.countDown();
-        Thread.sleep(200);
-        releaseQuiesce.countDown();
+        try {
+            holdDispatch.countDown();
+            assertTrue(dispatchSkipped.await(5, TimeUnit.SECONDS),
+                    "NEXT_PATH dispatch must observe stopped while quiesce is held");
+            assertFalse(quiesceDone.isDone(), "quiesce must still be held when the guard runs");
+        } finally {
+            releaseQuiesce.countDown();
+        }
         quiesceDone.get(5, TimeUnit.SECONDS);
 
         try {
@@ -806,13 +827,17 @@ class RuntimeApiServerTest {
         // interleaving by ending the ctx from afterEnqueueDispatchLockReleased.
         AtomicInteger sendInvocationCalls =
                 new AtomicInteger();
+        CompletableFuture<Context> dispatchObserved = new CompletableFuture<>();
         installGatedServerWithDispatchObservation(
                 waitingCtx -> {
                     if (!waitingCtx.response().ended()) {
                         waitingCtx.response().setStatusCode(500).end();
                     }
                 },
-                requestId -> sendInvocationCalls.incrementAndGet());
+                requestId -> {
+                    sendInvocationCalls.incrementAndGet();
+                    dispatchObserved.complete(Vertx.currentContext());
+                });
 
         HttpRequest parkedRequest = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
@@ -826,8 +851,12 @@ class RuntimeApiServerTest {
                 new CompletableFuture<>());
         server.enqueue(invocation);
 
-        // Wait for the runOnContext-scheduled dispatch to have fired.
-        Thread.sleep(500);
+        Context dispatchContext = dispatchObserved.get(5, TimeUnit.SECONDS);
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(10))
+                .until(() -> server.pendingQueueSize() == 1 && server.inFlightSize() == 0);
+        CompletableFuture<Void> dispatchReturned = new CompletableFuture<>();
+        dispatchContext.runOnContext(ignored -> dispatchReturned.complete(null));
+        dispatchReturned.get(5, TimeUnit.SECONDS);
 
         assertEquals(1, sendInvocationCalls.get(),
                 "sendInvocation must run exactly once — a zero count means the "
@@ -870,8 +899,8 @@ class RuntimeApiServerTest {
                 new CompletableFuture<>());
         server.enqueue(invocation);
 
-        // Wait for the runOnContext-scheduled dispatch (and its failed write) to fire.
-        Thread.sleep(500);
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(10))
+                .until(() -> server.pendingQueueSize() == 1 && server.inFlightSize() == 0);
 
         assertEquals(1, server.pendingQueueSize(),
                 "invocation must be requeued after write failure — zero means stranded.");
@@ -932,8 +961,7 @@ class RuntimeApiServerTest {
         CompletableFuture<HttpResponse<String>> asyncResponse =
                 httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
 
-        // Give the handler time to park
-        Thread.sleep(500);
+        awaitWaitingContexts(1);
         assertFalse(asyncResponse.isDone(), "handler should be parked");
 
         // Quiesce leaves the parked poller alone — real Lambda relies on the container
@@ -1236,7 +1264,8 @@ class RuntimeApiServerTest {
                         .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
 
-        Thread.sleep(300);
+        assertTrue(awaitExtensionParked(server, extensionId, 5000),
+                "extension /event/next must reach the server before enqueue");
         assertFalse(asyncNext.isDone(), "extension /event/next should be parked with no pending event");
 
         PendingInvocation invocation = new PendingInvocation(
@@ -1247,7 +1276,8 @@ class RuntimeApiServerTest {
 
         // The #2573 regression check: enqueue() alone must not deliver the INVOKE. Pre-fix,
         // this is exactly where the event arrived (dispatched inline inside enqueue()).
-        Thread.sleep(300);
+        assertTrue(server.isExtensionParked(extensionId),
+                "enqueue() alone must leave the extension parked until the runtime polls /next");
         assertFalse(asyncNext.isDone(),
                 "enqueue() alone must not deliver INVOKE; delivery must wait for the runtime's own /next poll");
 
@@ -1323,11 +1353,7 @@ class RuntimeApiServerTest {
 
         // The extension's first poll arrives after the dispatch already happened, so it must find
         // the event waiting rather than parking forever.
-        HttpResponse<String> eventResponse = httpClient.send(HttpRequest.newBuilder()
-                        .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
-                        .header("Lambda-Extension-Identifier", extensionId)
-                        .GET().build(),
-                HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> eventResponse = pollExtensionEventNext(extensionId).get(5, TimeUnit.SECONDS);
         assertEquals(200, eventResponse.statusCode());
         JsonObject body = new JsonObject(eventResponse.body());
         assertEquals("INVOKE", body.getString("eventType"));
@@ -1475,6 +1501,7 @@ class RuntimeApiServerTest {
         CountDownLatch releaseWrite = new CountDownLatch(1);
         CountDownLatch quiesceReachedHook = new CountDownLatch(1);
         CountDownLatch releaseQuiesce = new CountDownLatch(1);
+        CountDownLatch invokeNotificationSkipped = new CountDownLatch(1);
 
         server.stop().get(5, TimeUnit.SECONDS);
         port = findFreePort();
@@ -1487,9 +1514,16 @@ class RuntimeApiServerTest {
             }
             @Override protected void afterQuiesceStoppedFlagSet() {
                 quiesceReachedHook.countDown();
-                try { releaseQuiesce.await(5, TimeUnit.SECONDS); } catch (InterruptedException e) {
+                try {
+                    assertTrue(releaseQuiesce.await(10, TimeUnit.SECONDS),
+                            "the test must explicitly release quiesce after observing the stopped guard");
+                } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    throw new AssertionError("Interrupted while holding quiesce", e);
                 }
+            }
+            @Override protected void onStoppedDispatchSkipped() {
+                invokeNotificationSkipped.countDown();
             }
         };
         server.start().get(5, TimeUnit.SECONDS);
@@ -1518,9 +1552,14 @@ class RuntimeApiServerTest {
 
         // Let the runtime write finish now: its onSuccess fires notifyExtensionsOfInvoke() while
         // quiesce is still frozen just past committing stopped=true.
-        releaseWrite.countDown();
-        Thread.sleep(200);
-        releaseQuiesce.countDown();
+        try {
+            releaseWrite.countDown();
+            assertTrue(invokeNotificationSkipped.await(5, TimeUnit.SECONDS),
+                    "INVOKE fan-out must observe stopped while quiesce is held");
+            assertFalse(quiesceDone.isDone(), "quiesce must still be held when the guard runs");
+        } finally {
+            releaseQuiesce.countDown();
+        }
         quiesceDone.get(5, TimeUnit.SECONDS);
 
         // Only the SHUTDOWN quiesce queued should be there, no INVOKE snuck in behind it.
@@ -1558,7 +1597,8 @@ class RuntimeApiServerTest {
                 "arn:aws:lambda:us-east-1:000000000000:function:test",
                 new CompletableFuture<>()));
 
-        Thread.sleep(500);
+        assertTrue(server.isExtensionParked(extensionId),
+                "enqueue without a runtime poller must leave the extension parked");
         assertFalse(asyncNext.isDone(),
                 "extension must not receive INVOKE until the runtime actually polls /next");
     }
@@ -1574,7 +1614,8 @@ class RuntimeApiServerTest {
                         .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
 
-        Thread.sleep(300);
+        assertTrue(awaitExtensionParked(server, extensionId, 5000),
+                "extension /event/next must be parked before stop");
         assertFalse(asyncNext.isDone());
 
         server.stop();
@@ -1724,7 +1765,20 @@ class RuntimeApiServerTest {
         registerExtension("quiet-extension", "INVOKE");
 
         for (int i = 0; i < 3; i++) {
-            pollExtensionEventNext(chatty);
+            CompletableFuture<HttpResponse<String>> extensionResponse = pollExtensionEventNext(chatty);
+            String requestId = "req-repeated-poll-" + i;
+            server.enqueue(new PendingInvocation(
+                    requestId, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                    "arn:aws:lambda:us-east-1:000000000000:function:test",
+                    new CompletableFuture<>()));
+            HttpResponse<String> runtimeResponse = httpClient.send(HttpRequest.newBuilder()
+                            .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                            .GET().build(),
+                    HttpResponse.BodyHandlers.ofString());
+            assertEquals(200, runtimeResponse.statusCode());
+            HttpResponse<String> event = extensionResponse.get(5, TimeUnit.SECONDS);
+            assertEquals(200, event.statusCode());
+            assertEquals(requestId, new JsonObject(event.body()).getString("requestId"));
         }
 
         assertFalse(server.awaitExtensionsReady(300),
@@ -2040,54 +2094,53 @@ class RuntimeApiServerTest {
             // a shared client's connection pool could otherwise hand back a stale pooled
             // connection to that iteration's now-closed server.
             HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-            int freshPort = findFreePort();
-            RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
-            freshServer.start().get(5, TimeUnit.SECONDS);
-            try {
-                String extensionId = registerExtensionOn(client, freshPort, "lambda-adapter", "SHUTDOWN");
+            try (AutoCloseable clientCleanup = () -> {
+                client.shutdownNow();
+                assertTrue(client.awaitTermination(Duration.ofSeconds(5)), "HTTP client did not terminate");
+            }) {
+                int freshPort = findFreePort();
+                RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
+                try (AutoCloseable serverCleanup = () -> freshServer.stop().get(5, TimeUnit.SECONDS)) {
+                    freshServer.start().get(5, TimeUnit.SECONDS);
+                    String extensionId = registerExtensionOn(client, freshPort, "lambda-adapter", "SHUTDOWN");
 
-                CompletableFuture<HttpResponse<String>> asyncNext = client.sendAsync(
-                        HttpRequest.newBuilder()
-                                .uri(URI.create("http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
-                                .header("Lambda-Extension-Identifier", extensionId)
-                                .GET().build(),
-                        HttpResponse.BodyHandlers.ofString());
-
-                // Wait for the poll to actually park before racing stop() against it. A fixed
-                // sleep only *assumes* it parked: on a loaded machine the sleep expires first,
-                // stop() closes the listening socket while the request is still in flight, and
-                // the client sees the connection die (EOFException) rather than the SHUTDOWN
-                // this test is about. Same reasoning as
-                // extensionRegister_racedAgainstStop_eventuallyDeliversShutdown.
-                assertTrue(awaitExtensionParked(freshServer, extensionId, 5000),
-                        "extension never parked on /event/next; the stop() race was never set up");
-                freshServer.stop();
-
-                HttpResponse<String> response = asyncNext.get(5, TimeUnit.SECONDS);
-                boolean deliveredHere = response.statusCode() == 200
-                        && "SHUTDOWN".equals(new JsonObject(response.body()).getString("eventType"));
-                if (deliveredHere) {
-                    totalDelivered.incrementAndGet();
-                } else {
-                    // Didn't land in this specific request — a subsequent poll with the same
-                    // identifier must still find the SHUTDOWN queued (never orphaned).
-                    HttpResponse<String> retry = client.send(HttpRequest.newBuilder()
-                                    .uri(URI.create(
-                                            "http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
+                    CompletableFuture<HttpResponse<String>> asyncNext = client.sendAsync(
+                            HttpRequest.newBuilder()
+                                    .uri(URI.create("http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
                                     .header("Lambda-Extension-Identifier", extensionId)
                                     .GET().build(),
                             HttpResponse.BodyHandlers.ofString());
-                    if (retry.statusCode() == 200
-                            && "SHUTDOWN".equals(new JsonObject(retry.body()).getString("eventType"))) {
+
+                    // Wait for the poll to actually park before racing stop() against it. A fixed
+                    // sleep only *assumes* it parked: on a loaded machine the sleep expires first,
+                    // stop() closes the listening socket while the request is still in flight, and
+                    // the client sees the connection die (EOFException) rather than the SHUTDOWN
+                    // this test is about. Same reasoning as
+                    // extensionRegister_racedAgainstStop_eventuallyDeliversShutdown.
+                    assertTrue(awaitExtensionParked(freshServer, extensionId, 5000),
+                            "extension never parked on /event/next; the stop() race was never set up");
+                    freshServer.stop();
+
+                    HttpResponse<String> response = asyncNext.get(5, TimeUnit.SECONDS);
+                    boolean deliveredHere = response.statusCode() == 200
+                            && "SHUTDOWN".equals(new JsonObject(response.body()).getString("eventType"));
+                    if (deliveredHere) {
                         totalDelivered.incrementAndGet();
+                    } else {
+                        // Didn't land in this specific request — a subsequent poll with the same
+                        // identifier must still find the SHUTDOWN queued (never orphaned).
+                        HttpResponse<String> retry = client.send(HttpRequest.newBuilder()
+                                        .uri(URI.create(
+                                                "http://localhost:" + freshPort + "/2020-01-01/extension/event/next"))
+                                        .header("Lambda-Extension-Identifier", extensionId)
+                                        .GET().build(),
+                                HttpResponse.BodyHandlers.ofString());
+                        if (retry.statusCode() == 200
+                                && "SHUTDOWN".equals(new JsonObject(retry.body()).getString("eventType"))) {
+                            totalDelivered.incrementAndGet();
+                        }
                     }
                 }
-            } finally {
-                freshServer.stop().get(5, TimeUnit.SECONDS);
-                // Each HttpClient owns a selector thread and connection pool; leaking one per
-                // iteration across hundreds of iterations starves the JVM and makes even an
-                // unrelated server's bind time out.
-                client.close();
             }
         }
 
@@ -2257,7 +2310,8 @@ class RuntimeApiServerTest {
                         HttpResponse.BodyHandlers.ofString()));
             }
 
-            Thread.sleep(500);
+            await().alias("all concurrent runtime pollers parked").atMost(Duration.ofSeconds(5))
+                    .until(() -> servers.stream().allMatch(s -> s.waitingContextsSize() == 1));
             for (CompletableFuture<HttpResponse<String>> f : pending) {
                 assertFalse(f.isDone(), "all pollers should be parked, none held on a blocking thread");
             }
@@ -2308,24 +2362,22 @@ class RuntimeApiServerTest {
     /**
      * Issues one /extension/event/next for the given extension, which is what marks it init-ready.
      *
-     * <p>Deliberately async and un-awaited: with no event pending the handler parks the request
-     * until an INVOKE or SHUTDOWN arrives, so a blocking send here would hang the test. The
-     * readiness countdown happens as the handler runs, before it parks — callers observe it
-     * through the barrier rather than through this response.
-     *
-     * <p>Sleeps briefly before returning so the request has actually reached the handler. Without
-     * that, a caller asserting on the barrier immediately afterwards could observe the state from
-     * before this poll and pass (or fail) for the wrong reason.
+     * <p>Waits until this poll has parked or returned an already-queued event, rather than awaiting
+     * a response that might require a later INVOKE or SHUTDOWN. The previous poll must have
+     * completed so its parked context cannot satisfy this poll's readiness check.
      */
     private CompletableFuture<HttpResponse<String>> pollExtensionEventNext(String extensionId)
             throws Exception {
+        assertFalse(server.isExtensionParked(extensionId),
+                "the previous extension poll must complete before polling again");
         CompletableFuture<HttpResponse<String>> pending = httpClient.sendAsync(
                 HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
                         .header("Lambda-Extension-Identifier", extensionId)
                         .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
-        Thread.sleep(150);
+        await().alias("extension poll reached the server").atMost(Duration.ofSeconds(5))
+                .until(() -> server.isExtensionParked(extensionId) || pending.isDone());
         return pending;
     }
 

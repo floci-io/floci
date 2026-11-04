@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -55,6 +56,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -355,6 +357,50 @@ class ElbV2TcpDataPlaneIntegrationTest {
                     String response = new String(socket.getInputStream().readAllBytes(), StandardCharsets.US_ASCII);
                     assertTrue(response.startsWith("HTTP/1.1 200"), response);
                     assertTrue(response.endsWith("parked"), response);
+                }
+            });
+        } finally {
+            client.deleteLoadBalancer(request -> request.loadBalancerArn(other.loadBalancerArn()));
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = ProtocolEnum.class, names = {"TCP", "HTTP"})
+    void listenerStartsAfterExternalPortOwnerReleasesIt(ProtocolEnum protocol) throws Exception {
+        LoadBalancer other = client.createLoadBalancer(request -> request.name("tcp-regression-occupied")
+                .type(protocol == ProtocolEnum.TCP ? LoadBalancerTypeEnum.NETWORK : LoadBalancerTypeEnum.APPLICATION)
+                .subnets(Ec2Service.defaultSubnetId("us-east-1", "a"),
+                        Ec2Service.defaultSubnetId("us-east-1", "b")))
+                .loadBalancers().getFirst();
+        try (ServerSocket occupied = new ServerSocket(0)) {
+            int port = occupied.getLocalPort();
+            Action action = protocol == ProtocolEnum.TCP
+                    ? Action.builder().type(ActionTypeEnum.FORWARD).targetGroupArn(targetGroupArn).build()
+                    : Action.builder().type(ActionTypeEnum.FIXED_RESPONSE).fixedResponseConfig(
+                            FixedResponseActionConfig.builder().statusCode("200").contentType("text/plain")
+                                    .messageBody("recovered").build()).build();
+            Listener created = LogCapture.awaitRecord(ElbV2DataPlane.class, Duration.ofSeconds(5),
+                    record -> record.getMessage().contains("listener port failed to start")
+                            && record.getParameters() != null
+                            && Arrays.asList(record.getParameters()).contains(Integer.toString(port)),
+                    () -> client.createListener(request -> request.loadBalancerArn(other.loadBalancerArn())
+                            .protocol(protocol).port(port).defaultActions(action)).listeners().getFirst());
+            assertEquals(created.listenerArn(), client.describeListeners(request -> request
+                    .loadBalancerArn(other.loadBalancerArn())).listeners().getFirst().listenerArn());
+            occupied.close();
+
+            await().atMost(Duration.ofSeconds(5)).ignoreExceptions().untilAsserted(() -> {
+                try (Socket socket = connect(port)) {
+                    if (protocol == ProtocolEnum.TCP) {
+                        assertEcho(socket, new byte[]{0, 9, 13, 10});
+                    } else {
+                        socket.setSoTimeout(2000);
+                        socket.getOutputStream().write(("GET / HTTP/1.1\r\nHost: " + other.dnsName()
+                                + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));
+                        String response = new String(socket.getInputStream().readAllBytes(), StandardCharsets.US_ASCII);
+                        assertTrue(response.startsWith("HTTP/1.1 200"), response);
+                        assertTrue(response.endsWith("recovered"), response);
+                    }
                 }
             });
         } finally {

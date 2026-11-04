@@ -169,7 +169,6 @@ AWS::DynamoDB::Table	BillingMode	accepted and ignored
 AWS::DynamoDB::Table	ContributorInsightsSpecification	accepted and ignored
 AWS::DynamoDB::Table	DeletionProtectionEnabled	accepted and ignored
 AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
-AWS::DynamoDB::Table	KinesisStreamSpecification	accepted and ignored
 AWS::DynamoDB::Table	OnDemandThroughput	accepted and ignored
 AWS::DynamoDB::Table	PointInTimeRecoverySpecification	accepted and ignored
 AWS::DynamoDB::Table	ProvisionedThroughput	accepted and ignored
@@ -366,7 +365,6 @@ AWS::IAM::ManagedPolicy	Path	accepted and ignored
 AWS::IAM::ManagedPolicy	PolicyDocument	accepted and ignored
 AWS::IAM::ManagedPolicy	Users	accepted and ignored
 AWS::IAM::Policy	PolicyDocument	accepted and ignored
-AWS::IAM::Role	MaxSessionDuration	accepted and ignored
 AWS::IAM::Role	Tags	accepted and ignored
 AWS::IAM::User	LoginProfile	documented as ignored (docs/services/cloudformation.md, IAM)
 AWS::KMS::Key	BypassPolicyLockoutSafetyCheck	accepted and ignored

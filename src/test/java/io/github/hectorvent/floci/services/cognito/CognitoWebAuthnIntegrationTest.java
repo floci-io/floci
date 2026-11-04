@@ -8,6 +8,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
@@ -35,14 +37,12 @@ class CognitoWebAuthnIntegrationTest {
 
     @Test
     void passkeyRegistrationAndSignInRoundTrip() throws Exception {
-        String poolId = cognitoJson("CreateUserPool", """
-                {"PoolName":"PasskeyProtocolPool","UserPoolTier":"ESSENTIALS",
-                 "Policies":{"SignInPolicy":{"AllowedFirstAuthFactors":["PASSWORD","WEB_AUTHN"]}}}
-                """).path("UserPool").path("Id").asText();
-        JsonNode mfaConfig = cognitoJson("SetUserPoolMfaConfig", """
-                {"UserPoolId":"%s","MfaConfiguration":"OFF",
-                 "WebAuthnConfiguration":{"RelyingPartyId":"localhost"}}
-                """.formatted(poolId));
+        PasskeyUser fixture = passkeyUserWithCredentials(1, "packed");
+        String poolId = fixture.poolId();
+        String clientId = fixture.clientId();
+        String username = fixture.username();
+        String accessToken = fixture.accessToken();
+        JsonNode mfaConfig = fixture.mfaConfig();
         assertEquals("localhost", mfaConfig.path("WebAuthnConfiguration").path("RelyingPartyId").asText());
         assertEquals("preferred", mfaConfig.path("WebAuthnConfiguration").path("UserVerification").asText());
         cognitoAction("GetUserPoolMfaConfig", """
@@ -52,34 +52,13 @@ class CognitoWebAuthnIntegrationTest {
                 .body("WebAuthnConfiguration.RelyingPartyId", equalTo("localhost"))
                 .body("WebAuthnConfiguration", not(hasKey("FactorConfiguration")));
 
-        String clientId = cognitoJson("CreateUserPoolClient", """
-                {"UserPoolId":"%s","ClientName":"passkey-client",
-                 "ExplicitAuthFlows":["ALLOW_USER_PASSWORD_AUTH","ALLOW_USER_AUTH"]}
-                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
-        String username = "passkey-" + UUID.randomUUID();
-        cognitoJson("AdminCreateUser", """
-                {"UserPoolId":"%s","Username":"%s","MessageAction":"SUPPRESS"}
-                """.formatted(poolId, username));
-        cognitoJson("AdminSetUserPassword", """
-                {"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}
-                """.formatted(poolId, username, PASSWORD));
-        String accessToken = cognitoJson("InitiateAuth", """
-                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
-                 "AuthParameters":{"USERNAME":"%s","PASSWORD":"%s"}}
-                """.formatted(clientId, username, PASSWORD)).path("AuthenticationResult").path("AccessToken").asText();
-
-        JsonNode options = cognitoJson("StartWebAuthnRegistration", """
-                {"AccessToken":"%s"}
-                """.formatted(accessToken)).path("CredentialCreationOptions");
+        RegisteredPasskey passkey = fixture.passkeys().getFirst();
+        JsonNode options = passkey.options();
         assertTrue(options.isObject(), "CredentialCreationOptions is a document");
         assertEquals("localhost", options.path("rp").path("id").asText());
         assertEquals(60000, options.path("timeout").asInt());
-
-        WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256("http://localhost:5173");
-        ObjectNode complete = JSON.createObjectNode();
-        complete.put("AccessToken", accessToken);
-        complete.set("Credential", authenticator.register(options, "packed"));
-        cognitoAction("CompleteWebAuthnRegistration", complete.toString()).then().statusCode(200);
+        WebAuthnTestAuthenticator authenticator = passkey.authenticator();
+        ObjectNode complete = passkey.registrationRequest();
         cognitoAction("CompleteWebAuthnRegistration", complete.toString())
                 .then().statusCode(400).body("__type", equalTo("WebAuthnChallengeNotFoundException"));
 
@@ -131,36 +110,12 @@ class CognitoWebAuthnIntegrationTest {
 
     @Test
     void passkeyMfaIsTurnedOnPerUserWithWebAuthnMfaSettings() throws Exception {
-        String poolId = cognitoJson("CreateUserPool", """
-                {"PoolName":"PasskeyMfaPool","UserPoolTier":"ESSENTIALS",
-                 "Policies":{"SignInPolicy":{"AllowedFirstAuthFactors":["PASSWORD","WEB_AUTHN"]}}}
-                """).path("UserPool").path("Id").asText();
-        cognitoJson("SetUserPoolMfaConfig", """
-                {"UserPoolId":"%s","MfaConfiguration":"OFF",
-                 "WebAuthnConfiguration":{"RelyingPartyId":"localhost"}}
-                """.formatted(poolId));
-        String clientId = cognitoJson("CreateUserPoolClient", """
-                {"UserPoolId":"%s","ClientName":"passkey-mfa-client",
-                 "ExplicitAuthFlows":["ALLOW_USER_PASSWORD_AUTH","ALLOW_USER_AUTH"]}
-                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
-        String username = "passkey-mfa-" + UUID.randomUUID();
-        cognitoJson("AdminCreateUser", """
-                {"UserPoolId":"%s","Username":"%s","MessageAction":"SUPPRESS"}
-                """.formatted(poolId, username));
-        cognitoJson("AdminSetUserPassword", """
-                {"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}
-                """.formatted(poolId, username, PASSWORD));
-        String accessToken = cognitoJson("InitiateAuth", """
-                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
-                 "AuthParameters":{"USERNAME":"%s","PASSWORD":"%s"}}
-                """.formatted(clientId, username, PASSWORD)).path("AuthenticationResult").path("AccessToken").asText();
-        WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256("http://localhost:5173");
-        ObjectNode complete = JSON.createObjectNode();
-        complete.put("AccessToken", accessToken);
-        complete.set("Credential", authenticator.register(cognitoJson("StartWebAuthnRegistration", """
-                {"AccessToken":"%s"}
-                """.formatted(accessToken)).path("CredentialCreationOptions"), "none"));
-        cognitoAction("CompleteWebAuthnRegistration", complete.toString()).then().statusCode(200);
+        PasskeyUser fixture = passkeyUserWithCredentials(1);
+        String poolId = fixture.poolId();
+        String clientId = fixture.clientId();
+        String username = fixture.username();
+        String accessToken = fixture.accessToken();
+        WebAuthnTestAuthenticator authenticator = fixture.passkeys().getFirst().authenticator();
 
         String turnOn = """
                 {"AccessToken":"%s","WebAuthnMfaSettings":{"Enabled":true}}
@@ -243,4 +198,88 @@ class CognitoWebAuthnIntegrationTest {
                 """.formatted(poolId))
                 .then().statusCode(400).body("__type", equalTo("InvalidParameterException"));
     }
+
+    @Test
+    void listWebAuthnCredentialsRejectsAMaxResultsThatIsNotAnInteger() throws Exception {
+        String accessToken = passkeyUserWithCredentials(1).accessToken();
+        for (String bad : new String[] {"1.5", "\"2\"", "4294967297", "true"}) {
+            cognitoAction("ListWebAuthnCredentials", """
+                    {"AccessToken":"%s","MaxResults":%s}
+                    """.formatted(accessToken, bad))
+                    .then().statusCode(400)
+                    .body("__type", equalTo("SerializationException"))
+                    .body("message", equalTo("MaxResults must be an integer."));
+        }
+    }
+
+    @Test
+    void listWebAuthnCredentialsPagesWithAnIntegerMaxResultsAndTreatsNullAsOmitted() throws Exception {
+        String accessToken = passkeyUserWithCredentials(3).accessToken();
+        JsonNode first = cognitoJson("ListWebAuthnCredentials", """
+                {"AccessToken":"%s","MaxResults":2}
+                """.formatted(accessToken));
+        assertEquals(2, first.path("Credentials").size());
+        assertFalse(first.path("NextToken").asText().isEmpty());
+        JsonNode second = cognitoJson("ListWebAuthnCredentials", """
+                {"AccessToken":"%s","MaxResults":2,"NextToken":"%s"}
+                """.formatted(accessToken, first.path("NextToken").asText()));
+        assertEquals(1, second.path("Credentials").size());
+        assertTrue(second.path("NextToken").isMissingNode());
+
+        cognitoAction("ListWebAuthnCredentials", """
+                {"AccessToken":"%s","MaxResults":null}
+                """.formatted(accessToken))
+                .then().statusCode(200)
+                .body("Credentials", hasSize(3))
+                .body("$", not(hasKey("NextToken")));
+    }
+
+    private static PasskeyUser passkeyUserWithCredentials(int count) throws Exception {
+        return passkeyUserWithCredentials(count, "none");
+    }
+
+    private static PasskeyUser passkeyUserWithCredentials(int count, String attestation) throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+                {"PoolName":"PasskeyTestPool","UserPoolTier":"ESSENTIALS",
+                 "Policies":{"SignInPolicy":{"AllowedFirstAuthFactors":["PASSWORD","WEB_AUTHN"]}}}
+                """).path("UserPool").path("Id").asText();
+        JsonNode mfaConfig = cognitoJson("SetUserPoolMfaConfig", """
+                {"UserPoolId":"%s","MfaConfiguration":"OFF",
+                 "WebAuthnConfiguration":{"RelyingPartyId":"localhost"}}
+                """.formatted(poolId));
+        String clientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId":"%s","ClientName":"passkey-test-client",
+                 "ExplicitAuthFlows":["ALLOW_USER_PASSWORD_AUTH","ALLOW_USER_AUTH"]}
+                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+        String username = "passkey-" + UUID.randomUUID();
+        cognitoJson("AdminCreateUser", """
+                {"UserPoolId":"%s","Username":"%s","MessageAction":"SUPPRESS"}
+                """.formatted(poolId, username));
+        cognitoJson("AdminSetUserPassword", """
+                {"UserPoolId":"%s","Username":"%s","Password":"%s","Permanent":true}
+                """.formatted(poolId, username, PASSWORD));
+        String accessToken = cognitoJson("InitiateAuth", """
+                {"ClientId":"%s","AuthFlow":"USER_PASSWORD_AUTH",
+                 "AuthParameters":{"USERNAME":"%s","PASSWORD":"%s"}}
+                """.formatted(clientId, username, PASSWORD)).path("AuthenticationResult").path("AccessToken").asText();
+        List<RegisteredPasskey> passkeys = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            WebAuthnTestAuthenticator authenticator = WebAuthnTestAuthenticator.es256("http://localhost:5173");
+            ObjectNode complete = JSON.createObjectNode();
+            complete.put("AccessToken", accessToken);
+            JsonNode options = cognitoJson("StartWebAuthnRegistration", """
+                    {"AccessToken":"%s"}
+                    """.formatted(accessToken)).path("CredentialCreationOptions");
+            complete.set("Credential", authenticator.register(options, attestation));
+            cognitoAction("CompleteWebAuthnRegistration", complete.toString()).then().statusCode(200);
+            passkeys.add(new RegisteredPasskey(authenticator, options, complete));
+        }
+        return new PasskeyUser(poolId, clientId, username, accessToken, mfaConfig, List.copyOf(passkeys));
+    }
+
+    private record PasskeyUser(String poolId, String clientId, String username, String accessToken,
+                               JsonNode mfaConfig, List<RegisteredPasskey> passkeys) {}
+
+    private record RegisteredPasskey(WebAuthnTestAuthenticator authenticator, JsonNode options,
+                                     ObjectNode registrationRequest) {}
 }

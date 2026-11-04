@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -468,7 +469,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
     }
 
     @Test
-    void updateParentStackWithUnchangedNestedStackSucceedsEvenIfTemplateUrlUnavailable() throws InterruptedException {
+    void updateParentStackRollsBackWhenUnchangedChildTemplateUrlIsUnavailable() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String functionName = "cfn-nested-keep-func-" + suffix;
         String bucketName = "nested-stack-templates-" + suffix;
@@ -507,13 +508,25 @@ class CloudFormationDeletionPolicyIntegrationTest {
         try {
             awaitStackStatus(parentStackId, "CREATE_COMPLETE", CUSTOM_AUTH);
 
+            String childStackId = getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH);
+
             // Delete the template object from S3 so TemplateURL is no longer reachable
             given().header("Authorization", CUSTOM_AUTH)
                     .when().delete("/" + templateUrl).then().statusCode(204);
 
-            // Parent update modifying only Outputs: unchanged nested stack is skipped, so missing TemplateURL doesn't fail update
+            // Every update re-reads the child template, including output-only parent updates.
             updateStack(stackName, updatedParentTemplate, CUSTOM_AUTH);
-            awaitStackStatus(parentStackId, "UPDATE_COMPLETE", CUSTOM_AUTH);
+            awaitStackStatus(parentStackId, "UPDATE_ROLLBACK_COMPLETE", CUSTOM_AUTH);
+            assertThat(getNestedStackId(parentStackId, "ChildStack", CUSTOM_AUTH), equalTo(childStackId));
+            given().header("Authorization", CUSTOM_AUTH)
+                    .when().get("/2015-03-31/functions/" + functionName)
+                    .then().statusCode(200).body("Configuration.Timeout", equalTo(3));
+            String events = cfnQuery("DescribeStackEvents", parentStackId, CUSTOM_AUTH)
+                    .then().statusCode(200).extract().asString();
+            assertThat(XmlParser.extractGroups(events, "member").stream().anyMatch(event ->
+                    "ChildStack".equals(event.get("LogicalResourceId"))
+                            && "UPDATE_FAILED".equals(event.get("ResourceStatus"))
+                            && event.getOrDefault("ResourceStatusReason", "").contains("NoSuchKey")), equalTo(true));
         } finally {
             deleteStack(stackName);
         }

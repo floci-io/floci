@@ -45,6 +45,24 @@ class GlueTableResolverTest {
     }
 
     @Test
+    void listsParquetSchemasEscapingGlobCharactersAndQuotes() {
+        assertThat(GlueTableResolver.parquetSchemaSql(List.of("s3://bucket/a[1]/it's*.parquet", "s3://bucket/b.parquet")),
+                equalTo("SELECT file_name, name FROM parquet_schema("
+                        + "['s3://bucket/a[[]1]/it''s[*].parquet', 's3://bucket/b.parquet'])"));
+    }
+
+    @Test
+    void readsParquetOnlyForAParquetTableThatIsNotIceberg() {
+        Table parquet = table("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat", "s3://bucket/events/",
+                List.of(column("id", "int")));
+        assertThat(GlueTableResolver.readsParquet(parquet), is(true));
+        assertThat(GlueTableResolver.readsParquet(table("org.apache.hadoop.mapred.TextInputFormat",
+                "s3://bucket/events/", List.of(column("id", "int")))), is(false));
+        parquet.setParameters(Map.of("table_type", "ICEBERG", "metadata_location", "s3://bucket/m/v1.json"));
+        assertThat(GlueTableResolver.readsParquet(parquet), is(false));
+    }
+
+    @Test
     void readPlanForIcebergUsesMetadataLocation() {
         Table table = table(null, "s3://bucket/iceberg/", List.of(column("id", "int")));
         table.setParameters(Map.of("table_type", "ICEBERG", "metadata_location", "s3://bucket/iceberg/metadata/v1.json"));

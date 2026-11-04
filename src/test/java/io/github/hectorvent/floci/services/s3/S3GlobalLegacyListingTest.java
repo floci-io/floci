@@ -104,6 +104,7 @@ class S3GlobalLegacyListingTest {
         when(provider.get()).thenReturn(lambda);
         s3 = new S3Service(factory, config, null, null, provider, null, null, region, new ObjectMapper(), null);
         trail = mock(CloudTrailService.class);
+        when(trail.hasTrails()).thenReturn(true);
         CurrentVertxRequest vertx = mock(CurrentVertxRequest.class, RETURNS_DEEP_STUBS);
         when(vertx.getCurrent().request().path()).thenReturn("/" + BUCKET + "/object.txt");
         when(vertx.getCurrent().request().getHeader("Authorization")).thenAnswer(invocation ->

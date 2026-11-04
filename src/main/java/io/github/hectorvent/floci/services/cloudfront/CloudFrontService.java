@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.AcmCertificateReferenceProvider.CertificateReference;
@@ -119,7 +120,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final Map<String, CachePolicy> MANAGED_CACHE_POLICIES = managedCachePolicies();
     private static final String MANAGED_POLICY_ETAG = "E23ZP02F085DFQ";
 
-    private final StorageBackend<String, Distribution> distStore;
+    private final AccountAwareStorageBackend<Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
     private final StorageBackend<String, CachePolicy> cachePolicyStore;
     private final StorageBackend<String, OriginRequestPolicy> orpStore;
@@ -558,6 +559,10 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         dist.setEtag(UUID.randomUUID().toString());
         dist.setLastModifiedTime(Instant.now());
         distStore.put(targetDistributionId, dist);
+    }
+
+    public boolean hasDistributions() {
+        return !distStore.isEmptyInAllAccounts();
     }
 
     /**

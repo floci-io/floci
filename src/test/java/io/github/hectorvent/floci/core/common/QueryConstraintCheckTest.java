@@ -61,8 +61,12 @@ class QueryConstraintCheckTest {
               "operations": {"Acquire": "AcquireRequest"},
               "shapes": {
                 "AcquireRequest": {"type": "structure", "required": ["Values"], "members": {
-                  "Values": "valueMap", "Nested": "nestedType", "Entries": "entryList"}},
+                  "Values": "valueMap", "Nested": "nestedType", "Entries": "entryList",
+                  "Replacements": "replacementMap"}},
                 "valueMap": {"type": "map", "key": "keyType", "value": "valueType", "max": 2},
+                "replacementMap": {"type": "map", "key": "keyType", "value": "replacementType"},
+                "replacementType": {"type": "structure", "required": ["Values"], "members": {
+                  "Values": "nameList"}},
                 "nestedType": {"type": "structure", "members": {
                   "Arn": "arnType", "Parameters": "nameList"}},
                 "entryList": {"type": "list", "member": "entryType"},
@@ -562,6 +566,34 @@ class QueryConstraintCheckTest {
                         "Values.entry.1.key", "a", "Values.entry.1.value", "x",
                         "Values.entry.2.key", "b", "Values.entry.2.value", "y",
                         "Values.entry.3.key", "c", "Values.entry.3.value", "z")));
+    }
+
+    /**
+     * A map whose value is a structure names the field under {@code .member} after the key, which
+     * is the form AWS writes on this protocol: an AWS-validated SNS recording answers a missing
+     * {@code DataType} inside one as
+     * {@code Value null at 'messageAttributes.attr1.member.dataType'}. A scalar value stays at the
+     * key, as the test above has it, nothing recorded covering one here.
+     */
+    @Test
+    void aStructureUnderAMapsKeyNamesItsFieldUnderMember() throws Exception {
+        // `keyType` is 4 characters, so the key is short enough to break nothing of its own and
+        // leave the field inside the entry as the only violation.
+        assertEquals(List.of("Value null at 'replacements.Dept.member.values' failed to satisfy"
+                + " constraint: Member must not be null"),
+                maps().violations("Acquire", params(
+                        "Values.entry.1.key", "k", "Values.entry.1.value", "ok",
+                        "Replacements.entry.1.key", "Dept")));
+
+        assertEquals(List.of("Value at 'replacements.Dept.member.values' failed to satisfy"
+                + " constraint: Member must have length less than or equal to 2"),
+                maps().violations("Acquire", params(
+                        "Values.entry.1.key", "k", "Values.entry.1.value", "ok",
+                        "Replacements.entry.1.key", "Dept",
+                        "Replacements.entry.1.value.Values.member.1", "a",
+                        "Replacements.entry.1.value.Values.member.2", "b",
+                        "Replacements.entry.1.value.Values.member.3", "c")),
+                "and the list inside that structure is held to its own bounds under the same path");
     }
 
     /** A map the request names nowhere is the required member reading as null. */

@@ -1383,6 +1383,253 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body("{\"Database\":\"res-none\"," + members + "}").post("/").then();
     }
 
+    /** A DataSync agent is checked on its ARN, which ends in the id DataSync gave it, to describe it or to tag it. */
+    @Test
+    void aDataSyncAgentIsCheckedOnItsArn() {
+        String arn = adminJson("datasync", "FmrsService.CreateAgent").body("{\"ActivationKey\":\"RES-ACTIVATION\"}")
+                .post("/").then().statusCode(200).extract().path("AgentArn");
+        cleanup.register(() -> adminJson("datasync", "FmrsService.DeleteAgent")
+                .body("{\"AgentArn\":\"" + arn + "\"}").post("/"));
+        String agents = "arn:aws:datasync:" + REGION + ":" + ACCOUNT + ":agent/";
+        assertTrue(arn.startsWith(agents + "agent-"), arn);
+        String other = agents + "agent-0123456789abcdef0";
+
+        User user = user("res-agent");
+        user.policy(allowOn("datasync:DescribeAgent", arn) + "," + allowOn("datasync:TagResource", arn));
+        dataSync(user, "DescribeAgent", "{\"AgentArn\":\"" + arn + "\"}").statusCode(200);
+        refusedJson(dataSync(user, "DescribeAgent", "{\"AgentArn\":\"" + other + "\"}"), "datasync:DescribeAgent");
+        String tags = "\",\"Tags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}";
+        dataSync(user, "TagResource", "{\"ResourceArn\":\"" + arn + tags).statusCode(200);
+        refusedJson(dataSync(user, "TagResource", "{\"ResourceArn\":\"" + other + tags), "datasync:TagResource");
+    }
+
+    /**
+     * An EMR cluster is checked on {@code cluster/<id>}, the ARN EMR gives it, whether a request names it by its
+     * {@code ClusterId} or among its {@code JobFlowIds}, and a tag request on the cluster its {@code ResourceId}
+     * names, the one Floci tags, not on the one its {@code ClusterId} gives.
+     */
+    @Test
+    void anEmrClusterIsCheckedOnTheArnItsIdGives() {
+        String arn = emrCluster("res-emr");
+        String id = arn.substring(arn.lastIndexOf('/') + 1);
+
+        User user = user("res-emr");
+        user.policy(allowOn("elasticmapreduce:DescribeCluster", arn) + ","
+                + allowOn("elasticmapreduce:SetTerminationProtection", arn) + ","
+                + allowOn("elasticmapreduce:AddTags", arn));
+        emr(user, "DescribeCluster", "{\"ClusterId\":\"" + id + "\"}").statusCode(200);
+        refusedJson(emr(user, "DescribeCluster", "{\"ClusterId\":\"j-RESOTHER\"}"), "elasticmapreduce:DescribeCluster");
+        String unprotected = "],\"TerminationProtected\":false}";
+        emr(user, "SetTerminationProtection", "{\"JobFlowIds\":[\"" + id + "\"" + unprotected).statusCode(200);
+        refusedJson(emr(user, "SetTerminationProtection", "{\"JobFlowIds\":[\"" + id + "\",\"j-RESOTHER\""
+                + unprotected), "elasticmapreduce:SetTerminationProtection");
+        String tags = "\",\"Tags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}";
+        emr(user, "AddTags", "{\"ResourceId\":\"" + id + tags).statusCode(200);
+        refusedJson(emr(user, "AddTags", "{\"ClusterId\":\"" + id + "\",\"ResourceId\":\"j-RESOTHER" + tags),
+                "elasticmapreduce:AddTags");
+    }
+
+    /**
+     * A Rekognition stream processor is checked on the ARN its {@code Name} gives, and a moderation analysis on the
+     * custom model whose ARN its {@code ProjectVersion} gives. Floci serves no stream processor and no custom model,
+     * so an allowed request is answered by the handler, never by IAM.
+     */
+    @Test
+    void aStreamProcessorIsCheckedOnTheArnItsNameGives() {
+        String processor = "arn:aws:rekognition:" + REGION + ":" + ACCOUNT + ":streamprocessor/res-denied";
+        String version = "arn:aws:rekognition:" + REGION + ":" + ACCOUNT + ":project/res/version/res-denied/1";
+        User user = user("res-rekognition");
+        user.policy(allowOn("rekognition:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"rekognition:*\","
+                + "\"Resource\":[\"" + processor + "\",\"" + version + "\"]}");
+        refusedJson(rekognition(user, "StartStreamProcessor", "{\"Name\":\"res-denied\"}"),
+                "rekognition:StartStreamProcessor");
+        rekognition(user, "StartStreamProcessor", "{\"Name\":\"res-other\"}")
+                .body(not(containsString("not authorized")));
+        String image = "{\"Image\":{\"Bytes\":\"AA==\"}";
+        refusedJson(rekognition(user, "DetectModerationLabels", image + ",\"ProjectVersion\":\"" + version + "\"}"),
+                "rekognition:DetectModerationLabels");
+        rekognition(user, "DetectModerationLabels", image + "}").body(not(containsString("not authorized")));
+    }
+
+    /**
+     * An EMR {@code ModifyInstanceGroups} naming its instance groups by their ids alone, with no {@code ClusterId} or
+     * a null one, is checked on the cluster each group is in, the one EMR finds and modifies it in, so a grant on
+     * another cluster does not reach it and a deny on its own holds; an {@code InstanceGroups} that is no list is
+     * refused, not read as its values.
+     */
+    @Test
+    void anInstanceGroupNamedWithoutItsClusterIsCheckedOnTheClusterItIsIn() {
+        String arn = emrCluster("res-emr-groups");
+        String group = adminJson("elasticmapreduce", "ElasticMapReduce.ListInstanceGroups")
+                .body("{\"ClusterId\":\"" + arn.substring(arn.lastIndexOf('/') + 1) + "\"}").post("/").then()
+                .statusCode(200).extract().path("InstanceGroups[0].Id");
+        String modify = "{\"InstanceGroups\":[{\"InstanceGroupId\":\"" + group + "\",\"InstanceCount\":1}]}";
+
+        User user = user("res-emr-groups");
+        user.policy(allowOn("elasticmapreduce:ModifyInstanceGroups", arn));
+        emr(user, "ModifyInstanceGroups", modify).statusCode(200);
+        emr(user, "ModifyInstanceGroups", "{\"ClusterId\":null," + modify.substring(1)).statusCode(200);
+        user.policy(allowOn("elasticmapreduce:ModifyInstanceGroups", arn.substring(0, arn.lastIndexOf('/') + 1)
+                + "j-RESOTHER"));
+        refusedJson(emr(user, "ModifyInstanceGroups", modify), "elasticmapreduce:ModifyInstanceGroups");
+        user.policy(allowOn("elasticmapreduce:ModifyInstanceGroups", "*") + ",{\"Effect\":\"Deny\","
+                + "\"Action\":\"elasticmapreduce:ModifyInstanceGroups\",\"Resource\":\"" + arn + "\"}");
+        refusedJson(emr(user, "ModifyInstanceGroups", modify), "elasticmapreduce:ModifyInstanceGroups");
+        // An InstanceGroups that is not a list names no group to the check, and EMR changes none.
+        emr(user, "ModifyInstanceGroups", "{\"InstanceGroups\":{\"first\":{\"InstanceGroupId\":\"" + group
+                + "\",\"InstanceCount\":1}}}").statusCode(400)
+                .body(containsString("InstanceGroups must contain at least one instance group."));
+    }
+
+    /**
+     * An IAM Identity Center account assignment is checked on the account its {@code TargetId} names beside the
+     * instance and the permission set, so a grant scoped to one account does not reach another, and a deny on an
+     * account holds.
+     */
+    @Test
+    void anAccountAssignmentIsCheckedOnTheAccountItsTargetIdNames() {
+        String instance = ssoInstance();
+        String permissionSet = permissionSet(instance);
+        String assigned = assignment(instance, permissionSet, "111111111111");
+        String other = assignment(instance, permissionSet, "222222222222");
+
+        User user = user("res-sso");
+        user.policy(allowOn("sso:CreateAccountAssignment", instance) + ","
+                + allowOn("sso:CreateAccountAssignment", permissionSet) + ","
+                + allowOn("sso:CreateAccountAssignment", "arn:aws:sso:::account/111111111111"));
+        ssoAdmin(user, "CreateAccountAssignment", assigned).statusCode(200);
+        cleanup.register(() -> adminJson("sso", "SWBExternalService.DeleteAccountAssignment").body(assigned)
+                .post("/"));
+        refusedJson(ssoAdmin(user, "CreateAccountAssignment", other), "sso:CreateAccountAssignment");
+        user.policy(allowOn("sso:CreateAccountAssignment", "*") + ",{\"Effect\":\"Deny\","
+                + "\"Action\":\"sso:CreateAccountAssignment\",\"Resource\":\"arn:aws:sso:::account/222222222222\"}");
+        refusedJson(ssoAdmin(user, "CreateAccountAssignment", other), "sso:CreateAccountAssignment");
+    }
+
+    /** An assignment of the permission set to a group, in the account. */
+    /**
+     * An IAM Identity Center permission set provisioned to all the accounts it is provisioned to, with no
+     * {@code TargetId}, or a null one, is checked on each of those accounts, so a grant on one does not reach the
+     * others, a deny on one holds, and a grant on all of them lets it through. Each request finds the accounts
+     * afresh, so one provisioned to since is checked too.
+     */
+    @Test
+    void aPermissionSetProvisionedToAllItsAccountsIsCheckedOnEachOfThem() {
+        String instance = ssoInstance();
+        String permissionSet = permissionSet(instance);
+        for (String account : List.of("111111111111", "222222222222")) {
+            String assigned = assignment(instance, permissionSet, account);
+            adminJson("sso", "SWBExternalService.CreateAccountAssignment").body(assigned).post("/").then()
+                    .statusCode(200);
+            cleanup.register(() -> adminJson("sso", "SWBExternalService.DeleteAccountAssignment").body(assigned)
+                    .post("/"));
+        }
+        String provision = "{\"InstanceArn\":\"" + instance + "\",\"PermissionSetArn\":\"" + permissionSet + "\",";
+        String all = provision + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\"}";
+        String one = provision + "\"TargetType\":\"AWS_ACCOUNT\",\"TargetId\":\"111111111111\"}";
+
+        User user = user("res-sso-provision");
+        user.policy(allowOn("sso:ProvisionPermissionSet", instance) + ","
+                + allowOn("sso:ProvisionPermissionSet", permissionSet) + ","
+                + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/111111111111"));
+        ssoAdmin(user, "ProvisionPermissionSet", one).statusCode(200);
+        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
+        user.policy(allowOn("sso:ProvisionPermissionSet", "*") + ",{\"Effect\":\"Deny\","
+                + "\"Action\":\"sso:ProvisionPermissionSet\",\"Resource\":\"arn:aws:sso:::account/222222222222\"}");
+        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
+        ssoAdmin(user, "ProvisionPermissionSet", one).statusCode(200);
+        // A grant on both accounts covers it, a null TargetId naming no account of its own.
+        user.policy(allowOn("sso:ProvisionPermissionSet", instance) + ","
+                + allowOn("sso:ProvisionPermissionSet", permissionSet) + ","
+                + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/111111111111") + ","
+                + allowOn("sso:ProvisionPermissionSet", "arn:aws:sso:::account/222222222222"));
+        ssoAdmin(user, "ProvisionPermissionSet", provision + "\"TargetType\":\"ALL_PROVISIONED_ACCOUNTS\","
+                + "\"TargetId\":null}").statusCode(200);
+        String third = assignment(instance, permissionSet, "333333333333");
+        adminJson("sso", "SWBExternalService.CreateAccountAssignment").body(third).post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("sso", "SWBExternalService.DeleteAccountAssignment").body(third).post("/"));
+        refusedJson(ssoAdmin(user, "ProvisionPermissionSet", all), "sso:ProvisionPermissionSet");
+    }
+
+    /**
+     * An IAM Identity Center permission set a request creates is checked on the permission sets of the instance its
+     * {@code InstanceArn} names, {@code permissionSet/<instance id>/*}, so a grant on those lets it through and one on
+     * another instance's does not.
+     */
+    @Test
+    void aPermissionSetIsCreatedUnderTheInstanceItsRequestNames() {
+        String instance = ssoInstance();
+        String permissionSets = "arn:aws:sso:::permissionSet/";
+        String create = "{\"InstanceArn\":\"" + instance + "\",\"Name\":\"res-" + suffix() + "\"}";
+
+        User user = user("res-sso-create");
+        user.policy(allowOn("sso:CreatePermissionSet", instance) + ","
+                + allowOn("sso:CreatePermissionSet", permissionSets + "ssoins-0000000000000000/*"));
+        refusedJson(ssoAdmin(user, "CreatePermissionSet", create), "sso:CreatePermissionSet");
+        user.policy(allowOn("sso:CreatePermissionSet", instance) + ","
+                + allowOn("sso:CreatePermissionSet", permissionSets + instance.substring(instance.lastIndexOf('/') + 1)
+                + "/*"));
+        String permissionSet = ssoAdmin(user, "CreatePermissionSet", create).statusCode(200).extract()
+                .path("PermissionSet.PermissionSetArn");
+        cleanup.register(() -> adminJson("sso", "SWBExternalService.DeletePermissionSet")
+                .body("{\"InstanceArn\":\"" + instance + "\",\"PermissionSetArn\":\"" + permissionSet + "\"}")
+                .post("/"));
+    }
+
+    /** A cluster an administrator runs, kept alive with no steps, terminated after the test; its ARN. */
+    private String emrCluster(String name) {
+        String arn = adminJson("elasticmapreduce", "ElasticMapReduce.RunJobFlow")
+                .body("{\"Name\":\"" + name + "\",\"ReleaseLabel\":\"emr-7.5.0\",\"Instances\":{"
+                        + "\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceGroups\":[{\"Name\":\"master\","
+                        + "\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .post("/").then().statusCode(200).extract().path("ClusterArn");
+        String clusters = "arn:aws:elasticmapreduce:" + REGION + ":" + ACCOUNT + ":cluster/";
+        assertTrue(arn.startsWith(clusters + "j-"), arn);
+        String id = arn.substring(clusters.length());
+        cleanup.register(() -> adminJson("elasticmapreduce", "ElasticMapReduce.TerminateJobFlows")
+                .body("{\"JobFlowIds\":[\"" + id + "\"]}").post("/"));
+        return arn;
+    }
+
+    /** The IAM Identity Center instance ListInstances gives. */
+    private static String ssoInstance() {
+        return adminJson("sso", "SWBExternalService.ListInstances").body("{}").post("/").then()
+                .statusCode(200).extract().path("Instances[0].InstanceArn");
+    }
+
+    /** A permission set an administrator creates in the instance, deleted after the test. */
+    private String permissionSet(String instance) {
+        String permissionSet = adminJson("sso", "SWBExternalService.CreatePermissionSet")
+                .body("{\"InstanceArn\":\"" + instance + "\",\"Name\":\"res-" + suffix() + "\"}").post("/").then()
+                .statusCode(200).extract().path("PermissionSet.PermissionSetArn");
+        cleanup.register(() -> adminJson("sso", "SWBExternalService.DeletePermissionSet")
+                .body("{\"InstanceArn\":\"" + instance + "\",\"PermissionSetArn\":\"" + permissionSet + "\"}")
+                .post("/"));
+        return permissionSet;
+    }
+
+    private static String assignment(String instance, String permissionSet, String account) {
+        return "{\"InstanceArn\":\"" + instance + "\",\"TargetId\":\"" + account + "\",\"TargetType\":\"AWS_ACCOUNT\","
+                + "\"PermissionSetArn\":\"" + permissionSet + "\",\"PrincipalType\":\"GROUP\","
+                + "\"PrincipalId\":\"11111111-2222-3333-4444-555555555555\"}";
+    }
+
+    private static ValidatableResponse dataSync(User user, String operation, String body) {
+        return send(user, "datasync", "FmrsService." + operation, "1.1", body);
+    }
+
+    private static ValidatableResponse emr(User user, String operation, String body) {
+        return send(user, "elasticmapreduce", "ElasticMapReduce." + operation, "1.1", body);
+    }
+
+    private static ValidatableResponse rekognition(User user, String operation, String body) {
+        return send(user, "rekognition", "RekognitionService." + operation, "1.1", body);
+    }
+
+    private static ValidatableResponse ssoAdmin(User user, String operation, String body) {
+        return send(user, "sso", "SWBExternalService." + operation, "1.1", body);
+    }
+
     /** A monthly cost budget of the name, with a billing view ARN when one is given. */
     private static String budget(String name, String billingViewArn) {
         return "{\"BudgetName\":\"" + name + "\",\"BudgetType\":\"COST\",\"TimeUnit\":\"MONTHLY\",\"BudgetLimit\":"

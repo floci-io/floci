@@ -1,13 +1,18 @@
 package io.github.hectorvent.floci.services.athena.model;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class WorkGroupConfiguration {
 
     @JsonProperty("ResultConfiguration")
     private ResultConfiguration resultConfiguration;
+
+    @JsonProperty("ManagedQueryResultsConfiguration")
+    private ManagedQueryResultsConfiguration managedQueryResultsConfiguration;
 
     @JsonProperty("EnforceWorkGroupConfiguration")
     private Boolean enforceWorkGroupConfiguration;
@@ -23,6 +28,9 @@ public class WorkGroupConfiguration {
 
     @JsonProperty("EngineVersion")
     private QueryExecution.EngineVersion engineVersion;
+
+    @JsonProperty("EnableMinimumEncryptionConfiguration")
+    private Boolean enableMinimumEncryptionConfiguration;
 
     public WorkGroupConfiguration() {}
 
@@ -42,6 +50,18 @@ public class WorkGroupConfiguration {
     public void setBytesScannedCutoffPerQuery(Long bytesScannedCutoffPerQuery) {
         this.bytesScannedCutoffPerQuery = bytesScannedCutoffPerQuery;
     }
+    public ManagedQueryResultsConfiguration getManagedQueryResultsConfiguration() {
+        return managedQueryResultsConfiguration;
+    }
+    public void setManagedQueryResultsConfiguration(ManagedQueryResultsConfiguration configuration) {
+        this.managedQueryResultsConfiguration = configuration;
+    }
+
+    public Boolean getEnableMinimumEncryptionConfiguration() { return enableMinimumEncryptionConfiguration; }
+    public void setEnableMinimumEncryptionConfiguration(Boolean enabled) {
+        this.enableMinimumEncryptionConfiguration = enabled;
+    }
+
     public QueryExecution.EngineVersion getEngineVersion() { return engineVersion; }
     public void setEngineVersion(QueryExecution.EngineVersion engineVersion) { this.engineVersion = engineVersion; }
 }

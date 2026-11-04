@@ -1117,8 +1117,8 @@ public interface EmulatorConfig {
 
         /**
          * {@code immediate} follows the job run states without running anything; {@code docker} runs
-         * each Spark job run's {@code spark-submit} in a container of the application's custom image, or
-         * else of the release's EMR Serverless image.
+         * each Spark job run's {@code spark-submit}, and each Hive job run's {@code hive}, in a container of the
+         * application's custom image, or else of the release's EMR Serverless image.
          */
         @WithDefault("immediate")
         String runnerMode();
@@ -1132,6 +1132,14 @@ public interface EmulatorConfig {
          * image on Amazon ECR Public.
          */
         Optional<String> imageTemplate();
+
+        /**
+         * The image a {@code docker} Hive job run uses when its application names no custom image, as
+         * {@link #imageTemplate()} is for a Spark run, for example
+         * "registry.internal/emr-serverless/hive/%s:20250425". If omitted, Floci uses the release's public
+         * Hive image on Amazon ECR Public.
+         */
+        Optional<String> hiveImageTemplate();
 
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR Serverless driver a
@@ -1250,17 +1258,13 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("ns-1.awsdns-01.org")
-        String defaultNameserver1();
+        Optional<String> defaultNameserver1();
 
-        @WithDefault("ns-2.awsdns-02.net")
-        String defaultNameserver2();
+        Optional<String> defaultNameserver2();
 
-        @WithDefault("ns-3.awsdns-03.com")
-        String defaultNameserver3();
+        Optional<String> defaultNameserver3();
 
-        @WithDefault("ns-4.awsdns-04.co.uk")
-        String defaultNameserver4();
+        Optional<String> defaultNameserver4();
 
         /**
          * Optional control-plane processing window for VPC association mutations. A positive
@@ -2045,7 +2049,8 @@ public interface EmulatorConfig {
 
         /**
          * {@code immediate} completes each step by time without running anything; {@code docker} runs each
-         * Spark step's {@code spark-submit} in a container of the release's EMR Serverless image.
+         * Spark step's {@code spark-submit} in a container of the release's EMR Serverless image, which a cluster
+         * with Hive has Hive added to, and that cluster's Hive steps' {@code hive} too.
          */
         @WithDefault("immediate")
         String runnerMode();
@@ -2058,6 +2063,14 @@ public interface EmulatorConfig {
          * release's public EMR Serverless image on Amazon ECR Public.
          */
         Optional<String> imageTemplate();
+
+        /**
+         * The EMR Serverless Hive image a {@code docker} cluster with Hive takes Hive from, into the image its
+         * bootstrap and steps run in, as {@link #imageTemplate()} names the image Hive is added to, for example
+         * "registry.internal/emr-serverless/hive/%s:20250425". If omitted, Floci uses the release's public EMR
+         * Serverless Hive image on Amazon ECR Public.
+         */
+        Optional<String> hiveImageTemplate();
 
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap

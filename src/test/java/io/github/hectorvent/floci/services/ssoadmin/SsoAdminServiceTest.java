@@ -90,6 +90,7 @@ class SsoAdminServiceTest {
                 new InMemoryStorage<String, String>(),
                 identityStoreService,
                 organizationsService,
+                new SsoAdminRequestContext(),
                 ACCOUNT_ID,
                 "us-east-1");
         service.ensureBootstrapInstance(ACCOUNT_ID, "us-east-1");
@@ -1587,6 +1588,41 @@ class SsoAdminServiceTest {
                 () -> accountInstanceService.listAssignmentsForPrincipal(accountInstanceRequest, ACCOUNT_ID));
     }
 
+    /**
+     * A {@code ProvisionPermissionSet} for {@code ALL_PROVISIONED_ACCOUNTS} provisions the permission set to the
+     * accounts its permission check found it provisioned to, not to one another request provisioned it to in between:
+     * a permission set change then leaves that account not provisioned, and this request was not checked on it.
+     */
+    @Test
+    void allProvisionedAccountsAreTheOnesThePermissionCheckFound() {
+        PermissionSet permissionSet = createPermissionSet("PinnedAccounts");
+        service.createAssignment(assignmentRequest(permissionSet.arn()));
+        assertEquals(List.of("arn:aws:sso:::account/" + ACCOUNT_ID),
+                service.through("PermissionSetArn", permissionSet.arn(), "us-east-1"));
+
+        ObjectNode other = assignmentRequest(permissionSet.arn());
+        other.put("TargetId", "222222222222");
+        service.createAssignment(other);
+        service.attachPolicy(service.getInstanceArn(), permissionSet.arn(), "arn:aws:iam::aws:policy/ReadOnlyAccess");
+        ObjectNode all = mapper.createObjectNode();
+        all.put("InstanceArn", service.getInstanceArn());
+        all.put("PermissionSetArn", permissionSet.arn());
+        all.put("TargetType", "ALL_PROVISIONED_ACCOUNTS");
+        service.provisionPermissionSet(all);
+
+        assertEquals(List.of(ACCOUNT_ID), accountsProvisioned(permissionSet.arn(), "LATEST_PERMISSION_SET_PROVISIONED"));
+        assertEquals(List.of("222222222222"),
+                accountsProvisioned(permissionSet.arn(), "LATEST_PERMISSION_SET_NOT_PROVISIONED"));
+    }
+
+    private List<String> accountsProvisioned(String permissionSetArn, String status) {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("InstanceArn", service.getInstanceArn());
+        request.put("PermissionSetArn", permissionSetArn);
+        request.put("ProvisioningStatus", status);
+        return service.listAccountsForProvisionedPermissionSet(request).items();
+    }
+
     @Test
     void provisionPermissionSetSupportsSingleAndAllProvisionedAccounts() {
         PermissionSet permissionSet = createPermissionSet("ProvisionAdmins");
@@ -1921,6 +1957,7 @@ class SsoAdminServiceTest {
                 new InMemoryStorage<String, String>(),
                 identityStoreService,
                 organizationsService,
+                new SsoAdminRequestContext(),
                 "999999999999",
                 defaultRegion);
     }

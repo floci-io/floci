@@ -176,6 +176,19 @@ deleted, or not bound to the stage by a usage plan, with `403` `{"message":"Forb
 `x-amzn-ErrorType: ForbiddenException`, as AWS does. The header stays when the API customises its
 `INVALID_API_KEY` gateway response.
 
+#### API key source
+
+A REST API's `apiKeySource` is set with `CreateRestApi`, a `replace /apiKeySource` patch on
+`UpdateRestApi`, or an imported `x-amazon-apigateway-api-key-source`, and defaults to `HEADER`. Any
+other value is refused with `BadRequestException`. A stage export leaves the extension out, as AWS's
+does.
+
+With `AUTHORIZER`, the `x-api-key` header is not read. The key is the `usageIdentifierKey` the
+method's Lambda authorizer returns, checked against usage plans as above, and reported as
+`requestContext.identity.apiKey` and `apiKeyId` to a Lambda proxy integration. The authorizer's own
+event carries no key, since none is known before it runs. A method that requires a key and is not
+behind a Lambda authorizer then always answers `403`.
+
 ### REST Lambda Authorizers
 
 TOKEN and REQUEST authorizers must return a nonempty `principalId` and an IAM policy. Floci
@@ -210,7 +223,11 @@ A domain created with `CreateDomainName` is `AVAILABLE` at once. Its `regionalDo
 `<domain>.regional.local`, and a request whose `Host` header is either that name or the domain
 itself is routed through the domain's base path mappings to the mapped REST API stage. An
 `EDGE` domain also reports a `distributionDomainName` under `cloudfront.net` and the fixed
-CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. Moving a
+CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. The
+`regionalHostedZoneId` is the zone the [General Reference](https://docs.aws.amazon.com/general/latest/gr/apigateway.html)
+publishes for the domain's region, or the placeholder `Z2FDTNDATAQYL2`, which is no AWS zone, in a
+region the table does not list. The id is set at creation, so a stored domain keeps the one it
+was created with. Moving a
 domain between the two types with `UpdateDomainName` creates or drops the distribution. A
 domain created with no endpoint type is `EDGE`, as on AWS; it is `REGIONAL` when the request
 carries a regional certificate (`regionalCertificateArn` or `regionalCertificateName`) or the

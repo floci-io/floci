@@ -19,7 +19,15 @@ package io.github.hectorvent.floci.core.common;
  */
 public final class XmlBuilder {
 
-    private final StringBuilder sb = new StringBuilder();
+    private final StringBuilder sb;
+
+    public XmlBuilder() {
+        this.sb = new StringBuilder();
+    }
+
+    public XmlBuilder(int expectedLength) {
+        this.sb = new StringBuilder(expectedLength);
+    }
 
     /** Opens {@code <element xmlns="xmlns">}. Omits the xmlns attribute when {@code xmlns} is null. */
     public XmlBuilder start(String element, String xmlns) {
@@ -50,20 +58,22 @@ public final class XmlBuilder {
         if (value == null) {
             return this;
         }
-        sb.append('<').append(name).append('>')
-          .append(escape(value))
-          .append("</").append(name).append('>');
+        sb.append('<').append(name).append('>');
+        appendEscaped(sb, value, 0);
+        sb.append("</").append(name).append('>');
         return this;
     }
 
     /** Convenience overload — converts {@code long} to string. */
     public XmlBuilder elem(String name, long value) {
-        return elem(name, String.valueOf(value));
+        sb.append('<').append(name).append('>').append(value).append("</").append(name).append('>');
+        return this;
     }
 
     /** Convenience overload — converts {@code boolean} to string. */
     public XmlBuilder elem(String name, boolean value) {
-        return elem(name, String.valueOf(value));
+        sb.append('<').append(name).append('>').append(value).append("</").append(name).append('>');
+        return this;
     }
 
     /**
@@ -91,29 +101,41 @@ public final class XmlBuilder {
         if (s == null || s.isEmpty()) {
             return "";
         }
-        StringBuilder out = null;
         int len = s.length();
         for (int i = 0; i < len; i++) {
-            char c = s.charAt(i);
-            String replacement = switch (c) {
-                case '&'  -> "&amp;";
-                case '<'  -> "&lt;";
-                case '>'  -> "&gt;";
-                case '"'  -> "&quot;";
-                case '\'' -> "&apos;";
-                case '\r' -> "&#13;";
-                default   -> null;
-            };
-            if (replacement != null) {
-                if (out == null) {
-                    out = new StringBuilder(len + 8);
-                    out.append(s, 0, i);
-                }
-                out.append(replacement);
-            } else if (out != null) {
-                out.append(c);
+            if (replacement(s.charAt(i)) != null) {
+                StringBuilder out = new StringBuilder(len + 16);
+                out.append(s, 0, i);
+                appendEscaped(out, s, i);
+                return out.toString();
             }
         }
-        return out != null ? out.toString() : s;
+        return s;
+    }
+
+    /** Appends {@code s} from {@code from} with the XML special characters replaced, in runs. */
+    private static void appendEscaped(StringBuilder out, String s, int from) {
+        int len = s.length();
+        int runStart = from;
+        for (int i = from; i < len; i++) {
+            String replacement = replacement(s.charAt(i));
+            if (replacement != null) {
+                out.append(s, runStart, i).append(replacement);
+                runStart = i + 1;
+            }
+        }
+        out.append(s, runStart, len);
+    }
+
+    private static String replacement(char c) {
+        return switch (c) {
+            case '&'  -> "&amp;";
+            case '<'  -> "&lt;";
+            case '>'  -> "&gt;";
+            case '"'  -> "&quot;";
+            case '\'' -> "&apos;";
+            case '\r' -> "&#13;";
+            default   -> null;
+        };
     }
 }

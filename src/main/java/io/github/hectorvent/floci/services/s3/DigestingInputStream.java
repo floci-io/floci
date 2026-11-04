@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.services.s3.model.ChecksumAlgorithm;
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 
@@ -7,7 +8,6 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.Collection;
 import java.util.EnumMap;
 import java.util.HexFormat;
@@ -30,11 +30,7 @@ final class DigestingInputStream extends FilterInputStream {
     DigestingInputStream(InputStream in, Collection<ChecksumAlgorithm> algorithms, long maxSize) {
         super(in);
         this.maxSize = maxSize;
-        try {
-            this.md5 = MessageDigest.getInstance("MD5");
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("MD5 algorithm is not available", e);
-        }
+        this.md5 = Digests.md5Digest();
         for (ChecksumAlgorithm algorithm : algorithms) {
             calculators.put(algorithm, S3Checksum.calculator(algorithm));
         }
