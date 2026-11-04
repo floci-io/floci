@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.CloudFormationException;
 import software.amazon.awssdk.services.cloudformation.model.Output;
 import software.amazon.awssdk.services.cloudformation.model.Parameter;
+import software.amazon.awssdk.services.cloudformation.model.StackResource;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Subnet;
 
@@ -25,6 +26,7 @@ import java.util.stream.Collectors;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -45,14 +47,21 @@ class CloudFormationMappingListIntegrationTest {
     @AfterEach
     void cleanup() {
         try {
+            List<String> subnetIds = cfn.describeStackResources(request -> request.stackName(name))
+                    .stackResources().stream()
+                    .filter(resource -> "AWS::EC2::Subnet".equals(resource.resourceType()))
+                    .map(StackResource::physicalResourceId).toList();
             cfn.deleteStack(request -> request.stackName(name));
+            assertEquals(3, subnetIds.size(), "Capture every created subnet before deleting the stack");
             await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
                 CloudFormationException absent = assertThrows(CloudFormationException.class,
                         () -> cfn.describeStacks(request -> request.stackName(name)));
                 assertEquals("ValidationError", absent.awsErrorDetails().errorCode());
                 assertTrue(absent.getMessage().contains("does not exist"));
-                assertTrue(ec2.describeSubnets(request -> request.filters(filter -> filter
-                        .name("tag:aws:cloudformation:stack-name").values(name))).subnets().isEmpty());
+                List<String> remaining = ec2.describeSubnets().subnets().stream().map(Subnet::subnetId).toList();
+                for (String subnetId : subnetIds) {
+                    assertFalse(remaining.contains(subnetId), "Subnet remains after stack deletion: " + subnetId);
+                }
             });
         } finally {
             ec2.close();
