@@ -364,14 +364,15 @@ public class EcrRegistryManager {
             existing = lifecycleManager.findByName(adoptedName);
         }
         if (existing.isPresent()) {
-            if (hasLoopbackBinding(existing.get())) {
+            if (!hasLoopbackBinding(existing.get())) {
+                LOG.infov("Recreating ECR backing registry {0} with a loopback-only port binding", adoptedName);
+            } else if (!onAnotherNetwork(existing.get())) {
                 this.activeContainerName = adoptedName;
                 adoptExisting(existing.get());
                 runReconcileOnce();
                 return;
             }
             // Recreated under the current name; the data volume is resolved by its own probe.
-            LOG.infov("Recreating ECR backing registry {0} with a loopback-only port binding", adoptedName);
             lifecycleManager.stopAndRemove(existing.get().getId(), null);
         }
         this.activeContainerName = name;
@@ -718,6 +719,25 @@ public class EcrRegistryManager {
     private void rememberRegistryAddress(ContainerInfo info) {
         EndpointInfo endpoint = info.getEndpoint(CONTAINER_INTERNAL_PORT);
         this.registryAddress = endpoint != null ? endpoint.toString() : null;
+    }
+
+    // Floci in a container reaches the registry over the Docker network; on the host it uses the loopback port.
+    private boolean onAnotherNetwork(Container survivor) {
+        if (!containerDetector.isRunningInContainer()) {
+            return false;
+        }
+        Optional<String> network = containerBuilder.resolveDockerNetwork(resolveRegistryDockerNetwork());
+        if (network.isEmpty() || survivor.getNetworkSettings() == null
+                || survivor.getNetworkSettings().getNetworks() == null
+                || survivor.getNetworkSettings().getNetworks().isEmpty()) {
+            return false;
+        }
+        boolean moved = !survivor.getNetworkSettings().getNetworks().containsKey(network.get());
+        if (moved) {
+            LOG.infov("Surviving ECR backing registry {0} is not on Docker network {1}; replacing it (its data is kept)",
+                    survivor.getId(), network.get());
+        }
+        return moved;
     }
 
     private static boolean hasLoopbackBinding(Container container) {
