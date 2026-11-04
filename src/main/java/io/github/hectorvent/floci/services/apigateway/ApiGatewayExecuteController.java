@@ -660,8 +660,13 @@ public class ApiGatewayExecuteController {
         pathMap.putAll(extractPathParams(resource.getPath(), path));
         pathMap.putAll(greedyPathParam(resource.getPath(), path));
 
+        String rawPath = rawStagelessPath(path, uriInfo.getRequestUri().getRawPath());
+        Map<String, String> rawPathMap = new LinkedHashMap<>();
+        rawPathMap.putAll(extractPathParams(resource.getPath(), rawPath));
+        rawPathMap.putAll(greedyPathParam(resource.getPath(), rawPath));
+
         HttpRequestParameters mapped = mapHttpRequestParameters(scope, integration, mappingContext,
-                pathMap, multiValueHeaders, multiValueQuery);
+                pathMap, rawPathMap, multiValueHeaders, multiValueQuery);
         Map<String, String> outHeaders = joinedParameterValues(mapped.headers());
         Map<String, String> outQuery = joinedParameterValues(mapped.query());
         Map<String, String> outPath = mapped.path();
@@ -685,7 +690,7 @@ public class ApiGatewayExecuteController {
                         routeContext.sourceIp(),
                         outHeaders, outQuery, outPath, body,
                         Map.of(), Map.of(),
-                        multiValueHeaders, multiValueQuery);
+                        multiValueHeaders, multiValueQuery, mapped.rawPath());
 
         LOG.debugv("execute-api: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, uri);
@@ -964,6 +969,11 @@ public class ApiGatewayExecuteController {
         if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
         pathMap.putAll(extractPathParams(resource.getPath(), path));
 
+        String rawPath = rawStagelessPath(path, uriInfo.getRequestUri().getRawPath());
+        Map<String, String> rawPathMap = new HashMap<>();
+        if (rawPath != null && pathMap.containsKey("proxy")) rawPathMap.put("proxy", rawPath.substring(1));
+        rawPathMap.putAll(extractPathParams(resource.getPath(), rawPath));
+
         String incomingContentType = headerMap.getOrDefault("Content-Type",
                 headerMap.getOrDefault("content-type", "application/json"));
 
@@ -978,7 +988,7 @@ public class ApiGatewayExecuteController {
         // Only explicitly mapped parameters reach the backend — the defining difference from
         // HTTP_PROXY, which seeds the outgoing request with every inbound header and query param.
         HttpRequestParameters mapped = mapHttpRequestParameters(scope, integration, mappingContext,
-                pathMap, Map.of(), Map.of());
+                pathMap, rawPathMap, Map.of(), Map.of());
         Map<String, String> outHeaders = joinedParameterValues(mapped.headers());
         Map<String, String> outQuery = joinedParameterValues(mapped.query());
         Map<String, String> outPath = mapped.path();
@@ -1012,7 +1022,7 @@ public class ApiGatewayExecuteController {
                         outPath.getOrDefault("proxy", ""), resource.getPath(),
                         requestId, routeContext.sourceIp(),
                         outHeaders, outQuery, outPath, payload,
-                        Map.of(), Map.of(), mapped.headers(), mapped.query());
+                        Map.of(), Map.of(), mapped.headers(), mapped.query(), mapped.rawPath());
 
         LOG.debugv("execute-api: {0} {1}/{2}{3} → HTTP {4}", httpMethod, apiId, stageName, path, uri);
 
@@ -2313,18 +2323,20 @@ public class ApiGatewayExecuteController {
     }
 
     private record HttpRequestParameters(Map<String, List<String>> headers, Map<String, List<String>> query,
-                                         Map<String, String> path) { }
+                                         Map<String, String> path, Map<String, String> rawPath) { }
 
     private HttpRequestParameters mapHttpRequestParameters(GatewayResponseScope scope, Integration integration,
                                                             Map<String, Object> context, Map<String, String> path,
+                                                            Map<String, String> rawPath,
                                                             Map<String, List<String>> headers,
                                                             Map<String, List<String>> query) {
         Map<String, List<String>> outHeaders = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         outHeaders.putAll(headers);
         Map<String, List<String>> outQuery = new LinkedHashMap<>(query);
         Map<String, String> outPath = new LinkedHashMap<>(path);
+        Map<String, String> outRawPath = new LinkedHashMap<>(rawPath);
         if (integration.getRequestParameters() == null) {
-            return new HttpRequestParameters(outHeaders, outQuery, outPath);
+            return new HttpRequestParameters(outHeaders, outQuery, outPath, outRawPath);
         }
         for (Map.Entry<String, String> mapping : integration.getRequestParameters().entrySet()) {
             String destination = mapping.getKey();
@@ -2342,10 +2354,19 @@ public class ApiGatewayExecuteController {
             } else if (values != null && destination.startsWith("integration.request.querystring.")) {
                 outQuery.put(destination.substring("integration.request.querystring.".length()), values);
             } else if (values != null && destination.startsWith("integration.request.path.")) {
-                outPath.put(destination.substring("integration.request.path.".length()), String.join(",", values));
+                String name = destination.substring("integration.request.path.".length());
+                outPath.put(name, String.join(",", values));
+                // Only a value copied from the request path has a caller's encoding to keep.
+                String rawValue = source.startsWith("method.request.path.")
+                        ? rawPath.get(source.substring("method.request.path.".length())) : null;
+                if (rawValue != null) {
+                    outRawPath.put(name, rawValue);
+                } else {
+                    outRawPath.remove(name);
+                }
             }
         }
-        return new HttpRequestParameters(outHeaders, outQuery, outPath);
+        return new HttpRequestParameters(outHeaders, outQuery, outPath, outRawPath);
     }
 
     private static Map<String, String> joinedParameterValues(Map<String, List<String>> parameters) {
@@ -3002,6 +3023,8 @@ public class ApiGatewayExecuteController {
             queryParams.put(e.getKey(), String.join(",", e.getValue()));
         }
         Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
+        String rawPath = rawStagelessPath(path, uriInfo.getRequestUri().getRawPath());
+        Map<String, String> rawPathParams = rawPath == null ? Map.of() : extractV2PathParams(route.getRouteKey(), rawPath);
 
         // Reuses the claims dispatchV2 already verified via enforceJwtAuthorizer, rather than
         // independently re-extracting a token and re-parsing it here: extractBearerToken only
@@ -3024,7 +3047,7 @@ public class ApiGatewayExecuteController {
                         pathParams.getOrDefault("proxy", ""), route.getRouteKey(),
                         UUID.randomUUID().toString(), sourceIp,
                         requestHeaders, queryParams, pathParams, body,
-                        claims, authorizerContext, backendHeaders, multiValueQueryParams);
+                        claims, authorizerContext, backendHeaders, multiValueQueryParams, rawPathParams);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, effective.getIntegrationUri());
@@ -4382,6 +4405,33 @@ public class ApiGatewayExecuteController {
 
     private static String proxyTargetPath(String normalizedPath, UriInfo uriInfo, String stageName) {
         return rawTargetPath(normalizedPath, uriInfo.getRequestUri().getRawPath(), stageName);
+    }
+
+    /**
+     * The request path after the stage, as the caller encoded it, for reading path parameters off.
+     * A trailing slash goes only when {@code normalizedPath} lost it too, so the segments line up with
+     * the path the route was matched on. Null for a raw path in no known execute-api URL form, whose
+     * parameters are then encoded from their decoded values.
+     */
+    static String rawStagelessPath(String normalizedPath, String rawRequestPath) {
+        if (rawRequestPath == null) {
+            return null;
+        }
+        int prefixSegments;
+        if (rawRequestPath.startsWith("/execute-api/")) {
+            prefixSegments = 3;
+        } else if (rawRequestPath.startsWith("/_aws/execute-api/") || rawRequestPath.startsWith("/restapis/")) {
+            prefixSegments = 4;
+        } else {
+            return null;
+        }
+        int start = 0;
+        for (int segment = 0; segment < prefixSegments && start >= 0; segment++) {
+            start = rawRequestPath.indexOf('/', start + 1);
+        }
+        String stageless = start >= 0 ? rawRequestPath.substring(start) : "/";
+        boolean slashLost = stageless.length() > 1 && stageless.endsWith("/") && !normalizedPath.endsWith("/");
+        return slashLost ? stageless.substring(0, stageless.length() - 1) : stageless;
     }
 
     /**
