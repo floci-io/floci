@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -185,5 +186,58 @@ class SmithyRpcV2RoutingIntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/x-amz-cbor-1.1");
+    }
+
+    @Test
+    void translateRoutesViaTargetPrefixServiceName() throws Exception {
+        byte[] response = given()
+            .contentType("application/cbor")
+            .accept("application/cbor")
+            .header("smithy-protocol", "rpc-v2-cbor")
+            .body(CBOR_MAPPER.writeValueAsBytes(JSON_MAPPER.readTree("""
+                {"Text":"Ciao","SourceLanguageCode":"it","TargetLanguageCode":"de"}
+                """)))
+        .when()
+            .post("/service/AWSShineFrontendService_20170701/operation/TranslateText")
+        .then()
+            .statusCode(200)
+            .header("smithy-protocol", equalTo("rpc-v2-cbor"))
+            .contentType("application/cbor")
+            .extract().asByteArray();
+
+        assertThat(CBOR_MAPPER.readTree(response)
+                .path("TranslatedText").asText(), equalTo("Ciao"));
+    }
+
+    @Test
+    void translateDocumentRoundTripsContentAsCborByteString() throws Exception {
+        // Non-UTF-8 bytes included on purpose: Document.Content is a blob, not text.
+        byte[] document = {'H', 'e', 'l', 'l', 'o', ' ', (byte) 0xC3, (byte) 0xA9, 0x00, (byte) 0xFF, '\n'};
+        ObjectNode request = JSON_MAPPER.createObjectNode();
+        request.putObject("Document")
+                .put("Content", document)
+                .put("ContentType", "text/plain");
+        request.put("SourceLanguageCode", "en");
+        request.put("TargetLanguageCode", "es");
+
+        byte[] response = given()
+            .contentType("application/cbor")
+            .accept("application/cbor")
+            .header("smithy-protocol", "rpc-v2-cbor")
+            .body(CBOR_MAPPER.writeValueAsBytes(request))
+        .when()
+            .post("/service/AWSShineFrontendService_20170701/operation/TranslateDocument")
+        .then()
+            .statusCode(200)
+            .header("smithy-protocol", equalTo("rpc-v2-cbor"))
+            .contentType("application/cbor")
+            .extract().asByteArray();
+
+        JsonNode decoded = CBOR_MAPPER.readTree(response);
+        JsonNode content = decoded.path("TranslatedDocument").path("Content");
+        assertThat(content.isBinary(), equalTo(true));
+        assertThat(content.binaryValue(), equalTo(document));
+        assertThat(decoded.path("SourceLanguageCode").asText(), equalTo("en"));
+        assertThat(decoded.path("TargetLanguageCode").asText(), equalTo("es"));
     }
 }
