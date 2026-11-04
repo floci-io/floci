@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static io.github.hectorvent.floci.testing.CodeArtifactRequests.putPackageOriginConfiguration;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -579,7 +580,7 @@ class CodeArtifactNuGetDockerIntegrationTest {
                 .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
                 .then().statusCode(201);
 
-        setOriginRestrictions(packageId, "BLOCK");
+        putPackageOriginConfiguration(AUTH, DOMAIN, REPO, "nuget", null, packageId, "BLOCK", "BLOCK");
 
         given().header("Authorization", "Bearer " + bearerToken)
                 .contentType("multipart/form-data; boundary=boundary123")
@@ -599,21 +600,13 @@ class CodeArtifactNuGetDockerIntegrationTest {
                 .then().statusCode(200)
                 .body("versions", equalTo(List.of(VERSION)));
 
-        setOriginRestrictions(packageId, "ALLOW");
+        putPackageOriginConfiguration(AUTH, DOMAIN, REPO, "nuget", null, packageId, "ALLOW", "BLOCK");
 
         given().header("Authorization", "Bearer " + bearerToken)
                 .contentType("multipart/form-data; boundary=boundary123")
                 .body(pushBody("boundary123", nextVersion))
                 .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
                 .then().statusCode(201);
-    }
-
-    private static void setOriginRestrictions(String packageId, String publish) {
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"restrictions\":{\"publish\":\"" + publish + "\",\"upstream\":\"BLOCK\"}}")
-                .post("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=nuget&package=" + packageId)
-                .then().statusCode(200)
-                .body("originConfiguration.restrictions.publish", equalTo(publish));
     }
 
     private static long describeDomainAssetSizeBytes() {

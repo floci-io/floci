@@ -30,6 +30,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.github.hectorvent.floci.testing.CodeArtifactRequests.npmPublishEnvelope;
+import static io.github.hectorvent.floci.testing.CodeArtifactRequests.putPackageOriginConfiguration;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
@@ -887,18 +889,20 @@ class CodeArtifactNpmDockerIntegrationTest {
     void aLiteralSlashScopedPublishIsCountedAndRespectsAPublishBlock() {
         String scope = "flociscope";
         String packageName = "literal-slash-pkg";
-        String literalPath = "/codeartifact/npm/" + DOMAIN + "/" + REPO + "/@" + scope + "/" + packageName;
+        String npmName = "@" + scope + "/" + packageName;
+        String literalPath = "/codeartifact/npm/" + DOMAIN + "/" + REPO + "/" + npmName;
         byte[] firstTarball = "literal slash throwaway tarball 1".getBytes(StandardCharsets.UTF_8);
         long assetSizeBytesBefore = describeDomainAssetSizeBytes();
 
         given().urlEncodingEnabled(false).header("Authorization", "Bearer " + bearerToken)
-                .contentType("application/json").body(scopedEnvelope(scope, packageName, "1.0.0", firstTarball))
+                .contentType("application/json")
+                .body(npmPublishEnvelope(npmName, "1.0.0", packageName + "-1.0.0.tgz", firstTarball))
                 .put(literalPath)
                 .then().statusCode(anyOf201Or200());
         assertEquals(assetSizeBytesBefore + firstTarball.length, describeDomainAssetSizeBytes());
 
-        setNpmOriginRestrictions(scope, packageName, "BLOCK");
-        String secondVersion = scopedEnvelope(scope, packageName, "2.0.0",
+        putPackageOriginConfiguration(AUTH, DOMAIN, REPO, "npm", scope, packageName, "BLOCK", "BLOCK");
+        String secondVersion = npmPublishEnvelope(npmName, "2.0.0", packageName + "-2.0.0.tgz",
                 "literal slash throwaway tarball 2".getBytes(StandardCharsets.UTF_8));
         given().urlEncodingEnabled(false).header("Authorization", "Bearer " + bearerToken)
                 .contentType("application/json").body(secondVersion)
@@ -911,30 +915,11 @@ class CodeArtifactNpmDockerIntegrationTest {
                 .body("versions", hasKey("1.0.0"))
                 .body("versions", not(hasKey("2.0.0")));
 
-        setNpmOriginRestrictions(scope, packageName, "ALLOW");
+        putPackageOriginConfiguration(AUTH, DOMAIN, REPO, "npm", scope, packageName, "ALLOW", "BLOCK");
         given().urlEncodingEnabled(false).header("Authorization", "Bearer " + bearerToken)
                 .contentType("application/json").body(secondVersion)
                 .put(literalPath)
                 .then().statusCode(anyOf201Or200());
-    }
-
-    private static String scopedEnvelope(String scope, String packageName, String version, byte[] tarball) {
-        String npmName = "@" + scope + "/" + packageName;
-        String assetName = packageName + "-" + version + ".tgz";
-        return "{\"name\":\"" + npmName + "\",\"versions\":{\"" + version + "\":{\"name\":\"" + npmName
-                + "\",\"version\":\"" + version + "\",\"dist\":{\"tarball\":\"http://ignored/" + assetName + "\"}}},"
-                + "\"_attachments\":{\"" + assetName + "\":{\"content_type\":\"application/octet-stream\","
-                + "\"data\":\"" + Base64.getEncoder().encodeToString(tarball) + "\",\"length\":" + tarball.length
-                + "}}}";
-    }
-
-    private static void setNpmOriginRestrictions(String scope, String packageName, String publish) {
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"restrictions\":{\"publish\":\"" + publish + "\",\"upstream\":\"BLOCK\"}}")
-                .post("/v1/package?domain=" + DOMAIN + "&repository=" + REPO + "&format=npm&namespace=" + scope
-                        + "&package=" + packageName)
-                .then().statusCode(200)
-                .body("originConfiguration.restrictions.publish", equalTo(publish));
     }
 
     /**
