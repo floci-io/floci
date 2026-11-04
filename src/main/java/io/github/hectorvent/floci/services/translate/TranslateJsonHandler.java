@@ -94,8 +94,8 @@ public class TranslateJsonHandler {
         JsonNode parentNode = node == null ? null : node.get(parent);
         if (parentNode != null && parentNode.isObject()) {
             JsonNode value = parentNode.get(field);
-            if (value != null && value.isBinary()) {
-                return Base64.getEncoder().encodeToString(((BinaryNode) value).binaryValue());
+            if (value instanceof BinaryNode binary) {
+                return Base64.getEncoder().encodeToString(binary.binaryValue());
             }
         }
         return getNestedStringField(node, parent, field);
