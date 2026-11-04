@@ -89,8 +89,12 @@ class RedshiftDataResourceResolver {
             throw validation("Database " + database + " does not exist in workgroup " + workgroup.workgroupName()
                     + "; the only database is " + workgroup.database() + ".");
         }
+        int proxyPort = workgroup.endpoint() != null ? workgroup.endpoint().getPort() : 0;
+        boolean hasProxy = proxyPort > 0;
+        String host = hasProxy ? "127.0.0.1" : workgroup.host();
+        int port = hasProxy ? proxyPort : workgroup.port();
         if (!hasText(request, "SecretArn")) {
-            return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
+            return new DatabaseTarget(workgroup.arn(), host, port, database,
                     workgroup.masterUsername(), workgroup.masterPassword(), spectrum, null,
                     workgroup.masterUsername(), workgroup.workgroupName());
         }
@@ -100,7 +104,7 @@ class RedshiftDataResourceResolver {
         if (isManagedAdminSecret(secretArn, workgroup.adminPasswordSecretArn(), region)) {
             user = workgroup.masterUsername();
         }
-        return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
+        return new DatabaseTarget(workgroup.arn(), host, port, database,
                 user, creds.password(), spectrum, null, user, workgroup.workgroupName());
     }
 
@@ -177,8 +181,10 @@ class RedshiftDataResourceResolver {
     }
 
     private static DatabaseTarget target(String arn, Cluster cluster, String database, String user, String password) {
-        String host = cluster.getContainerHost();
-        int port = cluster.getContainerPort();
+        int proxyPort = cluster.getProxyPort();
+        boolean hasProxy = proxyPort > 0;
+        String host = hasProxy ? "127.0.0.1" : cluster.getContainerHost();
+        int port = hasProxy ? proxyPort : cluster.getContainerPort();
         if (host == null || host.isBlank() || port <= 0) {
             throw validation("Cluster runtime is not available for Data API execution.");
         }

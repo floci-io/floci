@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
+import io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator.S3TransferException;
 import io.github.hectorvent.floci.services.redshift.spectrum.PostgresExtendedBackendSession;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumColumn;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumInterceptor;
@@ -742,7 +744,14 @@ public class RedshiftInterceptingBridge {
         try {
             backend.setSoTimeout(EXCHANGE_READ_TIMEOUT_MS);
             boolean failed = coordinator.isDiscardingUntilSync();
-            copyBackend.finish(failed);
+            try {
+                copyBackend.finish(failed);
+            } catch (S3TransferException e) {
+                copyBackend.recover();
+                coordinator.discardUntilSync();
+                write(client.getOutputStream(), PostgresWire.frame('E',
+                        S3CopySimulator.errorBody(e.sqlState(), e.getMessage())));
+            }
             if (consumeSync) {
                 copyBackend.synchronize();
                 byte[] status = new byte[]{(byte) copyBackend.readyStatus()};

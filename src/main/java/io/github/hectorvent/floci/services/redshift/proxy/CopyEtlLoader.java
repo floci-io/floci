@@ -14,6 +14,7 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,7 +27,6 @@ import java.util.function.IntConsumer;
 final class CopyEtlLoader {
     private static final Set<String> RECORD_ERRORS = Set.of(
             "22P02", "22003", "22007", "22008", "22001", "22021", "22P04", "23502");
-    private static final int RECORD_HEAP_MIB = 192;
 
     private CopyEtlLoader() {
     }
@@ -50,7 +50,14 @@ final class CopyEtlLoader {
             failure = new S3TransferException("XX000", "S3 COPY failed", exception);
         }
         backend.recover();
-        backend.finish(failure != null);
+        try {
+            backend.finish(failure != null);
+        } catch (S3TransferException e) {
+            backend.recover();
+            if (failure == null) {
+                failure = e;
+            }
+        }
         backend.synchronize();
         if (failure == null) {
             client.getOutputStream().write(PostgresWire.frame('C',
@@ -106,9 +113,6 @@ final class CopyEtlLoader {
                 return backend.copy(S3CopySimulator.copyBackendSql(spec, discovered),
                         output -> S3CopySimulator.streamCopyInput(input, discovered, widths, kinds, output));
             }
-            if (!S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.tryAcquire(RECORD_HEAP_MIB)) {
-                throw new S3TransferException("53400", "COPY memory budget exhausted; retry shortly", null);
-            }
             try {
                 return RequestScopes.callAsChecked(S3CopySimulator.keyAccount(spec, s3, iam),
                         () -> loadRecords(backend, input, discovered, widths, kinds));
@@ -116,8 +120,6 @@ final class CopyEtlLoader {
                 throw exception;
             } catch (Exception exception) {
                 throw new IOException("Unable to read COPY input", exception);
-            } finally {
-                S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(RECORD_HEAP_MIB);
             }
         } finally {
             S3CopySimulator.releaseCopySession(input);
@@ -142,6 +144,15 @@ final class CopyEtlLoader {
         return catalog;
     }
 
+    private static void acquireTransformHeap(int[] heldMib, int wantedMib) {
+        while (heldMib[0] < wantedMib) {
+            if (!S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.tryAcquire(1)) {
+                throw new S3TransferException("53400", "COPY memory budget exhausted; retry shortly", null);
+            }
+            heldMib[0]++;
+        }
+    }
+
     private static long loadRecords(CopyBackendSession backend, CopyInput input, List<String> discovered,
                                      List<Integer> widths, List<CopyRecordTransformer.ColumnKind> kinds)
             throws IOException {
@@ -162,8 +173,10 @@ final class CopyEtlLoader {
                 byte[] record;
                 while ((record = records.next()) != null) {
                     backend.execute("SAVEPOINT " + rowSavepoint);
+                    int[] heldMib = new int[]{0};
                     try {
-                        byte[] transformed = transform(spec, record, jsonColumns, widths, kinds);
+                        acquireTransformHeap(heldMib, (int) ((record.length * 2L) / (1024 * 1024)) + 1);
+                        byte[] transformed = transform(spec, record, jsonColumns, widths, kinds, heldMib);
                         accepted += backend.copy(sql, output -> {
                             for (int offset = 0; offset < transformed.length; offset += 8192) {
                                 int length = Math.min(8192, transformed.length - offset);
@@ -178,6 +191,10 @@ final class CopyEtlLoader {
                         if (!RECORD_ERRORS.contains(exception.sqlState()) || ++rejected >= spec.transforms().maxError()) {
                             throw exception;
                         }
+                    } finally {
+                        if (heldMib[0] > 0) {
+                            S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(heldMib[0]);
+                        }
                     }
                     backend.execute("RELEASE SAVEPOINT " + rowSavepoint);
                 }
@@ -187,15 +204,45 @@ final class CopyEtlLoader {
     }
 
     private static byte[] transform(CopyStatementParser.S3CopyFrom spec, byte[] record, List<String> jsonColumns,
-                                    List<Integer> widths, List<CopyRecordTransformer.ColumnKind> kinds) throws IOException {
+                                    List<Integer> widths, List<CopyRecordTransformer.ColumnKind> kinds,
+                                    int[] heldMib) throws IOException {
         if (spec.jsonAuto()) {
             ByteArrayOutputStream csv = new ByteArrayOutputStream();
-            JsonLinesToCsvConverter.convert(new ByteArrayInputStream(record), jsonColumns, csv, spec.jsonAutoIgnoreCase());
+            OutputStream bounded = new OutputStream() {
+                private long count = 0;
+
+                @Override
+                public void write(int b) throws IOException {
+                    count++;
+                    check();
+                    csv.write(b);
+                }
+
+                @Override
+                public void write(byte[] b, int off, int len) throws IOException {
+                    count += len;
+                    check();
+                    csv.write(b, off, len);
+                }
+
+                private void check() {
+                    if (count > S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES) {
+                        throw new S3TransferException("54000", "COPY transformed record exceeds the size limit", null);
+                    }
+                    if (heldMib != null) {
+                        acquireTransformHeap(heldMib, (int) ((record.length + 2L * count) / (1024 * 1024)) + 1);
+                    }
+                }
+            };
+            JsonLinesToCsvConverter.convert(new ByteArrayInputStream(record), jsonColumns, bounded, spec.jsonAutoIgnoreCase());
             return csv.toByteArray();
         }
         return new CopyRecordTransformer(spec, widths, kinds).apply(record, bytes -> {
             if (bytes > S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES) {
                 throw new S3TransferException("54000", "COPY transformed record exceeds the size limit", null);
+            }
+            if (heldMib != null) {
+                acquireTransformHeap(heldMib, (int) ((record.length + 2L * bytes) / (1024 * 1024)) + 1);
             }
         });
     }

@@ -69,6 +69,25 @@ class RedshiftDataResourceResolverTest {
     }
 
     @Test
+    void resolvesClusterProxyPortWhenProxyIsAvailable() {
+        Cluster c = cluster();
+        c.setProxyPort(5439);
+        RedshiftService redshift = mock(RedshiftService.class);
+        when(redshift.describeClusters("wh")).thenReturn(List.of(c));
+
+        ObjectNode req = mapper.createObjectNode();
+        req.put("ClusterIdentifier", "wh");
+        req.put("DbUser", "admin");
+        req.put("Database", "dev");
+
+        RedshiftDataResourceResolver.DatabaseTarget target =
+                resolver(redshift, mock(SecretsManagerService.class)).resolve(req, REGION);
+
+        assertEquals("127.0.0.1", target.host());
+        assertEquals(5439, target.port());
+    }
+
+    @Test
     void aProvisionedClusterArnCarriesTheCallersAccount() {
         RedshiftService redshift = mock(RedshiftService.class);
         when(redshift.describeClusters("wh")).thenReturn(List.of(cluster()));

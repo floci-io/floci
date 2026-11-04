@@ -75,8 +75,11 @@ final class CopyBackendSession {
         if (!ownsTransaction) {
             return;
         }
-        execute(cycleFailed ? "ROLLBACK" : "COMMIT");
-        ownsTransaction = false;
+        try {
+            execute(cycleFailed ? "ROLLBACK" : "COMMIT");
+        } finally {
+            ownsTransaction = false;
+        }
     }
 
     void recover() throws IOException {

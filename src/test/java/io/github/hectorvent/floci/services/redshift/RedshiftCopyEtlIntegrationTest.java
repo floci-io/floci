@@ -212,7 +212,7 @@ class RedshiftCopyEtlIntegrationTest {
         try (Connection connection = connect(mode); Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE " + table + " (id int, name text)");
             statement.addBatch(copy(table, table, "MAXERROR 2"));
-            statement.addBatch("UNLOAD ('SELECT id FROM " + table + "') TO 's3://" + id + "/" + table + "-out/'");
+            statement.addBatch("UNLOAD ('SELECT id FROM " + table + "') TO 's3://" + id + "/" + table + "-out/' PARALLEL OFF");
             int[] counts = statement.executeBatch();
             assertEquals(2, counts.length);
             assertEquals(1, count(statement, table));

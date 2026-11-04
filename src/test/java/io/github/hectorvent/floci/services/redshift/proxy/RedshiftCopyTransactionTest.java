@@ -21,6 +21,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -39,6 +40,51 @@ class RedshiftCopyTransactionTest {
     @Test
     void syncCompletionWaitsForTheRestOfAnAsynchronousFrame() throws Exception {
         runCycle(List.of(), List.of("SAVEPOINT client_sp"), true);
+    }
+
+    @Test
+    void commitFailureAtClientSyncReturnsErrorWithoutDroppingSession() throws Exception {
+        try (ServerSocket clients = new ServerSocket(0); ServerSocket backends = new ServerSocket(0);
+                Socket client = new Socket("127.0.0.1", clients.getLocalPort()); Socket bridgeClient = clients.accept();
+                Socket bridgeBackend = new Socket("127.0.0.1", backends.getLocalPort()); Socket backend = backends.accept()) {
+            client.setSoTimeout(5000);
+            backend.setSoTimeout(5000);
+            S3Service s3 = mock(S3Service.class);
+            when(s3.objectExists("bucket", "data")).thenReturn(true);
+            when(s3.getObject("bucket", "data")).thenReturn(new S3Object("bucket", "data",
+                    "1\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+            CompletableFuture<Void> server = CompletableFuture.runAsync(() -> {
+                try {
+                    serve(backend, false, true);
+                } catch (Exception exception) {
+                    throw new AssertionError(exception);
+                }
+            });
+            Thread.ofVirtual().start(new RedshiftInterceptingBridge(bridgeClient, bridgeBackend, s3,
+                    mock(IamService.class))::run);
+            ByteArrayOutputStream pipeline = new ByteArrayOutputStream();
+            statement(pipeline, "copy", "COPY events FROM 's3://bucket/data' MAXERROR 2");
+            pipeline.writeBytes(PostgresWire.frame('S', new byte[0]));
+            client.getOutputStream().write(pipeline.toByteArray());
+            client.getOutputStream().flush();
+            PostgresWireDecoder decoder = new PostgresWireDecoder(client.getInputStream());
+            boolean sawError = false;
+            boolean sawReady = false;
+            while (true) {
+                PostgresWireDecoder.FrontendMessage response = decoder.nextMessage();
+                assertNotNull(response, "COPY must leave the connection usable");
+                if (response.type() == 'E') {
+                    sawError = true;
+                } else if (response.type() == 'Z') {
+                    sawReady = true;
+                    assertEquals('I', response.body()[0], "The aborted cycle must report Idle at Sync");
+                    break;
+                }
+            }
+            assertTrue(sawError, "Commit failure must report an error frame to the client");
+            assertTrue(sawReady, "The client must receive ReadyForQuery");
+            server.get(5, TimeUnit.SECONDS);
+        }
     }
 
     private void runCycle(List<String> before, List<String> after, boolean fragmentNotice) throws Exception {
@@ -98,6 +144,10 @@ class RedshiftCopyTransactionTest {
     }
 
     private static void serve(Socket socket, boolean fragmentNotice) throws Exception {
+        serve(socket, fragmentNotice, false);
+    }
+
+    private static void serve(Socket socket, boolean fragmentNotice, boolean failCommit) throws Exception {
         PostgresWireDecoder decoder = new PostgresWireDecoder(socket.getInputStream());
         Map<String, String> statements = new HashMap<>();
         Map<String, String> portals = new HashMap<>();
@@ -129,7 +179,10 @@ class RedshiftCopyTransactionTest {
                     } else if (sql.equals("COMMIT") || sql.equals("ROLLBACK")) {
                         transaction = false;
                     }
-                    if (sql.startsWith("SAVEPOINT ") && !transaction) {
+                    if (failCommit && sql.equals("COMMIT")) {
+                        send(socket, 'E', S3CopySimulator.errorBody("23505", "deferred constraint violation"));
+                        failed = true;
+                    } else if (sql.startsWith("SAVEPOINT ") && !transaction) {
                         send(socket, 'E', S3CopySimulator.errorBody("25P01", "SAVEPOINT requires a transaction"));
                         failed = true;
                     } else if (sql.startsWith("COPY ")) {

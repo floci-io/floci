@@ -202,6 +202,17 @@ final class BackendResponseCoordinator {
         }
     }
 
+    void discardUntilSync() {
+        lock.lock();
+        try {
+            discardingUntilSync = true;
+            discardQueuedOperationsBeforeSync();
+            changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     boolean isDiscardingUntilSync() {
         lock.lock();
         try {
