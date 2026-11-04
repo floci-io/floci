@@ -2255,6 +2255,19 @@ public class SqsService implements Resettable, ResourceProvider {
         return baseUrl + "/" + regionResolver.getAccountId() + "/" + queueUrl;
     }
 
+    /**
+     * The ARN of the queue {@code queueUrl} reaches from {@code region}, read as the lookups read it:
+     * the path names the account and the queue, the host does not count, and a value that names no
+     * account is in {@code defaultAccount}.
+     */
+    public static String queueArn(String queueUrl, String partition, String region, String defaultAccount) {
+        String url = queueUrl.contains("://") ? queueUrl : "sqs://queue/" + defaultAccount + "/" + queueUrl;
+        String path = extractQueuePath(url);
+        String account = accountFromQueueUrl(url);
+        return new AwsArnUtils.Arn(partition, "sqs", region, account != null ? account : defaultAccount,
+                path.substring(path.lastIndexOf('/') + 1)).toString();
+    }
+
     private String regionKey(String region, String queueUrl) {
         return region + "::" + extractQueuePath(normalizeQueueUrl(queueUrl));
     }

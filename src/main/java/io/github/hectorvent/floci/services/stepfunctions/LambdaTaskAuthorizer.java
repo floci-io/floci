@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.AccessDeniedMessages;
 import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
@@ -14,16 +15,19 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.SimulationDeci
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
 import io.github.hectorvent.floci.services.iam.RequestPrincipal;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider.ResourcePolicy;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
-import io.github.hectorvent.floci.services.lambda.LambdaResourcePolicyProvider;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -37,6 +41,9 @@ import java.util.Optional;
  * resource's policy can allow a call; across accounts, both have to (IAM User Guide, cross-account
  * policy evaluation logic). The role's permissions boundary and its account's service control
  * policies limit it, and an explicit Deny in any of them refuses it.
+ *
+ * <p>{@link #authorize} is the same decision for any other integration's call, ahead of which it
+ * requires the execution role to exist and to trust Step Functions.
  */
 @ApplicationScoped
 public class LambdaTaskAuthorizer {
@@ -44,22 +51,77 @@ public class LambdaTaskAuthorizer {
     private static final Logger LOG = Logger.getLogger(LambdaTaskAuthorizer.class);
     private static final String INVOKE = "lambda:InvokeFunction";
     private static final String ASSUME_ROLE = "sts:AssumeRole";
+    private static final String ANY_RESOURCE = "*";
 
     private final IamService iamService;
     private final IamPolicyEvaluator evaluator;
     private final AssumeRolePolicyEvaluator trustEvaluator;
-    private final LambdaResourcePolicyProvider functionPolicies;
+    private final Instance<ResourcePolicyProvider> resourcePolicies;
     private final Instance<ScpProvider> scpProvider;
 
     @Inject
     public LambdaTaskAuthorizer(IamService iamService, IamPolicyEvaluator evaluator,
                                 AssumeRolePolicyEvaluator trustEvaluator,
-                                LambdaResourcePolicyProvider functionPolicies, Instance<ScpProvider> scpProvider) {
+                                Instance<ResourcePolicyProvider> resourcePolicies,
+                                Instance<ScpProvider> scpProvider) {
         this.iamService = iamService;
         this.evaluator = evaluator;
         this.trustEvaluator = trustEvaluator;
-        this.functionPolicies = functionPolicies;
+        this.resourcePolicies = resourcePolicies;
         this.scpProvider = scpProvider;
+    }
+
+    /**
+     * One IAM action a task's call needs.
+     *
+     * @param action        the IAM action, such as {@code sqs:SendMessage}
+     * @param resourceArn   the resource it acts on, or {@code *} for an action with no resource-level
+     *                      permissions. An S3 ARN carries no account: the bucket's owner comes from S3
+     * @param conditionKeys the condition keys the integrated service adds to the global ones
+     */
+    public record Permission(String action, String resourceArn, Map<String, List<String>> conditionKeys) {
+
+        public Permission(String action, String resourceArn) {
+            this(action, resourceArn, Map.of());
+        }
+    }
+
+    /**
+     * Decides a task's call to its integrated service, throwing the failure the task records. The
+     * execution role has to exist and to trust Step Functions, then to assume the role the task's
+     * {@code Credentials} name, if any, and the role the task ends up with has to be allowed every
+     * permission.
+     *
+     * @param credentialsRoleArn the role the task's {@code Credentials} resolved to, or null
+     * @param errorPrefix        the integration's error prefix, dot included, such as {@code SQS.}
+     * @throws AslExecutor.FailStateException {@code States.Permissions} for the execution role,
+     *         {@code States.TaskFailed} for a refused assumption, and
+     *         {@code <errorPrefix>AccessDeniedException} for a refused permission
+     */
+    void authorize(StateMachine machine, String credentialsRoleArn, String errorPrefix, List<Permission> permissions) {
+        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        IamRole executionRole = role(machine.getRoleArn()).orElseThrow(
+                () -> new AslExecutor.FailStateException("States.Permissions",
+                        "The execution role " + machine.getRoleArn() + " does not exist."));
+        if (!trustEvaluator.allowsService(executionRole.getAssumeRolePolicyDocument(), ServicePrincipals.of("states"),
+                machine.getStateMachineArn(), owner.accountId())) {
+            throw new AslExecutor.FailStateException("States.Permissions",
+                    "The execution role " + machine.getRoleArn() + " does not trust Step Functions.");
+        }
+        String effectiveRoleArn = machine.getRoleArn();
+        if (credentialsRoleArn != null) {
+            if (assumeRefusal(machine.getRoleArn(), credentialsRoleArn, machine.getStateMachineArn()).isPresent()) {
+                throw NestedTaskCredentials.assumptionDenied(machine, credentialsRoleArn);
+            }
+            effectiveRoleArn = credentialsRoleArn;
+        }
+        for (Permission permission : permissions) {
+            Optional<String> refusal = refusal(effectiveRoleArn, permission.action(), permission.resourceArn(),
+                    owner.region(), permission.conditionKeys());
+            if (refusal.isPresent()) {
+                throw new AslExecutor.FailStateException(errorPrefix + "AccessDeniedException", refusal.get());
+            }
+        }
     }
 
     /**
@@ -74,7 +136,12 @@ public class LambdaTaskAuthorizer {
 
     /** Applies the task role's identity policies, boundary and SCPs to the requested action. */
     public Optional<String> refusal(String roleArn, String action, String resourceArn) {
-        AwsArnUtils.Arn resource = AwsArnUtils.parse(resourceArn);
+        return refusal(roleArn, action, resourceArn, AwsArnUtils.regionOrDefault(resourceArn, null), Map.of());
+    }
+
+    private Optional<String> refusal(String roleArn, String action, String resourceArn, String requestedRegion,
+                                     Map<String, List<String>> conditionKeys) {
+        AwsArnUtils.Arn resource = ANY_RESOURCE.equals(resourceArn) ? null : AwsArnUtils.parse(resourceArn);
         Optional<IamRole> invokingRole = role(roleArn);
         if (invokingRole.isEmpty()) {
             LOG.infov("Role {0} names no existing role, so it cannot invoke {1}", roleArn, resourceArn);
@@ -86,16 +153,18 @@ public class LambdaTaskAuthorizer {
         AwsArnUtils.Arn roleId = AwsArnUtils.parse(invokingRoleArn);
         List<List<String>> scpLevels = scpLevels(roleId.accountId());
 
-        List<ResourcePolicy> policies = "lambda".equals(resource.service())
-                ? functionPolicies.getResourcePolicies("lambda", resourceArn) : List.of();
-        String ownerAccount = policies.isEmpty() ? resource.accountId() : policies.getFirst().ownerAccountId();
+        List<ResourcePolicy> policies = resource == null ? List.of()
+                : ResourcePolicyProviders.policiesFor(resourcePolicies, resource.service(), action, resourceArn);
+        String ownerAccount = policies.isEmpty()
+                ? (resource == null ? null : resource.accountId()) : policies.getFirst().ownerAccountId();
         List<String> documents = policies.stream()
                 .map(ResourcePolicy::policyDocument)
                 .filter(document -> document != null && !document.isBlank())
                 .toList();
+        Map<String, List<String>> serviceContext = new LinkedHashMap<>(conditionKeys);
+        serviceContext.put("aws:PrincipalArn", List.of(invokingRoleArn));
         Map<String, List<String>> context = IamConditionContextResolver.withGlobalContext(
-                Map.of("aws:PrincipalArn", List.of(invokingRoleArn)), resourceArn, resource.region(),
-                roleId.accountId(), ownerAccount);
+                serviceContext, resourceArn, requestedRegion, roleId.accountId(), ownerAccount);
 
         RequestPrincipal session = RequestPrincipal.roleSession(sessionArn(invokingRoleArn), invokingRoleArn);
         ResourcePolicyDecision functionPolicy = evaluator.evaluateResourcePolicyFor(
@@ -191,8 +260,12 @@ public class LambdaTaskAuthorizer {
         return scpProvider.isResolvable() ? scpProvider.get().effectiveScpLevels(accountId) : null;
     }
 
+    /**
+     * A resource whose account is unknown, an action on {@code *} or an S3 ARN of a bucket S3 does
+     * not hold, is judged within the caller's account: nothing says it belongs to another.
+     */
     private static ResourceAccountRelationship relationship(String callerAccount, String resourceAccount) {
-        return callerAccount.equals(resourceAccount)
+        return resourceAccount == null || resourceAccount.isBlank() || callerAccount.equals(resourceAccount)
                 ? ResourceAccountRelationship.SAME_ACCOUNT : ResourceAccountRelationship.CROSS_ACCOUNT;
     }
 

@@ -5,14 +5,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SqsTestQueue;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -55,6 +58,9 @@ class StepFunctionsTaskCredentialsIntegrationTest {
 
     @InjectSpy
     JsonataEvaluator jsonataEvaluator;
+
+    @Inject
+    SqsService sqsService;
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -207,6 +213,54 @@ class StepFunctionsTaskCredentialsIntegrationTest {
         assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
         assertTrue(done.jsonPath().getString("output").contains("\"ok\":true"), done.asString());
         verify(lambdaExecutor).invoke(argThat(fn -> fn != null && function.equals(fn.getFunctionArn())), any(), any());
+    }
+
+    /** The execution role does not exist, and neither does the Credentials role: nothing evaluates either. */
+    @ParameterizedTest
+    @ValueSource(strings = {"sqs:sendMessage", "aws-sdk:sqs:sendMessage"})
+    void sqsCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
+        SqsTestQueue queue = SqsTestQueue.create(sqsService, SOURCE, "us-east-1", "credentials-");
+        cleanup.register(queue::delete);
+        String taskRole = "arn:aws:iam::" + TARGET + ":role/no-such-role";
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
+                "Type", "Task", "Resource", "arn:aws:states:::" + integration,
+                "Credentials", Map.of("RoleArn", taskRole),
+                "Parameters", Map.of("QueueUrl", queue.url(), "MessageBody", "hello"), "End", true))));
+
+        String execution = start(machine(SOURCE, definition, "STANDARD"), "{}");
+        Response done = terminal(SOURCE, execution);
+
+        assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
+        assertEquals("hello", queue.receive().getFirst().getBody());
+        assertEquals(taskRole, taskScheduled(execution).path("taskCredentials").path("roleArn").asText());
+    }
+
+    @Test
+    void credentialsThatDoNotResolveStillPassWithEnforcementOff() throws Exception {
+        SqsTestQueue queue = SqsTestQueue.create(sqsService, SOURCE, "us-east-1", "credentials-");
+        cleanup.register(queue::delete);
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
+                "Type", "Task", "Resource", "arn:aws:states:::sqs:sendMessage",
+                "Credentials", Map.of("RoleArn.$", "$.missing"),
+                "Parameters", Map.of("QueueUrl", queue.url(), "MessageBody", "hello"), "End", true))));
+
+        String execution = start(machine(SOURCE, definition, "STANDARD"), "{}");
+        Response done = terminal(SOURCE, execution);
+
+        assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
+        assertTrue(taskScheduled(execution).path("taskCredentials").isMissingNode(), done.asString());
+    }
+
+    private JsonNode taskScheduled(String execution) throws Exception {
+        Response history = request(SOURCE, "GetExecutionHistory", Map.of("executionArn", execution));
+        history.then().statusCode(200);
+        for (JsonNode event : MAPPER.readTree(history.asString()).path("events")) {
+            if ("TaskScheduled".equals(event.path("type").asText())) {
+                return event.path("taskScheduledEventDetails");
+            }
+        }
+        fail("No TaskScheduled event in " + history.asString());
+        return null;
     }
 
     @Test
