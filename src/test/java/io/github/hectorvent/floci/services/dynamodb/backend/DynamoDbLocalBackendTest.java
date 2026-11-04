@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -62,6 +63,7 @@ class DynamoDbLocalBackendTest {
 
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
     private final DynamoDbLocalClient client = mock(DynamoDbLocalClient.class);
+    private final KinesisService kinesisService = mock(KinesisService.class);
     private final AccountAwareStorageBackend<Map<String, String>> tags =
             AccountAwareStorageBackend.inMemory("000000000000");
     private DynamoDbLocalBackend backend;
@@ -69,7 +71,7 @@ class DynamoDbLocalBackendTest {
     @BeforeEach
     void setUp() {
         when(client.endpoint()).thenReturn(URI.create("http://local:8000"));
-        backend = new DynamoDbLocalBackend(client, tags, mapper, Duration.ofSeconds(5));
+        backend = new DynamoDbLocalBackend(client, tags, kinesisService, mapper, Duration.ofSeconds(5));
     }
 
     private JsonNode json(String text) throws IOException {
@@ -496,6 +498,39 @@ class DynamoDbLocalBackendTest {
     }
 
     @Test
+    void kinesisDestinationCallsLeaveTheTableAsItIs() throws Exception {
+        answerOrdersTable();
+        String streamArn = "arn:aws:kinesis:" + REGION + ":" + ACCOUNT + ":stream/orders-events";
+
+        TableDefinition enabled = backend.enableKinesisStreamingDestination(SCOPE, "orders", streamArn, "MILLISECOND");
+        TableDefinition updated = backend.updateKinesisStreamingDestination(SCOPE, "orders", streamArn, "MICROSECOND");
+        TableDefinition disabled = backend.disableKinesisStreamingDestination(SCOPE, "orders", streamArn);
+
+        for (TableDefinition table : List.of(enabled, updated, disabled)) {
+            assertEquals("orders", table.getTableName());
+            assertTrue(table.getKinesisStreamingDestinations().isEmpty());
+        }
+        verify(kinesisService).describeStreamByArn(streamArn, REGION);
+        neverSent("EnableKinesisStreamingDestination");
+        neverSent("UpdateKinesisStreamingDestination");
+        neverSent("DisableKinesisStreamingDestination");
+    }
+
+    @Test
+    void enablingADestinationWhoseStreamDoesNotExistIsReportedAsNotFound() throws Exception {
+        String streamArn = "arn:aws:kinesis:" + REGION + ":" + ACCOUNT + ":stream/missing";
+        when(kinesisService.describeStreamByArn(streamArn, REGION))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Stream missing not found", 400));
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> backend.enableKinesisStreamingDestination(SCOPE, "orders", streamArn, "MILLISECOND"));
+
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+        assertEquals("Kinesis stream not found: " + streamArn, e.getMessage());
+        neverSent("DescribeTable");
+    }
+
+    @Test
     void ensureGlobalTableDescribes() throws Exception {
         answerOrdersTable();
 
@@ -770,7 +805,7 @@ class DynamoDbLocalBackendTest {
 
     @Test
     void startFailsWhenBudgetExpires() throws Exception {
-        backend = new DynamoDbLocalBackend(client, tags, mapper, Duration.ZERO);
+        backend = new DynamoDbLocalBackend(client, tags, kinesisService, mapper, Duration.ZERO);
         when(client.send(any(), any(), any(), any(), any())).thenThrow(new ConnectException("refused"));
 
         IllegalStateException error = assertThrows(IllegalStateException.class, backend::start);

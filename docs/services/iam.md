@@ -614,21 +614,32 @@ returns `EntityAlreadyExists`; `Get`/`Update`/`DeleteLoginProfile` on a user wit
 wholesale replace. A password must be 1–128 characters from AWS's documented password character
 class, and when the account has an [account password policy](#account-password-policy) set, it is
 also checked against that policy's length and character-class requirements, with
-`PasswordPolicyViolation` returned on either action if it doesn't comply. The password itself is never
-echoed back by any of these actions, matching AWS.
+`PasswordPolicyViolation` returned on either action if it doesn't comply, naming the rule the
+password broke, which is also what `ChangePassword` answers for a new password. The password itself
+is never echoed back by any of these actions, matching AWS.
 
 `ChangePassword` is the self-service half of `UpdateLoginProfile`. It takes no `UserName` and acts
 only on the user whose access key signed the request, which is what the API reference means by "the
 IAM user who is calling this operation", and the account root password is not affected by it. A
 caller with no IAM user behind its key, which is Floci's stand-in for account root credentials, is
-refused with `InvalidUserType`, the error the CLI reference documents for that case. `OldPassword`
-must match the stored password, and the reference publishes no error for a mismatch, so Floci
-answers `InvalidParameterValue`, the common error type for a parameter value the service cannot
-accept. It is checked before the new password is held to the account policy, so a caller who cannot
-prove the current password learns nothing about what the policy requires. A successful change
-clears `PasswordResetRequired`, which is what lets a user whose password an administrator reset
-restore their own console access programmatically, and it updates the `password_last_changed` the
-credential report reads.
+refused with `InvalidUserType`, the error the CLI reference documents for that case.
+
+`OldPassword` must match the stored password, and a mismatch answers `AccessDenied` with status
+403 and "Either the new password does not conform to the account password policy or the old
+password was incorrect.", captured from a real account on 2026-10-31. The reference publishes no
+error for a mismatch and none of the six this operation declares describes one, so the capture is
+what settles it. The sentence is AWS's own and is sent as captured, naming both of the operation's
+causes without saying which one refused the call. The old password is checked before the new one is
+held to the account policy, so a caller who cannot prove the current password learns nothing about
+what the policy requires, and a request with both halves wrong answers this.
+
+That the sentence names the policy half does not settle the policy half: the capture covers a wrong
+old password with a conforming new one, and the API model declares `PasswordPolicyViolation` on
+this operation for a password the account policy refuses, so that is what Floci answers there,
+naming the rule the password broke as `CreateLoginProfile` and `UpdateLoginProfile` do. A
+successful change clears `PasswordResetRequired`, which is what lets a user whose password an
+administrator reset restore their own console access programmatically, and it updates the
+`password_last_changed` the credential report reads.
 
 `PasswordReusePrevention` is enforced on `ChangePassword` and on `UpdateLoginProfile`, which share
 one history per login profile, so an administrator reset cannot put back a password a user has just
@@ -712,9 +723,12 @@ matching on one does not match.
 IAM user or role only, not a group. It is held to the 20 characters `arnType` declares before it
 is resolved, so a value too short to be any ARN is a `ValidationError` with status 400 naming the
 length rather than an entity resolved out of whatever follows its last slash. A value that clears
-20 characters and still parses as no ARN is resolved as before: the member publishes a length and
-no pattern, and no source records what AWS answers for one, so inventing a refusal would be a
-guess. The length wording follows the captures of real IAM length violations, naming only the
+20 characters and still parses as no ARN is refused too, with `InvalidInput` and "Invalid ARN
+provided in the request: <value>", captured from a real account on 2026-10-31 for
+`arn:aws:iam:user/bob`, which this emulator used to simulate against a user named `bob`. Parsing
+means the six colon-delimited segments every ARN carries, so a valid ARN naming something that is
+neither a user nor a role still answers the `InvalidInput` about the entity type rather than about
+the shape. The length wording follows the captures of real IAM length violations, naming only the
 bound the value broke and leaving the value itself out of the message. `SimulateCustomPolicy`
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
 limit; extra documents beyond the first are ignored. Neither simulation action evaluates a
@@ -1649,7 +1663,8 @@ Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazo
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
-Timestream for InfluxDB and the Amazon Redshift Data API they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Timestream for InfluxDB, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
+Amazon Rekognition and IAM Identity Center they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1696,6 +1711,17 @@ ARN its `Export.ExportArn` gives, which is the new export's own. CloudTrail's `S
 `StopLogging` and `GetTrailStatus` are checked on the trail their bare `Name` names, by name or by
 ARN, its tag operations on the resource whose ARN their `ResourceId` gives, and its dashboard
 operations on the dashboard their `DashboardId` names, by name or by ARN.
+Amazon EMR's requests naming a cluster by its job flow id, in `JobFlowId` or `JobFlowIds`, are checked on
+`cluster/<id>`, as when they name it by `ClusterId`, and `AddTags` and `RemoveTags` on the cluster their
+`ResourceId` names, the one Floci tags, not on one their `ClusterId` gives. A `ModifyInstanceGroups`
+naming its instance groups with no `ClusterId`, or a null one, is checked on the cluster each group is
+in, the one EMR finds it in. A Rekognition stream processor is checked on `streamprocessor/<name>`, the ARN its `Name`
+gives. IAM Identity Center's `CreateAccountAssignment`, `DeleteAccountAssignment` and
+`ProvisionPermissionSet` are checked on the account their `TargetId` names, `account/<id>`, beside the
+instance and the permission set, and a `ProvisionPermissionSet` for `ALL_PROVISIONED_ACCOUNTS` on each
+account the permission set is provisioned to. AWS does not document which accounts such a request is
+authorized on, so checking each one it provisions is Floci's reading. A permission set, an application or a trusted token issuer
+a create makes has the id of the instance its `InstanceArn` names, `permissionSet/<instance id>/*`.
 Cost Explorer's `GetAnomalyMonitors` and `GetAnomalySubscriptions` are checked on each ARN their
 `MonitorArnList` or `SubscriptionArnList` gives, and Timestream for InfluxDB's `RebootDbCluster` on the
 cluster and on each member instance its `instanceIds` names. Global
@@ -1732,7 +1758,8 @@ an execution started through one is the state machine's. An ARN naming another a
 Region than the request's is checked as given and as each resource of that name a handler may act
 on instead, in the ARN's account or the caller's and in the ARN's Region or the request's (ECR's
 tag handlers keep the ARN's account in the request's Region), and the request is refused if any is
-denied. Every other request is checked on `*`, as is an operation whose action acts on no
+denied; one of a type AWS owns, whose ARN's account is `aws` (an IAM Identity Center application
+provider), is checked in that account alone. Every other request is checked on `*`, as is an operation whose action acts on no
 resource type or whose request names none, where AWS checks `*` too. `make
 iam-request-resources-check` re-derives the table from the pinned botocore, `make
 iam-request-resources-verify` checks it against AWS, and the namespaces it does not read yet are

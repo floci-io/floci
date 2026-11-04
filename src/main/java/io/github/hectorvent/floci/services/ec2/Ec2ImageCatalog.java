@@ -215,6 +215,8 @@ public class Ec2ImageCatalog {
         public Boolean advertised;
         public String guestRuntime;
         public Boolean cloudInit;
+        /** The guest kubelet owns EKS Node creation and status instead of Floci simulating them. */
+        public Boolean kubeletRegistersNode;
         public String provenance;
 
         public boolean advertised() {

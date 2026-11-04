@@ -14,10 +14,10 @@ import io.github.hectorvent.floci.services.acm.model.ValidationMethod;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.AlbFixtures;
 import io.github.hectorvent.floci.testing.InlineMocks;
+import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusTest;
-import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
@@ -89,16 +89,9 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 
 @QuarkusTest
-@TestProfile(ElbV2HttpsDataPlaneIntegrationTest.RealElbV2DataPlaneProfile.class)
+@TestProfile(RealElbV2DataPlaneProfile.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ElbV2HttpsDataPlaneIntegrationTest {
-
-    public static final class RealElbV2DataPlaneProfile implements QuarkusTestProfile {
-        @Override
-        public Map<String, String> getConfigOverrides() {
-            return Map.of("floci.services.elbv2.mock", "false");
-        }
-    }
 
     private static final String REGION = "us-east-1";
     private static final String AUTH =

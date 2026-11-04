@@ -352,19 +352,30 @@ class PasswordSelfServiceGrantEnforcementIntegrationTest {
     }
 
     /**
-     * A {@code PolicySourceArn} that names a user without being an ARN this emulator can parse is
-     * resolved by its trailing name, as it was before the principal keys were populated, so the
-     * account they carry comes from the identity that resolved rather than from the text of the
-     * call.
+     * A {@code PolicySourceArn} that names a user without being an ARN is refused rather than
+     * resolved by its trailing name, which is what a capture from a real account answers and what
+     * this class used to pin the other way: the grant is read from the identity the ARN resolves
+     * to, so there is nothing to resolve from a value that parses as no ARN. The same user under
+     * a well-formed ARN simulates as allowed, which is what says the refusal is the shape of the
+     * value rather than the grant.
      */
     @Test
-    void aPolicySourceArnItCannotParseStillSimulates() {
+    void aPolicySourceArnItCannotParseIsRefused() {
         allowUsersToChangePassword(true);
         String userName = "pw-oddarn-" + suffix();
         userWithAConsolePassword(userName);
 
         admin("SimulatePrincipalPolicy", Map.of(
                 "PolicySourceArn", "arn:aws:iam:user/" + userName,
+                "ActionNames.member.1", "iam:ChangePassword",
+                "ResourceArns.member.1", "arn:aws:iam::" + ACCOUNT + ":user/" + userName))
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"))
+                .body("ErrorResponse.Error.Message",
+                        equalTo("Invalid ARN provided in the request: arn:aws:iam:user/" + userName));
+
+        admin("SimulatePrincipalPolicy", Map.of(
+                "PolicySourceArn", "arn:aws:iam::" + ACCOUNT + ":user/" + userName,
                 "ActionNames.member.1", "iam:ChangePassword",
                 "ResourceArns.member.1", "arn:aws:iam::" + ACCOUNT + ":user/" + userName))
                 .statusCode(200)

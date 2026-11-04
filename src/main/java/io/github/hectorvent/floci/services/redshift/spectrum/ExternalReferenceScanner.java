@@ -5,7 +5,6 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 
@@ -313,144 +312,37 @@ public final class ExternalReferenceScanner {
 
     private static List<Token> tokenize(String sql) {
         List<Token> result = new ArrayList<>();
+        List<SpectrumSqlLexer.Token> raw = SpectrumSqlLexer.tokenize(sql).tokens();
         int i = 0;
-        while (i < sql.length()) {
-            char c = sql.charAt(i);
-            if (c == '\'' || c == '-' && i + 1 < sql.length() && sql.charAt(i + 1) == '-'
-                    || c == '/' && i + 1 < sql.length() && sql.charAt(i + 1) == '*') {
-                i = skip(sql, i, c == '\'' && isEscapeStringPrefix(sql, i));
-            } else if (c == '$' && dollarTagEnd(sql, i) > 0) {
-                i = skipDollarQuoted(sql, i);
-            } else if (c == '"' || Character.isLetter(c) || c == '_') {
+        while (i < raw.size()) {
+            SpectrumSqlLexer.Token t = raw.get(i);
+            if (t.kind() == SpectrumSqlLexer.Kind.WORD || t.kind() == SpectrumSqlLexer.Kind.QUOTED_WORD) {
                 List<Word> chain = new ArrayList<>();
-                i = read(sql, i, chain);
-                while (true) {
-                    int separator = skipTrivia(sql, i);
-                    if (separator >= sql.length() || sql.charAt(separator) != '.') {
-                        break;
-                    }
-                    int next = skipTrivia(sql, separator + 1);
-                    if (next >= sql.length() || !(sql.charAt(next) == '"' || Character.isLetter(sql.charAt(next))
-                            || sql.charAt(next) == '_')) {
-                        break;
-                    }
-                    i = read(sql, next, chain);
+                chain.add(new Word(t.text(), t.kind() == SpectrumSqlLexer.Kind.QUOTED_WORD));
+                i++;
+                while (i + 1 < raw.size() && raw.get(i).kind() == SpectrumSqlLexer.Kind.OP
+                        && ".".equals(raw.get(i).text())
+                        && (raw.get(i + 1).kind() == SpectrumSqlLexer.Kind.WORD
+                                || raw.get(i + 1).kind() == SpectrumSqlLexer.Kind.QUOTED_WORD)) {
+                    chain.add(new Word(raw.get(i + 1).text(), raw.get(i + 1).kind() == SpectrumSqlLexer.Kind.QUOTED_WORD));
+                    i += 2;
                 }
                 result.add(new Token(chain, '\0'));
             } else {
-                if (c == '(' || c == ')' || c == ',' || c == ';') {
-                    result.add(new Token(null, c));
+                // by kind, not by text: the string ';' is not a statement separator
+                char symbol = switch (t.kind()) {
+                    case LPAREN -> '(';
+                    case RPAREN -> ')';
+                    case COMMA -> ',';
+                    case SEMICOLON -> ';';
+                    default -> '\0';
+                };
+                if (symbol != '\0') {
+                    result.add(new Token(null, symbol));
                 }
                 i++;
             }
         }
         return result;
-    }
-
-    private static int skipTrivia(String sql, int start) {
-        int i = start;
-        while (i < sql.length()) {
-            if (Character.isWhitespace(sql.charAt(i))) {
-                i++;
-            } else if (sql.charAt(i) == '-' && i + 1 < sql.length() && sql.charAt(i + 1) == '-'
-                    || sql.charAt(i) == '/' && i + 1 < sql.length() && sql.charAt(i + 1) == '*') {
-                i = skip(sql, i, false);
-            } else {
-                break;
-            }
-        }
-        return i;
-    }
-
-    private static int read(String sql, int start, List<Word> chain) {
-        if (sql.charAt(start) == '"') {
-            StringBuilder value = new StringBuilder();
-            int i = start + 1;
-            while (i < sql.length()) {
-                if (sql.charAt(i) == '"') {
-                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '"') {
-                        value.append('"');
-                        i += 2;
-                    } else {
-                        i++;
-                        break;
-                    }
-                } else {
-                    value.append(sql.charAt(i++));
-                }
-            }
-            chain.add(new Word(value.toString(), true));
-            return i;
-        }
-        int i = start;
-        while (i < sql.length() && (Character.isLetterOrDigit(sql.charAt(i)) || sql.charAt(i) == '_'
-                || sql.charAt(i) == '$')) {
-            i++;
-        }
-        chain.add(new Word(sql.substring(start, i).toLowerCase(Locale.ROOT), false));
-        return i;
-    }
-
-    private static boolean isEscapeStringPrefix(String sql, int quote) {
-        if (quote == 0 || Character.toLowerCase(sql.charAt(quote - 1)) != 'e') {
-            return false;
-        }
-        if (quote == 1) {
-            return true;
-        }
-        char before = sql.charAt(quote - 2);
-        return !(Character.isLetterOrDigit(before) || before == '_' || before == '$');
-    }
-
-    /** Returns the index just past an opening dollar-quote tag such as {@code $$} or {@code $body$}, or -1. */
-    private static int dollarTagEnd(String sql, int start) {
-        int i = start + 1;
-        if (i < sql.length() && (Character.isLetter(sql.charAt(i)) || sql.charAt(i) == '_')) {
-            while (i < sql.length() && (Character.isLetterOrDigit(sql.charAt(i)) || sql.charAt(i) == '_')) {
-                i++;
-            }
-        }
-        return i < sql.length() && sql.charAt(i) == '$' ? i + 1 : -1;
-    }
-
-    private static int skipDollarQuoted(String sql, int start) {
-        int bodyStart = dollarTagEnd(sql, start);
-        int close = sql.indexOf(sql.substring(start, bodyStart), bodyStart);
-        return close < 0 ? sql.length() : close + (bodyStart - start);
-    }
-
-    private static int skip(String sql, int start, boolean backslashEscapes) {
-        if (sql.charAt(start) == '\'') {
-            int i = start + 1;
-            while (i < sql.length()) {
-                char c = sql.charAt(i);
-                if (backslashEscapes && c == '\\') {
-                    i += 2;
-                } else if (c == '\'' && (i + 1 >= sql.length() || sql.charAt(i + 1) != '\'')) {
-                    return i + 1;
-                } else {
-                    i += c == '\'' ? 2 : 1;
-                }
-            }
-            return sql.length();
-        }
-        if (sql.charAt(start) == '-') {
-            int i = sql.indexOf('\n', start + 2);
-            return i < 0 ? sql.length() : i;
-        }
-        int depth = 1;
-        int i = start + 2;
-        while (i < sql.length() && depth > 0) {
-            if (sql.startsWith("/*", i)) {
-                depth++;
-                i += 2;
-            } else if (sql.startsWith("*/", i)) {
-                depth--;
-                i += 2;
-            } else {
-                i++;
-            }
-        }
-        return Math.min(i, sql.length());
     }
 }

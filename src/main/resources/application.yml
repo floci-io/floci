@@ -1023,9 +1023,10 @@ floci:
     emrserverless:
       enabled: true
       job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
-      runner-mode: immediate        # docker = run each Spark job run's spark-submit in a container
+      runner-mode: immediate        # docker = run each job run's spark-submit or hive in a container
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
+      # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # for Hive job runs
       # Remove the drivers a previous run of this deployment left on the daemon before the first
       # job run starts. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true

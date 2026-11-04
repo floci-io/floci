@@ -38,6 +38,9 @@ class IamChangePasswordIntegrationTest {
     private static final String REGION = "us-east-1";
     private static final String PASSWORD = "Sup3r$ecret!";
     private static final String NEW_PASSWORD = "An0ther$ecret!";
+    /** Captured: what a wrong old password is refused with, both of the causes named. */
+    private static final String WRONG_OLD_PASSWORD = "Either the new password does not conform to "
+            + "the account password policy or the old password was incorrect.";
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -53,8 +56,8 @@ class IamChangePasswordIntegrationTest {
         // Nothing echoes a password back, so the proof the write took is the next call: the old
         // password is no longer the current one and the new one is.
         signedAs(accessKeyId, Map.of("OldPassword", PASSWORD, "NewPassword", "Th1rd$ecret!"))
-                .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
+                .statusCode(403)
+                .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
         signedAs(accessKeyId, Map.of("OldPassword", NEW_PASSWORD, "NewPassword", "Th1rd$ecret!"))
                 .statusCode(200);
     }
@@ -104,6 +107,12 @@ class IamChangePasswordIntegrationTest {
                 .body("ErrorResponse.Error.Message", containsString("'oldPassword'"));
     }
 
+    /**
+     * The two halves of the refusal answer differently, which is what the capture of 2026-10-31
+     * settles and what it leaves alone: a new password the account policy refuses is told which
+     * rule it broke, where a wrong old password gets the captured sentence, which names both
+     * causes without saying which one applied.
+     */
     @Test
     void theNewPasswordIsHeldToTheAccountPasswordPolicy() {
         String accessKeyId = userWithAConsolePassword("policy");
@@ -113,7 +122,16 @@ class IamChangePasswordIntegrationTest {
 
         signedAs(accessKeyId, Map.of("OldPassword", PASSWORD, "NewPassword", "sh0rt!"))
                 .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("PasswordPolicyViolation"));
+                .body("ErrorResponse.Error.Code", equalTo("PasswordPolicyViolation"))
+                .body("ErrorResponse.Error.Type", equalTo("Sender"))
+                .body("ErrorResponse.Error.Message", containsString("a minimum length of 20"));
+
+        signedAs(accessKeyId,
+                Map.of("OldPassword", "N0tTheOne!", "NewPassword", "L0ngEn0ugh$ecret!!!!"))
+                .statusCode(403)
+                .body("ErrorResponse.Error.Code", equalTo("AccessDenied"))
+                .body("ErrorResponse.Error.Type", equalTo("Sender"))
+                .body("ErrorResponse.Error.Message", equalTo(WRONG_OLD_PASSWORD));
 
         signedAs(accessKeyId,
                 Map.of("OldPassword", PASSWORD, "NewPassword", "L0ngEn0ugh$ecret!!!!"))

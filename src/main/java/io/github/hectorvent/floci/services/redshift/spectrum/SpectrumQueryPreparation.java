@@ -138,7 +138,7 @@ public class SpectrumQueryPreparation {
             try (ExternalCatalogLocks.Guard ignored = catalogLocks.read(binding,
                     session.inTransaction() || !backend.permitsCachePublication())) {
                 requireCurrentBinding(session, binding);
-                ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding, reference.table());
+                ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding, reference.table(), sql);
                 if (outcome == ExternalTableMaterializer.Outcome.NOT_EXTERNAL) {
                     throw new SpectrumSqlException("42P01", "external relation \"" + reference.schema()
                             + "." + reference.table() + "\" does not exist");

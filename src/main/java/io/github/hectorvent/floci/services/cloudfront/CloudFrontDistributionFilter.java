@@ -55,7 +55,12 @@ public class CloudFrontDistributionFilter implements ContainerRequestFilter {
             return;
         }
 
-        Distribution dist = service.get().findByHost(host);
+        CloudFrontService cloudFront = service.get();
+        if (!cloudFront.hasDistributions()) {
+            return;
+        }
+
+        Distribution dist = cloudFront.findByHost(host);
         if (dist == null) {
             return;
         }

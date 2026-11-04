@@ -69,8 +69,7 @@ public class ProvisionedConcurrencyPool implements Resettable {
     private final Set<ContainerHandle> pendingTeardown = new HashSet<>();
     private final Map<ContainerHandle, CountDownLatch> stopping = new HashMap<>();
     private final ExecutorService workers = Executors.newVirtualThreadPerTaskExecutor();
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(
-            Thread.ofPlatform().daemon().name("lambda-provisioned-concurrency").factory());
+    private final ScheduledExecutorService scheduler;
     private boolean stopped;
     private int activeLaunches;
     private long shutdownDeadlineNanos;
@@ -121,6 +120,15 @@ public class ProvisionedConcurrencyPool implements Resettable {
     ProvisionedConcurrencyPool(LambdaRuntimeLauncher launcher, LambdaFunctionStore functions,
                               LambdaAliasStore aliases, StorageBackend<String, Configuration> storage,
                               Clock clock, int maxPerFunction, int maxTotal, boolean ephemeral, int drainSeconds) {
+        this(launcher, functions, aliases, storage, clock, maxPerFunction, maxTotal, ephemeral,
+                drainSeconds, Executors.newSingleThreadScheduledExecutor(
+                        Thread.ofPlatform().daemon().name("lambda-provisioned-concurrency").factory()));
+    }
+
+    ProvisionedConcurrencyPool(LambdaRuntimeLauncher launcher, LambdaFunctionStore functions,
+                              LambdaAliasStore aliases, StorageBackend<String, Configuration> storage,
+                              Clock clock, int maxPerFunction, int maxTotal, boolean ephemeral, int drainSeconds,
+                              ScheduledExecutorService scheduler) {
         this.launcher = launcher;
         this.functions = functions;
         this.aliases = aliases;
@@ -130,6 +138,7 @@ public class ProvisionedConcurrencyPool implements Resettable {
         this.maxTotal = maxTotal;
         this.ephemeral = ephemeral;
         this.drainTimeoutNanos = TimeUnit.SECONDS.toNanos(drainSeconds);
+        this.scheduler = scheduler;
     }
 
     @PostConstruct

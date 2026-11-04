@@ -38,6 +38,14 @@ public interface DynamoDbTableAccess {
 
     TableDefinition disableStream(Scope scope, String tableName);
 
+    TableDefinition enableKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                      String precision);
+
+    TableDefinition disableKinesisStreamingDestination(Scope scope, String tableName, String streamArn);
+
+    TableDefinition updateKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                      String precision);
+
     TimeToLive timeToLive(Scope scope, String tableName);
 
     void updateTimeToLive(Scope scope, String tableName, String attributeName, boolean enabled);

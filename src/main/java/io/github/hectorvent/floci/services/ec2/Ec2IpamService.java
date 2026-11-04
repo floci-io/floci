@@ -33,6 +33,8 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2Ids.randomHex;
+
 /**
  * Amazon VPC IP Address Manager (IPAM) emulation: organization admin
  * delegation, IPAMs with default scopes, hierarchical pools with provisioned
@@ -1004,13 +1006,4 @@ public class Ec2IpamService {
         return region + "|" + id;
     }
 
-    private static String randomHex(int len) {
-        String chars = "0123456789abcdef";
-        StringBuilder sb = new StringBuilder(len);
-        ThreadLocalRandom r = ThreadLocalRandom.current();
-        for (int i = 0; i < len; i++) {
-            sb.append(chars.charAt(r.nextInt(chars.length())));
-        }
-        return sb.toString();
-    }
 }

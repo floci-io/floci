@@ -2412,9 +2412,10 @@ public class IamQueryHandler {
      * {@code ValidationError} naming the length, so a value too short to be any ARN is refused on
      * its shape rather than resolved to whatever follows its last slash.
      *
-     * <p>A value that clears 20 characters and still parses as no ARN is left alone: the member
-     * publishes a length and no pattern, and what AWS answers for one is not recorded. An absent
-     * or blank value is left alone too, the resolver below reporting that one.
+     * <p>A value that clears 20 characters and still parses as no ARN is left to the resolver
+     * below, which refuses it as {@code InvalidInput} on a capture of its own: the member publishes
+     * a length and no pattern, so there is no shape to hold it to here. An absent or blank value
+     * is left there too, that resolver reporting it.
      */
     private String validatedPolicySourceArn(MultivaluedMap<String, String> params) {
         String arn = getParam(params, "PolicySourceArn");

@@ -151,11 +151,13 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         @SuppressWarnings("unchecked")
         List<Map<String, String>> tags = (List<Map<String, String>>) persisted.get("Tags");
 
-        assertEquals("s3://floci-athena-results/results/", resultConfiguration.get("OutputLocation"));
+        // No result location is invented: a query names its own, as on AWS.
+        assertNull(resultConfiguration);
         assertEquals(false, configuration.get("EnforceWorkGroupConfiguration"));
         assertEquals(false, configuration.get("PublishCloudWatchMetricsEnabled"));
         assertEquals(false, configuration.get("RequesterPaysEnabled"));
-        assertEquals("Athena engine version 3", engineVersion.get("SelectedEngineVersion"));
+        assertEquals(false, configuration.get("EnableMinimumEncryptionConfiguration"));
+        assertEquals("AUTO", engineVersion.get("SelectedEngineVersion"));
         assertEquals("Athena engine version 3", engineVersion.get("EffectiveEngineVersion"));
         assertEquals(List.of(), tags);
     }
@@ -269,7 +271,7 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> engineVersion = (Map<String, Object>) configuration.get("EngineVersion");
 
-        assertEquals("Athena engine version 3", engineVersion.get("SelectedEngineVersion"));
+        assertEquals("AUTO", engineVersion.get("SelectedEngineVersion"));
         assertEquals("Athena engine version 3", engineVersion.get("EffectiveEngineVersion"));
     }
 
@@ -307,7 +309,7 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         @SuppressWarnings("unchecked")
         Map<String, Object> engineVersion = (Map<String, Object>) configuration.get("EngineVersion");
 
-        assertEquals("Athena engine version 3", engineVersion.get("SelectedEngineVersion"));
+        assertEquals("AUTO", engineVersion.get("SelectedEngineVersion"));
         assertEquals("Athena engine version 3", engineVersion.get("EffectiveEngineVersion"));
     }
 

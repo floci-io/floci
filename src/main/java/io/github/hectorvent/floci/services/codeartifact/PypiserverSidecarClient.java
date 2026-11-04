@@ -24,6 +24,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -35,6 +36,16 @@ import java.util.regex.Pattern;
 public class PypiserverSidecarClient implements RepositorySidecarManager {
 
     private static final Pattern SIMPLE_INDEX_HREF = Pattern.compile("href=\"([^\"]*)\"");
+    // The three patterns below are pypiserver 2.4.2's own, from pypiserver/pkg_helpers.py, ported
+    // verbatim for guessPackageName.
+    private static final Pattern ARCHIVE_SUFFIX = Pattern.compile(
+            "(\\.zip|\\.tar\\.gz|\\.tgz|\\.tar\\.bz2|\\.tar\\.xz|-py[23]\\.\\d-.*|"
+                    + "\\.win-amd64-py[23]\\.\\d\\..*|\\.win32-py[23]\\.\\d\\..*|\\.egg)$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern WHEEL_FILE = Pattern.compile(
+            "^(?<namever>(?<name>.+?)-(?<ver>\\d.*?))"
+                    + "((-(?<build>\\d.*?))?-(?<pyver>.+?)-(?<abi>.+?)-(?<plat>.+?)\\.whl|\\.dist-info)$");
+    private static final Pattern PKGNAME_END = Pattern.compile("-\\d+[a-z_.!+]", Pattern.CASE_INSENSITIVE);
 
     private final PypiserverSidecarManager manager;
     private final ObjectMapper mapper;
@@ -63,8 +74,11 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
 
     @Override
     public void release(String repositoryContainerId) {
-        manager.release(repositoryContainerId);
-        SidecarConcurrency.release(repositoryContainerId);
+        try {
+            manager.release(repositoryContainerId);
+        } finally {
+            SidecarConcurrency.release(repositoryContainerId);
+        }
     }
 
     /**
@@ -206,22 +220,29 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
         }
     }
 
-    /**
-     * Delegates to {@link SidecarConcurrency#beginUse}: {@code CodeArtifactService} calls this
-     * right after it resolves {@code repositoryContainerId}, closing the window between that
-     * resolution and this client's own {@link #listPackageVersions} call, which brackets the
-     * same key again internally. Nesting is safe: {@link SidecarConcurrency}'s bookkeeping is a
-     * reference count, not a flag.
-     */
     @Override
-    public void beginUse(String repositoryContainerId) {
-        SidecarConcurrency.beginUse(repositoryContainerId);
+    public void registerRepository(String repositoryContainerId) {
+        manager.registerRepository(repositoryContainerId);
     }
 
-    /** Delegates to {@link SidecarConcurrency#endUse}, pairing {@link #beginUse} above. */
+    @Override
+    public void beginUse(String repositoryContainerId) {
+        manager.beginUse(repositoryContainerId);
+        try {
+            SidecarConcurrency.beginUse(repositoryContainerId);
+        } catch (RuntimeException e) {
+            manager.endUse(repositoryContainerId);
+            throw e;
+        }
+    }
+
     @Override
     public void endUse(String repositoryContainerId) {
-        SidecarConcurrency.endUse(repositoryContainerId);
+        try {
+            SidecarConcurrency.endUse(repositoryContainerId);
+        } finally {
+            manager.endUse(repositoryContainerId);
+        }
     }
 
     private Instant lastModified(String fileUrl) {
@@ -564,6 +585,47 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
      */
     private static final List<String> PEP440_CONTINUATION_PREFIXES =
             List.of("alpha", "beta", "preview", "pre", "post", "rev", "dev", "rc");
+
+    /**
+     * The package name pypiserver 2.4.2 files an upload of {@code filename} under: a port of its
+     * {@code guess_pkgname_and_version} (pypiserver/pkg_helpers.py), name part only. pypiserver
+     * stores an upload by its raw filename and never reads the form's {@code name} field, so this,
+     * not that field, is the package a publish:BLOCK check must name (pgermosen's review). Empty
+     * exactly when pypiserver itself rejects the filename as a bad one.
+     *
+     * <p>{@code rstrip(".asc")} is ported as Python runs it: it strips any trailing run of the
+     * characters {@code .}, {@code a}, {@code s} and {@code c}, not the suffix.
+     */
+    static Optional<String> guessPackageName(String filename) {
+        String path = filename.substring(filename.lastIndexOf('/') + 1);
+        if (path.endsWith(".asc")) {
+            int end = path.length();
+            while (end > 0 && ".asc".indexOf(path.charAt(end - 1)) >= 0) {
+                end--;
+            }
+            path = path.substring(0, end);
+        }
+        if (path.endsWith(".whl")) {
+            Matcher wheel = WHEEL_FILE.matcher(path);
+            return wheel.find() ? Optional.of(wheel.group("name")) : Optional.empty();
+        }
+        if (!ARCHIVE_SUFFIX.matcher(path).find()) {
+            return Optional.empty();
+        }
+        path = ARCHIVE_SUFFIX.matcher(path).replaceAll("");
+        int dashes = path.length() - path.replace("-", "").length();
+        if (dashes == 0) {
+            return Optional.of(path);
+        }
+        if (dashes == 1) {
+            return Optional.of(path.substring(0, path.indexOf('-')));
+        }
+        if (path.indexOf('.') < 0) {
+            return Optional.of(path.substring(0, path.lastIndexOf('-')));
+        }
+        Matcher end = PKGNAME_END.matcher(path);
+        return Optional.of(end.find() ? path.substring(0, end.start()) : path);
+    }
 
     /**
      * Real PyPI filenames always embed their own version right after a {@code -} (PEP 427/517

@@ -88,8 +88,31 @@ Gateway Load Balancer listeners require omitted `Port` and `Protocol` fields on 
 
 ## Behavior Notes
 
+- HTTP and HTTPS target groups use their configured protocol for both application requests
+  and WebSocket upgrades. An HTTPS target requires a TLS handshake; a failed handshake
+  never falls back to plaintext. Backend certificates may be self-signed or expired, as on
+  AWS ALB. This trust setting applies only to the target clients and health checks.
+- Backend connection and TLS handshake errors return 502 for HTTP requests and WebSocket
+  upgrades. Connection and handshake timeouts use ten-second deadlines and return 504.
+- HTTP and HTTPS health checks use their own configured protocol and port, independently
+  of the target's application protocol. HTTPS health checks require a TLS handshake,
+  preserve the configured success-code matcher, and do not follow redirects.
+- One health-check deadline covers connection, TLS handshake and response headers.
+  Partial bytes do not renew it. Expiry closes the probe and counts toward `Target.Timeout`.
+- Health probes connect directly without JVM proxy settings. A timed-out lookup keeps
+  its target and shared worker slot until the underlying work actually exits. This bounds
+  background work even when name resolution ignores interruption.
+- Backend TLS uses the runtime's supported protocols and ciphers. Floci does not reproduce
+  AWS ALB's backend security-policy selection from the frontend listener policy.
+- ALB listeners share the emulator's network address. Stored subnet and security-group
+  associations do not create a load-balancer VPC network boundary or enforce frontend
+  ingress and backend egress rules. These listeners cannot yet reproduce NAT allowlisting failures.
 - TCP listeners relay bytes bidirectionally without parsing HTTP or terminating TLS. TLS passthrough requires a TCP listener, with certificates configured at the target, not at the listener. Targets are selected per connection using round-robin among healthy targets, falling back to registered targets when none are healthy. The default TCP idle timeout is 350 seconds, configurable via the `tcp.idle_timeout.seconds` listener attribute (60 to 6000 seconds).
 - TCP listeners require a dedicated local port. Floci still shares its address across load balancers, so a second listener on an in-use TCP port registers successfully and logs a warning, but serves no traffic until the listener holding the port is deleted or moved, and ports reserved by Floci remain unavailable. Address isolation and TLS-terminating NLB listeners are not provided by the TCP proxy.
+- An asynchronous socket-bind failure retains the admitted listeners and retries while they
+  remain configured. Retry delays grow from 100 milliseconds to five seconds; a successful
+  bind resets the delay. Deleting the last listener or stopping Floci cancels its retry.
+  An external process holding the port must still release it before Floci can serve traffic.
 - HTTPS listeners terminate TLS using the configured ACM or IAM server certificates, with SNI certificate selection. When several load balancers share one local HTTPS port, clients must send SNI to identify the certificate they need; a connection without SNI cannot identify a particular load balancer before the TLS handshake.
 - ACM certificates must be issued before attaching them. Reimporting an attached ACM certificate refreshes subsequent full TLS handshakes; existing connections keep their negotiated certificate. Reload does not invalidate TLS session caches: a resumed session can retain its previously authenticated certificate after replacement or removal until the session expires or is invalidated. ACM deletion and revocation are refused while a listener still references the certificate.
 - Certificate replacement keeps the previous key material available to new handshakes while the replacement loads. A failed reload leaves the previous certificate active.
@@ -150,8 +173,8 @@ types remain control-plane only.
 
 | Declared listener protocol | Local forwarding behavior | Target types and transport |
 |---|---|---|
-| `HTTP` | Parses and forwards HTTP requests; supports WebSocket upgrades. | `instance` resolves an EC2 private address; `ip` uses the registered address. Backend requests use plain HTTP. `lambda` invokes the registered function with an ALB event. |
-| `HTTPS` | Terminates TLS with an ACM or IAM certificate, then handles HTTP as above. | Same targets as HTTP; an HTTPS target-group setting does not enable TLS to the backend. |
+| `HTTP` | Parses and forwards HTTP requests; supports WebSocket upgrades. | `instance` resolves an EC2 private address; `ip` uses the registered address. The target-group protocol selects HTTP or HTTPS to the backend. `lambda` invokes the registered function with an ALB event. |
+| `HTTPS` | Terminates TLS with an ACM or IAM certificate, then handles HTTP as above. | Same targets and backend protocol selection as HTTP. |
 | `TCP` | Relays bytes bidirectionally without HTTP parsing or TLS termination (enabling TLS pass-through to the target). Requires a dedicated local port. | `instance` resolves an EC2 private address; `ip` uses the registered address. Selected round-robin per connection. |
 | `TLS` | Stored; certificate references are checked, but only `HTTPS` enables TLS on the local socket. TLS termination for NLB `TLS` listeners is unsupported (use a `TCP` listener for TLS pass-through). | No NLB TLS backend transport is implemented. |
 | `UDP`, `TCP_UDP` | Stored declarations do not create UDP sockets or UDP forwarding. | Datagram targets are unsupported. |
@@ -165,11 +188,12 @@ on the listener socket.
 
 ### Health checks
 
-For non-Lambda targets, the checker sends a **plain HTTP GET** to `HealthCheckPath`
+For non-Lambda targets, the checker sends an HTTP or HTTPS GET to `HealthCheckPath`
 on `HealthCheckPort`, or the target's traffic port when configured as `traffic-port`.
+`HealthCheckProtocol` selects TLS independently of the target's application protocol.
 The response-code matcher and healthy/unhealthy thresholds affect target health.
-`HealthCheckProtocol=TCP` does not perform a TCP-only probe, and `HTTPS` does not enable
-TLS for the probe. Lambda targets are not actively probed. In ELBv2 mock mode, sockets
+`HealthCheckProtocol=TCP` does not perform a TCP-only probe.
+Lambda targets are not actively probed. In ELBv2 mock mode, sockets
 and active monitoring are disabled. The proxy can route to initial targets and fails
 open to registered targets when none are healthy, so a successful request alone does
 not prove that a health check passed.

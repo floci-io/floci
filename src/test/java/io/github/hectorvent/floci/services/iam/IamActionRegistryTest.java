@@ -10,6 +10,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
+import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
+import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvFileSource;
@@ -40,6 +42,32 @@ import static org.mockito.Mockito.when;
 class IamActionRegistryTest {
 
     private final IamActionRegistry registry = new IamActionRegistry();
+
+    @ParameterizedTest
+    @CsvSource({"/policy/validation", "/%70olicy/validation", "/policy/%76alidation",
+            "/policy;ignored=yes/validation", "/policy/validation;ignored=yes",
+            "/%70olicy;ignored=yes/%76alidation;ignored=yes/", "/policy/%2e/validation",
+            "/x/%2e%2e/policy/validation", "//policy//validation"})
+    void validatePolicyResolvesThroughTheRouteTable(String path) {
+        ContainerRequestContext sent = mockCtx("POST", path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        UriInfo uriInfo = sent.getUriInfo();
+        ResteasyReactiveContainerRequestContext ctx = Mockito.mock(ResteasyReactiveContainerRequestContext.class);
+        ResteasyReactiveRequestContext routed = Mockito.mock(ResteasyReactiveRequestContext.class);
+        when(ctx.getMethod()).thenReturn("POST");
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getServerRequestContext()).thenReturn(routed);
+        when(routed.getPathWithoutPrefix()).thenReturn("/policy/validation");
+        assertEquals("access-analyzer:ValidatePolicy", registry.resolveRoute("access-analyzer", ctx));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"/policy%2Fvalidation", "/policy%253Bignored/validation", "/policy/validation/extra"})
+    void policyRouteDoesNotTurnEncodedDelimitersIntoStructure(String path) {
+        ContainerRequestContext ctx = mockCtx("POST", path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertNull(registry.resolveRoute("access-analyzer", ctx));
+    }
 
     @ParameterizedTest
     @CsvSource({"createReusableDelegationSet,CreateReusableDelegationSet",

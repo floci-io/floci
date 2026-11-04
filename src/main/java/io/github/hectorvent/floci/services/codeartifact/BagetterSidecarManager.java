@@ -46,6 +46,7 @@ public class BagetterSidecarManager implements ContainerTeardown {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
+    private final SidecarRepositoryLease lease;
 
     @Inject
     public BagetterSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
@@ -54,6 +55,7 @@ public class BagetterSidecarManager implements ContainerTeardown {
         this.lifecycleManager = lifecycleManager;
         this.config = config;
         this.pool = new PerKeyContainerPool(lifecycleManager, HEALTH_PATH);
+        this.lease = new SidecarRepositoryLease("BaGetter", pool);
     }
 
     /**
@@ -70,7 +72,19 @@ public class BagetterSidecarManager implements ContainerTeardown {
 
     /** Stops and removes the container for one nuget repository, if one was ever started. */
     public void release(String nugetRepositoryId) {
-        pool.stopContainer(nugetRepositoryId);
+        lease.release(nugetRepositoryId);
+    }
+
+    public void registerRepository(String nugetRepositoryId) {
+        lease.registerRepository(nugetRepositoryId);
+    }
+
+    public void beginUse(String nugetRepositoryId) {
+        lease.beginUse(nugetRepositoryId);
+    }
+
+    public void endUse(String nugetRepositoryId) {
+        lease.endUse(nugetRepositoryId);
     }
 
     /**
@@ -129,6 +143,6 @@ public class BagetterSidecarManager implements ContainerTeardown {
 
     @Override
     public void stopManagedContainers() {
-        pool.stopAll();
+        lease.stopManagedContainers();
     }
 }

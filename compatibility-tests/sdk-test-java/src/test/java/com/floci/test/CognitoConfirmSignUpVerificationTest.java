@@ -10,6 +10,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminGetUserResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
@@ -35,6 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Compatibility tests for Cognito ConfirmSignUp verified attribute updates (Issue #1654).
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@Isolated("Clears the shared SES and SNS inspection stores")
 class CognitoConfirmSignUpVerificationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();

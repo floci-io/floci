@@ -17,6 +17,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.github.hectorvent.floci.testing.LogsRequests.logs;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.*;
@@ -32,7 +33,8 @@ class CloudWatchLogsMetricFilterRetryIntegrationTest {
 
     @InjectSpy CloudWatchMetricsService metrics;
     @Inject CloudWatchLogsMetricFilterService publications;
-    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260916/eu-west-1/logs/aws4_request";
+    private static final String REGION = "eu-west-1";
+    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260916/" + REGION + "/monitoring/aws4_request";
     private static final long TIME = 1_700_000_040_000L;
 
     @BeforeAll
@@ -60,7 +62,7 @@ class CloudWatchLogsMetricFilterRetryIntegrationTest {
                 .body("Datapoints[0].Sum", equalTo(7.0f)).body("Datapoints[0].SampleCount", equalTo(1.0f));
         publications.retryPending();
         statistics(group).then().body("Datapoints[0].SampleCount", equalTo(1.0f));
-        logs("DeleteLogGroup", "{\"logGroupName\":\"" + group + "\"}").then().statusCode(200);
+        logs(REGION, "DeleteLogGroup", "{\"logGroupName\":\"" + group + "\"}").then().statusCode(200);
     }
 
     @Test
@@ -80,33 +82,28 @@ class CloudWatchLogsMetricFilterRetryIntegrationTest {
         ingest(group);
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> statistics(group).then().statusCode(200)
                 .body("Datapoints[0].Sum", equalTo(7.0f)).body("Datapoints[0].SampleCount", equalTo(1.0f)));
-        logs("DeleteLogGroup", "{\"logGroupName\":\"" + group + "\"}").then().statusCode(200);
+        logs(REGION, "DeleteLogGroup", "{\"logGroupName\":\"" + group + "\"}").then().statusCode(200);
     }
 
     private static void create(String group) {
-        logs("CreateLogGroup", "{\"logGroupName\":\"" + group + "\"}").then().statusCode(200);
-        logs("CreateLogStream", "{\"logGroupName\":\"" + group + "\",\"logStreamName\":\"s\"}").then().statusCode(200);
-        logs("PutMetricFilter", """
+        logs(REGION, "CreateLogGroup", "{\"logGroupName\":\"" + group + "\"}").then().statusCode(200);
+        logs(REGION, "CreateLogStream", "{\"logGroupName\":\"" + group + "\",\"logStreamName\":\"s\"}").then().statusCode(200);
+        logs(REGION, "PutMetricFilter", """
                 {"logGroupName":"%s","filterName":"retry","filterPattern":"ERROR",
                  "metricTransformations":[{"metricName":"Value","metricNamespace":"%s","metricValue":"3","defaultValue":7}]}
                 """.formatted(group, group)).then().statusCode(200);
     }
 
     private static void ingest(String group) {
-        logs("PutLogEvents", """
+        logs(REGION, "PutLogEvents", """
                 {"logGroupName":"%s","logStreamName":"s","logEvents":[{"timestamp":%d,"message":"INFO"}]}
                 """.formatted(group, TIME)).then().statusCode(200);
-        logs("GetLogEvents", "{\"logGroupName\":\"" + group + "\",\"logStreamName\":\"s\"}")
+        logs(REGION, "GetLogEvents", "{\"logGroupName\":\"" + group + "\",\"logStreamName\":\"s\"}")
                 .then().statusCode(200).body("events", hasSize(1));
     }
 
-    private static Response logs(String action, String body) {
-        return given().contentType("application/x-amz-json-1.1").header("Authorization", AUTH)
-                .header("X-Amz-Target", "Logs_20140328." + action).body(body).post("/");
-    }
-
     private static Response statistics(String namespace) {
-        return given().contentType("application/x-amz-json-1.0").header("Authorization", AUTH.replace("/logs/", "/monitoring/"))
+        return given().contentType("application/x-amz-json-1.0").header("Authorization", AUTH)
                 .header("X-Amz-Target", "GraniteServiceVersion20100801.GetMetricStatistics").body("""
                         {"Namespace":"%s","MetricName":"Value","Period":60,"StartTime":%d,"EndTime":%d,
                          "Statistics":["Sum","SampleCount"]}

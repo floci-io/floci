@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @QuarkusTest
 class S3LegacyHeaderAccountIntegrationTest {
@@ -102,6 +103,7 @@ class S3LegacyHeaderAccountIntegrationTest {
         AtomicReference<CloudTrailService.S3EventInput> recorded = new AtomicReference<>();
         AtomicReference<String> eventAccount = new AtomicReference<>();
         CloudTrailService cloudTrail = mock(CloudTrailService.class);
+        when(cloudTrail.hasTrails()).thenReturn(true);
         doAnswer(invocation -> {
             recorded.set(invocation.getArgument(0));
             eventAccount.set(requestContext.getAccountId());

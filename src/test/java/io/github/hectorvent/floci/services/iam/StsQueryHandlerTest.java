@@ -835,21 +835,27 @@ class StsQueryHandlerTest {
         verify(service, never()).resolveAccountId(anyString());
     }
 
-    @Test
-    void getAccessKeyInfoRefusesAKeyNobodyHolds() {
-        // The operation models no error at all, and the page says only that a deleted key "might
-        // return an error that the key doesn't exist", so this is the published common error
-        // nearest that sentence rather than a reading.
+    @ParameterizedTest
+    @ValueSource(strings = {"AKIAABSENTKEY0000000", "ASIAABSENTKEY0000000"})
+    void getAccessKeyInfoRefusesAKeyNobodyHolds(String accessKeyId) {
+        // The operation models no error, and the page says only that a deleted key "might return
+        // an error that the key doesn't exist". A capture from a real account answers both id
+        // formats the same way: ValidationError with a sentence that quotes neither the id nor a
+        // violation count, rather than an account decoded out of the id.
         IamService service = mock(IamService.class);
         when(service.findAccountForAccessKeyId(anyString())).thenReturn(Optional.empty());
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
-        params.add("AccessKeyId", "AKIAABSENTKEY0000000");
+        params.add("AccessKeyId", accessKeyId);
 
         Response response = newHandler(service, new RegionResolver(REGION, "000000000000"))
                 .handle("GetAccessKeyInfo", params);
 
         assertEquals(400, response.getStatus());
-        assertTrue(response.getEntity().toString().contains("<Code>InvalidParameterValue</Code>"));
+        String body = response.getEntity().toString();
+        assertTrue(body.contains("<Code>ValidationError</Code>"), body);
+        assertTrue(body.contains("<Message>Access key ID is not valid.</Message>"), body);
+        assertTrue(body.contains("<Type>Sender</Type>"), body);
+        assertFalse(body.contains(accessKeyId), body);
     }
 
     @ParameterizedTest

@@ -301,7 +301,7 @@ naming different VPCs find nothing.
 |--------|-------------|
 | CreateVpc | Creates a VPC with the requested CIDR block. `InstanceTenancy` accepts `default` or `dedicated`; `host` is rejected with `InvalidParameterValue`, as on AWS. `DryRun=true` is answered with `DryRunOperation` and creates nothing. A tag specification error keeps its own error; the CIDR block and the tenancy are checked only without `DryRun`. |
 | DescribeVpcs | Lists or returns stored VPCs. |
-| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
+| DeleteVpc | Deletes a VPC from the local EC2 store, together with its default security group and rules, main route table and default network ACL. Docker network cleanup waits for an in-flight creation and prevents queued attaches from recreating the deleted network. Fails with `DependencyViolation` while the VPC still has a subnet, a security group, route table or network ACL other than those defaults, a VPC endpoint, an attached internet gateway or egress-only internet gateway, a transit gateway attachment, an Elastic Load Balancing v2 load balancer, or anything still holding a network interface in one of its subnets: an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone network interface, or an interface endpoint. |
 | ModifyVpcAttribute | Updates supported VPC attributes. |
 | DescribeVpcAttribute | Returns a supported VPC attribute. |
 | CreateDhcpOptions | Creates a DHCP options set with the supplied configurations and optional tags. |
@@ -767,9 +767,32 @@ are not supported.`
 `DescribeAddresses` report the same address. It follows the `RunInstances` rules: an address outside
 the subnet's CIDR, or one of the five AWS reserves, fails with `InvalidParameterValue`, and one that
 an instance, network interface, NAT gateway or interface endpoint already holds fails with
-`InvalidIPAddress.InUse`. A gateway has its primary address only, so the secondary-address
-parameters (`SecondaryAllocationIds`, `SecondaryPrivateIpAddresses` and
-`SecondaryPrivateIpAddressCount`) fail with `UnsupportedOperation` before anything is created.
+`InvalidIPAddress.InUse`.
+
+Secondary addresses sit on the gateway's one interface and are listed after the primary address in
+`natGatewayAddressSet`, with `isPrimary` `false`. On a public gateway each `SecondaryAllocationIds`
+Elastic IP is paired with the `SecondaryPrivateIpAddresses` entry at the same position, or with the
+next free address, and is held like the primary one: `DescribeAddresses` shows it associated, another
+gateway given it is created `failed`, `ReleaseAddress` refuses it, and `DeleteNatGateway` hands it
+back. A private gateway takes the listed `SecondaryPrivateIpAddresses` plus
+`SecondaryPrivateIpAddressCount` more free addresses. Listed addresses follow the `PrivateIpAddress`
+rules. `SecondaryPrivateIpAddressCount` on a public gateway, or a secondary Elastic IP on a private
+one, fails with `InvalidParameterCombination`, and a count outside 1 to 31 with
+`InvalidParameterValue`. `AssociateNatGatewayAddress`, `DisassociateNatGatewayAddress`,
+`AssignPrivateNatGatewayAddress` and `UnassignPrivateNatGatewayAddress` are not implemented. An
+`AWS::EC2::NatGateway` whose secondary addresses change is still updated in place, as on AWS: it
+keeps its id, a secondary the template still names keeps its address, a dropped Elastic IP is handed
+back, and a new address that is already held fails the update and leaves the gateway as it was.
+
+### EC2 Instance Connect Endpoints
+
+| Action | Description |
+|--------|-------------|
+| CreateInstanceConnectEndpoint | Creates an endpoint in a subnet, `create-complete` at once, with a private address from the subnet. |
+| DescribeInstanceConnectEndpoints | Lists endpoints; filters `instance-connect-endpoint-id`, `state`, `vpc-id`, `subnet-id`, `tag:<key>`, `tag-key`, `tag-value`. |
+| DeleteInstanceConnectEndpoint | Deletes an endpoint and answers with it in `delete-in-progress`. |
+
+A repeated `ClientToken` returns the endpoint the first call created (`IdempotentParameterMismatch` when reused with another subnet, security group set, `IpAddressType`, `PreserveClientIp` or tag set; tags added later with `CreateTags` do not count). While an endpoint exists, `DeleteSubnet` on its subnet and `DeleteVpc` on its VPC fail with `DependencyViolation`, as on AWS. The interface ID in an endpoint's `networkInterfaceIdSet` resolves in `DescribeNetworkInterfaces` while the endpoint exists: a requester-managed `ec2_instance_connect_endpoint` interface carrying the endpoint's private address, subnet, VPC and security groups. An unknown filter name is `InvalidParameterValue` even when no endpoint exists. `DescribeInstanceConnectEndpoints` pages by `MaxResults`/`NextToken` in endpoint ID order (`MaxResults` outside 1-50 is `InvalidMaxResults`), and `publicDnsNames` carries only the `ipv4` names. The endpoint's tunnel (`openTunnel`) is not served yet.
 
 ### Capacity Reservations
 
@@ -1198,6 +1221,60 @@ Spot prices returned by `DescribeSpotPriceHistory` are synthetic and derived det
 |--------|-------------|
 | DescribeVpnGateways | Returns an empty gateway set (no stored gateways). |
 
+### Client VPN
+
+| Action | Description |
+|--------|-------------|
+| CreateClientVpnEndpoint | Creates an endpoint; a `client-vpn-endpoint` `TagSpecification` tags it. |
+| DescribeClientVpnEndpoints | Lists endpoints, or the ones `ClientVpnEndpointId.N` names. |
+| ModifyClientVpnEndpoint | Changes the members the request gives. |
+| DeleteClientVpnEndpoint | Deletes an endpoint with no associated target networks. |
+| AssociateClientVpnTargetNetwork | Associates a subnet and adds the route to its VPC through it. |
+| DescribeClientVpnTargetNetworks | Lists an endpoint's associations. |
+| DisassociateClientVpnTargetNetwork | Removes an association and the routes through its subnet. |
+| ApplySecurityGroupsToClientVpnTargetNetwork | Sets the security groups the endpoint applies in its VPC. |
+| AuthorizeClientVpnIngress | Adds an authorization rule for a network, for one group or all. |
+| DescribeClientVpnAuthorizationRules | Lists an endpoint's authorization rules. |
+| RevokeClientVpnIngress | Removes an authorization rule. |
+| CreateClientVpnRoute | Adds a route through an associated subnet. |
+| DescribeClientVpnRoutes | Lists an endpoint's routes, the ones associations added included. |
+| DeleteClientVpnRoute | Removes a route the endpoint was given. |
+| ExportClientVpnClientConfiguration | Returns the OpenVPN client configuration for the endpoint. |
+
+Client VPN is a configuration registry: no VPN server runs, so clients cannot connect. An endpoint
+is `pending-associate` until a subnet is associated, then `available`, and its DNS name is
+`*.cvpn-endpoint-<id>.prod.clientvpn.<region>.<dns suffix>`. Defaults are AWS's: `udp` on port 443,
+a 24-hour session timeout, the self-service portal disabled, and, for a VPC given without security
+groups, the VPC's default security group.
+
+- Associations settle as `associated`, authorization rules and routes as `active`, at once; the
+  operation's response carries the transitional status AWS answers with (`associating`,
+  `authorizing`, `creating`).
+- An association needs a subnet of the endpoint's VPC, one per Availability Zone. It adds a
+  `Default Route` to the VPC's CIDR through the subnet (`origin` `associate`, `type` `Nat`), which
+  goes with the association. An endpoint created without a VPC takes the first subnet's VPC and its
+  default security group.
+- An association pins its subnet and VPC, as the network interface AWS places in the subnet does:
+  `DeleteSubnet` and `DeleteVpc` answer `DependencyViolation` until it is disassociated.
+- An endpoint with associated target networks cannot be deleted (`IncorrectState`).
+- Security groups named on create, modify or `ApplySecurityGroupsToClientVpnTargetNetwork` must
+  exist (`InvalidGroup.NotFound`) and be in the endpoint's VPC.
+- Authorization rules and routes compare networks, not spellings: `10.0.0.9/16` is the same network
+  as `10.0.0.0/16`, so it is a duplicate on create and matches on revoke or delete.
+- The describe operations take AWS's filters, with `*` and `?` wildcards: `endpoint-id`,
+  `transport-protocol`, `tag-key` and `tag:<key>` for endpoints; `association-id`,
+  `target-network-id` and `vpc-id` for target networks; `description`, `destination-cidr` and
+  `group-id` for authorization rules; `destination-cidr`, `origin` and `target-subnet` for routes.
+  Any other filter is `InvalidParameterValue` ("The filter '<name>' is invalid").
+- An endpoint with the self-service portal enabled reports `selfServicePortalUrl`,
+  `https://self-service.clientvpn.<dns suffix>/endpoints/<id>`.
+- The exported configuration names the endpoint's address, port and transport, carries the server
+  certificate's chain from ACM as its `<ca>`, and verifies the certificate's domain name, as AWS's
+  does. A server certificate ACM does not hold leaves those two parts out.
+- An unknown endpoint id is `InvalidClientVpnEndpointId.NotFound` ("Endpoint `<id>` does not
+  exist"), and a malformed one `InvalidParameterValue` ("ClientVpnEndpointId you provided is not
+  valid").
+
 ### EBS Encryption Defaults
 
 | Action | Description |
@@ -1485,6 +1562,37 @@ The file uses the same schema as `src/main/resources/ec2/image-catalog.yaml` and
 include every image that process should expose. Missing or invalid files fail on first
 catalog use; leaving the setting unset preserves the bundled catalog. Containerized
 Floci needs the file mounted at the configured container path.
+
+For an image whose guest kubelet registers its own EKS Node, set
+`kubeletRegistersNode: true` on that image entry. This is explicit image capability
+metadata, independent of `guestRuntime`: systemd guests do not necessarily run
+kubelet. For example, a locally built worker can use:
+
+```yaml
+defaultDockerImage: example/base:1
+images:
+  - imageId: ami-kubelet-worker
+    aliases: [ami-kubelet-alias]
+    dockerImage: example/kubelet-worker:1
+    name: kubelet-worker
+    description: Linux guest with kubelet and cluster bootstrap support
+    architecture: arm64
+    creationDate: '2026-01-01T00:00:00.000Z'
+    guestRuntime: systemd
+    kubeletRegistersNode: true
+```
+
+With this capability, Floci tracks the instance's cluster join and notifies join
+listeners, but does not create a synthetic Kubernetes Node or patch its capacity,
+allocatable resources or Ready condition. The same rule applies when joined nodes
+are replayed after cluster recreation or process restart. Both the image ID and its
+aliases use the capability. Keep the configured catalog available across restarts.
+Omitting the field, setting it to `false`, or using an unknown image ID preserves
+simulated Node registration. No bundled image opts in automatically.
+
+This setting does not install, start or authenticate kubelet, or set up worker
+networking. The image and its bootstrap configuration must do that. If kubelet
+fails to join, Floci will not synthesize a Ready Node to hide the failure.
 
 ### Public IPv4 addresses
 

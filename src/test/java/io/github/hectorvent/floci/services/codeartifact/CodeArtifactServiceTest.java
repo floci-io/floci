@@ -16,10 +16,18 @@ import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactDomain
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
 import io.github.hectorvent.floci.services.codeartifact.model.PackageOriginConfig;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
+import java.io.ByteArrayOutputStream;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -38,6 +46,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,6 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -58,6 +69,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -481,6 +493,240 @@ class CodeArtifactServiceTest {
         assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void nugetPushFinishingAfterRepositoryRecreationDoesNotChargeTheNewRepository() throws Exception {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("nuget");
+        String token = service.getAuthorizationToken(REGION, "dom", null, null).token();
+        HttpHeaders headers = mock(HttpHeaders.class);
+        when(headers.getHeaderString(HttpHeaders.AUTHORIZATION)).thenReturn("Bearer " + token);
+        when(headers.getHeaderString(HttpHeaders.CONTENT_TYPE))
+                .thenReturn("multipart/form-data; boundary=boundary123");
+        when(bagetterClient.ensureReady(oldId, null)).thenReturn("http://127.0.0.1:1234");
+        when(bagetterClient.lockFor(oldId)).thenReturn(new Object());
+
+        HttpClient http = mock(HttpClient.class);
+        HttpResponse<byte[]> absent = mock(HttpResponse.class);
+        when(absent.statusCode()).thenReturn(404);
+        HttpResponse<Void> published = mock(HttpResponse.class);
+        when(published.statusCode()).thenReturn(201);
+        when(http.send(any(HttpRequest.class), any(HttpResponse.BodyHandler.class))).thenAnswer(call -> {
+            HttpRequest request = call.getArgument(0);
+            if (!"PUT".equals(request.method())) {
+                return absent;
+            }
+            service.deleteRepository(REGION, "dom", null, "repo");
+            CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                    Map.of());
+            assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
+            return published;
+        });
+        CodeArtifactNuGetController controller = new CodeArtifactNuGetController(service, bagetterClient,
+                mock(CodeArtifactNuGetExternalConnectionImporter.class), http);
+
+        byte[] packageBytes;
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream(); ZipOutputStream zip =
+                     new ZipOutputStream(output)) {
+            zip.putNextEntry(new ZipEntry("demo.nuspec"));
+            zip.write(("<?xml version=\"1.0\"?><package><metadata><id>demo</id><version>1.0.0</version>"
+                    + "<authors>floci</authors><description>test</description></metadata></package>")
+                    .getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+            zip.finish();
+            packageBytes = output.toByteArray();
+        }
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.writeBytes(("--boundary123\r\nContent-Disposition: form-data; name=\"package\"; "
+                + "filename=\"demo.nupkg\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+                .getBytes(StandardCharsets.UTF_8));
+        body.writeBytes(packageBytes);
+        body.writeBytes("\r\n--boundary123--\r\n".getBytes(StandardCharsets.UTF_8));
+
+        Response response = controller.push(headers, "dom", "repo", body.toByteArray());
+
+        assertEquals(201, response.getStatus());
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void pypiUploadFinishingAfterRepositoryRecreationDoesNotChangeTheNewRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("pypi");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "pypi", null,
+                "demo");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "pypi", null,
+                "demo", "1.0.0");
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String newId = replacement.getSidecarContainerIds().get("pypi");
+        assertNotEquals(oldId, newId);
+        recordBytes("dom", "repo", "pypi", null, "demo", 13L);
+        recordReadme("dom", "repo", "pypi", null, "demo", "1.0.0", "new readme");
+        when(pypiserverClient.listPackageVersions(newId, "dom", "repo", null, "demo"))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "pypi", null, "demo", List.of("1.0.0"),
+                null, null, "Unlisted");
+        String newRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(REGION, "dom", null,
+                "repo", "pypi", null, "demo", "1.0.0");
+
+        service.completeContainerBackedPublishIfCurrentRepository(REGION, "dom", null, "repo", oldId, "pypi",
+                "demo", "1.0.0", 999L, packageFence, newRevision, "old readme", versionFence);
+
+        assertEquals(13L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+        assertEquals("new readme", service.getPackageVersionReadme(REGION, "dom", null, "repo", "pypi", null,
+                "demo", "1.0.0").readme());
+        assertEquals(Map.of("1.0.0", "Unlisted"),
+                service.containerBackedOverriddenVersionStatusesByRepository(REGION, "dom", null, "repo", "pypi")
+                        .get("demo"));
+    }
+
+    @Test
+    void pypiUploadCompletesBookkeepingForItsCurrentRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("pypi");
+        when(pypiserverClient.listPackageVersions(repoId, "dom", "repo", null, "demo"))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "pypi", null, "demo", List.of("1.0.0"),
+                null, null, "Unlisted");
+        String beforeRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(REGION, "dom", null,
+                "repo", "pypi", null, "demo", "1.0.0");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "pypi", null,
+                "demo");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "pypi", null,
+                "demo", "1.0.0");
+
+        service.completeContainerBackedPublishIfCurrentRepository(REGION, "dom", null, "repo", repoId, "pypi",
+                "demo", "1.0.0", 37L, packageFence, beforeRevision, "published readme", versionFence);
+
+        assertEquals(37L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+        assertEquals("published readme", service.getPackageVersionReadme(REGION, "dom", null, "repo", "pypi", null,
+                "demo", "1.0.0").readme());
+        assertEquals(Map.of(), service.containerBackedOverridesForPackage(ACCOUNT_ID, REGION, "dom", "repo", "pypi",
+                null, "demo"));
+    }
+
+    @Test
+    void nugetPushCompletesBookkeepingForItsCurrentRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        when(bagetterClient.listPackageVersions(repoId, "dom", "repo", null, "demo"))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+        service.updatePackageVersionsStatus(REGION, "dom", null, "repo", "nuget", null, "demo", List.of("1.0.0"),
+                null, null, "Unlisted");
+        String beforeRevision = service.requireContainerBackedVersionNotArchivedOrDisposed(REGION, "dom", null,
+                "repo", "nuget", null, "demo", "1.0.0");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo");
+
+        service.completeContainerBackedPublishIfCurrentRepository(REGION, "dom", null, "repo", repoId, "nuget",
+                "demo", "1.0.0", 29L, packageFence, beforeRevision, null, 0L);
+
+        assertEquals(29L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+        assertEquals(Map.of(), service.containerBackedOverridesForPackage(ACCOUNT_ID, REGION, "dom", "repo", "nuget",
+                null, "demo"));
+    }
+
+    @Test
+    void publishWithMissingSidecarGenerationDoesNotChargeRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository repository = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        repository.setSidecarContainerIds(Map.of());
+        long nugetFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo");
+        long pypiFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "pypi", null,
+                "demo");
+
+        service.completeContainerBackedPublishIfCurrentRepository(REGION, "dom", null, "repo", null, "nuget",
+                "demo", "1.0.0", 17L, nugetFence, null, null, 0L);
+        service.completeContainerBackedPublishIfCurrentRepository(REGION, "dom", null, "repo", null, "pypi",
+                "demo", "1.0.0", 23L, pypiFence, null, "readme", 0L);
+
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void oldNugetRetentionClaimCannotWriteAfterRepositoryRecreation() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("nuget");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo", "1.0.0");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome oldClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", packageFence);
+        assertTrue(oldClaim.claimed());
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
+        CodeArtifactService.RetainedVersionOriginClaimOutcome newClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", packageFence);
+        assertTrue(newClaim.claimed());
+        assertNotEquals(oldClaim.episodeId(), newClaim.episodeId());
+
+        AtomicBoolean wroteOldAsset = new AtomicBoolean();
+        CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", versionFence, packageFence,
+                oldClaim.episodeId(), oldId, "demo.1.0.0.nupkg", new byte[] {1},
+                () -> wroteOldAsset.set(true));
+
+        assertFalse(result.fenceMatched());
+        assertFalse(wroteOldAsset.get());
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void nugetRetentionUsingOldSidecarIdCannotWriteWithANewRepositoryClaim() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("nuget");
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
+                "demo", "1.0.0");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome newClaim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", "public:nuget.org", packageFence);
+        assertTrue(newClaim.claimed());
+
+        AtomicBoolean wroteOldAsset = new AtomicBoolean();
+        CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "nuget", null, "demo", "1.0.0", versionFence, packageFence,
+                newClaim.episodeId(), oldId, "demo.1.0.0.nupkg", new byte[] {1},
+                () -> wroteOldAsset.set(true));
+
+        assertFalse(result.fenceMatched());
+        assertFalse(wroteOldAsset.get());
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void listNugetPackageVersionsPropagatesInvalidLeaseCompletion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        when(bagetterClient.listPackageVersions(repoId, "dom", "repo", null, "demo"))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", null)));
+        when(bagetterClient.preferredDisplayVersion(repoId, "dom", "repo", null, "demo"))
+                .thenReturn(Optional.empty());
+        IllegalStateException invalidLease = new IllegalStateException("No active BaGetter sidecar use");
+        doThrow(invalidLease).when(bagetterClient).endUse(repoId);
+
+        assertSame(invalidLease, assertThrows(IllegalStateException.class, () -> service.listPackageVersions(
+                REGION, "dom", null, "repo", "nuget", null, "demo", null, null, null, null, null)));
+    }
+
     /**
      * The same window, but for {@code DeletePackage} instead of {@code DeleteRepository}: the
      * repository stays alive, only the package underneath it is gone, so a resurrected entry
@@ -838,6 +1084,75 @@ class CodeArtifactServiceTest {
         PublishPackageVersionResult published = service.publishPackageVersion(REGION, "dom", null, "repo", "generic",
                 "ns", "my-pkg", "1.0.0", "a.txt", Digests.sha256Hex(content), "false", content);
         assertEquals("Published", published.packageVersion().getStatus());
+    }
+
+    /**
+     * The check each native publish path (mvn deploy, npm publish, twine upload, dotnet nuget
+     * push) runs before its sidecar write: refused exactly while the package's origin
+     * configuration says publish:BLOCK, the same rule publishPackageVersion applies to generic.
+     */
+    @Test
+    void containerBackedPackagePublishIsRefusedOnlyWhilePublishIsBlocked() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                "BLOCK", "ALLOW");
+        AwsException blocked = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                        "widget"));
+        assertEquals("ConflictException", blocked.getErrorCode());
+        // Scoped to that one package: a sibling in the same namespace still publishes.
+        service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                "other");
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                "ALLOW", "ALLOW");
+        service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+    }
+
+    /**
+     * pypi and nuget names are case/punctuation insensitive, and PutPackageOriginConfiguration
+     * keys by the normalized spelling, so a restriction set under one spelling must block a
+     * publish that names the package under another (twine sends the name as typed in the
+     * project metadata, the nuget controller lowercases the nuspec id).
+     */
+    @Test
+    void containerBackedPackagePublishBlockMatchesAnyNormalizedSpellingOfTheName() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "My_Pkg", "BLOCK",
+                "BLOCK");
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "nuget", null, "Demo.Package", "BLOCK",
+                "BLOCK");
+
+        assertThrows(AwsException.class, () -> service.requireContainerBackedPackagePublishAllowed(REGION, "dom",
+                null, "repo", "pypi", null, "my-pkg"));
+        assertThrows(AwsException.class, () -> service.requireContainerBackedPackagePublishAllowed(REGION, "dom",
+                null, "repo", "nuget", null, "demo.package"));
+    }
+
+    /**
+     * A package first retained from an external connection defaults to publish:BLOCK (the User
+     * Guide's "Default package origin control settings"), so a later direct publish of it is
+     * refused without anyone calling PutPackageOriginConfiguration.
+     */
+    @Test
+    void containerBackedPackagePublishIsRefusedForAPackageFirstRetainedFromAnExternalConnection() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", "scope",
+                "left-pad");
+        service.ensureRetainedPackageOriginDefault(REGION, "dom", null, "repo", "npm", "scope", "left-pad", fence);
+
+        AwsException blocked = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "npm", "scope",
+                        "left-pad"));
+        assertEquals("ConflictException", blocked.getErrorCode());
     }
 
     @Test
@@ -2020,6 +2335,57 @@ class CodeArtifactServiceTest {
         AwsException e = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
                 "maven", "com.example", "widget"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void nugetImportFinishingAfterRepositoryRecreationDoesNotBlockPublishingToTheNewRepository() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = original.getSidecarContainerIds().get("nuget");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "widget");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "nuget", null,
+                "widget", "1.0.0");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome claim = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "widget", "1.0.0", "public:nuget-org", packageFence);
+        AtomicBoolean wroteOldAsset = new AtomicBoolean();
+
+        CodeArtifactService.AssetRetentionAttemptResult retained = service.retainAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "nuget", null, "widget", "1.0.0", versionFence, packageFence,
+                claim.episodeId(), oldId, "widget.1.0.0.nupkg", new byte[] {1},
+                () -> wroteOldAsset.set(true));
+        assertTrue(retained.fenceMatched());
+        assertTrue(retained.wroteNewContent());
+        assertTrue(wroteOldAsset.get());
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        assertNotEquals(oldId, replacement.getSidecarContainerIds().get("nuget"));
+
+        service.ensureRetainedPackageOriginDefaultIfCurrentRepository(REGION, "dom", null, "repo", "nuget", null,
+                "widget", packageFence, oldId);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
+                "nuget", null, "widget"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void nugetImportSetsTheDefaultWhileItsRepositoryIsCurrent() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "widget");
+
+        service.ensureRetainedPackageOriginDefaultIfCurrentRepository(REGION, "dom", null, "repo", "nuget", null,
+                "widget", fence, repoId);
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "nuget", null, "widget");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
     }
 
     @Test
@@ -4421,6 +4787,29 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void getNugetReadmeBracketsTheSidecarCallAndReleasesOnFailure() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        when(bagetterClient.fetchPackageVersionReadme(repoId, "dom", "repo", null, "my-pkg", "1.0.0"))
+                .thenReturn(Optional.of("# readme"))
+                .thenThrow(new IllegalStateException("sidecar unavailable"));
+
+        assertEquals("# readme", service.getPackageVersionReadme(REGION, "dom", null, "repo", "nuget", null,
+                "my-pkg", "1.0.0").readme());
+        assertThrows(IllegalStateException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
+                "repo", "nuget", null, "my-pkg", "1.0.0"));
+
+        InOrder order = inOrder(bagetterClient);
+        order.verify(bagetterClient).beginUse(repoId);
+        order.verify(bagetterClient).fetchPackageVersionReadme(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(bagetterClient).endUse(repoId);
+        order.verify(bagetterClient).beginUse(repoId);
+        order.verify(bagetterClient).fetchPackageVersionReadme(repoId, "dom", "repo", null, "my-pkg", "1.0.0");
+        order.verify(bagetterClient).endUse(repoId);
+    }
+
+    @Test
     void listPackageVersionAssetsKeepsUseThroughFetchingThePage() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
@@ -6125,6 +6514,36 @@ class CodeArtifactServiceTest {
         assertEquals(3, result.packages().stream().filter(p -> "my-pkg".equals(p.packageName())).count());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void listPackagesDoesNotRescanOriginKeysForUnconfiguredPackages(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService listingService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                origins, regionResolver, mock(EmulatorConfig.class), true, null,
+                new CodeArtifactSidecarRegistry(List.of(pypiserverClient, bagetterClient)));
+        listingService.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository repository = listingService.createRepository(REGION, "dom", null, "repo",
+                null, null, Map.of());
+        origins.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::" + format + "::::configured",
+                new PackageOriginConfig("BLOCK", "ALLOW", format, null, "configured"));
+        RepositorySidecarManager manager = "nuget".equals(format) ? bagetterClient : pypiserverClient;
+        when(manager.listPackages(eq(repository.getSidecarContainerIds().get(format)), eq("dom"), eq("repo")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageIdentifier(null, "first"),
+                        new RepositorySidecarManager.PackageIdentifier(null, "second")));
+        clearInvocations(origins);
+
+        CodeArtifactService.ListPackagesResult result = listingService.listPackages(REGION, "dom", null, "repo",
+                format, null, null, null, null, null, null);
+
+        assertEquals(3, result.packages().size());
+        assertEquals(2, result.packages().stream().filter(entry -> "ALLOW".equals(entry.publishRestriction())
+                && "BLOCK".equals(entry.upstreamRestriction())).count());
+        assertTrue(result.packages().stream().anyMatch(entry -> "configured".equals(entry.packageName())
+                && "BLOCK".equals(entry.publishRestriction()) && "ALLOW".equals(entry.upstreamRestriction())));
+        verify(origins, times(1)).keysForAccount(ACCOUNT_ID);
+    }
+
     @Test
     void listPackagesFormatFilterOnlyTouchesThatOneFormatsSidecar() {
         service.createDomain(REGION, "dom", null, Map.of());
@@ -6692,4 +7111,271 @@ class CodeArtifactServiceTest {
                 "my-pkg", "1.0.0");
         assertEquals(assetCount, pv.getAssets().size());
     }
+
+    @Test
+    void legacyNugetOriginRestrictionRemainsEffective() {
+        assertLegacyRestriction("nuget", "Newtonsoft.Json", "newtonsoft.json");
+    }
+
+    @Test
+    void legacyPypiOriginRestrictionRemainsEffective() {
+        assertLegacyRestriction("pypi", "My_Proj", "my-proj");
+    }
+
+    private void assertLegacyRestriction(String format, String original, String normalized) {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String legacyKey = REGION + "::dom::repo::" + format + "::::" + original;
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, legacyKey,
+                new PackageOriginConfig("BLOCK", "BLOCK", format, null, original));
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized));
+    }
+
+    @Test
+    void normalizedNugetOriginRestrictionControl() {
+        assertNormalizedRestriction("nuget", "Newtonsoft.Json", "newtonsoft.json");
+    }
+
+    @Test
+    void normalizedPypiOriginRestrictionControl() {
+        assertNormalizedRestriction("pypi", "My_Proj", "my-proj");
+    }
+
+    private void assertNormalizedRestriction(String format, String original, String normalized) {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", format, null, original, "BLOCK", "BLOCK");
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, normalized));
+    }
+    @Test
+    void readingLegacyOriginConfigMigratesItBeforeRemovingTheOldKey() {
+        assertLegacyRestriction("nuget", "Newtonsoft.Json", "newtonsoft.json");
+        assertTrue(packageOriginConfigStore.getForAccount(ACCOUNT_ID,
+                REGION + "::dom::repo::nuget::::Newtonsoft.Json").isEmpty());
+        assertTrue(packageOriginConfigStore.getForAccount(ACCOUNT_ID,
+                REGION + "::dom::repo::nuget::::newtonsoft.json").isPresent());
+        assertEquals("BLOCK", service.describePackage(REGION, "dom", null, "repo", "nuget", null,
+                "NEWTONSOFT.JSON").publishRestriction());
+        assertThrows(AwsException.class, () -> service.requireContainerBackedPackagePublishAllowed(REGION,
+                "dom", null, "repo", "nuget", null, "NEWTONSOFT.JSON"));
+    }
+
+    @Test
+    void explicitOriginUpdateRetiresEveryLegacySpelling() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        for (String name : List.of("My_Proj", "MY.PROJ")) {
+            packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::" + name,
+                    new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, name));
+        }
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "my-proj",
+                "ALLOW", "ALLOW");
+        assertEquals(List.of(REGION + "::dom::repo::pypi::::my-proj"),
+                packageOriginConfigStore.keysForAccount(ACCOUNT_ID).stream().sorted().toList());
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "MY_PROJ"));
+    }
+
+    @Test
+    void accountMigrationPreservesOtherOwnersAndCoordinateBoundaries() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        PackageOriginConfig config = new PackageOriginConfig("BLOCK", "BLOCK", "nuget", null, "Newtonsoft.Json");
+        packageOriginConfigStore.putForAccount("999999999999", REGION + "::dom::repo::nuget::::Newtonsoft.Json", config);
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::other::nuget::::Newtonsoft.Json", config);
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, OTHER_REGION + "::dom::repo::nuget::::Newtonsoft.Json", config);
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "nuget", null, "newtonsoft.json"));
+        assertTrue(packageOriginConfigStore.getForAccount(ACCOUNT_ID,
+                REGION + "::dom::repo::nuget::::newtonsoft.json").isEmpty());
+        assertEquals(2, packageOriginConfigStore.keysForAccount(ACCOUNT_ID).size());
+        assertEquals(1, packageOriginConfigStore.keysForAccount("999999999999").size());
+    }
+
+    @Test
+    void conflictingLegacySpellingsPreserveBothBlocks() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::My_Proj",
+                new PackageOriginConfig("BLOCK", "ALLOW", "pypi", null, "My_Proj"));
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::MY.PROJ",
+                new PackageOriginConfig("ALLOW", "BLOCK", "pypi", null, "MY.PROJ"));
+        CodeArtifactService.PackageDescription description = service.describePackage(REGION, "dom", null, "repo",
+                "pypi", null, "my-proj");
+        assertEquals("BLOCK", description.publishRestriction());
+        assertEquals("BLOCK", description.upstreamRestriction());
+        assertEquals(1, packageOriginConfigStore.keysForAccount(ACCOUNT_ID).size());
+    }
+
+    @Test
+    void deletingCanonicalPackageAlsoRemovesLegacyOriginEntries() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::my-proj",
+                new PackageOriginConfig("ALLOW", "ALLOW", "pypi", null, "my-proj"));
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::My_Proj",
+                new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "MY_PROJ"));
+        service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-proj");
+        assertTrue(packageOriginConfigStore.keysForAccount(ACCOUNT_ID).isEmpty());
+        assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
+                "pypi", null, "MY_PROJ"));
+    }
+
+    @Test
+    void failedMigrationSavePreservesLegacyRestrictionsForRetry() {
+        AccountAwareStorageBackend<PackageOriginConfig> store = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService failingService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                store, regionResolver, mock(EmulatorConfig.class), true, null,
+                new CodeArtifactSidecarRegistry(List.of()));
+        failingService.createDomain(REGION, "dom", null, Map.of());
+        failingService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String legacyKey = REGION + "::dom::repo::nuget::::Newtonsoft.Json";
+        String canonicalKey = REGION + "::dom::repo::nuget::::newtonsoft.json";
+        store.putForAccount(ACCOUNT_ID, legacyKey,
+                new PackageOriginConfig("BLOCK", "BLOCK", "nuget", null, "Newtonsoft.Json"));
+        doThrow(new IllegalStateException("save failed")).when(store)
+                .putForAccount(eq(ACCOUNT_ID), eq(canonicalKey), any(PackageOriginConfig.class));
+        assertThrows(IllegalStateException.class, () -> failingService.isUpstreamRetentionBlocked(REGION,
+                "dom", null, "repo", "nuget", null, "newtonsoft.json"));
+        assertTrue(store.getForAccount(ACCOUNT_ID, legacyKey).isPresent());
+        assertTrue(store.getForAccount(ACCOUNT_ID, canonicalKey).isEmpty());
+        doAnswer(invocation -> invocation.callRealMethod()).when(store)
+                .putForAccount(eq(ACCOUNT_ID), eq(canonicalKey), any(PackageOriginConfig.class));
+        assertTrue(failingService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "nuget", null,
+                "newtonsoft.json"));
+        assertTrue(store.getForAccount(ACCOUNT_ID, legacyKey).isEmpty());
+        assertTrue(store.getForAccount(ACCOUNT_ID, canonicalKey).isPresent());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void ordinaryOriginLookupsMigrateAccountOnlyOnce(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        origins.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::" + format + "::::Legacy_Package",
+                new PackageOriginConfig("BLOCK", "BLOCK", format, null, "Legacy_Package"));
+        clearInvocations(origins);
+
+        for (String name : List.of("first", "second")) {
+            lookupService.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", format, null, name);
+            assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, name));
+            assertThrows(AwsException.class, () -> lookupService.describePackage(REGION, "dom", null, "repo",
+                    format, null, name));
+            lookupService.listPackages(REGION, "dom", null, "repo", format, null, null, null, null, null, null);
+        }
+        String normalized = "pypi".equals(format) ? "legacy-package" : "legacy_package";
+        assertEquals("BLOCK", lookupService.describePackage(REGION, "dom", null, "repo", format, null,
+                normalized).publishRestriction());
+        assertThrows(AwsException.class, () -> lookupService.requireContainerBackedPackagePublishAllowed(REGION,
+                "dom", null, "repo", format, null, normalized));
+        verify(origins, times(1)).keysForAccount(ACCOUNT_ID);
+    }
+
+    @Test
+    void accountMigrationRetriesFailedAliasDeletionBeforeCachingCompletion() {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        String legacy = REGION + "::dom::repo::pypi::::My_Proj";
+        String canonical = REGION + "::dom::repo::pypi::::my-proj";
+        origins.putForAccount(ACCOUNT_ID, legacy, new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
+        doThrow(new IllegalStateException("controlled delete failure")).when(origins).deleteForAccount(ACCOUNT_ID, legacy);
+        assertThrows(IllegalStateException.class, () -> lookupService.isUpstreamRetentionBlocked(REGION,
+                "dom", null, "repo", "pypi", null, "my-proj"));
+        assertTrue(origins.getForAccount(ACCOUNT_ID, canonical).isPresent());
+        assertTrue(origins.getForAccount(ACCOUNT_ID, legacy).isPresent());
+        doAnswer(invocation -> invocation.callRealMethod()).when(origins).deleteForAccount(ACCOUNT_ID, legacy);
+        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "my-proj"));
+        assertTrue(origins.getForAccount(ACCOUNT_ID, legacy).isEmpty());
+        lookupService.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "pypi", null, "new");
+        verify(origins, times(2)).keysForAccount(ACCOUNT_ID);
+    }
+
+    @Test
+    void clearingServiceResetsAccountMigration() {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "absent"));
+        lookupService.clear();
+        lookupService.createDomain(REGION, "dom", null, Map.of());
+        lookupService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        origins.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::My_Proj",
+                new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
+        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "my-proj"));
+        verify(origins, times(2)).keysForAccount(ACCOUNT_ID);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void firstOriginLookupDoesNotRewriteCanonicalRecords(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        for (String name : List.of("first", "second", "third")) {
+            origins.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::" + format + "::::" + name,
+                    new PackageOriginConfig("BLOCK", "ALLOW", format, null, name));
+        }
+        clearInvocations(origins);
+
+        assertEquals("BLOCK", lookupService.describePackage(REGION, "dom", null, "repo", format, null,
+                "first").publishRestriction());
+        assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, "second"));
+
+        verify(origins, never()).putForAccount(anyString(), anyString(), any(PackageOriginConfig.class));
+        verify(origins, never()).deleteForAccount(anyString(), anyString());
+        verify(origins, times(1)).keysForAccount(ACCOUNT_ID);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void canonicalOriginCoordinatesAreRepairedBeforeAliasRemoval(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        String canonical = REGION + "::dom::repo::" + format + "::::example";
+        String legacy = REGION + "::dom::repo::" + format + "::::EXAMPLE";
+        origins.putForAccount(ACCOUNT_ID, canonical, new PackageOriginConfig("ALLOW", "BLOCK", null, null, null));
+        origins.putForAccount(ACCOUNT_ID, legacy, new PackageOriginConfig("BLOCK", "ALLOW", format, null, "EXAMPLE"));
+        clearInvocations(origins);
+
+        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, "example"));
+
+        PackageOriginConfig repaired = origins.getForAccount(ACCOUNT_ID, canonical).orElseThrow();
+        assertEquals(format, repaired.getFormat());
+        assertNull(repaired.getNamespace());
+        assertEquals("example", repaired.getPackageName());
+        assertEquals("ALLOW", repaired.getPublishRestriction());
+        assertEquals("BLOCK", repaired.getUpstreamRestriction());
+        InOrder order = inOrder(origins);
+        order.verify(origins).putForAccount(ACCOUNT_ID, canonical, repaired);
+        order.verify(origins).deleteForAccount(ACCOUNT_ID, legacy);
+        verify(origins, times(1)).putForAccount(anyString(), anyString(), any(PackageOriginConfig.class));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void unchangedCanonicalOriginRemovesAliasesWithoutRewriting(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        String canonical = REGION + "::dom::repo::" + format + "::::example";
+        String legacy = REGION + "::dom::repo::" + format + "::::EXAMPLE";
+        origins.putForAccount(ACCOUNT_ID, canonical, new PackageOriginConfig("ALLOW", "BLOCK", format, null, "example"));
+        origins.putForAccount(ACCOUNT_ID, legacy, new PackageOriginConfig("BLOCK", "ALLOW", format, null, "EXAMPLE"));
+        clearInvocations(origins);
+
+        assertEquals("ALLOW", lookupService.describePackage(REGION, "dom", null, "repo", format, null,
+                "example").publishRestriction());
+        assertTrue(origins.getForAccount(ACCOUNT_ID, legacy).isEmpty());
+        assertEquals("BLOCK", origins.getForAccount(ACCOUNT_ID, canonical).orElseThrow().getUpstreamRestriction());
+        verify(origins, never()).putForAccount(anyString(), anyString(), any(PackageOriginConfig.class));
+        verify(origins).deleteForAccount(ACCOUNT_ID, legacy);
+    }
+
+    private CodeArtifactService originLookupService(AccountAwareStorageBackend<PackageOriginConfig> origins) {
+        CodeArtifactService lookupService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                origins, regionResolver, mock(EmulatorConfig.class), true, null,
+                new CodeArtifactSidecarRegistry(List.of()));
+        lookupService.createDomain(REGION, "dom", null, Map.of());
+        lookupService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        return lookupService;
+    }
+
 }

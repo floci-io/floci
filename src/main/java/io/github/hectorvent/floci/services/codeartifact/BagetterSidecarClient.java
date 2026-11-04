@@ -79,6 +79,21 @@ public class BagetterSidecarClient implements RepositorySidecarManager {
         manager.release(repositoryContainerId);
     }
 
+    @Override
+    public void registerRepository(String repositoryContainerId) {
+        manager.registerRepository(repositoryContainerId);
+    }
+
+    @Override
+    public void beginUse(String repositoryContainerId) {
+        manager.beginUse(repositoryContainerId);
+    }
+
+    @Override
+    public void endUse(String repositoryContainerId) {
+        manager.endUse(repositoryContainerId);
+    }
+
     /**
      * NuGet packages have no namespace (AWS: "Python, NuGet, Ruby, and Cargo package versions do
      * not contain a corresponding component") and exactly one real asset per version, the

@@ -19,6 +19,25 @@ class IamPolicyConditionMatchingTest {
     private final IamPolicyEvaluator evaluator = new IamPolicyEvaluator(new ObjectMapper());
 
     @ParameterizedTest
+    @CsvSource({"StringEquals,true,true,false", "ForAllValues:StringLikeIfExists,true,true,false",
+            "BinaryEquals,true,false,false", "ForAnyValue:BinaryEqualsIfExists,true,false,false",
+            "Null,true,true,false", "NullIfExists,true,false,true",
+            "ForAllValues:NullIfExists,true,false,true", "ForAllValues:Null,true,false,false",
+            "forallvalues:StringEquals,false,false,false", "ForAllValues:ForAnyValue:StringEquals,false,false,false",
+            "StringEqualsIfExistsIfExists,false,false,false", "Unknown,false,false,false"})
+    void knownOperatorNamesAndEvaluatedOperatorsUseTheSameModifierParser(String operator, boolean known,
+                                                                        boolean evaluated, boolean nullIfExists) {
+        assertEquals(known, IamPolicyEvaluator.isKnownConditionOperator(operator));
+        assertEquals(evaluated, IamPolicyEvaluator.isSupportedConditionOperator(operator));
+        assertEquals(nullIfExists, IamPolicyEvaluator.isNullConditionOperatorWithIfExists(operator));
+    }
+
+    @Test
+    void recognizingTheBinaryOperatorDoesNotMakeItsAllowStatementGrantPermission() {
+        assertEquals(Decision.DENY, decision("BinaryEquals", List.of("YQ=="), List.of("YQ==")));
+    }
+
+    @ParameterizedTest
     @CsvSource({
             "StringLike, home/Alice/*, home/Alice/notes, ALLOW",
             "StringLike, home/Alice/*, home/alice/notes, DENY",

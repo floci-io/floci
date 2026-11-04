@@ -8,7 +8,7 @@
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `CreateEventBus` | Create a custom event bus |
+| `CreateEventBus` | Create a custom event bus, with its description, KMS key, dead-letter config and log config |
 | `DeleteEventBus` | Delete an event bus |
 | `DescribeEventBus` | Get event bus details |
 | `UpdateEventBus` | Update event bus description, KMS key, dead-letter config, or log config |
