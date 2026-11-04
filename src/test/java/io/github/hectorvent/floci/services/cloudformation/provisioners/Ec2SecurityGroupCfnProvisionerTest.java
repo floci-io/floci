@@ -58,7 +58,8 @@ class Ec2SecurityGroupCfnProvisionerTest {
                 """), ctx(null));
 
         assertEquals("sg-1", r.getPhysicalId());
-        assertEquals(Set.of("GroupId", "Id", "VpcId"), r.getAttributes().keySet());
+        assertEquals(Set.of("GroupId", "Id", "VpcId", Ec2SecurityGroupCfnProvisioner.TAG_KEYS_ATTR),
+                r.getAttributes().keySet());
         assertEquals("sg-1", r.getAttributes().get("GroupId"));
         assertEquals("sg-1", r.getAttributes().get("Id"));
         assertEquals("vpc-1", r.getAttributes().get("VpcId"));
@@ -250,13 +251,15 @@ class Ec2SecurityGroupCfnProvisionerTest {
     }
 
     @Test
-    void updateRemovesAndReconcilesTags() throws Exception {
+    void updateRemovesOnlyTheTagKeysItOwns() throws Exception {
         when(ec2.describeSecurityGroups("us-east-1", List.of("sg-1"), List.of(), Map.of()))
                 .thenReturn(List.of(group("sg-1", "web", "web tier", "vpc-1")));
+        // team was added through EC2, outside the stack, so AWS keeps it.
         when(ec2.describeTags(eq("us-east-1"), any())).thenReturn(List.of(
-                tagEntry("sg-1", "env", "prod"), tagEntry("sg-1", "old", "stale")));
+                tagEntry("sg-1", "env", "prod"), tagEntry("sg-1", "old", "stale"), tagEntry("sg-1", "team", "core")));
         StackResource r = resource("WebSg");
         r.setPhysicalId("sg-1");
+        r.getAttributes().put(Ec2SecurityGroupCfnProvisioner.TAG_KEYS_ATTR, "[\"env\",\"old\"]");
 
         provisioner.provision(r, props("""
                 {"GroupName": "web", "GroupDescription": "web tier", "VpcId": "vpc-1",
@@ -268,6 +271,30 @@ class Ec2SecurityGroupCfnProvisionerTest {
         verify(ec2).deleteTags(eq("us-east-1"), eq(List.of("sg-1")), removed.capture());
         assertEquals(1, removed.getValue().size());
         assertEquals("old", removed.getValue().get(0).getKey());
+        assertEquals("[\"env\"]", r.getAttributes().get(Ec2SecurityGroupCfnProvisioner.TAG_KEYS_ATTR));
+    }
+
+    @Test
+    void aDeploymentWithoutTagsOwnsNoKeysEvenIfThePreviousTemplateNowResolvesSome() throws Exception {
+        when(ec2.describeSecurityGroups("us-east-1", List.of("sg-1"), List.of(), Map.of()))
+                .thenReturn(List.of(group("sg-1", "web", "web tier", "vpc-1")));
+        when(ec2.describeTags(eq("us-east-1"), any())).thenReturn(List.of(tagEntry("sg-1", "external", "x")));
+        StackResource r = resource("WebSg");
+        r.setPhysicalId("sg-1");
+        String untagged = """
+                {"GroupName": "web", "GroupDescription": "web tier", "VpcId": "vpc-1"}
+                """;
+        provisioner.provision(r, props(untagged), ctx("sg-1"));
+        assertEquals("[]", r.getAttributes().get(Ec2SecurityGroupCfnProvisioner.TAG_KEYS_ATTR));
+
+        // An Fn::If over the next update's conditions can make the previous Tags resolve to a key
+        // that deployment never wrote; the recorded empty set keeps it from being removed.
+        provisioner.provision(r, props(untagged), ctx("sg-1", props("""
+                {"GroupName": "web", "GroupDescription": "web tier", "VpcId": "vpc-1",
+                 "Tags": [{"Key": "external", "Value": "x"}]}
+                """)));
+
+        verify(ec2, never()).deleteTags(anyString(), anyList(), anyList());
     }
 
     @Test
