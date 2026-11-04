@@ -177,6 +177,33 @@ class LambdaCodeSigningConfigCfnProvisionerTest {
     }
 
     @Test
+    void configARollbackCouldNotDeleteIsDeletedByTheNextCleanup() {
+        when(configs.create(eq(REGION), eq(ACCOUNT), any(), any(), any())).thenReturn(stored());
+        when(lambda.listFunctionsByCodeSigningConfig(REGION, ACCOUNT, CSC_ARN, 1, null))
+                .thenReturn(new PaginatedResult<>(List.of("arn:aws:lambda:eu-west-1:000000000000:function:fn"), null))
+                .thenReturn(new PaginatedResult<>(List.of(), null));
+        StackResource r = config();
+        r.setPhysicalId("Csc-0a1b2c3d");
+        r.getAttributes().put("Arn", "arn:aws:stub:::Csc");
+        provisioner.provision(r, props(), ctx("Csc-0a1b2c3d"));
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(CSC_ARN, provisioner.updateCleanupPhysicalId(r));
+        assertTrue(provisioner.completeUpdate(r).complete());
+        verify(configs).delete(REGION, CSC_ARN);
+    }
+
+    @Test
+    void whitespaceDescriptionIsKept() {
+        when(configs.create(eq(REGION), eq(ACCOUNT), any(), any(), any())).thenReturn(stored());
+
+        provisioner.provision(config(), props().put("Description", "   "), ctx(null));
+
+        verify(configs).create(eq(REGION), eq(ACCOUNT), eq("   "), any(), any());
+    }
+
+    @Test
     void updateOfAStubFromBeforeThisProvisionerCreatesTheConfig() {
         when(configs.create(eq(REGION), eq(ACCOUNT), any(), any(), any())).thenReturn(stored());
         StackResource r = config();

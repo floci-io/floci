@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,7 +34,7 @@ class SignerCfnProvisionerTest {
             JsonNode node = inv.getArgument(0);
             return node == null || node.isMissingNode() ? null : node.asText();
         });
-        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         return new ProvisionContext(engine, "eu-west-1", "000000000000", "my-stack", priorPhysicalId);
     }
 
@@ -216,6 +217,38 @@ class SignerCfnProvisionerTest {
                 () -> provisioner.provision(profile(), props(null).put("PlatformId", "AWSIoT"), ctx(null)));
 
         assertEquals("ValidationError", e.getErrorCode());
+    }
+
+    @Test
+    void unknownValidityPeriodTypeIsRejected() {
+        ObjectNode props = props(null);
+        props.putObject("SignatureValidityPeriod").put("Type", "WEEKS").put("Value", 30);
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(profile(), props, ctx(null)));
+
+        assertEquals("ValidationError", e.getErrorCode());
+    }
+
+    @Test
+    void validityPeriodOutsideTheSignerLimitsIsRejected() {
+        for (String period : List.of("DAYS:0", "DAYS:4106", "MONTHS:136", "YEARS:12")) {
+            ObjectNode props = props(null);
+            props.putObject("SignatureValidityPeriod").put("Type", period.split(":")[0])
+                    .put("Value", Integer.parseInt(period.split(":")[1]));
+
+            AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(profile(), props, ctx(null)),
+                    period);
+
+            assertEquals("ValidationError", e.getErrorCode(), period);
+        }
+    }
+
+    @Test
+    void validityPeriodAtTheSignerLimitIsAccepted() {
+        ObjectNode props = props(null);
+        props.putObject("SignatureValidityPeriod").put("Type", "YEARS").put("Value", 11);
+
+        provisioner.provision(profile(), props, ctx(null));
     }
 
     @Test

@@ -13,6 +13,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -44,7 +45,7 @@ public class LambdaCodeSigningConfigCfnProvisioner implements CfnResourceProvisi
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         r.getAttributes().remove(CfnRollback.CODE_SIGNING_CONFIG_UPDATE_SNAPSHOT_ATTR);
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
-        String description = ctx.resolveOrDefault(props, "Description", "");
+        String description = Objects.requireNonNullElse(ctx.resolveOptional(props, "Description"), "");
         CodeSigningConfig.AllowedPublishers publishers = new CodeSigningConfig.AllowedPublishers();
         publishers.setSigningProfileVersionArns(ctx.resolveStringList(
                 ctx.engine().resolveNode(props.path("AllowedPublishers")), "SigningProfileVersionArns"));
@@ -65,6 +66,26 @@ public class LambdaCodeSigningConfigCfnProvisioner implements CfnResourceProvisi
         r.getAttributes().put("CodeSigningConfigArn", config.getCodeSigningConfigArn());
         r.getAttributes().put("CodeSigningConfigId", config.getCodeSigningConfigId());
         ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        ReplacementCleanup.clear(resource);
     }
 
     /** A stub migration deletes the config it created; an in-place update puts the prior settings back. */

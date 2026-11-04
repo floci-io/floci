@@ -28,6 +28,7 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
     private static final String TYPE = "AWS::Signer::SigningProfile";
     private static final List<String> PLATFORMS = List.of("AWSLambda-SHA384-ECDSA", "Notation-OCI-SHA384-ECDSA");
     private static final Pattern PROFILE_NAME = Pattern.compile("[0-9a-zA-Z_]{2,64}");
+    private static final Map<String, Integer> MAX_VALIDITY = Map.of("DAYS", 4105, "MONTHS", 135, "YEARS", 11);
     private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     /** The create-only properties the profile was minted from, so an update can tell whether it is replaced. */
     private static final String CREATE_ONLY_ATTR = "FlociSigningProfileCreateOnly";
@@ -50,7 +51,8 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationError",
                     TYPE + " ProfileName must be 2 to 64 characters from [0-9a-zA-Z_], got " + explicitName, 400);
         }
-        JsonNode period = ctx.engine().resolveNode(props.path("SignatureValidityPeriod"));
+        JsonNode period = ctx.engine().resolveNodeOmittingNoValue(props.path("SignatureValidityPeriod"));
+        validatePeriod(period);
         String createOnly = platformId + "|" + Objects.toString(explicitName, "") + "|"
                 + period.path("Type").asText() + "|" + period.path("Value").asText();
         if (!createOnly.equals(r.getAttributes().get(CREATE_ONLY_ATTR))) {
@@ -62,6 +64,26 @@ public class SignerCfnProvisioner implements CfnResourceProvisioner {
             mint(r, ctx, explicitName, createOnly);
         }
         ReplacementCleanup.record(r, ctx, attributesBefore);
+    }
+
+    /** Signer's limits on a validity period, with its messages: a known unit, above zero, at most the unit's cap. */
+    private static void validatePeriod(JsonNode period) {
+        String type = period.path("Type").asText(null);
+        if (type != null && !MAX_VALIDITY.containsKey(type)) {
+            throw new AwsException("ValidationError",
+                    TYPE + " SignatureValidityPeriod Type must be DAYS, MONTHS or YEARS, got " + type, 400);
+        }
+        if (!period.hasNonNull("Value")) {
+            return;
+        }
+        int value = period.get("Value").asInt();
+        if (value < 1) {
+            throw new AwsException("ValidationError", "Signature validity period value must be greater than 0.", 400);
+        }
+        if (type != null && value > MAX_VALIDITY.get(type)) {
+            throw new AwsException("ValidationError", "Signature validity period value for " + type
+                    + " must be less than or equal to " + MAX_VALIDITY.get(type), 400);
+        }
     }
 
     private static void mint(StackResource r, ProvisionContext ctx, String explicitName, String createOnly) {
