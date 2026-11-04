@@ -233,7 +233,7 @@ public class RedshiftParquetWriter {
                     // Internal staging cleanup does not use the external role.
                 });
             } catch (RuntimeException exception) {
-                LOG.debugv(exception, "Could not remove UNLOAD staging prefix {0}", root);
+                LOG.warnv(exception, "Could not remove UNLOAD staging prefix {0}", root);
             }
         }
     }
