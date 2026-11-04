@@ -18,8 +18,8 @@ final class TcpStreamBridge {
 
     static void relay(Socket client, Socket backend) {
         CountDownLatch directions = new CountDownLatch(2);
-        Thread.ofVirtual().start(() -> copy(client, backend, directions));
-        Thread.ofVirtual().start(() -> copy(backend, client, directions));
+        RelayThreads.start("rds-tcp-c2b", () -> copy(client, backend, directions));
+        RelayThreads.start("rds-tcp-b2c", () -> copy(backend, client, directions));
         try {
             directions.await();
         } catch (InterruptedException e) {

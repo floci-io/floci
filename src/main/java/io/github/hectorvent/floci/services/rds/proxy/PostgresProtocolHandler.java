@@ -1562,10 +1562,9 @@ public class PostgresProtocolHandler {
                 closeQuietly(backend);
             }
         };
-        Thread t1 = Thread.ofVirtual().name("rds-pg-c2b")
-                .start(() -> relay(clientIn, backendOut, closeBoth));
-        Thread t2 = Thread.ofVirtual().name("rds-pg-b2c")
-                .start(() -> relayToClient(backendIn, clientOut, session.iamRole(), closeBoth));
+        Thread t1 = RelayThreads.start("rds-pg-c2b", () -> relay(clientIn, backendOut, closeBoth));
+        Thread t2 = RelayThreads.start("rds-pg-b2c",
+                () -> relayToClient(backendIn, clientOut, session.iamRole(), closeBoth));
         try {
             t1.join();
             t2.join();
@@ -1585,7 +1584,7 @@ public class PostgresProtocolHandler {
         }
         BufferedOutputStream buffered = new BufferedOutputStream(to, 8192);
         try {
-            relayGuardingSessionRole(from, buffered, iamRole);
+            relayGuardingSessionRole(new RelayInputStream(from), buffered, iamRole);
         } catch (IOException e) {
             // Either side closing mid-relay is the normal way a session ends, so this stays at
             // debug: it is one line per connection teardown, not per message.
@@ -1605,7 +1604,7 @@ public class PostgresProtocolHandler {
      * Copies framed backend messages, stopping the session if PostgreSQL ever reports a
      * {@code session_authorization} other than {@code iamRole}.
      */
-    private static void relayGuardingSessionRole(InputStream from, OutputStream to, String iamRole)
+    private static void relayGuardingSessionRole(RelayInputStream from, OutputStream to, String iamRole)
             throws IOException {
         byte[] buf = new byte[8192];
         while (true) {
@@ -1652,7 +1651,7 @@ public class PostgresProtocolHandler {
             }
 
             // Batch while the backend keeps talking, flush as soon as it pauses.
-            if (from.available() == 0) {
+            if (from.isDrained()) {
                 to.flush();
             }
         }

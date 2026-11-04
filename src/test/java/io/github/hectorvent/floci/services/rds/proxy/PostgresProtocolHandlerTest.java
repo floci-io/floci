@@ -1456,6 +1456,81 @@ class PostgresProtocolHandlerTest {
     }
 
     @Test
+    void iamSessionIsTerminatedWhenAnotherSessionRoleFollowsABurstOfRows() throws Exception {
+        int rows = 2_000;
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            int backendPort = backendServer.getLocalPort();
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(),
+                            new AtomicReference<>(), "approle", true, (in, out) -> {
+                                answerRoleAdmission(in, out, "approle", true, true);
+                                readSimpleQuery(in);
+                                // One write, so the rows and the role switch reach the relay
+                                // together and are parsed out of its buffer, not off the socket.
+                                ByteArrayOutputStream burst = new ByteArrayOutputStream();
+                                DataOutputStream burstOut = new DataOutputStream(burst);
+                                for (int i = 0; i < rows; i++) {
+                                    writeDataRow(burstOut, Integer.toString(i));
+                                }
+                                writeCommandComplete(burstOut, "SELECT " + rows);
+                                writeParameterStatus(burstOut, "session_authorization", "masteruser");
+                                writeParameterStatus(burstOut, "is_superuser", "on");
+                                writeCommandComplete(burstOut, "RESET");
+                                writeReadyForQuery(burstOut);
+                                burst.writeTo(out);
+                                out.flush();
+                            });
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendPort);
+
+                Thread authThread = startIamAuth(proxyClient, backend);
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeStartup(clientOut, "approle", "postgres");
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, rdsToken("approle"));
+                readAuthenticationOk(clientIn);
+                readParametersUntilReadyForQuery(clientIn);
+
+                writeSimpleQuery(clientOut, "SELECT g FROM generate_series(0, 1999) g; RESET SESSION AUTHORIZATION");
+
+                for (int i = 0; i < rows; i++) {
+                    assertEquals('D', clientIn.readByte(), "row " + i + " must arrive whole and in order");
+                    byte[] row = clientIn.readNBytes(clientIn.readInt() - 4);
+                    String value = Integer.toString(i);
+                    assertEquals(value, new String(row, row.length - value.length(), value.length(),
+                            StandardCharsets.UTF_8));
+                }
+                assertEquals('C', clientIn.readByte());
+                clientIn.readNBytes(clientIn.readInt() - 4);
+                Map<Character, String> error = readErrorResponse(clientIn);
+                assertEquals("FATAL", error.get('S'));
+                assertEquals("42501", error.get('C'));
+                assertEquals("permission denied to set session authorization", error.get('M'));
+                assertEquals(-1, clientIn.read(), "session must be closed, not handed back as master");
+
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+            }
+        }
+    }
+
+    @Test
     void nonIamSessionRelaysSessionAuthorizationChanges() throws Exception {
         try (ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
