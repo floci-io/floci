@@ -266,11 +266,12 @@ role update replaces the stored value. Omitting the role on an existing
 cross-account event-bus target with the same ID and ARN retains its previous
 role, as documented by AWS.
 
-The value must be between 1 and 1600 characters when supplied. Floci stores
-the role as configuration; target delivery does not assume it. Only Redshift
-Data API targets check the role's trust and permissions (see
-[Redshift Data API Targets](#redshift-data-api-targets)); no other target
-enforces its role's IAM policies.
+The value must be between 1 and 1600 characters when supplied.
+[AppSync targets](#appsync-targets) always require an existing role that trusts
+EventBridge, including source-rule conditions, even with IAM enforcement off.
+With enforcement on, AppSync and [Redshift Data API targets](#redshift-data-api-targets)
+also check the role's permissions. Other target types store the role as
+configuration without assuming it or enforcing its IAM policies.
 
 ## API Destination Targets
 
@@ -351,7 +352,7 @@ aws events put-targets \
 - A retry uses the target's current definition, so `PutTargets` changes apply to pending retries, and a target removed with `RemoveTargets` stops being retried.
 - An accepted asynchronous Lambda invocation counts as delivered. A later function error is handled by Lambda's own retry and destination settings, not by the rule.
 - Pending retries are kept in memory and are dropped by an emulator reset or restart.
-- An `AWS::Events::Rule` target in a CloudFormation template keeps its `RetryPolicy`, `DeadLetterConfig`, `RoleArn` and `EcsParameters`, which reach the rule as `PutTargets` would set them. A value of another type than the resource schema declares for them fails the rule before it is created, with the message CloudFormation gives.
+- An `AWS::Events::Rule` target in a CloudFormation template keeps its `RetryPolicy`, `DeadLetterConfig`, `RoleArn`, `EcsParameters` and `AppSyncParameters`, which reach the rule as `PutTargets` would set them. A value of another type than the resource schema declares for them fails the rule before it is created, with the message CloudFormation gives.
 
 ## Current Behavior
 
