@@ -805,13 +805,7 @@ public class ElbV2QueryHandler {
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeListenerCertificatesResponse", AwsNamespaces.ELB_V2)
                 .start("DescribeListenerCertificatesResult");
-        if (!certs.isEmpty()) {
-            xml.start("Certificates");
-            for (String c : certs) {
-                xml.start("member").elem("CertificateArn", c).end("member");
-            }
-            xml.end("Certificates");
-        }
+        appendCertificates(xml, certs);
         xml.end("DescribeListenerCertificatesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeListenerCertificatesResponse");
@@ -884,13 +878,7 @@ public class ElbV2QueryHandler {
         if (l.getPort() != null) xml.elem("Port", String.valueOf(l.getPort()));
         xml.elem("Protocol", safe(l.getProtocol()));
         xml.elem("SslPolicy", safe(l.getSslPolicy()));
-        if (!l.getCertificates().isEmpty()) {
-            xml.start("Certificates");
-            for (String c : l.getCertificates()) {
-                xml.start("member").elem("CertificateArn", c).end("member");
-            }
-            xml.end("Certificates");
-        }
+        appendCertificates(xml, l.getCertificates());
         xml.start("DefaultActions");
         for (Action a : l.getDefaultActions()) {
             xml.start("member").raw(actionXml(a)).end("member");
@@ -902,6 +890,16 @@ public class ElbV2QueryHandler {
         }
         xml.end("AlpnPolicy");
         return xml.build();
+    }
+
+    private static void appendCertificates(XmlBuilder xml, List<String> certificates) {
+        if (!certificates.isEmpty()) {
+            xml.start("Certificates");
+            for (String certificate : certificates) {
+                xml.start("member").elem("CertificateArn", certificate).end("member");
+            }
+            xml.end("Certificates");
+        }
     }
 
     private String ruleXml(Rule r) {
