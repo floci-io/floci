@@ -2,7 +2,11 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient;
+import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.PlanResult;
+import io.github.hectorvent.floci.services.appsync.graphql.AppSyncTransportException;
 import io.github.hectorvent.floci.testing.AwsTestClients;
+import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -11,10 +15,12 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridge.model.AppSyncParameters;
 import software.amazon.awssdk.services.eventbridge.model.EventBridgeException;
 import software.amazon.awssdk.services.eventbridge.model.RuleState;
 import software.amazon.awssdk.services.eventbridge.model.Target;
 
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -23,6 +29,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.when;
 
 @QuarkusTest
 class EventBridgeAppSyncTargetSettingsIntegrationTest {
@@ -31,11 +42,15 @@ class EventBridgeAppSyncTargetSettingsIntegrationTest {
     private static final String ENDPOINT = "arn:aws:appsync:us-east-1:" + ACCOUNT + ":endpoints/graphql-api/example";
     private static final String ROLE = "arn:aws:iam::" + ACCOUNT + ":role/events-appsync";
     private static final String OPERATION = "mutation Publish($id: ID!) { publish(id: $id) { id } }";
+    @InjectMock
+    GraphqlSidecarClient sidecar;
     private EventBridgeClient client;
     private String rule;
 
     @BeforeEach
     void createRule() {
+        reset(sidecar);
+        when(sidecar.plan(any(), any(), any(), any())).thenReturn(new PlanResult("MUTATION", List.of()));
         client = client(ACCOUNT);
         rule = "appsync-settings-" + UUID.randomUUID();
         client.putRule(request -> request.name(rule).eventPattern("{}").state(RuleState.DISABLED));
@@ -93,8 +108,53 @@ class EventBridgeAppSyncTargetSettingsIntegrationTest {
         assertNotNull(listedTarget().appSyncParameters());
         assertEquals(replacement, listedTarget().appSyncParameters().graphQLOperation());
         client.putTargets(request -> request.rule(rule).targets(Target.builder().id("appsync")
-                .arn(ENDPOINT).roleArn(ROLE).build()));
+                .arn("arn:aws:sqs:us-east-1:" + ACCOUNT + ":queue").roleArn(ROLE).build()));
         assertNull(listedTarget().appSyncParameters());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "empty", "malformed", "query", "two mutations"})
+    void invalidAppSyncSettingsCannotReplaceStoredTargets(String scenario) {
+        putTarget(OPERATION);
+        Target original = listedTarget();
+        Target.Builder invalid = original.toBuilder().appSyncParameters((AppSyncParameters) null);
+        if ("empty".equals(scenario)) {
+            invalid.appSyncParameters(AppSyncParameters.builder().build());
+        } else if (!"missing".equals(scenario)) {
+            String operation = switch (scenario) {
+                case "malformed" -> "mutation SENSITIVE {";
+                case "query" -> "query SENSITIVE { publish { id } }";
+                default -> "mutation SENSITIVE { first } mutation Other { second }";
+            };
+            invalid.appSyncParameters(p -> p.graphQLOperation(operation));
+            if ("two mutations".equals(scenario)) {
+                when(sidecar.plan(any(), any(), eq(operation), isNull())).thenThrow(
+                        new AppSyncTransportException(400, "BadRequestException", "SENSITIVE ambiguous operation"));
+            } else {
+                when(sidecar.plan(any(), any(), eq(operation), isNull())).thenReturn(
+                        new PlanResult("query".equals(scenario) ? "QUERY" : null, List.of()));
+            }
+        }
+        EventBridgeException error = assertThrows(EventBridgeException.class,
+                () -> client.putTargets(request -> request.rule(rule).targets(
+                        original.toBuilder().id("bad").build(), invalid.build())));
+        assertEquals("ValidationException", error.awsErrorDetails().errorCode());
+        assertEquals(400, error.statusCode());
+        assertFalse(error.getMessage().contains("SENSITIVE"));
+        assertEquals(List.of(original), client.listTargetsByRule(request -> request.rule(rule)).targets());
+    }
+
+    @Test
+    void parserOutageDoesNotOverwriteTargetsOrBecomeAValidationError() {
+        putTarget(OPERATION);
+        Target original = listedTarget();
+        when(sidecar.plan(any(), any(), any(), any())).thenThrow(
+                new AppSyncTransportException(500, "InternalFailureException", "SENSITIVE transport failure"));
+        EventBridgeException error = assertThrows(EventBridgeException.class, () -> putTarget("mutation { replacement }"));
+        assertEquals("InternalFailure", error.awsErrorDetails().errorCode());
+        assertEquals(500, error.statusCode());
+        assertFalse(error.getMessage().contains("SENSITIVE"));
+        assertEquals(List.of(original), client.listTargetsByRule(request -> request.rule(rule)).targets());
     }
 
     @Test

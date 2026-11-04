@@ -84,6 +84,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private final TargetDispatcher dispatcher;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
     private final ReplayDispatcher replayDispatcher;
+    private final AppSyncTargetValidator appSyncTargetValidator;
 
     @Inject
     public EventBridgeService(StorageFactory storageFactory,
@@ -93,7 +94,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                               RuleScheduler ruleScheduler,
                               TargetDispatcher dispatcher,
                               ReplayDispatcher replayDispatcher,
-                              ResourceGroupsTaggingService resourceGroupsTaggingService) {
+                              ResourceGroupsTaggingService resourceGroupsTaggingService,
+                              AppSyncTargetValidator appSyncTargetValidator) {
         this(
                 storageFactory.create("eventbridge", "eventbridge-buses.json",
                         new TypeReference<Map<String, EventBus>>() {}),
@@ -112,7 +114,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 storageFactory.create("eventbridge", "eventbridge-api-destinations.json",
                         new TypeReference<Map<String, ApiDestination>>() {}),
                 regionResolver, objectMapper, ruleScheduler, dispatcher, replayDispatcher,
-                resourceGroupsTaggingService
+                resourceGroupsTaggingService, appSyncTargetValidator
         );
     }
 
@@ -129,7 +131,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                        RuleScheduler ruleScheduler,
                        TargetDispatcher dispatcher,
                        ReplayDispatcher replayDispatcher,
-                       ResourceGroupsTaggingService resourceGroupsTaggingService) {
+                       ResourceGroupsTaggingService resourceGroupsTaggingService,
+                       AppSyncTargetValidator appSyncTargetValidator) {
         this.busStore = busStore;
         this.ruleStore = ruleStore;
         this.targetStore = targetStore;
@@ -144,6 +147,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         this.dispatcher = dispatcher;
         this.replayDispatcher = replayDispatcher;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
+        this.appSyncTargetValidator = appSyncTargetValidator;
     }
 
     @PostConstruct
@@ -524,7 +528,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return arn.resource().startsWith("event-bus/") && AwsArnUtils.isForeignAccount(arn, accountId);
     }
 
-    private static void validateTargetSettings(List<Target> targets) {
+    private void validateTargetSettings(List<Target> targets) {
         for (int i = 0; i < targets.size(); i++) {
             Target target = targets.get(i);
             String operation = target.getAppSyncParameters() == null
@@ -573,6 +577,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             }
             validateTargetArn(target.getRoleArn(), "iam");
             validateTargetArn(arn, "sqs");
+            appSyncTargetValidator.validate(target);
         }
     }
 

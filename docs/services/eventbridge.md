@@ -181,8 +181,12 @@ aws events put-targets \
 The delivered input must be a JSON object containing the mutation's variables. `Input`,
 `InputPath`, and `InputTransformer` work as for other targets; with none, the full event is
 the variables object. `PutTargets`, `ListTargetsByRule`, persisted target settings, and
-`AWS::Events::Rule` preserve `AppSyncParameters.GraphQLOperation`. A provided operation
-must contain 1 to 1,048,576 characters; validation errors omit its sensitive contents.
+`AWS::Events::Rule` preserve `AppSyncParameters.GraphQLOperation`. Endpoint targets require
+these settings and a parsed document containing exactly one mutation operation, with 1 to
+1,048,576 characters. `PutTargets` validates the whole batch before storage, so a rejected
+replacement preserves the previous targets. Validation errors omit the operation's sensitive
+contents. Parsing uses the GraphQL sidecar and requires Docker; it does not require the target
+API to exist or validate its schema fields during `PutTargets`.
 
 With IAM enforcement enabled, the target role must exist and trust `events.amazonaws.com`,
 including any trust conditions on the rule's `aws:SourceArn` and `aws:SourceAccount`. Its

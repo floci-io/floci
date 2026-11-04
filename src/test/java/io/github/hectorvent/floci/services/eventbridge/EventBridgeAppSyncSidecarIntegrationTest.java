@@ -20,6 +20,8 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeValue;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridge.model.AppSyncParameters;
+import software.amazon.awssdk.services.eventbridge.model.EventBridgeException;
 import software.amazon.awssdk.services.eventbridge.model.InputTransformer;
 import software.amazon.awssdk.services.eventbridge.model.Target;
 import software.amazon.awssdk.services.sqs.SqsClient;
@@ -33,6 +35,7 @@ import java.util.UUID;
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Real SDK delivery through a CFN rule, GraphQL sidecar, resolver callback and DynamoDB. */
@@ -171,6 +174,39 @@ class EventBridgeAppSyncSidecarIntegrationTest {
         send("invalid");
         assertTrue(item("invalid").isEmpty());
         assertEquals("INVALID_PARAMETER", deadLetter().messageAttributes().get("ERROR_CODE").stringValue());
+    }
+
+    @Test
+    void realParserRejectsInvalidSettingsBeforeReplacingTheStoredTarget() {
+        Target original = events.listTargetsByRule(request -> request.rule(rule)).targets().getFirst();
+        List<Target> invalid = List.of(
+                original.toBuilder().appSyncParameters((AppSyncParameters) null).build(),
+                original.toBuilder().appSyncParameters(AppSyncParameters.builder().build()).build(),
+                original.toBuilder().appSyncParameters(p -> p.graphQLOperation("mutation {")).build(),
+                original.toBuilder().appSyncParameters(p -> p.graphQLOperation("query { unused }")).build(),
+                original.toBuilder().appSyncParameters(p -> p.graphQLOperation(
+                        "mutation First { one } mutation Second { two }")).build());
+        for (Target replacement : invalid) {
+            EventBridgeException error = assertThrows(EventBridgeException.class,
+                    () -> events.putTargets(request -> request.rule(rule).targets(replacement)));
+            assertEquals("ValidationException", error.awsErrorDetails().errorCode());
+            assertEquals(400, error.statusCode());
+            assertEquals(List.of(original), events.listTargetsByRule(request -> request.rule(rule)).targets());
+        }
+        String operation = """
+                # A keyword in a comment or string is not another operation.
+                mutation Publish { publish(id: "mutation { ignored }") { ...MessageFields } }
+                fragment MessageFields on Message { id }
+                """;
+        assertEquals(0, events.putTargets(request -> request.rule(rule).targets(original.toBuilder()
+                .appSyncParameters(p -> p.graphQLOperation(operation)).build())).failedEntryCount());
+        assertEquals(operation, events.listTargetsByRule(request -> request.rule(rule))
+                .targets().getFirst().appSyncParameters().graphQLOperation());
+        String maximum = OPERATION + "#" + "x".repeat(1048576 - OPERATION.length() - 1);
+        assertEquals(0, events.putTargets(request -> request.rule(rule).targets(original.toBuilder()
+                .appSyncParameters(p -> p.graphQLOperation(maximum)).build())).failedEntryCount());
+        assertEquals(maximum, events.listTargetsByRule(request -> request.rule(rule))
+                .targets().getFirst().appSyncParameters().graphQLOperation());
     }
 
     private void send(String id) {
