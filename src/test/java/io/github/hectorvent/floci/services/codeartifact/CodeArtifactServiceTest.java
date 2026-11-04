@@ -7075,7 +7075,7 @@ class CodeArtifactServiceTest {
     }
 
     @Test
-    void migrationDoesNotReadOtherOwnersRepositoriesOrRegions() {
+    void accountMigrationPreservesOtherOwnersAndCoordinateBoundaries() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         PackageOriginConfig config = new PackageOriginConfig("BLOCK", "BLOCK", "nuget", null, "Newtonsoft.Json");
@@ -7108,8 +7108,8 @@ class CodeArtifactServiceTest {
     void deletingCanonicalPackageAlsoRemovesLegacyOriginEntries() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
-        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "my-proj",
-                "ALLOW", "ALLOW");
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::my-proj",
+                new PackageOriginConfig("ALLOW", "ALLOW", "pypi", null, "my-proj"));
         packageOriginConfigStore.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::My_Proj",
                 new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
         assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "MY_PROJ"));
@@ -7144,6 +7144,73 @@ class CodeArtifactServiceTest {
                 "newtonsoft.json"));
         assertTrue(store.getForAccount(ACCOUNT_ID, legacyKey).isEmpty());
         assertTrue(store.getForAccount(ACCOUNT_ID, canonicalKey).isPresent());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"nuget", "pypi"})
+    void ordinaryOriginLookupsMigrateAccountOnlyOnce(String format) {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        origins.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::" + format + "::::Legacy_Package",
+                new PackageOriginConfig("BLOCK", "BLOCK", format, null, "Legacy_Package"));
+        clearInvocations(origins);
+
+        for (String name : List.of("first", "second")) {
+            lookupService.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", format, null, name);
+            assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", format, null, name));
+            assertThrows(AwsException.class, () -> lookupService.describePackage(REGION, "dom", null, "repo",
+                    format, null, name));
+            lookupService.listPackages(REGION, "dom", null, "repo", format, null, null, null, null, null, null);
+        }
+        String normalized = "pypi".equals(format) ? "legacy-package" : "legacy_package";
+        assertEquals("BLOCK", lookupService.describePackage(REGION, "dom", null, "repo", format, null,
+                normalized).publishRestriction());
+        assertThrows(AwsException.class, () -> lookupService.requireContainerBackedPackagePublishAllowed(REGION,
+                "dom", null, "repo", format, null, normalized));
+        verify(origins, times(1)).keysForAccount(ACCOUNT_ID);
+    }
+
+    @Test
+    void accountMigrationRetriesFailedAliasDeletionBeforeCachingCompletion() {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        String legacy = REGION + "::dom::repo::pypi::::My_Proj";
+        String canonical = REGION + "::dom::repo::pypi::::my-proj";
+        origins.putForAccount(ACCOUNT_ID, legacy, new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
+        doThrow(new IllegalStateException("controlled delete failure")).when(origins).deleteForAccount(ACCOUNT_ID, legacy);
+        assertThrows(IllegalStateException.class, () -> lookupService.isUpstreamRetentionBlocked(REGION,
+                "dom", null, "repo", "pypi", null, "my-proj"));
+        assertTrue(origins.getForAccount(ACCOUNT_ID, canonical).isPresent());
+        assertTrue(origins.getForAccount(ACCOUNT_ID, legacy).isPresent());
+        doAnswer(invocation -> invocation.callRealMethod()).when(origins).deleteForAccount(ACCOUNT_ID, legacy);
+        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "my-proj"));
+        assertTrue(origins.getForAccount(ACCOUNT_ID, legacy).isEmpty());
+        lookupService.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "pypi", null, "new");
+        verify(origins, times(2)).keysForAccount(ACCOUNT_ID);
+    }
+
+    @Test
+    void clearingServiceResetsAccountMigration() {
+        AccountAwareStorageBackend<PackageOriginConfig> origins = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+        CodeArtifactService lookupService = originLookupService(origins);
+        assertFalse(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "absent"));
+        lookupService.clear();
+        lookupService.createDomain(REGION, "dom", null, Map.of());
+        lookupService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        origins.putForAccount(ACCOUNT_ID, REGION + "::dom::repo::pypi::::My_Proj",
+                new PackageOriginConfig("BLOCK", "BLOCK", "pypi", null, "My_Proj"));
+        assertTrue(lookupService.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "pypi", null, "my-proj"));
+        verify(origins, times(2)).keysForAccount(ACCOUNT_ID);
+    }
+
+    private CodeArtifactService originLookupService(AccountAwareStorageBackend<PackageOriginConfig> origins) {
+        CodeArtifactService lookupService = new CodeArtifactService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                AccountAwareStorageBackend.inMemory(ACCOUNT_ID), AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
+                origins, regionResolver, mock(EmulatorConfig.class), true, null,
+                new CodeArtifactSidecarRegistry(List.of()));
+        lookupService.createDomain(REGION, "dom", null, Map.of());
+        lookupService.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        return lookupService;
     }
 
 }

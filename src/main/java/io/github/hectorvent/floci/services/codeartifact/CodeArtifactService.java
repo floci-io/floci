@@ -41,6 +41,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -194,6 +195,7 @@ public class CodeArtifactService implements Resettable {
     private final AccountAwareStorageBackend<CodeArtifactRepository> repositories;
     private final AccountAwareStorageBackend<CodeArtifactPackageVersion> packageVersions;
     private final AccountAwareStorageBackend<PackageOriginConfig> packageOriginConfigs;
+    private final Set<String> migratedOriginConfigAccounts = new HashSet<>();
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final CodeArtifactSidecarRegistry sidecarRegistry;
@@ -2634,16 +2636,7 @@ public class CodeArtifactService implements Resettable {
                         accountingPackageName(pv.getFormat(), pv.getPackageName())));
             }
         }
-        for (String storedKey : packageOriginConfigs.keysForAccount(owner)) {
-            for (String normalizedFormat : List.of("nuget", "pypi")) {
-                String prefix = originPrefix + normalizedFormat + "::::";
-                if (storedKey.startsWith(prefix)) {
-                    String normalizedKey = prefix + accountingPackageName(normalizedFormat,
-                            storedKey.substring(prefix.length()));
-                    packageOriginConfig(owner, normalizedKey, normalizedFormat);
-                }
-            }
-        }
+        migrateOriginConfigs(owner);
         for (PackageOriginConfig config : packageOriginConfigs.scanForAccount(owner,
                 k -> k.startsWith(originPrefix))) {
             if (config.getFormat() != null
@@ -2810,73 +2803,67 @@ public class CodeArtifactService implements Resettable {
     public record PackageDescription(String format, String namespace, String packageName,
                                      String publishRestriction, String upstreamRestriction) {}
 
-    private synchronized Optional<PackageOriginConfig> packageOriginConfig(String owner, String key, String format) {
-        Optional<PackageOriginConfig> canonical = packageOriginConfigs.getForAccount(owner, key);
-        if (canonical.isPresent()) {
-            PackageOriginConfig config = canonical.get();
-            if (("nuget".equals(format) || "pypi".equals(format))
-                    && (config.getFormat() == null || config.getPackageName() == null)) {
-                PackageOriginConfig repaired = originConfigWithCoordinates(config, key, format);
-                packageOriginConfigs.putForAccount(owner, key, repaired);
-                return Optional.of(repaired);
-            }
-            return canonical;
+    private Optional<PackageOriginConfig> packageOriginConfig(String owner, String key, String format) {
+        migrateOriginConfigs(owner);
+        return packageOriginConfigs.getForAccount(owner, key);
+    }
+
+    private synchronized void migrateOriginConfigs(String owner) {
+        if (migratedOriginConfigAccounts.contains(owner)) {
+            return;
         }
-        List<String> legacyKeys = legacyOriginConfigKeys(owner, key, format);
-        PackageOriginConfig migrated = null;
-        for (String legacyKey : legacyKeys) {
-            Optional<PackageOriginConfig> legacy = packageOriginConfigs.getForAccount(owner, legacyKey);
-            if (legacy.isEmpty()) {
+        Map<String, List<String>> aliasesByCanonicalKey = new LinkedHashMap<>();
+        for (String storedKey : packageOriginConfigs.keysForAccount(owner).stream().sorted().toList()) {
+            String[] parts = storedKey.split("::", -1);
+            if (parts.length != 6 || !parts[4].isEmpty()
+                    || (!"nuget".equals(parts[3]) && !"pypi".equals(parts[3]))) {
                 continue;
             }
-            PackageOriginConfig config = legacy.get();
-            if (migrated == null) {
-                migrated = originConfigWithCoordinates(config, key, format);
-            } else {
-                if ("BLOCK".equals(config.getPublishRestriction())) {
-                    migrated.setPublishRestriction("BLOCK");
+            String key = storedKey.substring(0, storedKey.lastIndexOf("::") + 2)
+                    + accountingPackageName(parts[3], parts[5]);
+            aliasesByCanonicalKey.computeIfAbsent(key, ignored -> new ArrayList<>()).add(storedKey);
+        }
+        for (Map.Entry<String, List<String>> entry : aliasesByCanonicalKey.entrySet()) {
+            String key = entry.getKey();
+            String format = key.split("::", -1)[3];
+            PackageOriginConfig canonical = packageOriginConfigs.getForAccount(owner, key).orElse(null);
+            PackageOriginConfig migrated = canonical == null ? null : originConfigWithCoordinates(canonical, key, format);
+            if (canonical == null) {
+                for (String legacyKey : entry.getValue()) {
+                    PackageOriginConfig legacy = packageOriginConfigs.getForAccount(owner, legacyKey).orElse(null);
+                    if (legacy == null) {
+                        continue;
+                    }
+                    if (migrated == null) {
+                        migrated = originConfigWithCoordinates(legacy, key, format);
+                    } else {
+                        if ("BLOCK".equals(legacy.getPublishRestriction())) {
+                            migrated.setPublishRestriction("BLOCK");
+                        }
+                        if ("BLOCK".equals(legacy.getUpstreamRestriction())) {
+                            migrated.setUpstreamRestriction("BLOCK");
+                        }
+                    }
                 }
-                if ("BLOCK".equals(config.getUpstreamRestriction())) {
-                    migrated.setUpstreamRestriction("BLOCK");
+            }
+            if (migrated == null) {
+                continue;
+            }
+            // Save before deleting aliases; a failed account pass remains eligible for retry.
+            packageOriginConfigs.putForAccount(owner, key, migrated);
+            for (String legacyKey : entry.getValue()) {
+                if (!legacyKey.equals(key)) {
+                    packageOriginConfigs.deleteForAccount(owner, legacyKey);
                 }
             }
         }
-        if (migrated == null) {
-            return Optional.empty();
-        }
-        // Write first so a failed save never discards the legacy restrictions.
-        packageOriginConfigs.putForAccount(owner, key, migrated);
-        for (String legacyKey : legacyKeys) {
-            packageOriginConfigs.deleteForAccount(owner, legacyKey);
-        }
-        return Optional.of(migrated);
+        migratedOriginConfigAccounts.add(owner);
     }
 
     private PackageOriginConfig originConfigWithCoordinates(PackageOriginConfig config, String key, String format) {
         String name = key.substring(key.lastIndexOf("::") + 2).replace("#b", "\\").replace("#c", ":");
         return new PackageOriginConfig(config.getPublishRestriction(), config.getUpstreamRestriction(),
                 format, null, name);
-    }
-
-    private List<String> legacyOriginConfigKeys(String owner, String key, String format) {
-        if (!"nuget".equals(format) && !"pypi".equals(format)) {
-            return List.of();
-        }
-        int packageOffset = key.lastIndexOf("::") + 2;
-        String prefix = key.substring(0, packageOffset);
-        String packageName = key.substring(packageOffset);
-        return packageOriginConfigs.keysForAccount(owner).stream()
-                .filter(candidate -> !candidate.equals(key) && candidate.startsWith(prefix))
-                .filter(candidate -> packageName.equals(accountingPackageName(format,
-                        candidate.substring(packageOffset))))
-                .sorted()
-                .toList();
-    }
-
-    private void deleteLegacyOriginConfigs(String owner, String key, String format) {
-        for (String legacyKey : legacyOriginConfigKeys(owner, key, format)) {
-            packageOriginConfigs.deleteForAccount(owner, legacyKey);
-        }
     }
 
     public PackageDescription describePackage(String region, String domain, String domainOwner, String repository,
@@ -2944,9 +2931,9 @@ public class CodeArtifactService implements Resettable {
         // same normalized spelling, so a restriction set under one casing is found under any other.
         String key = packageKey(region, domain, repository, format, namespace,
                 accountingPackageName(format, packageName));
+        migrateOriginConfigs(owner);
         packageOriginConfigs.putForAccount(owner, key, new PackageOriginConfig(publishRestriction,
                 upstreamRestriction, format, namespace, packageName));
-        deleteLegacyOriginConfigs(owner, key, format);
         return new PackageDescription(format, namespace, packageName, publishRestriction, upstreamRestriction);
     }
 
@@ -3632,7 +3619,7 @@ public class CodeArtifactService implements Resettable {
         // were actually in effect, not CodeArtifact's bare defaults. A later DescribePackage on the
         // same coordinates must 404 rather than finding a zero-version package the deleted config
         // left behind.
-        deleteLegacyOriginConfigs(owner, accountingKey, format);
+        migrateOriginConfigs(owner);
         packageOriginConfigs.deleteForAccount(owner, accountingKey);
         // Harmless no-op for generic (nothing is ever recorded there under this key; its bytes
         // live in packageVersions instead, already gone via the version-deleting branch above).
@@ -4809,7 +4796,10 @@ public class CodeArtifactService implements Resettable {
         domains.clear();
         repositories.clear();
         packageVersions.clear();
-        packageOriginConfigs.clear();
+        synchronized (this) {
+            packageOriginConfigs.clear();
+            migratedOriginConfigAccounts.clear();
+        }
         containerBackedAssetBytes.clear();
         containerBackedPackageDeletionFence.clear();
         containerBackedVersionDeletionFence.clear();
