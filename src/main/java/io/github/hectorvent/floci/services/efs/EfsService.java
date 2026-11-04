@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.efs;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SignedMarkers;
@@ -665,23 +666,9 @@ public class EfsService implements Resettable {
         if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 128)) {
             throw EfsException.badRequest("NextToken must be between 1 and 128 characters.");
         }
-        String after = nextToken == null ? null : pageMarkers.cursorOf(scope, nextToken);
-        if (nextToken != null && after == null) {
-            throw EfsException.badRequest("Invalid NextToken.");
-        }
-
-        List<T> sorted = items.stream().sorted(Comparator.comparing(cursorOf)).toList();
-        int start = 0;
-        while (after != null && start < sorted.size()
-                && cursorOf.apply(sorted.get(start)).compareTo(after) <= 0) {
-            start++;
-        }
         int limit = maxResults == null ? 100 : maxResults;
-        int end = (int) Math.min((long) start + limit, sorted.size());
-        List<T> result = sorted.subList(start, end);
-        String following = end < sorted.size()
-                ? pageMarkers.issue(scope, cursorOf.apply(sorted.get(end - 1))) : null;
-        return new PaginatedResult<>(result, following);
+        return Pagination.slice(items, cursorOf, limit, nextToken, pageMarkers, scope,
+                token -> EfsException.badRequest("Invalid NextToken."));
     }
 
     private String regionKey(String region, String id) {

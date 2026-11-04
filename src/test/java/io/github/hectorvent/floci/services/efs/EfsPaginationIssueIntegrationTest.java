@@ -34,27 +34,8 @@ class EfsPaginationIssueIntegrationTest {
 
     @Test
     void listTagsAndAccessPointsHonorMaxResults() {
-        String token = UUID.randomUUID().toString();
-        String fileSystemId = given()
-                .contentType("application/json")
-                .body("""
-                        {"CreationToken":"%s","Tags":[
-                          {"Key":"first","Value":"1"},
-                          {"Key":"second","Value":"2"}
-                        ]}
-                        """.formatted(token))
-                .post("/2015-02-01/file-systems")
-                .then().statusCode(201).extract().path("FileSystemId");
-
-        String[] accessPointIds = new String[2];
-        for (int i = 0; i < accessPointIds.length; i++) {
-            accessPointIds[i] = given()
-                    .contentType("application/json")
-                    .body("{" + "\"ClientToken\":\"" + token + "-" + i
-                            + "\",\"FileSystemId\":\"" + fileSystemId + "\"}")
-                    .post("/2015-02-01/access-points")
-                    .then().statusCode(200).extract().path("AccessPointId");
-        }
+        String fileSystemId = createFileSystem("first", "second");
+        String[] accessPointIds = createAccessPoints(fileSystemId);
 
         JsonPath tags = given()
                 .queryParam("MaxResults", 1)
@@ -123,16 +104,7 @@ class EfsPaginationIssueIntegrationTest {
     @Test
     void longTagKeyStillUsesABoundedToken() {
         String longKey = "a".repeat(128);
-        String fileSystemId = given()
-                .contentType("application/json")
-                .body("""
-                        {"CreationToken":"%s","Tags":[
-                          {"Key":"%s","Value":"1"},
-                          {"Key":"z","Value":"2"}
-                        ]}
-                        """.formatted(UUID.randomUUID(), longKey))
-                .post("/2015-02-01/file-systems")
-                .then().statusCode(201).extract().path("FileSystemId");
+        String fileSystemId = createFileSystem(longKey, "z");
 
         JsonPath first = given().queryParam("MaxResults", 1)
                 .get("/2015-02-01/resource-tags/" + fileSystemId)
@@ -153,25 +125,8 @@ class EfsPaginationIssueIntegrationTest {
 
     @Test
     void awsSdkReadsBothPages() {
-        String token = UUID.randomUUID().toString();
-        String fileSystemId = given()
-                .contentType("application/json")
-                .body("""
-                        {"CreationToken":"%s","Tags":[
-                          {"Key":"first","Value":"1"},
-                          {"Key":"second","Value":"2"}
-                        ]}
-                        """.formatted(token))
-                .post("/2015-02-01/file-systems")
-                .then().statusCode(201).extract().path("FileSystemId");
-        for (int i = 0; i < 2; i++) {
-            given().contentType("application/json")
-                    .body("""
-                            {"ClientToken":"%s","FileSystemId":"%s"}
-                            """.formatted(token + "-" + i, fileSystemId))
-                    .post("/2015-02-01/access-points")
-                    .then().statusCode(200);
-        }
+        String fileSystemId = createFileSystem("first", "second");
+        createAccessPoints(fileSystemId);
 
         try (EfsClient client = AwsTestClients.create(EfsClient.builder(), "000000000000", Region.US_EAST_1)) {
             ListTagsForResourceResponse firstTags = client.listTagsForResource(
@@ -211,5 +166,32 @@ class EfsPaginationIssueIntegrationTest {
                         request -> request.maxResults(1).nextToken(unfiltered.nextToken())));
             }
         }
+    }
+
+    private static String createFileSystem(String firstTagKey, String secondTagKey) {
+        return given()
+                .contentType("application/json")
+                .body("""
+                        {"CreationToken":"%s","Tags":[
+                          {"Key":"%s","Value":"1"},
+                          {"Key":"%s","Value":"2"}
+                        ]}
+                        """.formatted(UUID.randomUUID(), firstTagKey, secondTagKey))
+                .post("/2015-02-01/file-systems")
+                .then().statusCode(201).extract().path("FileSystemId");
+    }
+
+    private static String[] createAccessPoints(String fileSystemId) {
+        String token = UUID.randomUUID().toString();
+        String[] accessPointIds = new String[2];
+        for (int i = 0; i < accessPointIds.length; i++) {
+            accessPointIds[i] = given().contentType("application/json")
+                    .body("""
+                            {"ClientToken":"%s","FileSystemId":"%s"}
+                            """.formatted(token + "-" + i, fileSystemId))
+                    .post("/2015-02-01/access-points")
+                    .then().statusCode(200).extract().path("AccessPointId");
+        }
+        return accessPointIds;
     }
 }
