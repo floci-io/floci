@@ -728,12 +728,12 @@ row whose keys are all NULL, so that a table on the nullable side of an outer jo
 other predicate leaves every partition in. The query still runs unchanged on the rows loaded, so pruning
 never changes a result. Partitions loaded by one query stay for the next: a later query adds the ones it
 needs, reloads the ones whose objects or Glue entry changed and drops the ones Glue no longer lists.
+When two partitions hold key values that PostgreSQL casts to the same value, such as integer `1` and `01`,
+rows can no longer be told apart by partition, so a query on that table loads every partition and replaces
+the whole table when any of them changes.
 Pruning applies to the simple query protocol and the Data API. A session in a transaction block, and a client
 on the extended query protocol (the default of the PostgreSQL JDBC driver, unless `preferQueryMode=simple`),
-load every partition. In PostgreSQL a partitioned external table is a view of its declared columns over a
-backing table in the schema `floci_spectrum`, under a name made from the external schema and table, which
-records the partition each row came from, so `SELECT *` returns only the columns Glue declares. The Data API
-`ListSchemas` and `ListTables` do not list `floci_spectrum`.
+load every partition.
 
 Materialized relations are cached in the cluster database. Each new query checks the associated
 role, trust policy and S3 access before using cached data, following the existing S3 enforcement

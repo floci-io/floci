@@ -18,7 +18,6 @@ import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
-import io.github.hectorvent.floci.services.redshift.spectrum.ExternalTableMaterializer;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
@@ -1149,9 +1148,8 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         try (Connection c = connectionFactory.open(target);
              PreparedStatement ps = c.prepareStatement(
                      "SELECT schema_name FROM information_schema.schemata "
-                             + "WHERE schema_name LIKE ? AND schema_name <> ? ORDER BY schema_name")) {
+                             + "WHERE schema_name LIKE ? ORDER BY schema_name")) {
             ps.setString(1, pattern);
-            ps.setString(2, ExternalTableMaterializer.BACKING_SCHEMA);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     names.add(rs.getString(1));
@@ -1171,12 +1169,10 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
         try (Connection c = connectionFactory.open(target);
              PreparedStatement ps = c.prepareStatement(
                      "SELECT table_schema, table_name, table_type FROM information_schema.tables "
-                             + "WHERE table_schema LIKE ? AND table_name LIKE ? AND table_schema <> ? "
+                             + "WHERE table_schema LIKE ? AND table_name LIKE ? "
                              + "ORDER BY table_schema, table_name")) {
             ps.setString(1, schemaPattern);
             ps.setString(2, tablePattern);
-            // the tables behind the views of partitioned external tables are Floci's own, in a schema of their own
-            ps.setString(3, ExternalTableMaterializer.BACKING_SCHEMA);
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     ObjectNode t = objectMapper.createObjectNode();

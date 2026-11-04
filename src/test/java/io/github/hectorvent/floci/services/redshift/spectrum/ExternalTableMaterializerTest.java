@@ -63,7 +63,6 @@ import static org.mockito.Mockito.when;
 
 class ExternalTableMaterializerTest {
     private static final String ACCOUNT = "000000000000";
-    private static final String BACKING = ExternalTableMaterializer.backingTable("analytics", "events");
     private static final String EVENTS_FILE = "s3://bucket/events/p1.parquet";
     private static final ExternalSchemaBinding BINDING = new ExternalSchemaBinding(ACCOUNT, ACCOUNT + ":c",
             "dev", "analytics", "lake", "arn:aws:iam::000000000000:role/R");
@@ -962,7 +961,7 @@ class ExternalTableMaterializerTest {
                 release.countDown();
                 assertEquals(ExternalTableMaterializer.Outcome.LOADED, load.get(10, TimeUnit.SECONDS));
                 assertTrue(drop.get(10, TimeUnit.SECONDS));
-                assertEquals(ExternalTableMaterializer.dropRelationSql("analytics", "events", false, false), backend.statements.getLast());
+                assertEquals("DROP TABLE IF EXISTS \"analytics\".\"events\" RESTRICT", backend.statements.getLast());
                 assertEquals(ExternalTableMaterializer.Outcome.NOT_EXTERNAL,
                         materializer.ensureCurrent(backend, session(false), BINDING, "events"));
                 assertTrue(materializer.loadedTables(BINDING.clusterKey(), "dev", "analytics").isEmpty());
@@ -1134,86 +1133,6 @@ class ExternalTableMaterializerTest {
     }
 
     @Test
-    void exposesAPartitionedTableAsAViewOfTheDeclaredColumnsOnly() {
-        Table table = dayPartitionedTable();
-        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
-        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one));
-
-        materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL);
-
-        String load = backend.statements.getLast();
-        assertThat(load.startsWith("CREATE SCHEMA IF NOT EXISTS \"floci_spectrum\"; "), equalTo(true));
-        assertThat(load, containsString("CREATE TABLE " + BACKING + " (\"id\" integer, "
-                + "\"name\" text, \"day\" text, \"_floci_partition\" VARCHAR)"));
-        assertThat(load, containsString("CREATE OR REPLACE VIEW \"analytics\".\"events\" AS SELECT \"id\", \"name\", \"day\" "
-                + "FROM " + BACKING));
-        assertThat(load.substring(load.indexOf("CREATE OR REPLACE VIEW")), not(containsString("_floci_partition")));
-    }
-
-    @Test
-    void sendsEveryBatchAsPlainStatementsThatStartWithCreateOrDrop() {
-        Table table = dayPartitionedTable();
-        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
-        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one));
-        materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL);
-        table.setVersionId("2");
-        materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL);
-        when(glue.getTable("lake", "events")).thenReturn(csvTable());
-        when(glue.getPartitions("lake", "events")).thenReturn(List.of());
-        materializer.ensureCurrent(backend, session(false), BINDING, "events");
-
-        for (String statement : backend.statements) {
-            assertThat(statement, statement.startsWith("CREATE ") || statement.startsWith("DROP ")
-                    || statement.startsWith("COPY "), equalTo(true));
-            assertThat(statement, not(containsString("DO $")));
-        }
-    }
-
-    @Test
-    void keepsAnUnpartitionedTableAsAPlainTable() {
-        when(glue.getTable("lake", "events")).thenReturn(csvTable());
-
-        materializer.ensureCurrent(backend, session(false), BINDING, "events");
-
-        assertThat(backend.statements.getLast(), containsString("CREATE TABLE \"analytics\".\"events\""));
-        assertThat(backend.statements.getLast(), not(containsString("CREATE OR REPLACE VIEW")));
-        assertThat(backend.statements.getLast(), not(containsString("\"floci_spectrum\"")));
-    }
-
-    @Test
-    void dropsAViewAndItsBackingTableOrAPlainTableAsTheLastLoadMadeIt() {
-        String view = ExternalTableMaterializer.dropRelationSql("analytics", "ev\"ents", true, true);
-        String table = ExternalTableMaterializer.dropRelationSql("analytics", "ev\"ents", false, false);
-
-        assertThat(view, equalTo("DROP VIEW IF EXISTS \"analytics\".\"ev\"\"ents\" CASCADE; DROP TABLE IF EXISTS "
-                + ExternalTableMaterializer.backingTable("analytics", "ev\"ents") + " CASCADE"));
-        assertThat(table, equalTo("DROP TABLE IF EXISTS \"analytics\".\"ev\"\"ents\" RESTRICT"));
-    }
-
-    @Test
-    void keepsTheBackingTableOutOfTheUsersSchemaAndWithinTheIdentifierLimit() {
-        String backing = ExternalTableMaterializer.backingTable("analytics", "t".repeat(200));
-
-        assertThat(backing.startsWith("\"floci_spectrum\".\"t_"), equalTo(true));
-        assertThat(backing.substring(backing.indexOf('.') + 2, backing.length() - 1).length() <= 63, equalTo(true));
-        assertThat(backing, equalTo(ExternalTableMaterializer.backingTable("analytics", "t".repeat(200))));
-        assertThat(backing.equals(ExternalTableMaterializer.backingTable("other", "t".repeat(200))), equalTo(false));
-        assertThat(ExternalTableMaterializer.backingTable("analytics", "_floci_spectrum_events").equals(
-                ExternalTableMaterializer.backingTable("analytics", "events")), equalTo(false));
-    }
-
-    @Test
-    void leavesATableNamedLikeABackingTableAlone() {
-        Table table = csvTable();
-        table.setName("_floci_spectrum_events");
-        when(glue.getTable("lake", "_floci_spectrum_events")).thenReturn(table);
-
-        materializer.ensureCurrent(backend, session(false), BINDING, "_floci_spectrum_events");
-
-        assertThat(backend.statements.getLast(), containsString("CREATE TABLE \"analytics\".\"_floci_spectrum_events\""));
-    }
-
-    @Test
     void loadsOnlyThePartitionsTheWhereCanSelect() {
         Table table = dayPartitionedTable();
         Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
@@ -1243,7 +1162,7 @@ class ExternalTableMaterializerTest {
         List<String> added = backend.statements.subList(loaded, backend.statements.size());
         assertThat(added.stream().noneMatch(sql -> sql.contains("TRUNCATE") || sql.contains("DROP TABLE \"analytics\"")),
                 equalTo(true));
-        assertThat(added.stream().anyMatch(sql -> sql.contains("INSERT INTO " + BACKING + "")), equalTo(true));
+        assertThat(added.stream().anyMatch(sql -> sql.contains("INSERT INTO \"analytics\".\"events\"")), equalTo(true));
         assertThat(added.stream().noneMatch(sql -> sql.contains("DELETE FROM")), equalTo(true));
         assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", null),
                 equalTo(ExternalTableMaterializer.Outcome.CURRENT));
@@ -1266,8 +1185,7 @@ class ExternalTableMaterializerTest {
 
         List<String> changed = backend.statements.subList(loaded, backend.statements.size());
         assertThat(changed.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM " + BACKING + " WHERE \"_floci_partition\" = '"
-                        + ExternalTableMaterializer.partitionId(List.of("2026-01-01")) + "'")), equalTo(true));
+                "DELETE FROM \"analytics\".\"events\" WHERE (\"day\" = CAST('2026-01-01' AS text))")), equalTo(true));
         assertThat(changed.stream().noneMatch(sql -> sql.contains("2026-01-02")), equalTo(true));
         verify(duck, times(2)).execute(anyString(), any(), anyString(), eq(ACCOUNT));
     }
@@ -1287,8 +1205,7 @@ class ExternalTableMaterializerTest {
 
         List<String> dropped = backend.statements.subList(loaded, backend.statements.size());
         assertThat(dropped.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM " + BACKING + " WHERE \"_floci_partition\" = '"
-                        + ExternalTableMaterializer.partitionId(List.of("2026-01-02")) + "'")), equalTo(true));
+                "DELETE FROM \"analytics\".\"events\" WHERE (\"day\" = CAST('2026-01-02' AS text))")), equalTo(true));
     }
 
     @Test
@@ -1304,8 +1221,7 @@ class ExternalTableMaterializerTest {
         materializer.ensureCurrent(backend, session(false), BINDING, "events", null);
 
         assertThat(backend.statements.subList(loaded, backend.statements.size()).stream()
-                .anyMatch(sql -> sql.contains("WHERE \"_floci_partition\" = '"
-                        + ExternalTableMaterializer.partitionId(List.of("__HIVE_DEFAULT_PARTITION__")) + "'")), equalTo(true));
+                .anyMatch(sql -> sql.contains("WHERE (\"day\" IS NULL)")), equalTo(true));
     }
 
     @Test
@@ -1383,7 +1299,7 @@ class ExternalTableMaterializerTest {
     }
 
     @Test
-    void refreshingOnePartitionLeavesOtherPartitionsWhoseConvertedKeysOverlapIntact() {
+    void refreshingOnePartitionReloadsOtherPartitionsWhoseConvertedKeysOverlap() {
         Table table = csvTable();
         table.setPartitionKeys(List.of(new Column("day", "int")));
         when(glue.getTable("lake", "events")).thenReturn(table);
@@ -1403,17 +1319,14 @@ class ExternalTableMaterializerTest {
                 "SELECT * FROM analytics.events WHERE day = 1");
 
         verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
-                && !sql.contains("s3://bucket/zero-one/part-1.csv")), any(), anyString(), eq(ACCOUNT));
-        List<String> changed = backend.statements.subList(loaded, backend.statements.size());
-        assertThat(changed.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM " + BACKING + " WHERE \"_floci_partition\" = '"
-                        + ExternalTableMaterializer.partitionId(List.of("1")) + "'")), equalTo(true));
-        assertThat(changed.stream().noneMatch(sql -> sql.contains(
-                ExternalTableMaterializer.partitionId(List.of("01")))), equalTo(true));
+                && sql.contains("s3://bucket/zero-one/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+        List<String> replaced = backend.statements.subList(loaded, backend.statements.size());
+        assertThat(replaced.stream().anyMatch(sql -> sql.contains("TRUNCATE")), equalTo(true));
+        assertThat(replaced.stream().noneMatch(sql -> sql.contains("DELETE FROM")), equalTo(true));
     }
 
     @Test
-    void excludedPartitionsWithDeniedS3AccessDoNotBlockUnrelatedQueries() {
+    void readsEveryPartitionWhenTwoKeysCastToTheSameValueEvenIfTheWhereExcludesOne() {
         Table table = csvTable();
         table.setPartitionKeys(List.of(new Column("day", "int")));
         when(glue.getTable("lake", "events")).thenReturn(table);
@@ -1423,51 +1336,27 @@ class ExternalTableMaterializerTest {
         when(glue.getPartitions("lake", "events")).thenReturn(List.of(p1, p01, p2));
 
         materializer.ensureCurrent(backend, session(false), BINDING, "events",
-                "SELECT * FROM analytics.events WHERE day IN (1, 01, 2)");
+                "SELECT * FROM analytics.events WHERE day = 2");
 
-        when(glue.getPartitions("lake", "events")).thenReturn(List.of(p01, p2));
-        doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)
-                .authorizeSignedGetObject(anyString(), anyString(), eq("bucket"), eq("zero-one/part-1.csv"));
-
-        int loaded = backend.statements.size();
-        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events",
-                "SELECT * FROM analytics.events WHERE day = 2"),
-                equalTo(ExternalTableMaterializer.Outcome.LOADED));
-
-        List<String> dropped = backend.statements.subList(loaded, backend.statements.size());
-        assertThat(dropped.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM " + BACKING + " WHERE \"_floci_partition\" = '"
-                        + ExternalTableMaterializer.partitionId(List.of("1")) + "'")), equalTo(true));
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && sql.contains("s3://bucket/zero-one/part-1.csv")
+                && sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
     }
 
     @Test
-    void refreshingDecimalPartitionLeavesOverlappingDecimalPartitionsIntact() {
+    void keepsBothOverlappingPartitionsCurrentWhenNothingChanged() {
         Table table = csvTable();
-        table.setPartitionKeys(List.of(new Column("ratio", "decimal(5,2)")));
+        table.setPartitionKeys(List.of(new Column("day", "int")));
         when(glue.getTable("lake", "events")).thenReturn(table);
-        Partition p10 = dayPartition(table, "1.0", "one-zero/", "e10");
-        Partition p100 = dayPartition(table, "1.00", "one-zero-zero/", "e100");
-        when(glue.getPartitions("lake", "events")).thenReturn(List.of(p10, p100));
-
+        Partition p1 = dayPartition(table, "1", "one/", "e1");
+        Partition p01 = dayPartition(table, "01", "zero-one/", "e01");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(p1, p01));
         materializer.ensureCurrent(backend, session(false), BINDING, "events",
-                "SELECT * FROM analytics.events WHERE ratio IN (1.0, 1.00)");
+                "SELECT * FROM analytics.events WHERE day = 1");
 
-        Partition p10Changed = dayPartition(table, "1.0", "one-zero/", "e10-new");
-        when(glue.getPartitions("lake", "events")).thenReturn(List.of(p10Changed, p100));
-
-        reset(duck);
-        int loaded = backend.statements.size();
-        materializer.ensureCurrent(backend, session(false), BINDING, "events",
-                "SELECT * FROM analytics.events WHERE ratio = 1.0");
-
-        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one-zero/part-1.csv")
-                && !sql.contains("s3://bucket/one-zero-zero/part-1.csv")), any(), anyString(), eq(ACCOUNT));
-        List<String> changed = backend.statements.subList(loaded, backend.statements.size());
-        assertThat(changed.stream().anyMatch(sql -> sql.contains(
-                "DELETE FROM " + BACKING + " WHERE \"_floci_partition\" = '"
-                        + ExternalTableMaterializer.partitionId(List.of("1.0")) + "'")), equalTo(true));
-        assertThat(changed.stream().noneMatch(sql -> sql.contains(
-                ExternalTableMaterializer.partitionId(List.of("1.00")))), equalTo(true));
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events",
+                        "SELECT * FROM analytics.events WHERE day = 1"),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
     }
 
     private static Map<String, Object> schemaRow(String file, String name) {

@@ -26,8 +26,15 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -43,6 +50,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -59,9 +67,9 @@ public class ExternalTableMaterializer {
     private static final long LOCK_TIMEOUT_SECONDS = 30;
     private static final String SCRATCH_KEY_PREFIX = "spectrum-";
     private static final String HIVE_DEFAULT_PARTITION = "__HIVE_DEFAULT_PARTITION__";
-    static final String PARTITION_COLUMN = "_floci_partition";
-    /** The schema of the tables behind the views of partitioned external tables. */
-    public static final String BACKING_SCHEMA = "floci_spectrum";
+    private static final String NULL_KEY = "\u0000null";
+    private static final Set<String> INTEGER_TYPES = Set.of("tinyint", "smallint", "int", "integer", "bigint");
+    private static final Pattern DECIMAL_SCALE = Pattern.compile("^decimal\\(\\d+,(\\d+)\\)$");
     private static final Duration STALE_SCRATCH_AGE = Duration.ofHours(1);
     private static final String ICEBERG_SETUP = "INSTALL iceberg; LOAD iceberg;\n";
     private static final String ICEBERG_MANIFESTS = "SELECT DISTINCT manifest_path FROM read_avro(%s)";
@@ -268,11 +276,13 @@ public class ExternalTableMaterializer {
         String accountId = session.accountId();
         Optional<PartitionPruner.Filter> filter = PartitionPruner.filterFor(sql, binding.schemaName(),
                 table.getName(), table.getPartitionKeys());
-        List<Partition> qualified = filter.isEmpty() ? partitions
+        // partitions that PostgreSQL's casts make equal cannot be told apart by key value, so they are all read
+        boolean overlapping = hasOverlappingPartitions(table, partitions);
+        List<Partition> qualified = filter.isEmpty() || overlapping ? partitions
                 : partitions.stream().filter(partition -> filter.get().matches(partition.getValues())).toList();
         List<ReadSource> sources = readSources(accountId, binding, roleSession, table, location, qualified);
         authorizeObjects(accountId, binding, roleSession, sources);
-        String definitions = columnDefinitions(table, readPlanWithColumns(binding, table));
+        String definitions = columnDefinitions(readPlanWithColumns(binding, table));
         String identity = Digests.sha256Hex(table.getVersionId() + "|" + table.getUpdateTime() + "|" + definitions);
         String cacheKey = cacheKey(session, binding, table.getName());
         String label = binding.schemaName() + "." + table.getName();
@@ -298,6 +308,16 @@ public class ExternalTableMaterializer {
                         deletions.add(values);
                     }
                     loaded.put(values, fingerprint);
+                }
+            }
+            if (overlapping && !reset && (!deletions.isEmpty() || !toLoad.isEmpty())) {
+                // a delete by key value cannot tell overlapping partitions apart, so the whole table is replaced
+                reset = true;
+                toLoad.clear();
+                toLoad.addAll(sources);
+                loaded.clear();
+                for (ReadSource source : sources) {
+                    loaded.put(source.partition().getValues(), partitionFingerprint(table, source));
                 }
             }
             if (!reset && deletions.isEmpty() && toLoad.isEmpty()) {
@@ -752,7 +772,7 @@ public class ExternalTableMaterializer {
         String target = schema + "." + quote(table.getName());
         String stagingName = "floci_spectrum_stg_" + UUID.randomUUID().toString().replace("-", "");
         String staging = "pg_temp." + quote(stagingName);
-        String definitions = columnDefinitions(table, plan);
+        String definitions = columnDefinitions(plan);
         boolean stagingCreated = false;
         String scratchKey = null;
         try {
@@ -784,32 +804,19 @@ public class ExternalTableMaterializer {
                     throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "External table \"" + binding.schemaName() + "." + table.getName() + "\" exceeds configured row limit");
                 }
             }
-            // A partitioned table keeps the partition each row came from in a backing table, and the name the
-            // user queries is a view of the declared columns only, so that SELECT * returns what Glue declares.
-            boolean partitioned = hasPartitionKeys(table);
-            String physical = partitioned ? backingTable(binding.schemaName(), table.getName()) : target;
-            String view = !partitioned ? "" : "CREATE OR REPLACE VIEW " + target + " AS SELECT "
-                    + plan.columns().stream().map(column -> quote(column.getName())).collect(Collectors.joining(", "))
-                    + " FROM " + physical + "; ";
-            String backingSchema = partitioned ? "CREATE SCHEMA IF NOT EXISTS " + quote(BACKING_SCHEMA) + "; " : "";
             if (deletions != null) {
                 // the table already holds other partitions, so only the ones named here are replaced
-                String delete = deletions.isEmpty() ? "" : "DELETE FROM " + physical + " WHERE "
-                        + deletions.stream().map(values -> quote(PARTITION_COLUMN) + " = '" + partitionId(values) + "'")
+                String delete = deletions.isEmpty() ? "" : "DELETE FROM " + target + " WHERE "
+                        + deletions.stream().map(values -> "(" + partitionCondition(table, values) + ")")
                         .distinct().collect(Collectors.joining(" OR ")) + "; ";
-                backend.execute(backingSchema + "CREATE TABLE IF NOT EXISTS " + physical + " (" + definitions + "); " + delete
-                        + "INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view + "DROP TABLE " + staging);
+                backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); " + delete
+                        + "INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
             } else if (definitions.equals(loadedDefinitions)) {
-                backend.execute(backingSchema + "CREATE TABLE IF NOT EXISTS " + physical + " (" + definitions + "); TRUNCATE "
-                        + physical + "; INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view
-                        + "DROP TABLE " + staging);
+                backend.execute("CREATE TABLE IF NOT EXISTS " + target + " (" + definitions + "); TRUNCATE " + target
+                        + "; INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
             } else {
-                // the relation to replace is a view only if the last load of this table made one
-                boolean wasPartitioned = loadedDefinitions == null ? partitioned : loadedDefinitions.contains(quote(PARTITION_COLUMN));
-                String drop = dropRelationSql(binding.schemaName(), table.getName(), wasPartitioned, false) + "; ";
-                String dropBacking = partitioned && !wasPartitioned ? "DROP TABLE IF EXISTS " + physical + "; " : "";
-                backend.execute(backingSchema + drop + dropBacking + "CREATE TABLE " + physical + " (" + definitions
-                        + "); INSERT INTO " + physical + " SELECT * FROM " + staging + "; " + view + "DROP TABLE " + staging);
+                backend.execute("DROP TABLE IF EXISTS " + target + "; CREATE TABLE " + target + " (" + definitions
+                        + "); INSERT INTO " + target + " SELECT * FROM " + staging + "; DROP TABLE " + staging);
             }
             stagingCreated = false;
             return definitions;
@@ -845,14 +852,26 @@ public class ExternalTableMaterializer {
         return plan;
     }
 
-    private static String columnDefinitions(Table table, GlueTableResolver.ReadPlan plan) {
-        String definitions = plan.columns().stream()
-                .map(column -> quote(column.getName()) + " " + GlueTypeMapper.toPostgres(column.getType()))
+    private static String columnDefinitions(GlueTableResolver.ReadPlan plan) {
+        return plan.columns().stream().map(column -> quote(column.getName()) + " " + GlueTypeMapper.toPostgres(column.getType()))
                 .collect(Collectors.joining(", "));
-        if (hasPartitionKeys(table)) {
-            return definitions + ", " + quote(PARTITION_COLUMN) + " VARCHAR";
+    }
+
+    /**
+     * Matches the rows a partition loaded: its key columns hold the partition values cast to the column types,
+     * with the Hive default partition and a value wider than its column as NULL, as {@link #readSelect} projects them.
+     */
+    private static String partitionCondition(Table table, List<String> values) {
+        List<Column> keys = table.getPartitionKeys();
+        List<String> terms = new ArrayList<>();
+        for (int index = 0; index < keys.size(); index++) {
+            Column key = keys.get(index);
+            String value = partitionValue(key, values, index);
+            terms.add(value == null ? quote(key.getName()) + " IS NULL"
+                    : quote(key.getName()) + " = CAST('" + value.replace("'", "''") + "' AS "
+                            + GlueTypeMapper.toPostgres(key.getType()) + ")");
         }
-        return definitions;
+        return String.join(" AND ", terms);
     }
 
     /** A partition key value as it is loaded: null when it is missing, the Hive default partition or too wide. */
@@ -864,43 +883,82 @@ public class ExternalTableMaterializer {
         return value;
     }
 
-    /**
-     * The table behind the view of a partitioned external table. It lives in a schema of its own, under a name
-     * made from the schema and table it backs, so it cannot meet a table of the user's, and the name stays
-     * within the 63 bytes PostgreSQL keeps of an identifier.
-     */
-    static String backingTable(String schemaName, String tableName) {
-        return quote(BACKING_SCHEMA) + "." + quote("t_" + Digests.sha256Hex(schemaName + "\u0000" + tableName).substring(0, 32));
-    }
-
-    /**
-     * Drops what PostgreSQL holds for an external table: the view and the backing table when it is partitioned,
-     * the table otherwise. Which one it is cannot be asked of PostgreSQL here, because DROP VIEW refuses a table
-     * and DROP TABLE a view. Dependent objects stop a RESTRICT drop.
-     */
-    static String dropRelationSql(String schemaName, String tableName, boolean partitioned, boolean cascade) {
-        String relation = quote(schemaName) + "." + quote(tableName);
-        String mode = cascade ? " CASCADE" : " RESTRICT";
-        if (!partitioned) {
-            return "DROP TABLE IF EXISTS " + relation + mode;
-        }
-        return "DROP VIEW IF EXISTS " + relation + mode + "; DROP TABLE IF EXISTS " + backingTable(schemaName, tableName) + mode;
-    }
-
-    /** Whether the table in PostgreSQL was last loaded as a view over a backing table. */
-    public boolean loadedAsPartitioned(String clusterKey, String databaseName, String schemaName, String tableName) {
-        String signature = schemaSignatures.get(clusterKey + "|" + databaseName + "|" + schemaName + "|" + tableName);
-        return signature != null && signature.contains(quote(PARTITION_COLUMN));
-    }
-
-    static String partitionId(List<String> values) {
-        StringBuilder sb = new StringBuilder();
-        if (values != null) {
-            for (String value : values) {
-                sb.append(value == null ? "\u0000null\u0000" : value).append('\0');
+    /** Whether two partitions hold key values that PostgreSQL casts to the same value, or may do so. */
+    static boolean hasOverlappingPartitions(Table table, List<Partition> partitions) {
+        Set<List<String>> seen = new HashSet<>();
+        for (Partition partition : partitions) {
+            List<String> canonical = canonicalPartitionValues(table, partition.getValues());
+            if (canonical == null || !seen.add(canonical)) {
+                return true;
             }
         }
-        return Digests.sha256Hex(sb.toString());
+        return false;
+    }
+
+    /**
+     * The key values as PostgreSQL holds them after the cast to the column types, or null when a value cannot be
+     * reduced with confidence, which counts as an overlap so that the table is read whole.
+     */
+    private static List<String> canonicalPartitionValues(Table table, List<String> values) {
+        List<Column> keys = table.getPartitionKeys();
+        List<String> canonical = new ArrayList<>();
+        for (int index = 0; index < keys.size(); index++) {
+            Column key = keys.get(index);
+            String value = partitionValue(key, values, index);
+            String converted = value == null ? NULL_KEY
+                    : canonicalKeyValue(GlueTypeMapper.canonicalGlueType(key.getType()), value);
+            if (converted == null) {
+                return null;
+            }
+            canonical.add(converted);
+        }
+        return canonical;
+    }
+
+    private static String canonicalKeyValue(String type, String value) {
+        String trimmed = value.trim();
+        try {
+            if (INTEGER_TYPES.contains(type)) {
+                return new BigInteger(trimmed).toString();
+            }
+            if (type.startsWith("decimal")) {
+                BigDecimal number = new BigDecimal(trimmed);
+                Matcher scale = DECIMAL_SCALE.matcher(type);
+                if (scale.find()) {
+                    number = number.setScale(Integer.parseInt(scale.group(1)), RoundingMode.HALF_UP);
+                }
+                return number.signum() == 0 ? "0" : number.stripTrailingZeros().toPlainString();
+            }
+            if (type.equals("float") || type.equals("real") || type.equals("double")) {
+                // the narrowest float makes the most values equal, so it finds every overlap of the wider ones
+                return Float.toString(Float.parseFloat(trimmed));
+            }
+            return switch (type) {
+                case "boolean" -> booleanKey(trimmed);
+                case "date" -> LocalDate.parse(trimmed).toString();
+                case "timestamp" -> LocalDateTime.parse(trimmed.replace(' ', 'T')).truncatedTo(ChronoUnit.MICROS).toString();
+                default -> type.startsWith("char") ? value.stripTrailing() : value;
+            };
+        } catch (NumberFormatException | DateTimeParseException unparseable) {
+            LOG.debugv("Partition key value {0} of type {1} is not reduced, so the table is read whole", value, type);
+            return null;
+        }
+    }
+
+    /** PostgreSQL reads any unique prefix of true, false, yes, no, on and off, and 1 and 0. */
+    private static String booleanKey(String value) {
+        String lower = value.toLowerCase(Locale.ROOT);
+        if (lower.isEmpty()) {
+            return null;
+        }
+        if (lower.equals("1") || "true".startsWith(lower) || "yes".startsWith(lower) || lower.equals("on")) {
+            return "true";
+        }
+        if (lower.equals("0") || "false".startsWith(lower) || "no".startsWith(lower) || lower.equals("of")
+                || lower.equals("off")) {
+            return "false";
+        }
+        return null;
     }
 
     private void prepareScratchBucket(String accountId) {
@@ -1129,7 +1187,6 @@ public class ExternalTableMaterializer {
                         : "CAST('" + value.replace("'", "''") + "' AS VARCHAR)";
                 parts.add("COALESCE(" + expression + ", '\\N') AS " + quote(key.getName()));
             }
-            parts.add("'" + partitionId(values) + "' AS " + quote(PARTITION_COLUMN));
             projection = String.join(", ", parts);
         }
         return "SELECT " + projection + " FROM " + fromClause(plan, source.table());
