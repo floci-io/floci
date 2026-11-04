@@ -146,6 +146,71 @@ class AccountPropertiesIntegrationTest {
         .when().post("/").then().statusCode(200);
     }
 
+    /**
+     * The protocol numbers a map's entries, it does not run them from 1 without a gap, and the
+     * constraints read every index the request carries. So a request numbering 1 and 3 is held to
+     * both entries and has to store both: stopping at the gap held a caller to an entry it was
+     * then not given.
+     */
+    @Test
+    void entriesTheRequestNumbersWithAGapAreAllStored() {
+        String ns = namespace();
+
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", ns + "/First")
+            .formParam("Properties.entry.1.value", "one")
+            .formParam("Properties.entry.3.key", ns + "/Third")
+            .formParam("Properties.entry.3.value", "three")
+        .when().post("/").then().statusCode(200);
+
+        iam("GetAccountProperties").when().post("/").then().statusCode(200)
+            .body(containsString(ns + "/First"))
+            .body(containsString("one"))
+            .body(containsString(ns + "/Third"))
+            .body(containsString("three"));
+    }
+
+    /**
+     * The bare {@code Properties.N} spelling, which the shared reader takes alongside
+     * {@code Properties.entry.N} and {@code Properties.member.N}. The constraints read it, so a
+     * request sending it carries a map: reading only the one spelling left it an empty map and the
+     * refusal for a member that never arrived.
+     */
+    @Test
+    void theBareAndMemberSpellingsOfAnEntryAreRead() {
+        String bare = namespace();
+
+        iam("PutAccountProperties")
+            .formParam("Properties.1.key", bare + "/Bare")
+            .formParam("Properties.1.value", "read")
+        .when().post("/").then().statusCode(200);
+
+        String member = namespace();
+
+        iam("PutAccountProperties")
+            .formParam("Properties.member.1.key", member + "/Member")
+            .formParam("Properties.member.1.value", "read")
+        .when().post("/").then().statusCode(200);
+
+        iam("GetAccountProperties").when().post("/").then().statusCode(200)
+            .body(containsString(bare + "/Bare"))
+            .body(containsString(member + "/Member"));
+    }
+
+    /**
+     * An entry numbered with a value and no key, which is no entry the map could hold: the
+     * constraint walk neither counts nor answers it, and nothing is stored under a null key. The
+     * request carries that one entry alone, so what is left is an empty map.
+     */
+    @Test
+    void anEntryNumberedWithNoKeyIsNoEntry() {
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.value", "orphan")
+        .when().post("/").then().statusCode(400)
+            .body(containsString("ValidationError"))
+            .body(containsString("Member must not be null"));
+    }
+
     @Test
     void anAbsentPropertiesMapIsRejected() {
         iam("PutAccountProperties").when().post("/").then().statusCode(400)

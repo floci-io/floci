@@ -41,6 +41,8 @@ class IamTagOnCreateEnforcementIntegrationTest {
     private static final String ADMIN = "test";
     private static final String ACCOUNT = "000000000000";
     private static final String IMAGE = "ami-0abcdef1234567890";
+    private static final String TRUST = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
 
     @TestHTTPResource("/")
@@ -260,19 +262,74 @@ class IamTagOnCreateEnforcementIntegrationTest {
     void aRoleCreatedWithTagsNeedsTagRole() {
         User user = user("tag-role");
         String role = "tag-role-" + suffix();
-        String trust = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
-                + "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}";
 
         user.policy(allow("iam:CreateRole"));
-        refused(user.query("iam", "CreateRole").formParam("RoleName", role).formParam("AssumeRolePolicyDocument", trust)
+        refused(user.query("iam", "CreateRole").formParam("RoleName", role).formParam("AssumeRolePolicyDocument", TRUST)
                 .formParam("Tags.member.1.Key", "team").formParam("Tags.member.1.Value", "blue").post("/").then(),
                 "iam:TagRole");
 
         user.policy(allow("iam:CreateRole") + "," + allow("iam:TagRole"));
-        user.query("iam", "CreateRole").formParam("RoleName", role).formParam("AssumeRolePolicyDocument", trust)
+        user.query("iam", "CreateRole").formParam("RoleName", role).formParam("AssumeRolePolicyDocument", TRUST)
                 .formParam("Tags.member.1.Key", "team").formParam("Tags.member.1.Value", "blue").post("/").then()
                 .statusCode(200);
-        cleanup.register(() -> admin("iam").formParam("Action", "DeleteRole").formParam("RoleName", role).post("/"));
+        deleteRoleLater(role);
+    }
+
+    /**
+     * IAM's handler reads every index a request numbers, bare or under {@code member}, so the tags its create is
+     * checked with are the tags the role gets. A tag numbered only at 2 meets a policy that requires it, where a
+     * reading that stopped at the first gap saw none and refused a create the handler would have tagged.
+     */
+    @Test
+    void anIamTagPastAGapMeetsAPolicyRequiringIt() {
+        User user = user("tag-role-gap");
+        String role = "tag-role-gap-" + suffix();
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"iam:CreateRole\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"blue\"}}}," + allow("iam:TagRole"));
+
+        user.query("iam", "CreateRole").formParam("RoleName", role).formParam("AssumeRolePolicyDocument", TRUST)
+                .formParam("Tags.2.Key", "team").formParam("Tags.2.Value", "blue").post("/").then().statusCode(200);
+        deleteRoleLater(role);
+        admin("iam").formParam("Action", "ListRoleTags").formParam("RoleName", role).post("/").then()
+                .statusCode(200).body(containsString("team"));
+    }
+
+    /**
+     * Tags split across the two spellings are one list to the handler, so they are one set to the policy: a deny
+     * naming both keys holds, where a set per spelling matched neither and let the create through with both tags.
+     */
+    @Test
+    void iamTagsSplitAcrossSpellingsAreCheckedAsOneSet() {
+        User user = user("tag-role-split");
+        String role = "tag-role-split-" + suffix();
+        user.policy(allow("iam:CreateRole") + "," + allow("iam:TagRole")
+                + ",{\"Effect\":\"Deny\",\"Action\":\"iam:CreateRole\",\"Resource\":\"*\",\"Condition\":"
+                + "{\"StringEquals\":{\"aws:RequestTag/team\":\"blue\",\"aws:RequestTag/env\":\"prod\"}}}");
+
+        refused(user.query("iam", "CreateRole").formParam("RoleName", role)
+                .formParam("AssumeRolePolicyDocument", TRUST)
+                .formParam("Tags.member.1.Key", "team").formParam("Tags.member.1.Value", "blue")
+                .formParam("Tags.2.Key", "env").formParam("Tags.2.Value", "prod").post("/").then(), "iam:CreateRole");
+        admin("iam").formParam("Action", "GetRole").formParam("RoleName", role).post("/").then().statusCode(404);
+    }
+
+    /**
+     * A key that is blank but not empty is a key IAM takes, {@code tagKeyType} admitting a separator, so the
+     * policy is checked with it: a deny naming it holds rather than passing over a key the role would get.
+     */
+    @Test
+    void anIamTagKeyThatIsBlankIsReadForThePolicyToo() {
+        User user = user("tag-role-blank");
+        String role = "tag-role-blank-" + suffix();
+        user.policy(allow("iam:CreateRole") + "," + allow("iam:TagRole")
+                + ",{\"Effect\":\"Deny\",\"Action\":\"iam:CreateRole\",\"Resource\":\"*\",\"Condition\":"
+                + "{\"StringEquals\":{\"aws:RequestTag/ \":\"blue\",\"aws:RequestTag/env\":\"prod\"}}}");
+
+        refused(user.query("iam", "CreateRole").formParam("RoleName", role)
+                .formParam("AssumeRolePolicyDocument", TRUST)
+                .formParam("Tags.member.1.Key", " ").formParam("Tags.member.1.Value", "blue")
+                .formParam("Tags.2.Key", "env").formParam("Tags.2.Value", "prod").post("/").then(), "iam:CreateRole");
+        admin("iam").formParam("Action", "GetRole").formParam("RoleName", role).post("/").then().statusCode(404);
     }
 
     @Test
@@ -424,6 +481,10 @@ class IamTagOnCreateEnforcementIntegrationTest {
                 .getString("RunInstancesResponse.instancesSet.item.instanceId");
         cleanup.register(() -> admin("ec2").formParam("Action", "TerminateInstances")
                 .formParam("InstanceId.1", instanceId).post("/"));
+    }
+
+    private void deleteRoleLater(String role) {
+        cleanup.register(() -> admin("iam").formParam("Action", "DeleteRole").formParam("RoleName", role).post("/"));
     }
 
     private void deleteQueueLater(Response created) {
