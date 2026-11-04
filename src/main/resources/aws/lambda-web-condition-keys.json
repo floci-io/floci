@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_lambda_web_condition_keys.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/v1/lambda/lambda.json",
-    "botocore": "botocore 1.43.113 (installed package)",
+    "botocore": "botocore 1.43.118 (installed package)",
     "note": "make lambda-web-condition-keys-check re-derives members from botocore; make lambda-web-condition-keys-verify checks actions against AWS."
   },
   "actions": {

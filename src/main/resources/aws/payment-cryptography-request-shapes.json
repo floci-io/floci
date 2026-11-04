@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_payment_cryptography_shapes.py",
-    "botocore": "botocore 1.43.113 (installed package)"
+    "botocore": "botocore 1.43.118 (installed package)"
   },
   "operations": {
     "CreateKey": "CreateKeyInput",
