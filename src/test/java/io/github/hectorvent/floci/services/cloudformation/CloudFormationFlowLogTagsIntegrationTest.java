@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.AwsTestClients;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -10,12 +11,10 @@ import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Tag;
 
-import java.time.Duration;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -76,12 +75,12 @@ class CloudFormationFlowLogTagsIntegrationTest {
                         "Tags": [{"Key": {"Ref": "TagKey"}, "Value": "core"}]""";
         cfn.createStack(request -> request.stackName(stackName).templateBody(template(keyFromParameter)));
         stackCreated = true;
-        awaitStack("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         String flowLogId = flowLogId();
 
         cfn.updateStack(request -> request.stackName(stackName).templateBody(template(keyFromParameter))
                 .parameters(parameter -> parameter.parameterKey("TagKey").parameterValue("owner")));
-        awaitStack("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
 
         // Re-resolving the previous template would read owner too and leave team behind.
         assertEquals(Map.of("owner", "core"), tags(flowLogId));
@@ -91,7 +90,7 @@ class CloudFormationFlowLogTagsIntegrationTest {
     private String createStackWithExternalTag() {
         cfn.createStack(request -> request.stackName(stackName).templateBody(template(tagsProperty("team", "core"))));
         stackCreated = true;
-        awaitStack("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         String flowLogId = flowLogId();
         assertEquals(Map.of("team", "core"), tags(flowLogId));
         ec2.createTags(request -> request.resources(flowLogId)
@@ -101,7 +100,7 @@ class CloudFormationFlowLogTagsIntegrationTest {
 
     private void updateStack(String tagsProperty) {
         cfn.updateStack(request -> request.stackName(stackName).templateBody(template(tagsProperty)));
-        awaitStack("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
     }
 
     private static String tagsProperty(String key, String value) {
@@ -130,12 +129,6 @@ class CloudFormationFlowLogTagsIntegrationTest {
                   "Outputs": {"FlowId": {"Value": {"Ref": "Flow"}}}
                 }
                 """.formatted(tagsProperty);
-    }
-
-    private void awaitStack(String status) {
-        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertEquals(status, cfn.describeStacks(request -> request.stackName(stackName))
-                        .stacks().getFirst().stackStatusAsString()));
     }
 
     private String flowLogId() {

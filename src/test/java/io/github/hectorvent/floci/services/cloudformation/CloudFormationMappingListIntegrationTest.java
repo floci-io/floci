@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.AwsTestClients;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -74,7 +75,7 @@ class CloudFormationMappingListIntegrationTest {
     void conditionalMappedListsPlaceEachSubnetInTheSelectedZone(String mode) {
         cfn.createStack(request -> request.stackName(name).templateBody(template())
                 .parameters(mode(mode)));
-        awaitStatus("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, name, "CREATE_COMPLETE");
         assertPlacement(mode);
     }
 
@@ -82,7 +83,7 @@ class CloudFormationMappingListIntegrationTest {
     void changingTheSelectedMappingReplacesSubnetsInTheNewZones() {
         cfn.createStack(request -> request.stackName(name).templateBody(template())
                 .parameters(mode("Discover")));
-        awaitStatus("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, name, "CREATE_COMPLETE");
         assertPlacement("Discover");
         Map<String, String> previous = outputs();
 
@@ -90,7 +91,7 @@ class CloudFormationMappingListIntegrationTest {
                 .replace("10.88.2.0/24", "10.88.4.0/24");
         cfn.updateStack(request -> request.stackName(name).templateBody(updated)
                 .parameters(mode("Mapped")));
-        awaitStatus("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, name, "UPDATE_COMPLETE");
         assertPlacement("Mapped");
         List<String> remaining = ec2.describeSubnets().subnets().stream().map(Subnet::subnetId).toList();
         assertTrue(!remaining.contains(previous.get("Subnet0")) && !remaining.contains(previous.get("Subnet2")),
@@ -115,12 +116,6 @@ class CloudFormationMappingListIntegrationTest {
     private Map<String, String> outputs() {
         return cfn.describeStacks(request -> request.stackName(name)).stacks().getFirst().outputs().stream()
                 .collect(Collectors.toMap(Output::outputKey, Output::outputValue));
-    }
-
-    private void awaitStatus(String expected) {
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
-                assertEquals(expected, cfn.describeStacks(request -> request.stackName(name))
-                        .stacks().getFirst().stackStatusAsString()));
     }
 
     private static Parameter mode(String value) {
