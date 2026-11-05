@@ -193,16 +193,20 @@ public class InstanceConnectTunnelHandler {
             case MALFORMED_DATE -> throw new Refusal(403, "The request has no valid X-Amz-Date");
         }
         String akid = scope.accessKeyId();
-        if (config.auth().validateSignatures()) {
-            verifySignature(signed, scope, rawPath, rawQuery, header, query.apply("X-Amz-Security-Token"));
-        }
         String accountId = accountResolver.resolveFromPresignedCredential(signed.credential());
         if (!akid.matches("\\d{12}")) {
             accountId = sessionAccountLookup.resolveAccountId(akid).orElse(accountId);
         }
         String account = accountId;
-        return RequestScopes.callAs(account, scope.region(),
-                () -> resolveTarget(scope, account, signed.credential(), query));
+        // The signing secret is read from the credential's account, so the signature is verified
+        // inside its scope: outside one the store is the default account's and another account's
+        // key is unknown.
+        return RequestScopes.callAs(account, scope.region(), () -> {
+            if (config.auth().validateSignatures()) {
+                verifySignature(signed, scope, rawPath, rawQuery, header, query.apply("X-Amz-Security-Token"));
+            }
+            return resolveTarget(scope, account, signed.credential(), query);
+        });
     }
 
     /** Runs as the credential's account, so every store read below is that account's. */
