@@ -407,7 +407,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
                     () -> assertEquals(400, rejected.statusCode()),
                     () -> assertEquals("HTTP", described.path(result + "Protocol")),
                     () -> assertEquals(String.valueOf(HTTPS_PORT), described.path(result + "Port")),
-                    () -> assertEquals("", described.path(result + "SslPolicy")),
+                    () -> assertTrue(described.xmlPath().getList(result + "SslPolicy").isEmpty()),
                     () -> assertTrue(described.xmlPath().getList(result + "Certificates.member").isEmpty()),
                     () -> assertEquals("original", described.path(result
                             + "DefaultActions.member.FixedResponseConfig.MessageBody")),
@@ -529,7 +529,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
                     () -> assertEquals(400, rejected.statusCode()),
                     () -> assertEquals("HTTP", described.path(result + "Protocol")),
                     () -> assertEquals(String.valueOf(HTTP_PORT), described.path(result + "Port")),
-                    () -> assertEquals("", described.path(result + "SslPolicy")),
+                    () -> assertTrue(described.xmlPath().getList(result + "SslPolicy").isEmpty()),
                     () -> assertTrue(described.xmlPath().getList(result + "Certificates.member").isEmpty()),
                     () -> assertEquals("original", described.path(result
                             + "DefaultActions.member.FixedResponseConfig.MessageBody")),
