@@ -8,6 +8,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.util.Arrays;
+import java.util.HexFormat;
 import java.util.Locale;
 
 /**
@@ -410,12 +411,7 @@ final class PaymentCryptographyCrypto {
     }
 
     static String toHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(Character.forDigit((b >> 4) & 0x0f, 16));
-            sb.append(Character.forDigit(b & 0x0f, 16));
-        }
-        return sb.toString();
+        return HexFormat.of().formatHex(bytes);
     }
 
     static byte[] fromHex(String hex) {
