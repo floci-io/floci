@@ -333,7 +333,10 @@ class CfnStableNameUpdatePathTest {
         EcrCfnProvisioner provisioner = new EcrCfnProvisioner(ecr);
 
         ObjectNode createProps = mapper.createObjectNode().put("ImageTagMutability", "MUTABLE");
-        createProps.set("LifecyclePolicy", mapper.createObjectNode().put("LifecyclePolicyText", "{}"));
+        createProps.set("LifecyclePolicy", mapper.createObjectNode().put("LifecyclePolicyText", """
+                {"rules":[{"rulePriority":1,"selection":{"tagStatus":"any",
+                "countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}
+                """));
         createProps.put("RepositoryPolicyText", "{}");
         StackResource created = resource("AWS::ECR::Repository", "Repo");
         provisioner.provision(created, createProps, ctx(null));

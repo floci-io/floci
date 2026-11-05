@@ -59,6 +59,10 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         String mutability = ctx.resolveOptional(props, "ImageTagMutability");
         Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, ctx);
         String region = ctx.region();
+        String lifecyclePolicy = lifecyclePolicyText(props, ctx);
+        if (lifecyclePolicy != null) {
+            EcrService.validateLifecyclePolicyDocument(lifecyclePolicy);
+        }
 
         // provision is also the update path. Only the repository this resource already owns is
         // reconciled in place; a replacing update derives a different name and creates, and a name
@@ -70,7 +74,6 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
 
         // Both policies are updatable: a template that declares one sets it, and on the update
         // path a template that no longer declares one deletes it, tolerating "none set".
-        String lifecyclePolicy = lifecyclePolicyText(props, ctx);
         if (lifecyclePolicy != null) {
             ecrService.putLifecyclePolicy(repoName, null, lifecyclePolicy, region);
         } else if (reusing) {
