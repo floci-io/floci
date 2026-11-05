@@ -101,7 +101,7 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
             // AWS does not read a queue from this path. The signing scope names the service, as the AWS endpoint
             // does, so the body need not be read here, and requests for other services keep their routing. The
             // request is routed to POST / so that its signature is verified before it is rejected.
-            if (isSignedForSqs(ctx, queryParams)) {
+            if (SignedServiceRoute.signingService(ctx).filter("sqs"::equals).isPresent()) {
                 ctx.setProperty(INVALID_ADDRESS_PROPERTY, Boolean.TRUE);
                 rewriteToRoot(ctx);
             }
@@ -141,14 +141,6 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
         ctx.setRequestUri(ctx.getUriInfo().getRequestUriBuilder()
                 .replacePath("/")
                 .build());
-    }
-
-    private boolean isSignedForSqs(ContainerRequestContext ctx, MultivaluedMap<String, String> queryParams) {
-        // A blank header counts as absent, as SigV4HeaderSignatureFilter treats it, so a presigned credential is read.
-        String header = ctx.getHeaderString("Authorization");
-        String authorization = IamEnforcementFilter.requestAuthorization(
-                header == null || header.isBlank() ? null : header, queryParams);
-        return SigV4CredentialScope.serviceName(authorization).filter("sqs"::equals).isPresent();
     }
 
     private boolean isSqsTarget(String target) {

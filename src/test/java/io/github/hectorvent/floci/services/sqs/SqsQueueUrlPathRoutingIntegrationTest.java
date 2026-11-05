@@ -83,7 +83,7 @@ class SqsQueueUrlPathRoutingIntegrationTest {
         "/000000000000/" + QUEUE_NAME + "/"
     })
     void queryRequestPostedToQueuePathWithoutQueueUrlReachesSqs(String path) {
-        postQueryWithoutQueueUrl(path)
+        postQueryWithoutQueueUrl(given(), path)
         .then()
             .statusCode(200)
             .body(containsString(QUEUE_ARN));
@@ -95,13 +95,7 @@ class SqsQueueUrlPathRoutingIntegrationTest {
         "/queue/us-east-1/000000000000/" + QUEUE_NAME + "/"
     })
     void queryRequestPostedToPrefixedQueuePathWithoutQueueUrlIsRejectedAsInvalidAddress(String path) {
-        given()
-            .contentType(FORM_CONTENT_TYPE)
-            .header("Authorization", SQS_AUTHORIZATION)
-            .formParam("Action", "GetQueueAttributes")
-            .formParam("AttributeName.1", "QueueArn")
-        .when()
-            .post(path)
+        postQueryWithoutQueueUrl(given().header("Authorization", SQS_AUTHORIZATION), path)
         .then()
             .statusCode(404)
             .body("ErrorResponse.Error.Code", equalTo("InvalidAddress"))
@@ -113,16 +107,11 @@ class SqsQueueUrlPathRoutingIntegrationTest {
     void presignedQueryRequestOnPrefixedQueuePathIsRejectedAsInvalidAddress(boolean withBlankAuthorizationHeader) {
         // A blank Authorization header counts as absent, so the presigned credential names the service.
         RequestSpecification request = given()
-            .contentType(FORM_CONTENT_TYPE)
-            .queryParam("X-Amz-Credential", "test/20261105/us-east-1/sqs/aws4_request")
-            .formParam("Action", "GetQueueAttributes")
-            .formParam("AttributeName.1", "QueueArn");
+            .queryParam("X-Amz-Credential", "test/20261105/us-east-1/sqs/aws4_request");
         if (withBlankAuthorizationHeader) {
             request.header("Authorization", "");
         }
-        request
-        .when()
-            .post("/queue/us-east-1/000000000000/" + QUEUE_NAME)
+        postQueryWithoutQueueUrl(request, "/queue/us-east-1/000000000000/" + QUEUE_NAME)
         .then()
             .statusCode(404)
             .body("ErrorResponse.Error.Code", equalTo("InvalidAddress"));
@@ -193,8 +182,8 @@ class SqsQueueUrlPathRoutingIntegrationTest {
         }
     }
 
-    private static Response postQueryWithoutQueueUrl(String path) {
-        return given()
+    private static Response postQueryWithoutQueueUrl(RequestSpecification request, String path) {
+        return request
             .contentType(FORM_CONTENT_TYPE)
             .formParam("Action", "GetQueueAttributes")
             .formParam("AttributeName.1", "QueueArn")
