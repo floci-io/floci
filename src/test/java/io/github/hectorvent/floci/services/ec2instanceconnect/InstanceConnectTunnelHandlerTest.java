@@ -58,6 +58,7 @@ class InstanceConnectTunnelHandlerTest {
     void setUp() {
         ec2 = mock(Ec2Service.class);
         config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
+        when(config.services().ec2instanceconnect().enabled()).thenReturn(true);
         iam = mock(IamService.class);
         sessions = mock(SessionAccountLookup.class);
         enforcement = mock(IamEnforcementFilter.class);
@@ -102,6 +103,12 @@ class InstanceConnectTunnelHandlerTest {
 
         assertEquals(0, resolve(CLI_QUERY.replace("remotePort=22", "remotePort=3389")).fallbackPort(),
                 "only SSH is published");
+    }
+
+    @Test
+    void refusesEveryTunnelWhenTheServiceIsDisabled() {
+        when(config.services().ec2instanceconnect().enabled()).thenReturn(false);
+        assertEquals(404, refusal(CLI_QUERY));
     }
 
     @Test

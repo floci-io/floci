@@ -184,6 +184,9 @@ public class InstanceConnectTunnelHandler {
 
     /** Validates a tunnel request into its target, or throws {@link Refusal}. */
     Target resolve(String rawPath, String rawQuery, UnaryOperator<String> header) {
+        if (!config.services().ec2instanceconnect().enabled()) {
+            throw new Refusal(404, "EC2 Instance Connect is not enabled");
+        }
         Map<String, List<String>> params = new QueryStringDecoder(rawQuery == null ? "" : rawQuery, false)
                 .parameters();
         UnaryOperator<String> query = name -> {
