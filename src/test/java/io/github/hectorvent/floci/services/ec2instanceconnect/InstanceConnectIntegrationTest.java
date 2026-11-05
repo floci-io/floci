@@ -2,15 +2,16 @@ package io.github.hectorvent.floci.services.ec2instanceconnect;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.emptyString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
-import static org.hamcrest.Matchers.emptyString;
 
 @QuarkusTest
 class InstanceConnectIntegrationTest {
@@ -24,7 +25,7 @@ class InstanceConnectIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    private static io.restassured.response.Response send(String instanceId, String key) {
+    private static Response send(String instanceId, String key) {
         return given()
                 .header("X-Amz-Target", "AWSEC2InstanceConnectService.SendSSHPublicKey")
                 .contentType(JSON_1_1)
