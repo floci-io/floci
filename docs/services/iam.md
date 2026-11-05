@@ -245,6 +245,13 @@ authorized with are read the same way, so a tag numbered only at 2, or spelled b
 that requires that tag, and tags split across the two spellings are checked as the one list the
 resource gets rather than as a set each.
 
+Reading a gap as a member rather than as the end of the list is this service's own reading, and
+nothing recorded says AWS takes one. No SDK sends one either: botocore's Query serializer numbers a
+list from 1 with no gap in it, so a request carrying a gap is one written by hand. What is recorded
+is that the constraints ahead of each operation read every index a request names, which is what the
+operations themselves disagreed with, so a gap is read the way that walk already read it until a
+capture says otherwise.
+
 A map is read the same way, from the entries the protocol numbers under its name:
 `ReplacementValues.entry.1.key` and `.entry.1.value`, which is the form `AcquireRole`'s own sample
 publishes, or the bare `ReplacementValues.1.key`. An entry's value is named under the key that
@@ -1092,7 +1099,9 @@ request to both entries and then stored only the first. The three spellings are 
 `Properties.entry.1.key`, the generic `Properties.member.1.key` and the bare `Properties.1.key`,
 which is what the shared reader every other list and map here goes through already takes. An entry
 numbered with a value and no key is no entry the map could hold, so it is neither counted nor
-stored, and a request carrying only that one is a map that never arrived.
+stored, and a request carrying only that one is a map that never arrived. Reading a gap here as an
+entry rather than as the end of the map is this service's own reading too, for the reason the list
+section above gives.
 
 **Enabling federation twice is an error, and so is disabling it twice**, which is the asymmetry
 worth noticing: `EnableOutboundWebIdentityFederation` answers `FeatureEnabled` with status 409,
