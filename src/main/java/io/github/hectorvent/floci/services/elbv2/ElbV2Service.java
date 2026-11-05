@@ -45,6 +45,7 @@ import java.util.stream.Collectors;
 public class ElbV2Service implements ResourceProvider, ServerCertificateReferenceProvider, VpcDependencyProvider {
 
     private static final Logger LOG = Logger.getLogger(ElbV2Service.class);
+    private static final String DEFAULT_HTTPS_SSL_POLICY = "ELBSecurityPolicy-2016-08";
     /** {@code LoadBalancerTypeEnum}, in the model's order. */
     private static final List<String> LOAD_BALANCER_TYPES = List.of("application", "network", "gateway");
 
@@ -664,7 +665,8 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         listener.setLoadBalancerArn(lbArn);
         listener.setPort(port);
         listener.setProtocol(protocol != null ? protocol : ("gateway".equals(lbType) ? "GENEVE" : "HTTP"));
-        listener.setSslPolicy(sslPolicy);
+        listener.setSslPolicy(sslPolicy == null && "HTTPS".equalsIgnoreCase(listener.getProtocol())
+                ? DEFAULT_HTTPS_SSL_POLICY : sslPolicy);
         listener.setCertificates(certificates != null ? new ArrayList<>(certificates) : new ArrayList<>());
         listener.setDefaultActions(defaultActions != null ? new ArrayList<>(defaultActions) : new ArrayList<>());
         listener.setAlpnPolicy(alpnPolicy != null ? new ArrayList<>(alpnPolicy) : new ArrayList<>());
