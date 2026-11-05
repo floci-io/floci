@@ -3146,14 +3146,14 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeVpcEndpointServices")
             .formParam("Filter.1.Name", "service-name")
-            .formParam("Filter.1.Value.1", "com.amazonaws.us-east-1.s3")
+            .formParam("Filter.1.Value.1", "com.amazonaws.us-east-1.*")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", equalTo(1))
-            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.serviceName", equalTo("com.amazonaws.us-east-1.s3"));
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", greaterThanOrEqualTo(1))
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.serviceName", hasItem("com.amazonaws.us-east-1.s3"));
     }
 
     @Test

@@ -6,13 +6,13 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
-import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ec2.model.*;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
@@ -2018,24 +2018,28 @@ public class Ec2QueryHandler {
         String s3Gateway = "com.amazonaws." + region + ".s3";
         String s3Interface = AwsRegionFacts.vpcEndpointServiceName(region, "s3");
 
-        List<String> baseNames;
+        // Requested service names are echoed verbatim, exactly as AWS does. The emulator
+        // supports any interface service in every AZ, so a requested (often custom) name
+        // must come back unchanged with AZs, otherwise CDK's InterfaceVpcEndpoint fails.
+        List<String> fullNames;
         if (!requested.isEmpty()) {
-            // Keep requested full names unchanged; only strip+rebuild base names.
-            baseNames = requested.stream()
-                    .map(name -> isFullName(name) ? name : stripRegionPrefix(name, region))
-                    .toList();
+            fullNames = new ArrayList<>(requested);
         } else {
-            baseNames = new ArrayList<>(INTERFACE_ENDPOINT_SERVICES);
-            baseNames.add("s3");
+            fullNames = new ArrayList<>();
+            for (String name : INTERFACE_ENDPOINT_SERVICES) {
+                fullNames.add(AwsRegionFacts.vpcEndpointServiceName(region, name));
+            }
+            fullNames.add(s3Gateway);
+            if (!s3Interface.equals(s3Gateway)) {
+                fullNames.add(s3Interface);
+            }
         }
 
-        for (String base : baseNames) {
-            String fullName = isFullName(base) ? base : AwsRegionFacts.vpcEndpointServiceName(region, base);
-            String baseName = isFullName(base) ? stripRegionPrefix(base, region) : base;
+        for (String full : fullNames) {
             List<String> serviceTypes;
-            if (fullName.equals(s3Interface) && !s3Interface.equals(s3Gateway)) {
+            if (full.equals(s3Interface) && !s3Interface.equals(s3Gateway)) {
                 serviceTypes = List.of("Interface");
-            } else if (fullName.endsWith(".s3")) {
+            } else if (full.endsWith(".s3")) {
                 serviceTypes = s3Interface.equals(s3Gateway)
                         ? List.of("Gateway", "Interface")
                         : List.of("Gateway");
@@ -2043,30 +2047,15 @@ public class Ec2QueryHandler {
                 serviceTypes = List.of("Interface");
             }
             services.add(new ServiceDetail(
-                    fullName,
+                    full,
                     serviceTypes,
                     azNames,
                     "amazon",
                     "false",
                     "false",
-                    baseName,
+                    stripRegionPrefix(full, region),
                     region,
                     List.of("ipv4", "ipv6")));
-        }
-
-        // In partitions where S3 has distinct gateway and interface names (e.g. China),
-        // ensure the gateway offering is also listed.
-        if (!s3Interface.equals(s3Gateway) && baseNames.contains("s3")) {
-            services.add(new ServiceDetail(
-                    s3Gateway,
-                    List.of("Gateway"),
-                    azNames,
-                    "amazon",
-                    "false",
-                    "false",
-                    "s3",
-                    region,
-                    List.of("ipv4")));
         }
 
         return services;
@@ -2099,6 +2088,16 @@ public class Ec2QueryHandler {
             if (!isValidFilterName(name)) {
                 throw new AwsException("InvalidFilter",
                         "The filter '" + name + "' is invalid.", 400);
+            }
+            // Validate service-name filter values: AWS rejects values containing regex
+            // metacharacters other than the supported * and ? wildcards.
+            if ("service-name".equals(name)) {
+                for (String value : filter.getValue()) {
+                    if (!isValidServiceNameFilterValue(value)) {
+                        throw new AwsException("InvalidFilter",
+                                "The filter '" + name + "' is invalid.", 400);
+                    }
+                }
             }
         }
 
@@ -2148,34 +2147,25 @@ public class Ec2QueryHandler {
     }
 
     private boolean wildcardMatch(String value, String pattern) {
-        // Treat characters other than * and ? literally to avoid regex injection / ReDoS.
-        int vi = 0;
-        int pi = 0;
-        int vLen = value.length();
-        int pLen = pattern.length();
-        // Simple iterative wildcard matcher (no regex, no backtracking explosion).
-        int starIdx = -1;
-        int match = 0;
-        while (vi < vLen) {
-            if (pi < pLen && (pattern.charAt(pi) == '?' || pattern.charAt(pi) == value.charAt(vi))) {
-                vi++;
-                pi++;
-            } else if (pi < pLen && pattern.charAt(pi) == '*') {
-                starIdx = pi;
-                match = vi;
-                pi++;
-            } else if (starIdx != -1) {
-                pi = starIdx + 1;
-                match++;
-                vi = match;
-            } else {
+        return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
+    }
+
+    private boolean isValidServiceNameFilterValue(String value) {
+        if (value == null || value.isEmpty()) {
+            return true;
+        }
+        // AWS supports only * and ? as wildcards in service-name filters. Values
+        // containing other regex metacharacters are rejected with InvalidFilter.
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '*' || c == '?') {
+                continue;
+            }
+            if (!Character.isLetterOrDigit(c) && c != '.' && c != '-') {
                 return false;
             }
         }
-        while (pi < pLen && pattern.charAt(pi) == '*') {
-            pi++;
-        }
-        return pi == pLen;
+        return true;
     }
 
     // ─── Flow Logs ────────────────────────────────────────────────────────────
