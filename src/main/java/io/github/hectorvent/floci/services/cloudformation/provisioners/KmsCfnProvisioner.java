@@ -4,8 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
-import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
-import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.HashMap;
@@ -45,12 +43,8 @@ public class KmsCfnProvisioner implements CfnResourceProvisioner {
         String description = ctx.resolveOptional(props, "Description");
         String requestedSpec = ctx.resolveOptional(props, "KeySpec");
         String requestedUsage = ctx.resolveOptional(props, "KeyUsage");
-        KmsKeySpec keySpec = requestedSpec != null
-                ? KmsKeySpec.fromString(requestedSpec) : KmsKeySpec.SYMMETRIC_DEFAULT;
-        KmsKeyUsage keyUsage = requestedUsage != null
-                ? KmsKeyUsage.fromString(requestedUsage) : KmsKeyUsage.ENCRYPT_DECRYPT;
         Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, ctx);
-        KmsKey key = kmsService.createKey(description, keyUsage.name(), keySpec.name(), null, tags, ctx.region());
+        KmsKey key = kmsService.createKey(description, requestedUsage, requestedSpec, null, tags, ctx.region());
         r.setPhysicalId(key.getKeyId());
         r.getAttributes().put("Arn", key.getArn());
         r.getAttributes().put("KeyId", key.getKeyId());

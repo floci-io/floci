@@ -87,7 +87,7 @@ class LeafCfnProvisionerTest {
             KmsKey key = new KmsKey();
             key.setKeyId("k-123");
             key.setArn("arn:aws:kms:us-east-1:000000000000:key/k-123");
-            when(kms.createKey(eq("a key"), eq("ENCRYPT_DECRYPT"), eq("SYMMETRIC_DEFAULT"),
+            when(kms.createKey(eq("a key"), eq(null), eq(null),
                     eq(null), any(), eq(REGION))).thenReturn(key);
 
             StackResource r = resource("Key", "AWS::KMS::Key");
@@ -106,7 +106,7 @@ class LeafCfnProvisionerTest {
             KmsKey key = new KmsKey();
             key.setKeyId("k-1");
             ArgumentCaptor<Map<String, String>> tags = ArgumentCaptor.forClass(Map.class);
-            when(kms.createKey(any(), anyString(), anyString(), any(), tags.capture(), anyString())).thenReturn(key);
+            when(kms.createKey(any(), eq(null), eq(null), any(), tags.capture(), anyString())).thenReturn(key);
 
             provisioner.provision(resource("Key", "AWS::KMS::Key"), props("""
                     {"Tags": [{"Key": "team", "Value": "core"}]}
@@ -139,21 +139,29 @@ class LeafCfnProvisionerTest {
         }
 
         @Test
-        void explicitBlankKeySpecIsRejected() {
-            AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(
-                    resource("Key", "AWS::KMS::Key"), props("{\"KeySpec\":\"\"}"), ctx));
+        void explicitBlankKeySpecReachesTheService() {
+            KmsKey key = new KmsKey();
+            key.setKeyId("k-blank-spec");
+            when(kms.createKey(eq(null), eq(null), eq(""), eq(null), any(), eq(REGION)))
+                    .thenReturn(key);
 
-            assertTrue(failure.getMessage().contains("KeySpec"));
-            verify(kms, never()).createKey(any(), anyString(), anyString(), any(), any(), anyString());
+            provisioner.provision(resource("Key", "AWS::KMS::Key"),
+                    props("{\"KeySpec\":\"\"}"), ctx);
+
+            verify(kms).createKey(eq(null), eq(null), eq(""), eq(null), any(), eq(REGION));
         }
 
         @Test
-        void explicitBlankKeyUsageIsRejected() {
-            AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(
-                    resource("Key", "AWS::KMS::Key"), props("{\"KeyUsage\":\"\"}"), ctx));
+        void explicitBlankKeyUsageReachesTheService() {
+            KmsKey key = new KmsKey();
+            key.setKeyId("k-blank-usage");
+            when(kms.createKey(eq(null), eq(""), eq(null), eq(null), any(), eq(REGION)))
+                    .thenReturn(key);
 
-            assertTrue(failure.getMessage().contains("KeyUsage"));
-            verify(kms, never()).createKey(any(), anyString(), anyString(), any(), any(), anyString());
+            provisioner.provision(resource("Key", "AWS::KMS::Key"),
+                    props("{\"KeyUsage\":\"\"}"), ctx);
+
+            verify(kms).createKey(eq(null), eq(""), eq(null), eq(null), any(), eq(REGION));
         }
 
         @Test

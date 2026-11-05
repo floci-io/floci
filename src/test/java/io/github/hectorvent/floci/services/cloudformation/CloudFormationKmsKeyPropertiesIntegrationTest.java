@@ -1,11 +1,12 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnRequests;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
+import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.TestAccounts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -32,7 +33,7 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
             "KeySpec": "ECC_NIST_P256",
             "KeyUsage": "SIGN_VERIFY"
             """));
-        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", authorization(account, "cloudformation"));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", EnforcementFixtures.auth(account, "cloudformation"));
 
         String keyId = physicalId(account, stack);
         JsonPath key = kms(account, "DescribeKey", "{\"KeyId\":\"%s\"}".formatted(keyId));
@@ -47,7 +48,7 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
         String account = TestAccounts.randomId();
         String stack = "kms-cfn-default-" + account;
         createStack(account, stack, template(""));
-        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", authorization(account, "cloudformation"));
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", EnforcementFixtures.auth(account, "cloudformation"));
 
         String keyId = physicalId(account, stack);
         JsonPath key = kms(account, "DescribeKey", "{\"KeyId\":\"%s\"}".formatted(keyId));
@@ -75,7 +76,8 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
     }
 
     private static void createStack(String account, String stack, String template) {
-        cloudFormation(account, "CreateStack", stack)
+        CfnRequests.cfn("CreateStack", stack)
+            .header("Authorization", EnforcementFixtures.auth(account, "cloudformation"))
             .formParam("TemplateBody", template)
         .when()
             .post("/")
@@ -84,7 +86,8 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
     }
 
     private static String physicalId(String account, String stack) {
-        return cloudFormation(account, "DescribeStackResource", stack)
+        return CfnRequests.cfn("DescribeStackResource", stack)
+            .header("Authorization", EnforcementFixtures.auth(account, "cloudformation"))
             .formParam("LogicalResourceId", KEY_RESOURCE)
         .when()
             .post("/")
@@ -93,17 +96,9 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
             .extract().xmlPath().getString("**.find { it.name() == 'PhysicalResourceId' }");
     }
 
-    private static RequestSpecification cloudFormation(String account, String action, String stack) {
-        return given()
-                .header("Authorization", authorization(account, "cloudformation"))
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action)
-                .formParam("StackName", stack);
-    }
-
     private static JsonPath kms(String account, String action, String body) {
         return given()
-                .header("Authorization", authorization(account, "kms"))
+                .header("Authorization", EnforcementFixtures.auth(account, "kms"))
                 .header("X-Amz-Target", "TrentService." + action)
                 .contentType("application/x-amz-json-1.1")
                 .body(body)
@@ -112,9 +107,5 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
             .then()
                 .statusCode(200)
                 .extract().jsonPath();
-    }
-
-    private static String authorization(String account, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + account + "/20261105/us-east-1/" + service + "/aws4_request";
     }
 }
