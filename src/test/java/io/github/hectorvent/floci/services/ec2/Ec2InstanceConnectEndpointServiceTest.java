@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
+import io.github.hectorvent.floci.services.ec2.model.PrefixListId;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
@@ -422,6 +424,34 @@ class Ec2InstanceConnectEndpointServiceTest {
         service.deleteInstanceConnectEndpoint(REGION, endpoint.getInstanceConnectEndpointId());
         assertTrue(service.findUsableInstanceConnectEndpoint(REGION, endpoint.getInstanceConnectEndpointId())
                 .isEmpty());
+    }
+
+    @Test
+    void tunnelReachHonoursPrefixListRules() {
+        Ec2Service service = mockModeService();
+        String vpcId = service.createVpc(REGION, "10.74.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.74.1.0/24", "us-east-1a").getSubnetId();
+        String eiceGroup = service.createSecurityGroup(REGION, "eice", "x", vpcId).getGroupId();
+        String hostGroup = service.createSecurityGroup(REGION, "host", "x", vpcId).getGroupId();
+        String subnetList = service.createManagedPrefixList(REGION, "subnet", "IPv4", 2,
+                List.of(new PrefixListEntry("10.74.1.0/24", null)), List.of()).getPrefixListId();
+        service.revokeSecurityGroupEgress(REGION, eiceGroup, List.of(permission("-1", null, null, null, "0.0.0.0/0")));
+        service.authorizeSecurityGroupEgress(REGION, eiceGroup, List.of(prefixListPermission(subnetList)));
+        Instance instance = service.runInstances(REGION, "ami-1234567890abcdef0", "t3.micro", 1, 1, null,
+                List.of(hostGroup), subnetId, null, List.of(), null, null).getInstances().getFirst();
+        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(REGION, subnetId,
+                List.of(eiceGroup), null, null, List.of(), null);
+
+        assertFalse(service.instanceConnectEndpointMayReach(endpoint, instance, 22), "no ingress on the host yet");
+        service.authorizeSecurityGroupIngress(REGION, hostGroup, List.of(prefixListPermission(subnetList)));
+        assertTrue(service.instanceConnectEndpointMayReach(endpoint, instance, 22),
+                "both sides name the subnet through a prefix list");
+    }
+
+    private static IpPermission prefixListPermission(String prefixListId) {
+        IpPermission permission = permission("tcp", 22, 22, null, null);
+        permission.setPrefixListIds(new ArrayList<>(List.of(new PrefixListId(prefixListId, null))));
+        return permission;
     }
 
     private static IpPermission permission(String protocol, Integer from, Integer to, String groupId, String cidr) {

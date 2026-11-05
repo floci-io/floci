@@ -12976,8 +12976,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 instance.getOwnerId(), instance.getVpcId(), new HashSet<>(instanceGroupIds));
         SecurityGroupPolicy.Peer source = new SecurityGroupPolicy.Peer(endpoint.getPrivateIpAddress(),
                 endpoint.getOwnerId(), endpoint.getVpcId(), new HashSet<>(endpoint.getSecurityGroupIds()));
-        return SecurityGroupPolicy.allows(endpointGroups, true, "tcp", port, -1, target, Map.of())
-                && SecurityGroupPolicy.allows(instanceGroups, false, "tcp", port, -1, source, Map.of());
+        return SecurityGroupPolicy.allows(endpointGroups, true, "tcp", port, -1, target,
+                policyPrefixLists(region, endpointGroups))
+                && SecurityGroupPolicy.allows(instanceGroups, false, "tcp", port, -1, source,
+                        policyPrefixLists(region, instanceGroups));
     }
 
     private InstanceConnectEndpoint requireInstanceConnectEndpoint(String region, String id) {
