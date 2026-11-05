@@ -6,9 +6,12 @@ import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
+import io.restassured.path.xml.element.Node;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
@@ -32,6 +35,7 @@ import java.util.stream.Collectors;
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.withSettings;
@@ -85,6 +89,8 @@ class CloudFormationServiceRestoreIntegrationTest {
     void rejectedExecutionRestoresStackAndChangeSetState() throws Exception {
         String targetStack = uniqueStackName("target");
         createChangeSet(targetStack);
+        String policy = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"Update:*\",\"Principal\":\"*\",\"Resource\":\"*\"}]}";
+        service.describeChangeSet(targetStack, "initial", REGION).setStackPolicyBody(policy);
 
         List<Future<?>> runningOperations = fillExecutor();
         try {
@@ -94,6 +100,7 @@ class CloudFormationServiceRestoreIntegrationTest {
 
             Stack restored = service.describeStacks(targetStack, REGION).getFirst();
             assertEquals("REVIEW_IN_PROGRESS", restored.getStatus());
+            assertNull(restored.getStackPolicyBody());
             ChangeSet restoredChangeSet = service.describeChangeSet(targetStack, "initial", REGION);
             assertEquals("CREATE_COMPLETE", restoredChangeSet.getStatus());
             assertEquals("AVAILABLE", restoredChangeSet.getExecutionStatus());
@@ -104,6 +111,7 @@ class CloudFormationServiceRestoreIntegrationTest {
         Future<?> retry = service.executeChangeSet(targetStack, "initial", REGION);
         retry.get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
         assertEquals("CREATE_COMPLETE", service.describeStacks(targetStack, REGION).getFirst().getStatus());
+        assertEquals(policy, service.describeStacks(targetStack, REGION).getFirst().getStackPolicyBody());
         assertEquals("EXECUTE_COMPLETE",
                 service.describeChangeSet(targetStack, "initial", REGION).getExecutionStatus());
     }
@@ -155,10 +163,56 @@ class CloudFormationServiceRestoreIntegrationTest {
     }
 
     @Test
+    void rejectedPolicyOnlyUpdateCanBeExecutedOnceCapacityReturns() throws Exception {
+        // Outside STACK_PREFIX, so its own create and update are not held by the blocking provisioner.
+        String targetStack = "restore-policy-target-" + System.nanoTime();
+        cfn("CreateStack", targetStack).formParam("TemplateBody", TEMPLATE)
+                .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(targetStack, "CREATE_COMPLETE");
+        String policy = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"Update:*\",\"Principal\":\"*\",\"Resource\":\"*\"}]}";
+
+        String updateChangeSet;
+        List<Future<?>> runningOperations = fillExecutor();
+        try {
+            Response rejected = cfn("UpdateStack", targetStack)
+                    .formParam("UsePreviousTemplate", "true")
+                    .formParam("StackPolicyBody", policy)
+                    .when().post("/");
+            assertEquals(400, rejected.statusCode(), rejected.asString());
+            assertTrue(rejected.asString().contains("LimitExceededException"), rejected.asString());
+
+            String listed = cfn("ListChangeSets", targetStack).when().post("/")
+                    .then().statusCode(200).extract().asString();
+            List<Node> updates = XmlPath.from(listed)
+                    .getList("**.findAll { it.name() == 'member' }", Node.class).stream()
+                    .filter(summary -> summary.getNode("ChangeSetName").value().startsWith("update-"))
+                    .toList();
+            assertEquals(1, updates.size(), listed);
+            Node restored = updates.getFirst();
+            updateChangeSet = restored.getNode("ChangeSetName").value();
+            assertEquals("AVAILABLE", restored.getNode("ExecutionStatus").value(), listed);
+            assertEquals("CREATE_COMPLETE", restored.getNode("Status").value(), listed);
+        } finally {
+            release(runningOperations);
+        }
+
+        cfn("ExecuteChangeSet", targetStack).formParam("ChangeSetName", updateChangeSet)
+                .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(targetStack, "UPDATE_COMPLETE");
+        String applied = cfn("GetStackPolicy", targetStack).when().post("/")
+                .then().statusCode(200).extract().xmlPath()
+                .getString("GetStackPolicyResponse.GetStackPolicyResult.StackPolicyBody");
+        assertEquals(policy, applied);
+
+        service.deleteStack(targetStack, REGION, regionResolver.getAccountId())
+                .get(TIMEOUT_SECONDS, TimeUnit.SECONDS);
+    }
+
+    @Test
     void rejectedCreateCleanupDoesNotUnprotectAnExecutingStack() throws Exception {
         String targetStack = uniqueStackName("executing");
         ChangeSet initial = service.createChangeSetForCreateStack(targetStack, "initial-create",
-                TEMPLATE, null, Map.of(), List.of(), Map.of(), REGION, true);
+                TEMPLATE, null, Map.of(), List.of(), Map.of(), REGION, true, null);
         Future<?> execution = service.executeChangeSet(targetStack, "initial-create", REGION);
         try {
             service.clearProtectionAfterRejectedCreate(targetStack, initial, REGION);

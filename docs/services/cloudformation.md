@@ -43,8 +43,8 @@ changing credentials already issued.
 | `ValidateTemplate` | Refuses a body that is no template (see [Template format](#template-format)) and a template holding a `null` value (see [Null values](#null-values)); otherwise returns success without validating further |
 | `ListStacks` | List stacks by status |
 | `ListExports` | - |
-| `SetStackPolicy` | Accepted; no-op (stub — stack policies are not enforced) |
-| `GetStackPolicy` | Accepted; returns an empty policy (stub) |
+| `SetStackPolicy` | Store a stack policy given as `StackPolicyBody` or `StackPolicyURL`; only its structure is checked, and the policy is not enforced. `CreateStack` stores its policy and `UpdateStack` applies its policy once the update completes |
+| `GetStackPolicy` | Return the stored stack policy as submitted, including for a deleted stack by stack id |
 | `DescribeStackResource` | Get a specific stack resource |
 | `DescribeOrganizationsAccess` | - |
 | `ActivateOrganizationsAccess` | - |
