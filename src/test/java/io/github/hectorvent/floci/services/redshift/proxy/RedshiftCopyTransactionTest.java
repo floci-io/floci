@@ -9,8 +9,10 @@ import org.junit.jupiter.api.Timeout;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FilterInputStream;
+import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
@@ -19,6 +21,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -31,6 +34,111 @@ import static org.mockito.Mockito.when;
 
 @Timeout(15)
 class RedshiftCopyTransactionTest {
+    @Test
+    void readyForQueryClearsDiscardStateBeforeTheClientParsesRollback() throws Exception {
+        try (ServerSocket clients = new ServerSocket(0); ServerSocket backends = new ServerSocket(0);
+                Socket client = new Socket("127.0.0.1", clients.getLocalPort()); Socket bridgeClient = clients.accept();
+                Socket bridgeBackend = new Socket("127.0.0.1", backends.getLocalPort()); Socket backend = backends.accept()) {
+            client.setSoTimeout(5000);
+            backend.setSoTimeout(5000);
+            CountDownLatch rollbackParsed = new CountDownLatch(1);
+            AtomicBoolean readyForwarded = new AtomicBoolean();
+            RedshiftInterceptingBridge.WireFrameTracker tracker = new RedshiftInterceptingBridge.WireFrameTracker(
+                    (type, body) -> {
+                        if (type == 'Z') {
+                            readyForwarded.set(true);
+                        }
+                    });
+            OutputStream output = new FilterOutputStream(bridgeClient.getOutputStream()) {
+                @Override
+                public void write(byte[] bytes, int offset, int length) throws IOException {
+                    out.write(bytes, offset, length);
+                    tracker.consume(bytes, offset, length);
+                }
+
+                @Override
+                public void flush() throws IOException {
+                    out.flush();
+                    if (readyForwarded.compareAndSet(true, false)) {
+                        try {
+                            assertTrue(rollbackParsed.await(5, TimeUnit.SECONDS));
+                        } catch (InterruptedException exception) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException(exception);
+                        }
+                    }
+                }
+            };
+            Socket observedClient = spy(bridgeClient);
+            doReturn(output).when(observedClient).getOutputStream();
+            CompletableFuture<Void> server = CompletableFuture.runAsync(() -> {
+                try {
+                    PostgresWireDecoder decoder = new PostgresWireDecoder(backend.getInputStream());
+                    assertEquals('P', decoder.nextMessage().type());
+                    assertEquals('B', decoder.nextMessage().type());
+                    PostgresWire.write(backend.getOutputStream(), '1');
+                    PostgresWire.write(backend.getOutputStream(), '2');
+                    backend.getOutputStream().flush();
+                    assertEquals('P', decoder.nextMessage().type());
+                    assertEquals('B', decoder.nextMessage().type());
+                    assertEquals('E', decoder.nextMessage().type());
+                    PostgresWire.write(backend.getOutputStream(), 'E',
+                            S3CopySimulator.errorBody("25P02", "transaction is aborted"));
+                    backend.getOutputStream().flush();
+                    assertEquals('S', decoder.nextMessage().type());
+                    PostgresWire.write(backend.getOutputStream(), 'Z', new byte[]{'E'});
+                    backend.getOutputStream().flush();
+                    PostgresWireDecoder.FrontendMessage rollback = decoder.nextMessage();
+                    assertEquals('P', rollback.type());
+                    assertEquals("ROLLBACK TO SAVEPOINT client_sp", decoder.decodeParse(rollback).sql());
+                    rollbackParsed.countDown();
+                    PostgresWire.write(backend.getOutputStream(), '1');
+                    backend.getOutputStream().flush();
+                    assertEquals('B', decoder.nextMessage().type());
+                    assertEquals('E', decoder.nextMessage().type());
+                    assertEquals('S', decoder.nextMessage().type(), "Rollback must not execute the previous COPY");
+                    PostgresWire.write(backend.getOutputStream(), '2');
+                    PostgresWire.write(backend.getOutputStream(), 'C', PostgresWire.cStringBytes("ROLLBACK"));
+                    PostgresWire.write(backend.getOutputStream(), 'Z', new byte[]{'T'});
+                    backend.getOutputStream().flush();
+                } catch (Exception exception) {
+                    throw new AssertionError(exception);
+                }
+            });
+            Thread.ofVirtual().start(new RedshiftInterceptingBridge(observedClient, bridgeBackend,
+                    mock(S3Service.class), mock(IamService.class))::run);
+            OutputStream frontend = client.getOutputStream();
+            PostgresWireDecoder responses = new PostgresWireDecoder(client.getInputStream());
+            frontend.write(PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage("",
+                    "COPY events FROM 's3://bucket/data' MAXERROR 2", List.of()),
+                    "COPY events FROM 's3://bucket/data' MAXERROR 2"));
+            PostgresWire.write(frontend, 'B', new byte[8]);
+            frontend.flush();
+            assertEquals('1', responses.nextMessage().type());
+            assertEquals('2', responses.nextMessage().type());
+            ByteArrayOutputStream failed = new ByteArrayOutputStream();
+            statement(failed, "", "SELECT count(*) FROM events");
+            frontend.write(failed.toByteArray());
+            frontend.flush();
+            assertEquals('E', responses.nextMessage().type());
+            PostgresWire.write(frontend, 'S');
+            frontend.flush();
+            assertEquals('Z', responses.nextMessage().type());
+            frontend.write(PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage("",
+                    "ROLLBACK TO SAVEPOINT client_sp", List.of()), "ROLLBACK TO SAVEPOINT client_sp"));
+            frontend.flush();
+            assertEquals('1', responses.nextMessage().type());
+            PostgresWire.write(frontend, 'B', new byte[8]);
+            PostgresWire.write(frontend, 'E', new byte[5]);
+            PostgresWire.write(frontend, 'S');
+            frontend.flush();
+            server.get(5, TimeUnit.SECONDS);
+            assertEquals('2', responses.nextMessage().type());
+            assertEquals('C', responses.nextMessage().type());
+            assertEquals('T', responses.nextMessage().body()[0]);
+        }
+    }
+
     @Test
     void rollbackToSavepointRetainsOwnershipUntilClientSync() throws Exception {
         runCycle(List.of(), List.of("SAVEPOINT client_sp", "ROLLBACK TO SAVEPOINT client_sp"), false);

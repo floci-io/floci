@@ -989,10 +989,11 @@ public class RedshiftInterceptingBridge {
                     if (read == -1) {
                         break;
                     }
-                    clientOut.write(buffer, 0, read);
-                    clientOut.flush();
+                    // The client can send its next Parse as soon as ReadyForQuery reaches it.
                     tracker.consume(buffer, 0, read);
                     pumpBetweenMessages = tracker.betweenMessages();
+                    clientOut.write(buffer, 0, read);
+                    clientOut.flush();
                 } finally {
                     backendLock.unlock();
                 }

@@ -14,6 +14,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
@@ -39,6 +40,7 @@ class ContainerBindDirectoryDockerIntegrationTest {
     ImageCacheService imageCacheService;
 
     @Test
+    @Timeout(value = 10, unit = TimeUnit.MINUTES)
     void nonRootImageCanWriteFreshBindWithoutChangingExistingFiles(@TempDir Path root) throws Exception {
         Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker daemon must be available");
         Path directory = Files.createDirectory(root.resolve("domain"));

@@ -65,12 +65,18 @@ test_image() {
 # than for the second it saves. ContainerPlatformDockerIntegrationTest is not listed: it pulls the
 # other architecture, which a prefetch of the host image cannot serve.
 BUSYBOX_IMAGE="$(test_image BUSYBOX)"
-starts ContainerHostNetworkDockerIntegrationTest EcsServiceDiscoveryDockerIntegrationTest \
+starts ContainerHostNetworkDockerIntegrationTest ContainerBindDirectoryDockerIntegrationTest EcsServiceDiscoveryDockerIntegrationTest \
        EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerIntegrationTest \
        EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerIntegrationTest \
        EcsExecChannelDockerIntegrationTest EcsImagePullDockerIntegrationTest EcsLeftoverContainersDockerIntegrationTest \
        BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest \
     && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
+# Bind-directory ownership uses the default OpenSearch image, whose cold pull can outlast a test.
+OPENSEARCH_VERSIONS="src/main/java/io/github/hectorvent/floci/services/opensearch/OpenSearchVersions.java"
+OPENSEARCH_DEFAULT="$(grep -oE 'DEFAULT_VERSION = "[^"]+"' "$OPENSEARCH_VERSIONS" | cut -d '"' -f 2)"
+OPENSEARCH_IMAGE="$(grep -F "VERSION_TO_IMAGE.put(\"$OPENSEARCH_DEFAULT\"" "$OPENSEARCH_VERSIONS" \
+    | grep -oE 'opensearchproject/opensearch:[^"]+')"
+starts ContainerBindDirectoryDockerIntegrationTest && [ -n "$OPENSEARCH_IMAGE" ] && pull "$OPENSEARCH_IMAGE"
 # EcsImagePullDockerIntegrationTest runs its own registry to move a tag in; the /ecr/ line below
 # covers the shards that run the ECR tests.
 REGISTRY_IMAGE="$(test_image REGISTRY)"
