@@ -128,7 +128,7 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         }
         JsonNode lp = ctx.engine().resolveNode(props.get("LifecyclePolicy"));
         String policyText = lp.path("LifecyclePolicyText").asText(null);
-        return policyText == null || policyText.isEmpty() ? null : policyText;
+        return policyText;
     }
 
     /** {@code RepositoryPolicyText} as a JSON string, or null when the template declares none. */

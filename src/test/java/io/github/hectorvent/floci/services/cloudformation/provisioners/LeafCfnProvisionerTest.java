@@ -16,6 +16,8 @@ import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -305,11 +307,11 @@ class LeafCfnProvisionerTest {
             verify(ecr).setRepositoryPolicy("app", null, "{\"Version\":\"2012-10-17\"}", REGION);
         }
 
-        @Test
-        void invalidLifecyclePolicyDoesNotCreateOrReconcileARepository() {
-            JsonNode invalid = props("""
-                    {"RepositoryName":"app","LifecyclePolicy":{"LifecyclePolicyText":"{\\"rules\\":[]}"}}
-                    """);
+        @ParameterizedTest
+        @ValueSource(strings = {"", " ", "{\"rules\":[]}"})
+        void invalidLifecyclePolicyDoesNotCreateOrReconcileARepository(String policy) {
+            ObjectNode invalid = (ObjectNode) props("{\"RepositoryName\":\"app\"}");
+            invalid.putObject("LifecyclePolicy").put("LifecyclePolicyText", policy);
             assertThrows(AwsException.class, () -> provisioner.provision(
                     resource("Repo", "AWS::ECR::Repository"), invalid, ctx));
             assertThrows(AwsException.class, () -> provisioner.provision(
@@ -318,6 +320,7 @@ class LeafCfnProvisionerTest {
             verify(ecr, never()).createRepository(anyString(), any(), any(), any(), any(), any(), any(), anyString());
             verify(ecr, never()).putImageTagMutability(anyString(), any(), any(), anyString());
             verify(ecr, never()).putLifecyclePolicy(anyString(), any(), any(), anyString());
+            verify(ecr, never()).deleteLifecyclePolicy(anyString(), any(), anyString());
         }
 
         @Test

@@ -1,23 +1,30 @@
 package io.github.hectorvent.floci.services.ecr;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecr.model.InvalidParameterException;
+import software.amazon.awssdk.services.ecr.model.LifecyclePolicyNotFoundException;
 import software.amazon.awssdk.services.ecr.model.RepositoryNotFoundException;
 
 import java.net.URI;
 import java.util.UUID;
 import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.testing.CfnStackWaits.awaitStackDeleted;
+import static io.github.hectorvent.floci.testing.CfnStackWaits.awaitStatus;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -27,6 +34,7 @@ import static org.mockito.Mockito.when;
 @QuarkusTest
 class EcrLifecyclePolicyValidationIntegrationTest {
 
+    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String RULE = """
             {"rulePriority":1,"selection":{"tagStatus":"any","countType":"imageCountMoreThan",
             "countNumber":2},"action":{"type":"expire"}}
@@ -46,6 +54,45 @@ class EcrLifecyclePolicyValidationIntegrationTest {
     void keepRepositoryMetadataIndependentOfDocker() {
         when(registry.getRepositoryUri(anyString(), anyString(), anyString()))
                 .thenReturn("registry.invalid/lifecycle-validation");
+    }
+
+    @Test
+    void emptyCloudFormationUpdatePreservesPolicyAndOmittedPolicyStillRemovesIt() {
+        String repository = "lifecycle-validation/" + UUID.randomUUID();
+        String stack = "lifecycle-validation-" + UUID.randomUUID();
+        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
+                AwsBasicCredentials.create("test", "test"));
+        try (EcrClient client = EcrClient.builder().endpointOverride(endpoint)
+                .region(Region.US_EAST_1).credentialsProvider(credentials).build();
+             CloudFormationClient cfn = CloudFormationClient.builder().endpointOverride(endpoint)
+                     .region(Region.US_EAST_1).credentialsProvider(credentials).build()) {
+            ObjectNode template = JSON.createObjectNode();
+            ObjectNode properties = template.putObject("Resources").putObject("Repo")
+                    .put("Type", "AWS::ECR::Repository").putObject("Properties");
+            properties.put("RepositoryName", repository);
+            properties.putObject("LifecyclePolicy").put("LifecyclePolicyText", VALID_POLICY);
+            cfn.createStack(request -> request.stackName(stack).templateBody(template.toString()));
+            try {
+                awaitStatus(cfn, stack, "CREATE_COMPLETE");
+                String before = client.getLifecyclePolicy(request -> request.repositoryName(repository))
+                        .lifecyclePolicyText();
+                properties.putObject("LifecyclePolicy").put("LifecyclePolicyText", "");
+                cfn.updateStack(request -> request.stackName(stack).templateBody(template.toString()));
+                awaitStatus(cfn, stack, "UPDATE_ROLLBACK_COMPLETE");
+                assertEquals(before, client.getLifecyclePolicy(request -> request.repositoryName(repository))
+                        .lifecyclePolicyText());
+                properties.remove("LifecyclePolicy");
+                cfn.updateStack(request -> request.stackName(stack).templateBody(template.toString()));
+                awaitStatus(cfn, stack, "UPDATE_COMPLETE");
+                assertThrows(LifecyclePolicyNotFoundException.class,
+                        () -> client.getLifecyclePolicy(request -> request.repositoryName(repository)));
+            } finally {
+                cfn.deleteStack(request -> request.stackName(stack));
+                awaitStackDeleted(stack);
+                assertThrows(RepositoryNotFoundException.class,
+                        () -> client.describeRepositories(request -> request.repositoryNames(repository)));
+            }
+        }
     }
 
     static Stream<Object[]> invalidPolicies() {
