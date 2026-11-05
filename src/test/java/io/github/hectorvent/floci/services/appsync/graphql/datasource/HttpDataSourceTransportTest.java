@@ -17,6 +17,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.net.ssl.SSLContext;
 import java.net.InetAddress;
@@ -142,6 +144,35 @@ class HttpDataSourceTransportTest {
         Map<String, Object> response = transport.send(request("/error", "GET", Map.of()));
         assertEquals(503, response.get("statusCode"));
         assertEquals("upstream failed", response.get("body"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "text/plain; charset=does-not-exist", "text/plain; charset=bad@@@charset", "not a content type"})
+    void malformedResponseContentTypeDoesNotDiscardStatusOrBody(String contentType) {
+        server.createContext("/charset", exchange -> {
+            byte[] body = "response retained".getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", contentType);
+            exchange.sendResponseHeaders(503, body.length);
+            try (exchange) {
+                exchange.getResponseBody().write(body);
+            }
+        });
+        Map<String, Object> response = transport.send(request("/charset", "GET", Map.of()));
+        assertEquals(503, response.get("statusCode"));
+        assertEquals("response retained", response.get("body"));
+    }
+
+    @Test
+    void aSupportedResponseCharsetIsStillRespected() {
+        server.createContext("/latin", exchange -> {
+            byte[] body = "caf\u00e9".getBytes(StandardCharsets.ISO_8859_1);
+            exchange.getResponseHeaders().set("Content-Type", "text/plain; charset=ISO-8859-1");
+            exchange.sendResponseHeaders(200, body.length);
+            try (exchange) {
+                exchange.getResponseBody().write(body);
+            }
+        });
+        assertEquals("caf\u00e9", transport.send(request("/latin", "GET", Map.of())).get("body"));
     }
 
     @Test

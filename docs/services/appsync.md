@@ -481,7 +481,8 @@ The response handler receives `ctx.result.statusCode`, `ctx.result.headers`, and
 `ctx.result.body`. A 4xx or 5xx response is still a result for the handler to inspect. Transport
 failures use `HttpException`; invalid request mappings use `MappingTemplate`. Requests and responses
 are limited to 5 MiB, and transport work has a 30-second deadline. Redirects and automatic retries
-are disabled. HTTPS keeps certificate and hostname verification enabled.
+are disabled. Supported response charsets are respected; a missing, blank, or unrecognized charset
+falls back to UTF-8. HTTPS keeps certificate and hostname verification enabled.
 
 Unsigned requests support public HTTP(S) endpoints. Floci rejects private, loopback,
 link-local, and other reserved destinations, including a hostname that resolves to any such address.
@@ -494,7 +495,7 @@ data source's `serviceRoleArn`:
 | Signing service | Supported requests |
 |---|---|
 | `scheduler` | `POST`, `GET`, and `DELETE` on `/schedules/<name>` for CreateSchedule, GetSchedule, and DeleteSchedule. Query parameters are limited to `groupName` and `clientToken`. |
-| `states` | `POST /` with `X-Amz-Target: AWSStepFunctions.SendTaskSuccess` or `AWSStepFunctions.SendTaskFailure`. |
+| `states` | `POST /` with `X-Amz-Target: AWSStepFunctions.SendTaskSuccess` or `AWSStepFunctions.SendTaskFailure`, using `application/json` or `application/x-amz-json-1.0`. |
 
 The endpoint must be the service's standard regional HTTPS hostname, for example
 `https://scheduler.us-west-2.amazonaws.com`. The signing region must be a canonical published region

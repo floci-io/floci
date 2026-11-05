@@ -79,7 +79,7 @@ record HttpDataSourceAwsTarget(String accountId, String sourceApiArn, String rol
             try {
                 ContentType type = ContentType.parse(request.headers().get("content-type"));
                 Set<String> allowed = "states".equals(service)
-                        ? Set.of("application/json", "application/x-amz-json-1.0", "application/x-amz-json-1.1")
+                        ? Set.of("application/json", "application/x-amz-json-1.0")
                         : Set.of("application/json");
                 if (!allowed.contains(type.getMimeType()) || !StandardCharsets.UTF_8.equals(type.getCharset(StandardCharsets.UTF_8))) {
                     throw invalid("Signed HTTP data sources require a UTF-8 JSON content type");

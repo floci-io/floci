@@ -98,14 +98,17 @@ class AppSyncHttpDataSourceSidecarIntegrationTest {
                 client.deleteGraphqlApi(r -> r.apiId(apiId));
             }
         } finally {
-            if (roleName != null) {
-                RequestScopes.runAs(ACCOUNT, REGION, () -> {
-                    iam.deleteRolePolicy(roleName, "schedule");
-                    iam.deleteRole(roleName);
-                });
-            }
-            if (client != null) {
-                client.close();
+            try {
+                if (roleName != null) {
+                    RequestScopes.runAs(ACCOUNT, REGION, () -> {
+                        iam.deleteRolePolicy(roleName, "schedule");
+                        iam.deleteRole(roleName);
+                    });
+                }
+            } finally {
+                if (client != null) {
+                    client.close();
+                }
             }
         }
     }

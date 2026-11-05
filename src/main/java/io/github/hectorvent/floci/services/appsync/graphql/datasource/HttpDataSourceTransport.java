@@ -24,6 +24,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
@@ -160,10 +161,17 @@ class HttpDataSourceTransport implements AutoCloseable {
                     }
                 }
             }
-            ContentType contentType = ContentType.parse(headers.getOrDefault("content-type", "text/plain"));
             return Map.of("statusCode", response.getCode(), "headers", headers, "body",
-                    new String(bytes, contentType.getCharset(StandardCharsets.UTF_8)));
+                    new String(bytes, responseCharset(headers.get("content-type"))));
         });
+    }
+
+    private static Charset responseCharset(String contentType) {
+        try {
+            return ContentType.getCharset(ContentType.parseLenient(contentType), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return StandardCharsets.UTF_8;
+        }
     }
 
     @Override

@@ -92,6 +92,12 @@ class HttpDataSourceAwsTargetTest {
     }
 
     @Test
+    void anUnsupportedStepFunctionsWireProtocolIsRefusedBeforeSigning() {
+        assertInvalid(source("states", endpoint("states")), "POST", "/", Map.of("headers",
+                Map.of("X-Amz-Target", "AWSStepFunctions.SendTaskSuccess", "Content-Type", "application/x-amz-json-1.1")));
+    }
+
+    @Test
     void missingStateTargetAndForeignRolesFailClosed() {
         assertInvalid(source("states", endpoint("states")), "POST", "/", Map.of());
         for (String role : new String[]{"arn:aws:iam::999999999999:role/other",
