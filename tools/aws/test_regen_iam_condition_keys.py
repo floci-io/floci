@@ -166,6 +166,17 @@ def test_verify_fails_on_a_pair_the_table_does_not_name(tmp_path, monkeypatch):
         regen_iam_condition_keys.main(["--verify", "--source", str(source)])
     reference["Actions"] = [a for a in reference["Actions"] if a["Name"] != "GetRole"] + [
         {"Name": "GetRole", "ActionConditionKeys": ["iam:PermissionsBoundary", "iam:RoleTemplateARN"]}]
+    reference["Resources"] = [{"Name": "role", "ConditionKeys": sorted(regen_iam_condition_keys.RESOURCE_TAG_KEYS)}]
+    for entry in document["roleTags"] + document["requestTags"]:
+        name = entry["action"].split(":", 1)[1]
+        action = next((a for a in reference["Actions"] if a["Name"] == name), None)
+        if action is None:
+            action = {"Name": name, "ActionConditionKeys": []}
+            reference["Actions"].append(action)
+        if "target" in entry:
+            action["Resources"] = [{"Name": "role"}]
+        else:
+            action["ActionConditionKeys"].append(entry["key"])
     source.write_text(json.dumps(reference))
     assert regen_iam_condition_keys.main(["--verify", "--source", str(source)]) == 0
 
@@ -212,3 +223,51 @@ def run_aggregate_gate(tmp_path, changed, fail):
         ["make", "--no-print-directory", "iam-data-verify", "CHANGED=" + changed,
          "MAKE=" + str(recursive_make)],
         cwd=OUTPUT.parents[4], capture_output=True, text=True, check=False)
+
+
+def test_tag_context_uses_resource_keys_and_only_existing_role_targets():
+    model = json.loads(json.dumps(MODEL))
+    for name in ("CreateRole", "PassRole", "GetUser"):
+        model["operations"][name] = {"input": {"shape": "GetInput"}}
+    reference = {"Resources": [{"Name": "role", "ConditionKeys": sorted(regen_iam_condition_keys.RESOURCE_TAG_KEYS)}],
+                 "Actions": [{"Name": name, "Resources": [{"Name": "role"}]} for name in
+                             ("GetRole", "CreateRole", "PassRole")]
+                 + [{"Name": "GetUser", "Resources": [{"Name": "user"}]}]}
+    role_tags, request_tags = regen_iam_condition_keys.tag_context(reference, model)
+    assert request_tags == []
+    assert role_tags == [{"action": "iam:GetRole", "key": key, "target": "RoleName"}
+                         for key in sorted(regen_iam_condition_keys.RESOURCE_TAG_KEYS)]
+    reference["Actions"][0]["Resources"][0]["ConditionKeys"] = []
+    assert regen_iam_condition_keys.tag_context(reference, model) == ([], [])
+
+
+def test_tag_request_keys_are_limited_to_the_reference_and_model_members():
+    model = {"operations": {name: {"input": {"shape": "Input"}} for name in ("TagRole", "UntagUser")},
+             "shapes": {"Input": {"members": {"Tags": {"shape": "List"}, "TagKeys": {"shape": "Keys"}}},
+                        "List": {"type": "list", "member": {"shape": "Tag"}},
+                        "Keys": {"type": "list", "member": {"shape": "String"}},
+                        "Tag": {"type": "structure", "members": {"Key": {"shape": "String"},
+                                                                 "Value": {"shape": "String"}}},
+                        "String": {"type": "string"}}}
+    reference = {"Resources": [], "Actions": [
+        {"Name": "TagRole", "ActionConditionKeys": sorted(regen_iam_condition_keys.REQUEST_TAG_KEYS)},
+        {"Name": "UntagUser", "ActionConditionKeys": ["aws:TagKeys"]}]}
+    role_tags, request_tags = regen_iam_condition_keys.tag_context(reference, model)
+    assert role_tags == []
+    assert request_tags == [
+        {"action": "iam:TagRole", "key": "aws:RequestTag/${TagKey}", "member": "Tags"},
+        {"action": "iam:TagRole", "key": "aws:TagKeys", "member": "Tags"},
+        {"action": "iam:UntagUser", "key": "aws:TagKeys", "member": "TagKeys"}]
+    del model["shapes"]["Input"]["members"]["TagKeys"]
+    with pytest.raises(ValueError, match="Invalid IAM request tag member"):
+        regen_iam_condition_keys.tag_context(reference, model)
+
+
+def test_tag_context_offline_check_rejects_wrong_targets_and_request_members():
+    model = MODEL
+    with pytest.raises(ValueError, match="Invalid stored role tag target"):
+        regen_iam_condition_keys.validate_tag_context(
+            [{"action": "iam:GetRole", "key": "aws:ResourceTag/${TagKey}", "target": "UserName"}], [], model)
+    with pytest.raises(ValueError, match="Invalid IAM request tag member"):
+        regen_iam_condition_keys.validate_tag_context([], [
+            {"action": "iam:TagRole", "key": "aws:RequestTag/${TagKey}", "member": "RoleName"}], model)

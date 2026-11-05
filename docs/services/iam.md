@@ -2604,11 +2604,21 @@ floci populates:
   `DeleteRolePermissionsBoundary`. A role or user without a boundary, or one that does not
   exist, carries no value for the key.
 
+  The table's `roleTags` entries read `aws:ResourceTag/<key>` and `iam:ResourceTag/<key>`
+  from the stored role on existing-role APIs addressed by `RoleName`, such as `GetRole`,
+  `PutRolePolicy`, `TagRole` and `UntagRole`. The lookup uses the request account and the
+  tags before any mutation. `PassRole`, creation, and operations addressing a role by an
+  ARN or deletion-task ID do not gain these keys. A stray `RoleName` on another operation
+  does not supply role tags. Stored user tags and caller principal tags are not read here.
+  The action coverage comes from the Service Reference's role resource keys and the
+  pinned SDK model, with the documented `PassRole` exclusion.
+
   A request without the parameter carries no value for the key, and the target remains the
   authorized resource. Every other pair the reference lists is in the table's `notRead` with
   its reason. Regenerate with `make iam-condition-keys-sync`.
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
+  IAM `TagRole` and `TagUser` (the `Tags` list),
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and
   `s3:PutBucketTagging` (the `<Tagging>` body), for S3 Control's `s3:TagResource` (its `Tags` body),
   and for every create in the tag-on-create table whose action takes it, as described under the
@@ -2696,7 +2706,8 @@ floci populates:
   session, a federated user or the account root it is absent, and a statement that matches on it
   cannot match: an absent key has no equal or like value. That absence is the enforcement rather
   than a gap in it.
-- `aws:TagKeys`: the case-sensitive requested tag keys for EC2 `RunInstances` and
+- `aws:TagKeys`: the case-sensitive requested tag keys for IAM `TagRole` and `TagUser`
+  (from `Tags`), `UntagRole` and `UntagUser` (from `TagKeys`), EC2 `RunInstances` and
   `CreateTags`, S3 `PutBucketTagging`, S3 Control `TagResource` (its `Tags` body) and
   `UntagResource` (its `tagKeys` query parameters), and every create in the tag-on-create table
   whose action takes it. S3 Control's come from `s3control-tag-condition-keys.json`, which

@@ -29,6 +29,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
@@ -234,7 +235,9 @@ public class IamConditionContextResolver {
     private Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, String> members = IamConditionKeys.members(action);
         Map<String, String> targets = IamConditionKeys.targets(action);
-        if (members.isEmpty() && targets.isEmpty()) {
+        Map<String, String> roleTags = IamConditionKeys.roleTags(action);
+        Map<String, String> requestTags = IamConditionKeys.requestTags(action);
+        if (members.isEmpty() && targets.isEmpty() && roleTags.isEmpty() && requestTags.isEmpty()) {
             return null;
         }
         Map<String, String> form = formParameters(ctx);
@@ -252,7 +255,41 @@ public class IamConditionContextResolver {
                 conditions.put(key, List.of(value));
             }
         });
+        if (!roleTags.isEmpty() && form.containsKey("RoleName") && iamService.isResolvable()) {
+            iamService.get().findRole(requestContext.getAccountId(), form.get("RoleName")).ifPresent(role ->
+                    role.getTags().forEach((tag, value) -> roleTags.keySet().forEach(key ->
+                            conditions.put(key.replace("${TagKey}", tag), List.of(value)))));
+        }
+        if (!requestTags.isEmpty()) {
+            addIamRequestTags(conditions, form, requestTags);
+        }
         return conditions.isEmpty() ? null : conditions;
+    }
+
+    private static void addIamRequestTags(Map<String, List<String>> conditions, Map<String, String> form,
+                                          Map<String, String> requestTags) {
+        MultivaluedMap<String, String> parameters = new MultivaluedHashMap<>();
+        form.forEach(parameters::putSingle);
+        requestTags.forEach((key, memberName) -> {
+            List<String> keys = new ArrayList<>();
+            for (AwsQueryLists.IndexedMember member : AwsQueryLists.members(parameters, memberName, null)) {
+                String tag = form.get(member.prefix() + ("Tags".equals(memberName) ? ".Key" : ""));
+                if (tag == null) {
+                    continue;
+                }
+                if ("aws:TagKeys".equals(key)) {
+                    if (!keys.contains(tag)) {
+                        keys.add(tag);
+                    }
+                } else {
+                    conditions.put(key.replace("${TagKey}", tag),
+                            List.of(form.getOrDefault(member.prefix() + ".Value", "")));
+                }
+            }
+            if (!keys.isEmpty()) {
+                conditions.put(key, keys);
+            }
+        });
     }
 
     private String storedPermissionsBoundary(String target, String name) {

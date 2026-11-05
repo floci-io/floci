@@ -16,6 +16,11 @@ hand-edited entry fails, as does a BY_HAND member botocore no longer has or a BY
 file does not list. --verify compares every pair and key type with the live reference and
 fails on any difference, added pairs included: a key missing from the context stops a
 conditioned Allow matching and a conditioned Deny applying. --source reads a saved reference.
+
+roleTags lists the resource tag keys of existing role APIs addressed by RoleName, excluding
+PassRole. requestTags lists the request tag keys of TagRole/TagUser and UntagRole/UntagUser.
+Their action/key coverage is checked against the live reference by --verify; --check validates
+the stored targets and list shapes against pinned botocore.
 """
 from __future__ import annotations
 
@@ -57,6 +62,14 @@ NOT_IN_REQUEST = {
     "iam:RoleTemplateARN": "the value is the role template a service acquires the role from",
     "iam:ServiceSpecificCredentialServiceName": "the value is the named credential's service",
 }
+
+
+# Existing role APIs addressed by RoleName, plus explicit role/user tagging requests.
+# CreateRole's request tags are handled by TagOnCreate, not by looking up an existing role.
+# The IAM User Guide explicitly excludes PassRole from ResourceTag authorization.
+RESOURCE_TAG_KEYS = {"aws:ResourceTag/${TagKey}", "iam:ResourceTag/${TagKey}"}
+REQUEST_TAG_KEYS = {"aws:RequestTag/${TagKey}", "aws:TagKeys"}
+TAG_OPERATIONS = {"TagRole", "TagUser", "UntagRole", "UntagUser"}
 
 
 def action_keys(reference):
@@ -129,6 +142,55 @@ def require_by_hand_listed(pairs):
         raise ValueError(f"BY_HAND names pairs the reference does not list: {stale}")
 
 
+
+def tag_context(reference, model):
+    resources = {r["Name"]: r.get("ConditionKeys", []) for r in reference["Resources"]}
+    role_tags, request_tags = [], []
+    for action in sorted(reference["Actions"], key=lambda a: a["Name"]):
+        name = action["Name"]
+        operation = model["operations"].get(name)
+        if (not name.startswith("Create") and name != "PassRole"
+                and member_type(model, operation, "RoleName") == "string"):
+            keys = {key for resource in action.get("Resources", []) if resource["Name"] == "role"
+                    for key in resource.get("ConditionKeys", resources.get("role", []))}
+            role_tags += [{"action": "iam:" + name, "key": key, "target": "RoleName"}
+                          for key in sorted(keys & RESOURCE_TAG_KEYS)]
+        if name in TAG_OPERATIONS:
+            for key in sorted(set(action.get("ActionConditionKeys", [])) & REQUEST_TAG_KEYS):
+                member = "TagKeys" if name.startswith("Untag") else "Tags"
+                request_tags.append({"action": "iam:" + name, "key": key, "member": member})
+    validate_tag_context(role_tags, request_tags, model)
+    return role_tags, request_tags
+
+
+def validate_tag_context(role_tags, request_tags, model):
+    for entry in role_tags:
+        name = entry["action"].removeprefix("iam:")
+        if (entry["key"] not in RESOURCE_TAG_KEYS or entry["target"] != "RoleName"
+                or name.startswith("Create") or name == "PassRole"
+                or member_type(model, model["operations"].get(name), "RoleName") != "string"):
+            raise ValueError(f"Invalid stored role tag target: {entry}")
+    for entry in request_tags:
+        name = entry["action"].removeprefix("iam:")
+        member = "TagKeys" if name.startswith("Untag") else "Tags"
+        if (name not in TAG_OPERATIONS or entry["key"] not in REQUEST_TAG_KEYS
+                or (name.startswith("Untag") and entry["key"] != "aws:TagKeys")
+                or entry["member"] != member
+                or member_type(model, model["operations"].get(name), member) != "list"):
+            raise ValueError(f"Invalid IAM request tag member: {entry}")
+        operation = model["operations"][name]
+        shape = model["shapes"][operation["input"]["shape"]]
+        shape = model["shapes"][shape["members"][member]["shape"]]
+        item = model["shapes"][shape["member"]["shape"]]
+        valid = item["type"] == "string" if member == "TagKeys" else (
+            item["type"] == "structure" and all(
+                field in item.get("members", {})
+                and model["shapes"][item["members"][field]["shape"]]["type"] == "string"
+                for field in ("Key", "Value")))
+        if not valid:
+            raise ValueError(f"Invalid IAM request tag list shape: {entry}")
+
+
 def pairs_of(document):
     return sorted((e["action"], e["key"])
                   for e in document["read"] + document["fromTarget"] + document["notRead"])
@@ -139,7 +201,8 @@ def render(document):
     lines = ["{"]
     for key in ("source", "botocore", "types"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
-    for section, tail in (("read", ","), ("fromTarget", ","), ("notRead", "")):
+    for section, tail in (("read", ","), ("fromTarget", ","), ("notRead", ","),
+                          ("roleTags", ","), ("requestTags", "")):
         entries = document[section]
         lines.append(f'  "{section}": [')
         lines += [f"    {json.dumps(e)}{',' if i < len(entries) - 1 else ''}" for i, e in enumerate(entries)]
@@ -165,6 +228,7 @@ def main(argv=None):
         if classify(pairs, document["types"], model) != (
                 document["read"], document["fromTarget"], document["notRead"]):
             raise ValueError("IAM condition key members differ from pinned botocore")
+        validate_tag_context(document["roleTags"], document["requestTags"], model)
         return 0
     try:
         if args.source:
@@ -185,12 +249,18 @@ def main(argv=None):
             print(f"the table names {key} on {action}, which AWS no longer lists", file=sys.stderr)
         if set(pairs) != vendored or document["types"] != types:
             raise ValueError("IAM condition keys differ from AWS Service Reference")
+        model = load_model(latest_model_dir(resolve_botocore_data(args.botocore_data)[0], "iam"))
+        if tag_context(reference, model) != (document["roleTags"], document["requestTags"]):
+            raise ValueError("IAM tag condition keys differ from AWS Service Reference")
         return 0
     require_by_hand_listed(pairs)
     data, provenance = resolve_botocore_data(args.botocore_data)
-    read, from_target, not_read = classify(pairs, types, load_model(latest_model_dir(data, "iam")))
+    model = load_model(latest_model_dir(data, "iam"))
+    read, from_target, not_read = classify(pairs, types, model)
+    role_tags, request_tags = tag_context(reference, model)
     OUTPUT.write_text(render({"source": URL, "botocore": provenance, "types": types,
-                              "read": read, "fromTarget": from_target, "notRead": not_read}))
+                              "read": read, "fromTarget": from_target, "notRead": not_read,
+                              "roleTags": role_tags, "requestTags": request_tags}))
     return 0
 
 

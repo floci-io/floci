@@ -13,13 +13,16 @@ import java.util.Map;
  */
 final class IamConditionKeys {
 
-    private record Table(Map<String, Map<String, String>> members, Map<String, Map<String, String>> targets) {}
+    private record Table(Map<String, Map<String, String>> members, Map<String, Map<String, String>> targets,
+                         Map<String, Map<String, String>> roleTags, Map<String, Map<String, String>> requestTags) {}
 
     private static final Table TABLE = VendoredResources.read(
             "aws/iam-condition-keys.json", "IAM condition keys", input -> {
                 JsonNode document = new ObjectMapper().readTree(input);
                 return new Table(section(document.path("read"), "member"),
-                        section(document.path("fromTarget"), "target"));
+                        section(document.path("fromTarget"), "target"),
+                        section(document.path("roleTags"), "target"),
+                        section(document.path("requestTags"), "member"));
             });
 
     private IamConditionKeys() {}
@@ -52,5 +55,13 @@ final class IamConditionKeys {
      */
     static Map<String, String> targets(String action) {
         return TABLE.targets().getOrDefault(action, Map.of());
+    }
+
+    static Map<String, String> roleTags(String action) {
+        return TABLE.roleTags().getOrDefault(action, Map.of());
+    }
+
+    static Map<String, String> requestTags(String action) {
+        return TABLE.requestTags().getOrDefault(action, Map.of());
     }
 }
