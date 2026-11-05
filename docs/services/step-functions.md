@@ -576,8 +576,8 @@ These tasks and their `.waitForTaskToken` forms are evaluated with
 |---|---|---|---|
 | `arn:aws:states:::sqs:sendMessage` | `sqs:SendMessage` | The queue `QueueUrl` names | `SQS.AccessDeniedException` |
 | `arn:aws:states:::aws-sdk:sqs:sendMessage` | `sqs:SendMessage` | The queue `QueueUrl` names | `Sqs.AccessDeniedException` |
-| `arn:aws:states:::sns:publish` | `sns:Publish` | `TopicArn`, else `TargetArn`, or `*` for a `PhoneNumber` | `SNS.AccessDeniedException` |
-| `arn:aws:states:::aws-sdk:sns:publish` | `sns:Publish` | `TopicArn`, else `TargetArn`, or `*` for a `PhoneNumber` | `Sns.AccessDeniedException` |
+| `arn:aws:states:::sns:publish` | `sns:Publish` | `TopicArn`, else `TargetArn`, or `*` for a `PhoneNumber` | `SNS.AuthorizationErrorException` |
+| `arn:aws:states:::aws-sdk:sns:publish` | `sns:Publish` | `TopicArn`, else `TargetArn`, or `*` for a `PhoneNumber` | `Sns.AuthorizationErrorException` |
 | `arn:aws:states:::events:putEvents` | `events:PutEvents` | Each distinct event bus the entries name | `EventBridge.AccessDeniedException` |
 
 Each attempt is decided in turn, so `Retry` and `Catch` see a refusal like any other task failure:
@@ -613,11 +613,15 @@ answers it with its own error: no `QueueUrl`, a `TopicArn` or `TargetArn` that i
 neither of them, an entry that is not an object, an `EventBusName` that is a malformed ARN, or no
 entries at all.
 
-The error names `States.Permissions` and `<prefix>.AccessDeniedException` are Floci's reading: they
-have not been verified against AWS. SNS's own API models a refusal as `AuthorizationErrorException`,
-which is not the name these tasks use. Only global condition keys are available to the policies.
+A refused permission is named as the task's other errors from its service are: the integration's
+prefix and the exception the service's SDK raises. For SNS that is `AuthorizationErrorException`, the
+refusal `Publish` declares and the one a direct `Publish` under enforcement answers with, and for the
+others `AccessDeniedException`. `States.Permissions`, and these names for a refusal, are Floci's
+reading: they have not been verified against AWS. Only global condition keys are available to the
+policies.
 
-Resource policies take part as they do for a direct request under enforcement, for queues and topics:
+Resource policies take part as they do for a direct request under enforcement, for queues, topics and
+event buses:
 
 - **SQS:** the queue's own policy (`SetQueueAttributes` or `AddPermission`) or the role's policies
   can allow the send within one account, and across accounts both have to.
@@ -625,8 +629,11 @@ Resource policies take part as they do for a direct request under enforcement, f
   policy, a Deny in it refuses a role its identity policy allows, and the default policy of a new
   topic admits no role, because no role's call carries `aws:SourceOwner`. Across accounts both the
   role's policies and the topic policy have to allow the publish.
-- **EventBridge:** event bus policies do not take part, so `PutPermission` on a bus grants a task
-  nothing.
+- **EventBridge:** the bus's policy (`PutPermission`) can grant `events:PutEvents` to a role of the
+  bus's account that it names, with no identity policy, and a Deny in it refuses a role its identity
+  policy allows. A statement naming only the account, the form `PutPermission` writes for a
+  `Principal` account id, leaves the decision to that account's IAM policies. Across accounts both the
+  role's policies and the bus policy have to allow the send.
 
 A role in another account, named by `Credentials`, is authorized as that role but the task still
 runs in the state machine's account. Nested executions are the only tasks that run in the role's

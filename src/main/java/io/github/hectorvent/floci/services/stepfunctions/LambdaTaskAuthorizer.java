@@ -93,12 +93,11 @@ public class LambdaTaskAuthorizer {
      * permission.
      *
      * @param credentialsRoleArn the role the task's {@code Credentials} resolved to, or null
-     * @param errorPrefix        the integration's error prefix, dot included, such as {@code SQS.}
+     * @param deniedError        the error a refused permission fails with, such as {@code SQS.AccessDeniedException}
      * @throws AslExecutor.FailStateException {@code States.Permissions} for the execution role,
-     *         {@code States.TaskFailed} for a refused assumption, and
-     *         {@code <errorPrefix>AccessDeniedException} for a refused permission
+     *         {@code States.TaskFailed} for a refused assumption, and {@code deniedError} for a refused permission
      */
-    void authorize(StateMachine machine, String credentialsRoleArn, String errorPrefix, List<Permission> permissions) {
+    void authorize(StateMachine machine, String credentialsRoleArn, String deniedError, List<Permission> permissions) {
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
         IamRole executionRole = role(machine.getRoleArn()).orElseThrow(
                 () -> new AslExecutor.FailStateException("States.Permissions",
@@ -119,7 +118,7 @@ public class LambdaTaskAuthorizer {
             Optional<String> refusal = refusal(effectiveRoleArn, permission.action(), permission.resourceArn(),
                     owner.region(), permission.conditionKeys());
             if (refusal.isPresent()) {
-                throw new AslExecutor.FailStateException(errorPrefix + "AccessDeniedException", refusal.get());
+                throw new AslExecutor.FailStateException(deniedError, refusal.get());
             }
         }
     }

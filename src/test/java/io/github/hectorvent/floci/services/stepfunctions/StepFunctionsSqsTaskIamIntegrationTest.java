@@ -27,13 +27,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
+import static io.github.hectorvent.floci.testing.StepFunctionsTestClient.LAMBDA_TRUST;
+import static io.github.hectorvent.floci.testing.StepFunctionsTestClient.STATES_TRUST;
+import static io.github.hectorvent.floci.testing.StepFunctionsTestClient.trusting;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -42,14 +43,6 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     private static final String OTHER_ACCOUNT = "000000000442";
     private static final String REGION = "us-east-1";
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String STATES_TRUST = """
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-             "Principal":{"Service":"states.amazonaws.com"}}]}
-            """;
-    private static final String LAMBDA_TRUST = """
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-             "Principal":{"Service":"lambda.amazonaws.com"}}]}
-            """;
     private static final String SEND = allow("sqs:SendMessage");
     private static final String READ_ONLY = allow("sqs:GetQueueUrl");
     private static final String ASSUME = allow("sts:AssumeRole");
@@ -360,13 +353,6 @@ class StepFunctionsSqsTaskIamIntegrationTest {
         }
     }
 
-    private static String trusting(String role) {
-        return """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-                 "Principal":{"AWS":"%s"}}]}
-                """.formatted(role);
-    }
-
     private static String queuePolicy(String effect, String principal, String queueArn) {
         return """
                 {"Version":"2012-10-17","Statement":[{"Effect":"%s","Principal":{"AWS":"%s"},
@@ -437,14 +423,7 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     }
 
     private void await(String execution, String eventType) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        do {
-            if (!eventsOfType(execution, eventType).isEmpty()) {
-                return;
-            }
-            Thread.sleep(25);
-        } while (System.nanoTime() < deadline);
-        fail("No " + eventType + " event in " + execution);
+        sfn().await(ACCOUNT, execution, eventType, 5);
     }
 
     private List<JsonNode> eventsOfType(String execution, String type) throws Exception {

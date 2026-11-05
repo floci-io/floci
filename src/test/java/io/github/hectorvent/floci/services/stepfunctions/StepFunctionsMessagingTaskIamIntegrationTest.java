@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SqsTestQueue;
+import io.github.hectorvent.floci.testing.StepFunctionsTestClient;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -22,19 +23,19 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
+import static io.github.hectorvent.floci.testing.StepFunctionsTestClient.LAMBDA_TRUST;
+import static io.github.hectorvent.floci.testing.StepFunctionsTestClient.STATES_TRUST;
+import static io.github.hectorvent.floci.testing.StepFunctionsTestClient.trusting;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /** SNS and EventBridge tasks under IAM enforcement; each destination forwards to a queue the test reads. */
 @QuarkusTest
@@ -44,14 +45,6 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     private static final String OTHER_ACCOUNT = "000000000452";
     private static final String REGION = "us-east-1";
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String STATES_TRUST = """
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-             "Principal":{"Service":"states.amazonaws.com"}}]}
-            """;
-    private static final String LAMBDA_TRUST = """
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-             "Principal":{"Service":"lambda.amazonaws.com"}}]}
-            """;
     private static final String READ_ONLY = allow("*", "sns:ListTopics", "events:ListRules");
     private static final String ASSUME = allow("*", "sts:AssumeRole");
     private static final String PUBLISH_ANY = allow("*", "sns:Publish", "events:PutEvents");
@@ -295,7 +288,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"sns:publish,SNS.AccessDeniedException", "aws-sdk:sns:publish,Sns.AccessDeniedException"})
+    @CsvSource({"sns:publish,SNS.AuthorizationErrorException", "aws-sdk:sns:publish,Sns.AuthorizationErrorException"})
     void aTopicPolicyDenyRefusesARoleItsIdentityPolicyAllows(String integration, String error) throws Exception {
         Target target = target(integration);
         String role = role(STATES_TRUST, PUBLISH_ANY);
@@ -317,7 +310,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
 
         Response refused = terminal(start(machine, "{}"));
 
-        assertFailed(refused, "SNS.AccessDeniedException");
+        assertFailed(refused, "SNS.AuthorizationErrorException");
         String cause = refused.jsonPath().getString("cause");
         assertTrue(cause.contains("arn:aws:sts::" + OTHER_ACCOUNT + ":assumed-role/"), cause);
         assertNothingDelivered(target);
@@ -340,7 +333,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
 
         Response completed = terminal(start(machine(jsonPathTask(target, foreignRole), executionRole), "{}"));
 
-        assertFailed(completed, "SNS.AccessDeniedException");
+        assertFailed(completed, "SNS.AuthorizationErrorException");
         assertNothingDelivered(target);
     }
 
@@ -350,7 +343,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         Map<String, Object> task = Map.of("Type", "Task", "Resource", "arn:aws:states:::sns:publish",
                 "Parameters", Map.of("TargetArn", target.resourceArn(), "Message", "hello"), "End", true);
 
-        assertFailed(terminal(start(machine(task, role(STATES_TRUST, READ_ONLY)), "{}")), "SNS.AccessDeniedException");
+        assertFailed(terminal(start(machine(task, role(STATES_TRUST, READ_ONLY)), "{}")), "SNS.AuthorizationErrorException");
         assertNothingDelivered(target);
 
         Response allowed = terminal(start(machine(task,
@@ -367,7 +360,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
                 "Parameters", Map.of("PhoneNumber", "+15555550100", "Message", "hello"), "End", true);
 
         assertFailed(terminal(start(machine(task,
-                role(STATES_TRUST, allow(target.resourceArn(), "sns:Publish"))), "{}")), "SNS.AccessDeniedException");
+                role(STATES_TRUST, allow(target.resourceArn(), "sns:Publish"))), "{}")), "SNS.AuthorizationErrorException");
 
         Response allowed = terminal(start(machine(task, role(STATES_TRUST, PUBLISH_ANY)), "{}"));
         assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
@@ -393,9 +386,9 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
                 "SNS.InvalidParameterException");
     }
 
-    /** With no provider for it, the bus's policy takes no part, as for a direct PutEvents under enforcement. */
+    /** A statement naming the account leaves the decision to the account's IAM policies, as AWS does. */
     @Test
-    void anEventBusPolicyDoesNotGrantARoleWithNoIdentityPermission() throws Exception {
+    void anEventBusPolicyNamingTheAccountDoesNotGrantARoleWithNoIdentityPermission() throws Exception {
         Target target = target("events:putEvents");
         String role = role(STATES_TRUST, READ_ONLY);
         events("PutPermission", Map.of("EventBusName", busName(target.resourceArn()), "StatementId", "s",
@@ -405,19 +398,64 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         assertNothingDelivered(target);
     }
 
-    /** With no bus policy to hold the other half of the grant, another account's role cannot send. */
     @Test
-    void aForeignCredentialsRoleIsAuthorizedAsThatRoleOnABus() throws Exception {
+    void aSameAccountBusPolicyNamingTheRoleGrantsItWithNoIdentityPermission() throws Exception {
+        Target target = target("events:putEvents");
+        String role = role(STATES_TRUST, READ_ONLY);
+        putBusPolicy(target.resourceArn(), busStatement("Allow", role, target.resourceArn()));
+
+        Response completed = terminal(start(machine(jsonPathTask(target, null), role), "{}"));
+
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        assertDelivered(target);
+    }
+
+    @Test
+    void aBusPolicyDenyRefusesARoleItsIdentityPolicyAllows() throws Exception {
+        Target target = target("events:putEvents");
+        String role = role(STATES_TRUST, PUBLISH_ANY);
+        putBusPolicy(target.resourceArn(), busStatement("Deny", role, target.resourceArn()));
+
+        assertFailed(terminal(start(machine(jsonPathTask(target, null), role), "{}")), "EventBridge.AccessDeniedException");
+        assertNothingDelivered(target);
+    }
+
+    /** Another account's role needs the bus's grant as well as its own, which {@code PutPermission} gives. */
+    @Test
+    void aForeignCredentialsRoleNeedsTheBusPolicyToo() throws Exception {
         Target target = target("events:putEvents");
         String executionRole = role(STATES_TRUST, ASSUME);
         String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
                 "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), PUBLISH_ANY);
+        String machine = machine(jsonPathTask(target, foreignRole), executionRole);
+
+        Response refused = terminal(start(machine, "{}"));
+
+        assertFailed(refused, "EventBridge.AccessDeniedException");
+        String cause = refused.jsonPath().getString("cause");
+        assertTrue(cause.contains("arn:aws:sts::" + OTHER_ACCOUNT + ":assumed-role/"), cause);
+        assertNothingDelivered(target);
+
+        events("PutPermission", Map.of("EventBusName", busName(target.resourceArn()), "StatementId", "s",
+                "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
+        Response allowed = terminal(start(machine, "{}"));
+
+        assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
+        assertDelivered(target);
+    }
+
+    @Test
+    void aForeignCredentialsRoleNeedsItsIdentityPolicyOnABusToo() throws Exception {
+        Target target = target("events:putEvents");
+        String executionRole = role(STATES_TRUST, ASSUME);
+        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
+                "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), READ_ONLY);
+        events("PutPermission", Map.of("EventBusName", busName(target.resourceArn()), "StatementId", "s",
+                "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
 
         Response completed = terminal(start(machine(jsonPathTask(target, foreignRole), executionRole), "{}"));
 
         assertFailed(completed, "EventBridge.AccessDeniedException");
-        String cause = completed.jsonPath().getString("cause");
-        assertTrue(cause.contains("arn:aws:sts::" + OTHER_ACCOUNT + ":assumed-role/"), cause);
         assertNothingDelivered(target);
     }
 
@@ -552,18 +590,22 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         }
     }
 
-    private static String trusting(String role) {
-        return """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-                 "Principal":{"AWS":"%s"}}]}
-                """.formatted(role);
-    }
-
     private static String topicStatement(String effect, String principal, String topicArn) {
         return """
                 {"Version":"2012-10-17","Statement":[{"Effect":"%s","Principal":{"AWS":"%s"},
                  "Action":"sns:Publish","Resource":"%s"}]}
                 """.formatted(effect, principal, topicArn);
+    }
+
+    private static String busStatement(String effect, String principal, String busArn) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Sid":"s","Effect":"%s","Principal":{"AWS":"%s"},
+                 "Action":"events:PutEvents","Resource":"%s"}]}
+                """.formatted(effect, principal, busArn);
+    }
+
+    private void putBusPolicy(String busArn, String policy) {
+        events("PutPermission", Map.of("EventBusName", busName(busArn), "Policy", policy));
     }
 
     private static String busName(String busArn) {
@@ -614,7 +656,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
                 .formParam("Action", "Subscribe").formParam("TopicArn", topicArn)
                 .formParam("Protocol", "sqs").formParam("Endpoint", sink.arn())
                 .post("/").then().statusCode(200);
-        return new Target(errorPrefix + "AccessDeniedException", "sns:Publish", topicArn,
+        return new Target(errorPrefix + "AuthorizationErrorException", "sns:Publish", topicArn,
                 Map.of("TopicArn", topicArn, "Message", "hello"),
                 Map.of("TopicArn", topicArn, "Message", Map.of("token.$", "$$.Task.Token")), sink, null);
     }
@@ -679,8 +721,8 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
 
     private static String integrationOf(Target target) {
         return switch (target.error()) {
-            case "SNS.AccessDeniedException" -> "sns:publish";
-            case "Sns.AccessDeniedException" -> "aws-sdk:sns:publish";
+            case "SNS.AuthorizationErrorException" -> "sns:publish";
+            case "Sns.AuthorizationErrorException" -> "aws-sdk:sns:publish";
             default -> "events:putEvents";
         };
     }
@@ -702,30 +744,11 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     }
 
     private String machineWithDefinition(String definition, String role) {
-        String name = "sfn-msg-iam-" + UUID.randomUUID();
-        String arn = "arn:aws:states:" + REGION + ":" + ACCOUNT + ":stateMachine:" + name;
-        cleanup.register(() -> {
-            Response executions = request("ListExecutions", Map.of("stateMachineArn", arn));
-            if (executions.statusCode() == 200) {
-                for (Map<String, String> execution : executions.jsonPath().<Map<String, String>>getList("executions")) {
-                    if ("RUNNING".equals(execution.get("status"))) {
-                        request("StopExecution", Map.of("executionArn", execution.get("executionArn")))
-                                .then().statusCode(200);
-                    }
-                }
-            }
-            request("DeleteStateMachine", Map.of("stateMachineArn", arn)).then().statusCode(200);
-        });
-        Response created = request("CreateStateMachine", Map.of(
-                "name", name, "definition", definition, "type", "STANDARD", "roleArn", role));
-        created.then().statusCode(200);
-        return created.jsonPath().getString("stateMachineArn");
+        return sfn().createMachine(ACCOUNT, "sfn-msg-iam-", definition, "STANDARD", role);
     }
 
     private String start(String machine, String input) {
-        Response started = request("StartExecution", Map.of("stateMachineArn", machine, "input", input));
-        started.then().statusCode(200);
-        return started.jsonPath().getString("executionArn");
+        return sfn().start(ACCOUNT, machine, input);
     }
 
     private Response terminal(String execution) throws Exception {
@@ -733,45 +756,22 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     }
 
     private Response terminal(String execution, int seconds) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
-        do {
-            Response response = request("DescribeExecution", Map.of("executionArn", execution));
-            response.then().statusCode(200);
-            if (!"RUNNING".equals(response.jsonPath().getString("status"))) {
-                return response;
-            }
-            Thread.sleep(25);
-        } while (System.nanoTime() < deadline);
-        fail("Execution did not terminate: " + execution);
-        return null;
+        return sfn().terminal(ACCOUNT, execution, seconds);
     }
 
     private void await(String execution, String eventType) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        do {
-            if (!eventsOfType(execution, eventType).isEmpty()) {
-                return;
-            }
-            Thread.sleep(25);
-        } while (System.nanoTime() < deadline);
-        fail("No " + eventType + " event in " + execution);
+        sfn().await(ACCOUNT, execution, eventType, 5);
     }
 
     private List<JsonNode> eventsOfType(String execution, String type) throws Exception {
-        Response history = request("GetExecutionHistory", Map.of("executionArn", execution));
-        history.then().statusCode(200);
-        List<JsonNode> events = new ArrayList<>();
-        for (JsonNode event : MAPPER.readTree(history.asString()).path("events")) {
-            if (type.equals(event.path("type").asText())) {
-                events.add(event);
-            }
-        }
-        return events;
+        return sfn().eventsOfType(ACCOUNT, execution, type);
     }
 
     private Response request(String action, Map<String, ?> input) {
-        return given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "states"))
-                .header("X-Amz-Target", "AWSStepFunctions." + action)
-                .contentType("application/x-amz-json-1.0").body(MAPPER.valueToTree(input).toString()).post("/");
+        return sfn().request(ACCOUNT, action, input);
+    }
+
+    private StepFunctionsTestClient sfn() {
+        return new StepFunctionsTestClient(baseUri.getPort(), cleanup);
     }
 }

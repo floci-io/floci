@@ -32,7 +32,7 @@ class TaskPermissionsTest {
             "444455556666/orders,                                       444455556666",
             "http://localhost:4566/not-an-account/orders,               111122223333"})
     void aQueueUrlNamesTheQueueItsLookupReaches(String queueUrl, String account) {
-        assertEquals(new TaskPermissions("SQS.", List.of(new Permission("sqs:SendMessage",
+        assertEquals(new TaskPermissions("SQS.AccessDeniedException", List.of(new Permission("sqs:SendMessage",
                         "arn:aws:sqs:eu-west-1:" + account + ":orders"))),
                 TaskPermissions.of(integration("sqs:sendMessage"), input(queueUrl), machine("aws")).orElseThrow());
     }
@@ -46,15 +46,15 @@ class TaskPermissionsTest {
 
     @Test
     void theSdkFormNamesItsOwnErrorPrefix() {
-        assertEquals("Sqs.", TaskPermissions.of(integration("aws-sdk:sqs:sendMessage"), input("orders"), machine("aws"))
-                .orElseThrow().errorPrefix());
+        assertEquals("Sqs.AccessDeniedException", TaskPermissions.of(integration("aws-sdk:sqs:sendMessage"),
+                input("orders"), machine("aws")).orElseThrow().deniedError());
     }
 
     /** SQS answers these with its own validation error once the role has passed. */
     @ParameterizedTest
     @ValueSource(strings = {"{}", "{\"QueueUrl\":\"  \"}", "{\"QueueUrl\":7}"})
     void aRequestNamingNoQueueNeedsNoPermission(String request) throws Exception {
-        assertEquals(new TaskPermissions("SQS.", List.of()),
+        assertEquals(new TaskPermissions("SQS.AccessDeniedException", List.of()),
                 TaskPermissions.of(integration("sqs:sendMessage"), MAPPER.readTree(request), machine("aws")).orElseThrow());
     }
 
@@ -67,9 +67,9 @@ class TaskPermissionsTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"sns:publish,SNS.", "aws-sdk:sns:publish,Sns."})
-    void aPublishNeedsThePermissionOnItsTopicAndNamesItsPrefix(String integration, String prefix) throws Exception {
-        assertEquals(new TaskPermissions(prefix, List.of(new Permission("sns:Publish", TOPIC))),
+    @CsvSource({"sns:publish,SNS.AuthorizationErrorException", "aws-sdk:sns:publish,Sns.AuthorizationErrorException"})
+    void aPublishNeedsThePermissionOnItsTopicAndIsRefusedAsSnsRefuses(String integration, String deniedError) throws Exception {
+        assertEquals(new TaskPermissions(deniedError, List.of(new Permission("sns:Publish", TOPIC))),
                 TaskPermissions.of(integration(integration), json("{\"TopicArn\":\"" + TOPIC + "\"}"), machine("aws"))
                         .orElseThrow());
     }
@@ -108,7 +108,7 @@ class TaskPermissionsTest {
 
     @Test
     void anEntryNamingNoBusNeedsThePermissionOnTheDefaultBus() throws Exception {
-        assertEquals(new TaskPermissions("EventBridge.", List.of(new Permission("events:PutEvents", bus("default")))),
+        assertEquals(new TaskPermissions("EventBridge.AccessDeniedException", List.of(new Permission("events:PutEvents", bus("default")))),
                 TaskPermissions.of(integration("events:putEvents"), json("{\"Entries\":[{\"Source\":\"a\"}]}"),
                         machine("aws")).orElseThrow());
     }
