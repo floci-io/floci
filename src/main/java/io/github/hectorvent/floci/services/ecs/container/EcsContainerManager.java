@@ -479,12 +479,12 @@ public class EcsContainerManager {
                     boolean publishToHost = !containerDetector.isRunningInContainer()
                             || publishAwsvpcPorts;
                     for (PortMapping pm : def.getPortMappings()) {
+                        int hostPort = publishedHostPort(pm, taskDef.getNetworkMode(), publishAwsvpcPorts,
+                                config.services().ecs().dynamicAwsvpcHostPorts());
                         if (awsvpc && publishToHost) {
-                            int hostPort = awsvpcHostPort(pm, publishAwsvpcPorts,
-                                    config.services().ecs().dynamicAwsvpcHostPorts());
                             specBuilder.withPortBinding(pm.containerPort(), hostPort, hostPortBindAddress());
-                        } else if (!awsvpc && pm.hostPort() > 0) {
-                            specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
+                        } else if (hostPort > 0) {
+                            specBuilder.withPortBinding(pm.containerPort(), hostPort);
                         } else if (publishToHost) {
                             specBuilder.withDynamicPort(pm.containerPort());
                         } else {
@@ -1413,18 +1413,23 @@ public class EcsContainerManager {
                 continue;
             }
             for (PortMapping port : container.getPortMappings()) {
-                bindings.put(port.containerPort(), awsvpcHostPort(port, publishAwsvpcPortsToHost,
-                        dynamicAwsvpcHostPorts));
+                bindings.put(port.containerPort(), publishedHostPort(port, NetworkMode.awsvpc,
+                        publishAwsvpcPortsToHost, dynamicAwsvpcHostPorts));
             }
         }
         return bindings;
     }
 
-    private static int awsvpcHostPort(PortMapping port, boolean publishToHost, boolean dynamicHostPorts) {
-        if (publishToHost && !dynamicHostPorts) {
-            return port.hostPort() > 0 ? port.hostPort() : port.containerPort();
+    /** Host port to publish for a mapping; zero means no fixed host-port reservation. */
+    public static int publishedHostPort(PortMapping port, NetworkMode networkMode,
+                                        boolean publishAwsvpcPortsToHost, boolean dynamicAwsvpcHostPorts) {
+        if (networkMode != NetworkMode.awsvpc) {
+            return Math.max(0, port.hostPort());
         }
-        return 0;
+        if (!publishAwsvpcPortsToHost || dynamicAwsvpcHostPorts) {
+            return 0;
+        }
+        return port.hostPort() > 0 ? port.hostPort() : port.containerPort();
     }
 
     private record PreparedNetwork(NetworkInterface eni, SecurityGroupFirewallManager.Namespace namespace) {}

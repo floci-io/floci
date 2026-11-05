@@ -137,7 +137,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final Clock clock;
     private final boolean dockerMode;
-    private final boolean stableAwsvpcHostPorts;
+    private final boolean publishAwsvpcPortsToHost;
+    private final boolean dynamicAwsvpcHostPorts;
     private final boolean sweepLeftoverContainers;
     private final String baseUrl;
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
@@ -288,8 +289,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
-        this.stableAwsvpcHostPorts = config.services().ecs().publishAwsvpcPortsToHost()
-                && !config.services().ecs().dynamicAwsvpcHostPorts();
+        this.publishAwsvpcPortsToHost = config.services().ecs().publishAwsvpcPortsToHost();
+        this.dynamicAwsvpcHostPorts = config.services().ecs().dynamicAwsvpcHostPorts();
         this.sweepLeftoverContainers = dockerMode && config.services().ecs().reconcileContainersOnStartup();
         this.leftoverTaskVolumesRemoved = !sweepLeftoverContainers;
         this.baseUrl = config.effectiveBaseUrl();
@@ -5788,16 +5789,13 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private Set<Integer> fixedPublishedPorts(TaskDefinition definition) {
-        boolean awsvpc = definition.getNetworkMode() == NetworkMode.awsvpc;
-        if (awsvpc && !stableAwsvpcHostPorts) {
-            return Set.of();
-        }
         return definition.getContainerDefinitions().stream()
                 .filter(container -> container.getPortMappings() != null)
                 .flatMap(container -> container.getPortMappings().stream())
-                .filter(port -> awsvpc || port.hostPort() > 0)
                 // ContainerLifecycleManager currently publishes every mapping as TCP.
-                .map(port -> port.hostPort() > 0 ? port.hostPort() : port.containerPort())
+                .map(port -> EcsContainerManager.publishedHostPort(port, definition.getNetworkMode(),
+                        publishAwsvpcPortsToHost, dynamicAwsvpcHostPorts))
+                .filter(hostPort -> hostPort > 0)
                 .collect(Collectors.toSet());
     }
 
