@@ -290,10 +290,12 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 .withEnv(env)
                 .withMemoryMb(fn.getMemorySize())
                 .withDockerNetwork(config.services().lambda().dockerNetwork())
-                .withHostDockerInternalOnLinux()
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "lambda", fn.getFunctionName(), lambdaAccountId, lambdaRegion));
+        if ("host.docker.internal".equals(hostAddress)) {
+            specBuilder.withHostDockerInternalOnLinux();
+        }
 
         applyDockerFlags(specBuilder, dockerFlags);
 

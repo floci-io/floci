@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
@@ -447,7 +448,13 @@ class ContainerLauncherTest {
     }
 
     private ContainerLauncher newLauncher(ImageResolver selectedResolver) {
-        ContainerBuilder builder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
+        return newLauncher(selectedResolver, null);
+    }
+
+    private ContainerLauncher newLauncher(ImageResolver selectedResolver,
+                                          CurrentContainerNetworkResolver networkResolver) {
+        ContainerBuilder builder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer,
+                networkResolver);
         ContainerReachableEndpoint endpoint =
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
         return new ContainerLauncher(builder, lifecycleManager, logStreamer, selectedResolver,
@@ -625,6 +632,36 @@ class ContainerLauncherTest {
         // The code is tar-copied straight into /var/task on the real container.
         assertTrue(capturedRemotePaths.contains("/var/task"),
                 "small code should be copied directly into /var/task");
+    }
+
+    @Test
+    void launchFunction_inPodmanComposeBridgeUsesFlociIpWithoutHostGateway() {
+        CurrentContainerNetworkResolver networkResolver = mock(CurrentContainerNetworkResolver.class);
+        when(networkResolver.resolveNetworkName()).thenReturn(Optional.of("podman_compose_default"));
+        when(dockerHostResolver.resolve()).thenReturn("10.89.0.5");
+        lenient().when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+        when(config.services().lambda().extraHosts()).thenReturn(Optional.of(List.of("db.internal:10.0.0.5")));
+
+        newLauncher(imageResolver, networkResolver).launch(imageFunction());
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals("podman_compose_default", spec.networkMode());
+        assertTrue(spec.env().contains("AWS_LAMBDA_RUNTIME_API=10.89.0.5:9000"));
+        assertTrue(spec.env().contains("AWS_ENDPOINT_URL=http://10.89.0.5:4566"));
+        assertEquals(List.of("db.internal:10.0.0.5"), spec.extraHosts());
+    }
+
+    @Test
+    void launchFunction_onNativeLinuxDockerAddsHostGatewayForCallback() {
+        when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
+        when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+
+        launcher.launch(imageFunction());
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertTrue(spec.env().contains("AWS_LAMBDA_RUNTIME_API=host.docker.internal:9000"));
+        assertTrue(spec.env().contains("AWS_ENDPOINT_URL=http://host.docker.internal:4566"));
+        assertEquals(List.of("host.docker.internal:host-gateway"), spec.extraHosts());
     }
 
     @Test
