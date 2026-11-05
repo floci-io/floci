@@ -617,7 +617,7 @@ public class NativeDynamoDbJsonHandler {
 
     // DynamoDB's newer validator gives up on an attribute value with a member it does not know.
     // It leaves the other unknown members out when it measures how deep a request nests.
-    private static boolean readByOlderValidator(JsonNode request, String target) {
+    private static boolean readByOlderValidator(JsonNode request, String target, List<String> legacyMembers) {
         if (!request.hasNonNull(target)) {
             return true;
         }
@@ -625,12 +625,14 @@ public class NativeDynamoDbJsonHandler {
         request.path(target).forEach(values::add);
         request.path("ExpressionAttributeValues").forEach(values::add);
         int deepest = Math.max(jsonDepth(request.path(target)), jsonDepth(request.path("ExpressionAttributeValues")));
-        for (JsonNode condition : request.path("Expected")) {
-            values.add(condition.path("Value"));
-            condition.path("AttributeValueList").forEach(values::add);
-            int known = Math.max(jsonDepth(condition.path("Value")), jsonDepth(condition.path("AttributeValueList")));
-            // Expected and the condition hold these members.
-            deepest = Math.max(deepest, known + 2);
+        for (String member : legacyMembers) {
+            for (JsonNode entry : request.path(member)) {
+                values.add(entry.path("Value"));
+                entry.path("AttributeValueList").forEach(values::add);
+                int known = Math.max(jsonDepth(entry.path("Value")), jsonDepth(entry.path("AttributeValueList")));
+                // The member and its entry hold these members.
+                deepest = Math.max(deepest, known + 2);
+            }
         }
         // The request holds these members.
         return deepest + 1 >= OLDER_VALIDATOR_DEPTH
@@ -646,14 +648,9 @@ public class NativeDynamoDbJsonHandler {
         String tableName = textOrNull(request, "TableName");
         String returnValues = textOrNull(request, "ReturnValues");
         List<String> validationErrors = new ArrayList<>();
-        if (returnValues != null && !OLDER_RETURN_VALUES.contains(returnValues)) {
-            validationErrors.add(SmithyValidationErrors.notInEnum(returnValues, "returnValues", OLDER_RETURN_VALUES));
-        }
-        String conditionalOperator = textOrNull(request, "ConditionalOperator");
-        if (conditionalOperator != null && !OLDER_CONDITIONAL_OPERATORS.contains(conditionalOperator)) {
-            validationErrors.add(SmithyValidationErrors.notInEnum(conditionalOperator, "conditionalOperator",
-                    OLDER_CONDITIONAL_OPERATORS));
-        }
+        addOlderEnumError(request, "ReturnValues", "returnValues", OLDER_RETURN_VALUES, validationErrors);
+        addOlderEnumError(request, "ConditionalOperator", "conditionalOperator", OLDER_CONDITIONAL_OPERATORS,
+                validationErrors);
         if ("Item".equals(target) && !request.hasNonNull(target)) {
             validationErrors.add(SmithyValidationErrors.notNull("item"));
         }
@@ -683,17 +680,90 @@ public class NativeDynamoDbJsonHandler {
         }
         rejectExprAttrsWithoutExpression(null, request.get("ExpressionAttributeValues"),
                 request.has("ConditionExpression"), "ConditionExpression is null");
-        JsonNode values = request.get(target);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(values, false);
-        requireReadableValues(values, "");
-        DynamoDbAttributeValueValidator.requireNonEmptyNames(values);
-        DynamoDbAttributeValueValidator.requireNonEmptyMemberNames(values);
+        requireStorableInReadOrder(request.get(target));
         requireNamedExpressionValues(request.get("ExpressionAttributeValues"));
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(request.get("Expected")), false);
     }
 
+    private static final List<String> OLDER_COMPARISON_OPERATORS = List.of("IN", "NULL", "BETWEEN", "LT",
+            "NOT_CONTAINS", "EQ", "GT", "NOT_NULL", "NE", "LE", "BEGINS_WITH", "GE", "CONTAINS");
+    private static final List<String> OLDER_UPDATE_ACTIONS = List.of("ADD", "DELETE", "PUT");
+
+    // The older validator lists the members in this order and reports the first 10 errors.
+    private void requireValidOlderUpdate(JsonNode request) {
+        List<String> validationErrors = new ArrayList<>();
+        inReadOrder(request.path("Expected")).forEach((name, condition) -> addOlderEnumError(condition,
+                "ComparisonOperator", "expected." + name + ".member.comparisonOperator", OLDER_COMPARISON_OPERATORS,
+                validationErrors));
+        addReturnConsumedCapacityError(request, validationErrors);
+        String tableName = textOrNull(request, "TableName");
+        if (tableName == null) {
+            validationErrors.add(SmithyValidationErrors.notNull("tableName"));
+        } else if (tableName.isEmpty()) {
+            validationErrors.add(SmithyValidationErrors.lengthTooShort("tableName", "", 1));
+        }
+        addOlderEnumError(request, "ReturnValues", "returnValues", OLDER_RETURN_VALUES, validationErrors);
+        addOlderEnumError(request, "ConditionalOperator", "conditionalOperator", OLDER_CONDITIONAL_OPERATORS,
+                validationErrors);
+        addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
+        inReadOrder(request.path("AttributeUpdates")).forEach((name, update) -> addOlderEnumError(update, "Action",
+                "attributeUpdates." + name + ".member.action", OLDER_UPDATE_ACTIONS, validationErrors));
+        addIfPresent(validationErrors, returnItemCollectionMetricsError(request));
+        if (!request.hasNonNull("Key")) {
+            validationErrors.add(SmithyValidationErrors.notNull("key"));
+        }
+        throwValidationErrors(validationErrors.subList(0, Math.min(validationErrors.size(), 10)));
+
+        if (AwsArnUtils.looksLikeArn(tableName)) {
+            DynamoDbTableNames.resolve(tableName);
+        } else {
+            throwValidationErrors(DynamoDbTableNames.nameViolations(tableName));
+        }
+        rejectMixedParameters(request, List.of("AttributeUpdates", "Expected", "ConditionalOperator"),
+                List.of("UpdateExpression", "ConditionExpression"));
+        boolean usesExpressions = request.has("UpdateExpression") || request.has("ConditionExpression");
+        if (!usesExpressions) {
+            requireAbsentWithoutExpression(request.get("ExpressionAttributeNames"), "ExpressionAttributeNames");
+        }
+        rejectExprAttrsWithoutExpression(null, request.get("ExpressionAttributeValues"), usesExpressions,
+                "UpdateExpression and ConditionExpression are null");
+        requireStorableInReadOrder(request.get("Key"));
+        ObjectNode updateValues = objectMapper.createObjectNode();
+        request.path("AttributeUpdates").properties()
+                .forEach(update -> updateValues.set(update.getKey(), update.getValue().path("Value")));
+        requireStorableInReadOrder(updateValues);
+        requireNamedExpressionValues(request.get("ExpressionAttributeValues"));
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(request.get("Expected")), false);
+    }
+
+    // The older validator walks a map in the order of a Java HashMap that starts with one bucket.
+    private static Map<String, JsonNode> inReadOrder(JsonNode map) {
+        Map<String, JsonNode> entries = new HashMap<>(1);
+        map.properties().forEach(entry -> entries.put(entry.getKey(), entry.getValue()));
+        return entries;
+    }
+
+    // The older validator checks each attribute in full before the next one.
+    private void requireStorableInReadOrder(JsonNode attributes) {
+        for (Map.Entry<String, JsonNode> attribute : inReadOrder(attributes).entrySet()) {
+            ObjectNode value = objectMapper.createObjectNode().set(attribute.getKey(), attribute.getValue());
+            DynamoDbAttributeValueValidator.requireNonEmptyNames(value);
+            DynamoDbAttributeValueValidator.requireNestingWithinLimit(value, false);
+            DynamoDbAttributeValueValidator.requireNonEmptyMemberNames(value);
+            requireReadableValues(value, "");
+        }
+    }
+
+    private static void addOlderEnumError(JsonNode node, String member, String path, List<String> allowed,
+            List<String> validationErrors) {
+        String value = textOrNull(node, member);
+        if (value != null && !allowed.contains(value)) {
+            validationErrors.add(SmithyValidationErrors.notInEnum(value, path, allowed));
+        }
+    }
+
     private Response handlePutItem(JsonNode request, String region) {
-        if (readByOlderValidator(request, "Item")) {
+        if (readByOlderValidator(request, "Item", List.of("Expected"))) {
             requireValidOlderItemWrite(request, "Item");
         }
         String tableName = request.has("TableName") ? request.path("TableName").asText() : null;
@@ -824,7 +894,7 @@ public class NativeDynamoDbJsonHandler {
             Set.of("NONE", "ALL_OLD", "ALL_NEW", "UPDATED_OLD", "UPDATED_NEW");
 
     private Response handleDeleteItem(JsonNode request, String region) {
-        if (readByOlderValidator(request, "Key")) {
+        if (readByOlderValidator(request, "Key", List.of("Expected"))) {
             requireValidOlderItemWrite(request, "Key");
         }
         String tableName = request.path("TableName").asText();
@@ -861,6 +931,9 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleUpdateItem(JsonNode request, String region) {
+        if (readByOlderValidator(request, "Key", List.of("Expected", "AttributeUpdates"))) {
+            requireValidOlderUpdate(request);
+        }
         String tableName = request.path("TableName").asText();
         DynamoDbTableNames.resolve(tableName); // validate tableName first
         JsonNode key = request.path("Key");
@@ -2935,7 +3008,7 @@ public class NativeDynamoDbJsonHandler {
         if (exprAttrValues == null) {
             return;
         }
-        for (Map.Entry<String, JsonNode> entry : exprAttrValues.properties()) {
+        for (Map.Entry<String, JsonNode> entry : inReadOrder(exprAttrValues).entrySet()) {
             ObjectNode value = objectMapper.createObjectNode().set(entry.getKey(), entry.getValue());
             try {
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(value, false);
