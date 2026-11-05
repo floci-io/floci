@@ -876,7 +876,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(11)
     void protocolChangesPublishSecuritySettingsTogetherWithTheRuntime() throws Exception {
         LoadBalancerRef first = createLoadBalancer("protocol-first");
         LoadBalancerRef second = createLoadBalancer("protocol-second");
