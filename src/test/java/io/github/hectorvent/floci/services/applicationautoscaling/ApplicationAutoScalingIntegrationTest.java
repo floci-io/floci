@@ -43,6 +43,7 @@ class ApplicationAutoScalingIntegrationTest {
     private static final String ALARM_CLUSTER = "aas-it-cluster";
     private static final String ALARM_SERVICE = "aas-it-alarm-service";
     private static final String DIMENSION = "ecs:service:DesiredCount";
+    private static final String EXCLUDED_RESOURCE_ID = "service/aas-it-cluster/aas-it-service-excluded";
 
     private static String scalableTargetArn;
 
@@ -144,20 +145,46 @@ class ApplicationAutoScalingIntegrationTest {
                 """.formatted(PAGED_RESOURCE_ID, DIMENSION))
         .when().post("/").then().statusCode(200);
 
-        String nextToken = call("DescribeScalableTargets")
-            .body("{ \"ServiceNamespace\": \"ecs\", \"MaxResults\": 1 }")
-        .when().post("/")
-        .then().statusCode(200)
-            .body("ScalableTargets", hasSize(1))
-            .body("NextToken", notNullValue())
-            .extract().path("NextToken");
+        call("RegisterScalableTarget")
+            .body("""
+                {
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "MinCapacity": 1,
+                  "MaxCapacity": 2
+                }
+                """.formatted(EXCLUDED_RESOURCE_ID, DIMENSION))
+        .when().post("/").then().statusCode(200);
 
-        call("DescribeScalableTargets")
-            .body("{ \"ServiceNamespace\": \"ecs\", \"MaxResults\": 1, \"NextToken\": \"%s\" }"
-                .formatted(nextToken))
-        .when().post("/").then().statusCode(200)
-            .body("ScalableTargets", hasSize(1))
-            .body("NextToken", nullValue());
+        try {
+            String nextToken = call("DescribeScalableTargets")
+                .body("""
+                    { "ServiceNamespace": "ecs", "ResourceIds": ["%s", "%s"], "MaxResults": 1 }
+                    """.formatted(RESOURCE_ID, PAGED_RESOURCE_ID))
+            .when().post("/")
+            .then().statusCode(200)
+                .body("ScalableTargets", hasSize(1))
+                .body("NextToken", notNullValue())
+                .body("ScalableTargets[0].ResourceId", equalTo(RESOURCE_ID))
+                .extract().path("NextToken");
+
+            call("DescribeScalableTargets")
+                .body("""
+                    { "ServiceNamespace": "ecs", "ResourceIds": ["%s", "%s"],
+                      "MaxResults": 1, "NextToken": "%s" }
+                    """.formatted(RESOURCE_ID, PAGED_RESOURCE_ID, nextToken))
+            .when().post("/").then().statusCode(200)
+                .body("ScalableTargets", hasSize(1))
+                .body("ScalableTargets[0].ResourceId", equalTo(PAGED_RESOURCE_ID))
+                .body("NextToken", nullValue());
+        } finally {
+            call("DeregisterScalableTarget")
+                .body("""
+                    { "ServiceNamespace": "ecs", "ResourceId": "%s", "ScalableDimension": "%s" }
+                    """.formatted(EXCLUDED_RESOURCE_ID, DIMENSION))
+            .when().post("/").then().statusCode(200);
+        }
     }
 
     @Test
