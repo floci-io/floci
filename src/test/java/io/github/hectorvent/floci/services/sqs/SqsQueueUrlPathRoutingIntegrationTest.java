@@ -104,6 +104,27 @@ class SqsQueueUrlPathRoutingIntegrationTest {
             .post(path)
         .then()
             .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidAddress"))
+            .body("ErrorResponse.Error.Message", equalTo("The specified ID is invalid."));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void presignedQueryRequestOnPrefixedQueuePathIsRejectedAsInvalidAddress(boolean withBlankAuthorizationHeader) {
+        // A blank Authorization header counts as absent, so the presigned credential names the service.
+        RequestSpecification request = given()
+            .contentType(FORM_CONTENT_TYPE)
+            .queryParam("X-Amz-Credential", "test/20261105/us-east-1/sqs/aws4_request")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("AttributeName.1", "QueueArn");
+        if (withBlankAuthorizationHeader) {
+            request.header("Authorization", "");
+        }
+        request
+        .when()
+            .post("/queue/us-east-1/000000000000/" + QUEUE_NAME)
+        .then()
+            .statusCode(404)
             .body("ErrorResponse.Error.Code", equalTo("InvalidAddress"));
     }
 

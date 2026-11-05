@@ -30,7 +30,8 @@ import java.util.regex.Pattern;
  * uses the queue URL as the HTTP path instead. This filter appends it back into the
  * entity stream so SqsQueryHandler can look up the queue normally. Like AWS, a query request
  * is only rewritten on the unprefixed path, because the path names the queue. A query request signed
- * for SQS on the prefixed path is rejected with 404 InvalidAddress, as AWS rejects it.
+ * for SQS on the prefixed path is rejected with 404 InvalidAddress, as AWS rejects it, by
+ * {@link SqsInvalidAddressFilter} once its signature has been verified.
  * <p>
  * S3 object POSTs, which always carry uploads, uploadId, restore or select, are never rewritten.
  */
@@ -44,6 +45,13 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
      */
     public static final String APPENDED_BODY_BYTES_PROPERTY =
             SqsQueueUrlRouterFilter.class.getName() + ".appendedBodyBytes";
+
+    /**
+     * Set on a query request signed for SQS on a /queue/{region}/ path, which {@link SqsInvalidAddressFilter}
+     * rejects with 404 InvalidAddress after {@link SigV4HeaderSignatureFilter} has verified its signature.
+     */
+    public static final String INVALID_ADDRESS_PROPERTY =
+            SqsQueueUrlRouterFilter.class.getName() + ".invalidAddress";
 
     // The queue URL path (/{account}/{queue}), optionally behind a /queue/{region}/ prefix, with an optional
     // trailing slash, as the AWS SDK v2 may append one. Like AWS, a JSON request is routed on either form because
@@ -91,12 +99,11 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
 
         if (isSqsQuery && hasRegionPrefix) {
             // AWS does not read a queue from this path. The signing scope names the service, as the AWS endpoint
-            // does, so the body need not be read here, and requests for other services keep their routing.
-            String authorization = IamEnforcementFilter.requestAuthorization(
-                    ctx.getHeaderString("Authorization"), queryParams);
-            if (SigV4CredentialScope.serviceName(authorization).filter("sqs"::equals).isPresent()) {
-                ctx.abortWith(AwsQueryResponse.error("InvalidAddress", "The specified ID is invalid.",
-                        AwsNamespaces.SQS, 404));
+            // does, so the body need not be read here, and requests for other services keep their routing. The
+            // request is routed to POST / so that its signature is verified before it is rejected.
+            if (isSignedForSqs(ctx, queryParams)) {
+                ctx.setProperty(INVALID_ADDRESS_PROPERTY, Boolean.TRUE);
+                rewriteToRoot(ctx);
             }
             return;
         }
@@ -127,9 +134,21 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
         }
 
         // Rewrite the path to / so AwsQueryController / AwsJsonController handles the request.
+        rewriteToRoot(ctx);
+    }
+
+    private void rewriteToRoot(ContainerRequestContext ctx) {
         ctx.setRequestUri(ctx.getUriInfo().getRequestUriBuilder()
                 .replacePath("/")
                 .build());
+    }
+
+    private boolean isSignedForSqs(ContainerRequestContext ctx, MultivaluedMap<String, String> queryParams) {
+        // A blank header counts as absent, as SigV4HeaderSignatureFilter treats it, so a presigned credential is read.
+        String header = ctx.getHeaderString("Authorization");
+        String authorization = IamEnforcementFilter.requestAuthorization(
+                header == null || header.isBlank() ? null : header, queryParams);
+        return SigV4CredentialScope.serviceName(authorization).filter("sqs"::equals).isPresent();
     }
 
     private boolean isSqsTarget(String target) {
