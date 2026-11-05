@@ -12,7 +12,6 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ec2.model.*;
-import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
@@ -2005,7 +2004,6 @@ public class Ec2QueryHandler {
             String owner,
             String acceptanceRequired,
             String managesVpcEndpoints,
-            String baseServiceName,      // e.g., "s3", "ec2", "dynamodb"
             String serviceRegion,
             List<String> supportedIpAddressTypes) {
     }
@@ -2053,27 +2051,11 @@ public class Ec2QueryHandler {
                     "amazon",
                     "false",
                     "false",
-                    stripRegionPrefix(full, region),
                     region,
                     List.of("ipv4", "ipv6")));
         }
 
         return services;
-    }
-
-    private boolean isFullName(String name) {
-        return name != null && (name.startsWith("com.") || name.startsWith("cn."));
-    }
-
-    private String stripRegionPrefix(String fullName, String region) {
-        // Full name format: com.amazonaws.region.service or com.amazonaws.service
-        if (fullName.startsWith("com.amazonaws." + region + ".")) {
-            return fullName.substring(("com.amazonaws." + region + ".").length());
-        }
-        if (fullName.startsWith("com.amazonaws.")) {
-            return fullName.substring("com.amazonaws.".length());
-        }
-        return fullName;
     }
 
     private List<ServiceDetail> applyVpcEndpointServiceFilters(List<ServiceDetail> services,
@@ -2083,19 +2065,20 @@ public class Ec2QueryHandler {
         }
 
         // Validate filter names before iterating services (AWS returns InvalidFilter for unknown names)
+        Ec2Service.requireSupportedFilters(
+                filters.stream().map(Map.Entry::getKey).toList(),
+                Set.of("owner", "service-name", "service-region", "service-type",
+                        "supported-ip-address-types", "tag-key"),
+                "InvalidFilter");
+
+        // Validate service-name filter values: AWS rejects values containing regex
+        // metacharacters other than the supported * and ? wildcards.
         for (Map.Entry<String, List<String>> filter : filters) {
-            String name = filter.getKey();
-            if (!isValidFilterName(name)) {
-                throw new AwsException("InvalidFilter",
-                        "The filter '" + name + "' is invalid.", 400);
-            }
-            // Validate service-name filter values: AWS rejects values containing regex
-            // metacharacters other than the supported * and ? wildcards.
-            if ("service-name".equals(name)) {
+            if ("service-name".equals(filter.getKey())) {
                 for (String value : filter.getValue()) {
                     if (!isValidServiceNameFilterValue(value)) {
                         throw new AwsException("InvalidFilter",
-                                "The filter '" + name + "' is invalid.", 400);
+                                "The filter value " + value + " contains unsupported characters", 400);
                     }
                 }
             }
@@ -2118,20 +2101,10 @@ public class Ec2QueryHandler {
                 .toList();
     }
 
-    private boolean isValidFilterName(String name) {
-        return "owner".equals(name)
-                || "service-name".equals(name)
-                || "service-region".equals(name)
-                || "service-type".equals(name)
-                || "supported-ip-address-types".equals(name)
-                || "tag-key".equals(name)
-                || (name != null && name.startsWith("tag:"));
-    }
-
     private boolean matchesFilter(ServiceDetail svc, String filterName, List<String> values) {
         return switch (filterName) {
             case "owner" -> values.contains(svc.owner);
-            case "service-name" -> values.stream().anyMatch(v -> wildcardMatch(svc.serviceName, v));
+            case "service-name" -> values.stream().anyMatch(v -> Ec2Service.wildcardMatches(v, svc.serviceName));
             case "service-region" -> values.contains(svc.serviceRegion);
             case "service-type" -> svc.serviceTypes.stream().anyMatch(t -> values.contains(t));
             case "supported-ip-address-types" -> svc.supportedIpAddressTypes.stream()
@@ -2144,10 +2117,6 @@ public class Ec2QueryHandler {
             default -> throw new AwsException("InvalidFilter",
                     "The filter '" + filterName + "' is invalid.", 400);
         };
-    }
-
-    private boolean wildcardMatch(String value, String pattern) {
-        return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
     }
 
     private boolean isValidServiceNameFilterValue(String value) {

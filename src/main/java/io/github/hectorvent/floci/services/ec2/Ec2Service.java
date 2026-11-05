@@ -6421,12 +6421,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     static void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters) {
+        requireSupportedFilters(filterNames, supportedFilters, "InvalidParameterValue");
+    }
+
+    static void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters, String errorCode) {
         filterNames.stream()
                 .filter(name -> !supportedFilters.contains(name)
                         && !(supportedFilters.contains("tag-key") && name.startsWith("tag:")))
                 .findFirst()
                 .ifPresent(name -> {
-                    throw new AwsException("InvalidParameterValue", "The filter '" + name + "' is invalid", 400);
+                    throw new AwsException(errorCode, "The filter '" + name + "' is invalid", 400);
                 });
     }
 
@@ -10162,7 +10166,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * caller-supplied pattern of many stars made the regex backtrack for seconds, and its dot
      * skipped line terminators that a tag value may hold.
      */
-    private static boolean wildcardMatches(String pattern, String value) {
+    public static boolean wildcardMatches(String pattern, String value) {
         return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
     }
 
