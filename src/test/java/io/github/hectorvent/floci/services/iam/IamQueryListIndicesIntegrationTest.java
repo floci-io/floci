@@ -38,7 +38,10 @@ class IamQueryListIndicesIntegrationTest {
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
 
-    /** The provider below outlives this class otherwise, and the next class to list providers reads it. */
+    /**
+     * What these tests create outlives this class otherwise: the next class to list users or
+     * providers unscoped reads what this one left.
+     */
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
@@ -50,9 +53,11 @@ class IamQueryListIndicesIntegrationTest {
         return prefix + "-" + System.nanoTime();
     }
 
-    private static String createUser(String prefix) {
+    private String createUser(String prefix) {
         String name = unique(prefix);
         iam("CreateUser").formParam("UserName", name).when().post("/").then().statusCode(200);
+        cleanup.register(() -> iam("DeleteUser")
+            .formParam("UserName", name).when().post("/").then().statusCode(200));
         return name;
     }
 
