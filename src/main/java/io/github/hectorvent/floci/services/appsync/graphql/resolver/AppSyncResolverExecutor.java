@@ -302,7 +302,7 @@ public class AppSyncResolverExecutor {
             DataSource dataSource = dataSource(dataSourceName);
             DataSourceType type = dataSource.getType();
             return switch (type) {
-                case NONE, AMAZON_DYNAMODB, AWS_LAMBDA, RELATIONAL_DATABASE -> dataSource;
+                case NONE, AMAZON_DYNAMODB, AWS_LAMBDA, RELATIONAL_DATABASE, HTTP -> dataSource;
                 default -> throw unsupportedVtlDataSource(type, dataSourceName, stageName);
             };
         }
@@ -366,6 +366,7 @@ public class AppSyncResolverExecutor {
                 case AMAZON_DYNAMODB -> prepareVtlDynamoDbRequest(map);
                 case AWS_LAMBDA -> prepareVtlLambdaRequest(map);
                 case RELATIONAL_DATABASE -> prepareVtlRdsRequest(map);
+                case HTTP -> map;
                 default -> throw unsupportedVtlDataSource(dataSource.getType(), dataSource.getName(),
                         stage.function() ? "function" : "UNIT resolver");
             };
