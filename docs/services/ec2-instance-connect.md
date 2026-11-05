@@ -91,6 +91,9 @@ The account is resolved from the access key as for every other request: a 12-dig
 account, an IAM or session key is its owner's, and anything else is the default account. With
 signature validation off (the default) the signature is not checked, as for every other service.
 
+An unreachable instance takes up to about 20 seconds to answer 504: Floci tries the container's address
+and then the published SSH port, each with a 10 second connect timeout.
+
 The tunnel closes after `maxTunnelDuration` (3600 seconds by default), and either side closing
 closes the other. `PreserveClientIp` is recorded but not modelled: the instance always sees, and
 its security groups are evaluated against, the endpoint's own address and groups.

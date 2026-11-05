@@ -147,9 +147,11 @@ public class InstanceConnectTunnelHandler {
         // The container's own address is tried first: it is the one that works when Floci shares a
         // Docker network with the instance, whichever host it runs on. Where the host cannot route to
         // containers (Docker Desktop on macOS or Windows) the published SSH port is the way in.
+        boolean[] usedFallback = {false};
         client().connect(target.port(), target.host()).recover(primary -> target.fallbackPort() <= 0
                 ? Future.<NetSocket>failedFuture(primary)
                 : client().connect(target.fallbackPort(), target.fallbackHost())
+                        .onSuccess(ignored -> usedFallback[0] = true)
                         .recover(ignored -> Future.<NetSocket>failedFuture(primary))).onComplete(connected -> {
             if (connected.failed()) {
                 ctx.request().resume();
@@ -160,9 +162,12 @@ public class InstanceConnectTunnelHandler {
             NetSocket socket = connected.result();
             ctx.request().resume();
             ctx.request().toWebSocket().onSuccess(webSocket -> {
-                LOG.infov("EC2 Instance Connect Endpoint {0}: tunnel to {1} ({2}:{3}) opened",
+                String dialed = usedFallback[0]
+                        ? target.fallbackHost() + ":" + target.fallbackPort()
+                        : target.host() + ":" + target.port();
+                LOG.infov("EC2 Instance Connect Endpoint {0}: tunnel to {1} opened via {2} (published-port fallback: {3})",
                         target.endpoint().getInstanceConnectEndpointId(), target.instance().getInstanceId(),
-                        target.instance().getPrivateIpAddress(), String.valueOf(target.port()));
+                        dialed, usedFallback[0]);
                 webSocket.pipeTo(socket);
                 socket.pipeTo(webSocket);
                 long timer = vertx.setTimer(target.maxSeconds() * 1000L, ignored -> webSocket.close());
