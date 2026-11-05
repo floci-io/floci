@@ -13,8 +13,6 @@ RUN mvn clean package -DskipTests -q
 # Stage 2: Runtime
 FROM eclipse-temurin:25-jre-noble
 
-ARG VERSION=latest
-ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
 ENV AWS_DEFAULT_REGION=us-east-1
@@ -53,6 +51,9 @@ RUN chown -R 1001:root /app/quarkus-app
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chmod=755 docker/healthcheck.sh /usr/local/bin/
+
+ARG VERSION=latest
+ENV FLOCI_VERSION=${VERSION}
 
 VOLUME /app/data
 
