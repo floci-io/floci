@@ -483,7 +483,7 @@ failures use `HttpException`; invalid request mappings use `MappingTemplate`. Re
 are limited to 5 MiB, and transport work has a 30-second deadline. Redirects and automatic retries
 are disabled. HTTPS keeps certificate and hostname verification enabled.
 
-Unsigned requests support public HTTP(S) endpoints. Unlike AWS, Floci rejects private, loopback,
+Unsigned requests support public HTTP(S) endpoints. Floci rejects private, loopback,
 link-local, and other reserved destinations, including a hostname that resolves to any such address.
 Unsigned HTTP data sources do not require a service role.
 
