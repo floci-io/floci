@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -107,14 +106,15 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
     }
 
     /**
-     * All four services resolve a resource from the ARN's id suffix alone, so without this a
-     * caller could reach a local runtime, gateway, memory or harness through an ARN naming another
-     * account or region and read or change its tags. Reported as not found rather than a
+     * The runtime, gateway, memory and harness services resolve a resource from the ARN's id
+     * suffix alone, so without this a caller could reach a local runtime, runtime endpoint,
+     * gateway, memory or harness through an ARN naming another account, region or partition and
+     * read or change its tags. Reported as not found rather than a
      * validation error, so the response does not confirm what exists behind the foreign identity.
      */
     private void requireLocalIdentity(String region, String arn, AwsArnUtils.Arn parsed) {
-        if (!AwsRegions.partitionFor(region).equals(parsed.partition())
-                || !region.equals(parsed.region()) ||!regionResolver.getAccountId().equals(parsed.accountId())) {
+        if (!regionResolver.partitionForRegion(region).equals(parsed.partition())
+                || !region.equals(parsed.region()) || !regionResolver.getAccountId().equals(parsed.accountId())) {
             throw new AwsException("ResourceNotFoundException",
                     "AgentCore resource not found: " + arn, 404);
         }
