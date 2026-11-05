@@ -178,7 +178,8 @@ class BedrockAgentCoreEndpointIntegrationTest {
                 .then().statusCode(202).extract().path("agentRuntimeEndpointArn");
         try {
             for (String foreign : new String[] {endpointArn.replace(":000000000000:", ":222222222222:"),
-                    endpointArn.replace(":us-east-1:", ":eu-west-1:")}) {
+                    endpointArn.replace(":us-east-1:", ":eu-west-1:"),
+                    endpointArn.replace("arn:aws:", "arn:aws-cn:")}) {
                 given().when().get("/tags/" + foreign)
                         .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
                 given().contentType("application/json").body("{\"tags\":{\"env\":\"stolen\"}}")

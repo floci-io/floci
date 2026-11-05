@@ -343,18 +343,21 @@ public class BedrockAgentCoreControlService {
     }
 
     public Map<String, String> getEndpointTagsByArn(String region, String arn) {
-        return new HashMap<>(requireEndpointByArn(region, arn).endpoint().getTags());
+        Map<String, String> snapshot = new HashMap<>();
+        updateEndpointTags(region, arn, snapshot::putAll, false);
+        return snapshot;
     }
 
     public void tagEndpointByArn(String region, String arn, Map<String, String> tags) {
-        updateEndpointTags(region, arn, endpointTags -> endpointTags.putAll(tags));
+        updateEndpointTags(region, arn, endpointTags -> endpointTags.putAll(tags), true);
     }
 
     public void untagEndpointByArn(String region, String arn, List<String> keys) {
-        updateEndpointTags(region, arn, endpointTags -> keys.forEach(endpointTags::remove));
+        updateEndpointTags(region, arn, endpointTags -> keys.forEach(endpointTags::remove), true);
     }
 
-    private void updateEndpointTags(String region, String arn, Consumer<Map<String, String>> change) {
+    private void updateEndpointTags(String region, String arn, Consumer<Map<String, String>> change,
+                                    boolean persist) {
         EndpointLocation located = requireEndpointByArn(region, arn);
         String runtimeId = located.runtime().getAgentRuntimeId();
         synchronized (runtimeLock(region, runtimeId)) {
@@ -365,7 +368,9 @@ public class BedrockAgentCoreControlService {
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "AgentCore resource not found: " + arn, 404));
             change.accept(endpoint.getTags());
-            storage.put(key(region, runtimeId), runtime);
+            if (persist) {
+                storage.put(key(region, runtimeId), runtime);
+            }
         }
     }
 

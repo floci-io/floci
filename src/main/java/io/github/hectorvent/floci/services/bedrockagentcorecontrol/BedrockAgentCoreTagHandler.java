@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -112,7 +113,8 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
      * validation error, so the response does not confirm what exists behind the foreign identity.
      */
     private void requireLocalIdentity(String region, String arn, AwsArnUtils.Arn parsed) {
-        if (!region.equals(parsed.region()) || !regionResolver.getAccountId().equals(parsed.accountId())) {
+        if (!AwsRegions.partitionFor(region).equals(parsed.partition())
+                || !region.equals(parsed.region()) ||!regionResolver.getAccountId().equals(parsed.accountId())) {
             throw new AwsException("ResourceNotFoundException",
                     "AgentCore resource not found: " + arn, 404);
         }
