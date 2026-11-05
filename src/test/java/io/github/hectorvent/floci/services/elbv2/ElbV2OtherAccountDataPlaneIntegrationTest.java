@@ -1,11 +1,9 @@
 package io.github.hectorvent.floci.services.elbv2;
 
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import io.restassured.specification.RequestSpecification;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import jakarta.inject.Inject;
@@ -14,6 +12,13 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
+import static io.github.hectorvent.floci.testing.AlbFixtures.createListener;
+import static io.github.hectorvent.floci.testing.AlbFixtures.createLoadBalancer;
+import static io.github.hectorvent.floci.testing.AlbFixtures.createTargetGroup;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteListener;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteLoadBalancer;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteTargetGroup;
+import static io.github.hectorvent.floci.testing.AlbFixtures.registerTarget;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
@@ -24,8 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestProfile(RealElbV2DataPlaneProfile.class)
 class ElbV2OtherAccountDataPlaneIntegrationTest {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=111122223333/20261101/us-east-1/elasticloadbalancing/aws4_request";
+    private static final String ACCOUNT = "111122223333";
 
     @Inject
     Vertx vertx;
@@ -47,45 +51,23 @@ class ElbV2OtherAccountDataPlaneIntegrationTest {
         String targetGroupArn = null;
         String listenerArn = null;
         try {
-            loadBalancerArn = query().formParam("Action", "CreateLoadBalancer")
-                    .formParam("Name", "other-account-lb")
-                    .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
-                    .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
-                    .post("/").then().statusCode(200).extract()
-                    .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
-            targetGroupArn = query().formParam("Action", "CreateTargetGroup")
-                    .formParam("Name", "other-account-tg")
-                    .formParam("Protocol", "HTTP")
-                    .formParam("Port", backend.actualPort())
-                    .formParam("TargetType", "ip")
-                    .formParam("HealthCheckEnabled", "false")
-                    .post("/").then().statusCode(200).extract()
-                    .path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
-            query().formParam("Action", "RegisterTargets")
-                    .formParam("TargetGroupArn", targetGroupArn)
-                    .formParam("Targets.member.1.Id", "127.0.0.1")
-                    .formParam("Targets.member.1.Port", backend.actualPort())
-                    .post("/").then().statusCode(200);
-            listenerArn = query().formParam("Action", "CreateListener")
-                    .formParam("LoadBalancerArn", loadBalancerArn)
-                    .formParam("Protocol", "HTTP")
-                    .formParam("Port", listenerPort)
-                    .formParam("DefaultActions.member.1.Type", "forward")
-                    .formParam("DefaultActions.member.1.TargetGroupArn", targetGroupArn)
-                    .post("/").then().statusCode(200).extract()
-                    .path("CreateListenerResponse.CreateListenerResult.Listeners.member.ListenerArn");
+            loadBalancerArn = createLoadBalancer(ACCOUNT, "other-account-lb");
+            targetGroupArn = createTargetGroup(ACCOUNT, "other-account-tg", "ip", backend.actualPort());
+            registerTarget(ACCOUNT, targetGroupArn, "127.0.0.1", backend.actualPort());
+            listenerArn = createListener(ACCOUNT, loadBalancerArn, targetGroupArn, listenerPort);
 
             awaitForwarded(listenerPort);
 
             assertTrue(dataPlane.removeListener(listenerArn, listenerPort, () -> true));
+            elbV2Service.initializeStorage();
             elbV2Service.restorePersistedRuntime();
 
             awaitForwarded(listenerPort);
         } finally {
             try {
-                delete("DeleteListener", "ListenerArn", listenerArn);
-                delete("DeleteTargetGroup", "TargetGroupArn", targetGroupArn);
-                delete("DeleteLoadBalancer", "LoadBalancerArn", loadBalancerArn);
+                deleteListener(ACCOUNT, listenerArn);
+                deleteTargetGroup(ACCOUNT, targetGroupArn);
+                deleteLoadBalancer(ACCOUNT, loadBalancerArn);
             } finally {
                 backend.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
             }
@@ -96,15 +78,5 @@ class ElbV2OtherAccountDataPlaneIntegrationTest {
         await().atMost(Duration.ofSeconds(5)).ignoreExceptions().untilAsserted(() -> given()
                 .baseUri("http://127.0.0.1").port(listenerPort)
                 .get("/").then().statusCode(200).body(equalTo("other-account")));
-    }
-
-    private static RequestSpecification query() {
-        return given().header("Authorization", AUTH);
-    }
-
-    private static void delete(String action, String arnParameter, String arn) {
-        if (arn != null) {
-            query().formParam("Action", action).formParam(arnParameter, arn).post("/").then().statusCode(200);
-        }
     }
 }

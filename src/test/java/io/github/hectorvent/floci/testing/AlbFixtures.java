@@ -16,20 +16,23 @@ import static org.hamcrest.Matchers.equalTo;
  */
 public final class AlbFixtures {
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261101/us-east-1/elasticloadbalancing/aws4_request";
+    private static final String DEFAULT_ACCOUNT = "test";
 
     private AlbFixtures() {
     }
 
     public static String createLoadBalancer(String name) {
+        return createLoadBalancer(DEFAULT_ACCOUNT, name);
+    }
+
+    public static String createLoadBalancer(String account, String name) {
         return given()
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", name)
                 .formParam("Type", "application")
                 .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
                 .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
-                .header("Authorization", AUTH)
+                .header("Authorization", auth(account))
             .when()
                 .post("/")
             .then()
@@ -42,7 +45,7 @@ public final class AlbFixtures {
         return given()
                 .formParam("Action", "DescribeLoadBalancers")
                 .formParam("LoadBalancerArns.member.1", loadBalancerArn)
-                .header("Authorization", AUTH)
+                .header("Authorization", auth(DEFAULT_ACCOUNT))
             .when()
                 .post("/")
             .then()
@@ -53,6 +56,10 @@ public final class AlbFixtures {
 
     /** An HTTP target group with health checks off, so a target serves as soon as it is registered. */
     public static String createTargetGroup(String name, String targetType, int targetPort) {
+        return createTargetGroup(DEFAULT_ACCOUNT, name, targetType, targetPort);
+    }
+
+    public static String createTargetGroup(String account, String name, String targetType, int targetPort) {
         return given()
                 .formParam("Action", "CreateTargetGroup")
                 .formParam("Name", name)
@@ -60,7 +67,7 @@ public final class AlbFixtures {
                 .formParam("Port", targetPort)
                 .formParam("TargetType", targetType)
                 .formParam("HealthCheckEnabled", "false")
-                .header("Authorization", AUTH)
+                .header("Authorization", auth(account))
             .when()
                 .post("/")
             .then()
@@ -70,12 +77,16 @@ public final class AlbFixtures {
     }
 
     public static void registerTarget(String targetGroupArn, String targetId, int targetPort) {
+        registerTarget(DEFAULT_ACCOUNT, targetGroupArn, targetId, targetPort);
+    }
+
+    public static void registerTarget(String account, String targetGroupArn, String targetId, int targetPort) {
         given()
                 .formParam("Action", "RegisterTargets")
                 .formParam("TargetGroupArn", targetGroupArn)
                 .formParam("Targets.member.1.Id", targetId)
                 .formParam("Targets.member.1.Port", targetPort)
-                .header("Authorization", AUTH)
+                .header("Authorization", auth(account))
             .when()
                 .post("/")
             .then()
@@ -84,6 +95,10 @@ public final class AlbFixtures {
 
     /** An HTTP listener on {@code port} that forwards every request to {@code targetGroupArn}. */
     public static String createListener(String loadBalancerArn, String targetGroupArn, int port) {
+        return createListener(DEFAULT_ACCOUNT, loadBalancerArn, targetGroupArn, port);
+    }
+
+    public static String createListener(String account, String loadBalancerArn, String targetGroupArn, int port) {
         return given()
                 .formParam("Action", "CreateListener")
                 .formParam("LoadBalancerArn", loadBalancerArn)
@@ -91,7 +106,7 @@ public final class AlbFixtures {
                 .formParam("Port", port)
                 .formParam("DefaultActions.member.1.Type", "forward")
                 .formParam("DefaultActions.member.1.TargetGroupArn", targetGroupArn)
-                .header("Authorization", AUTH)
+                .header("Authorization", auth(account))
             .when()
                 .post("/")
             .then()
@@ -106,7 +121,7 @@ public final class AlbFixtures {
                 .formParam("ListenerArn", listenerArn)
                 .formParam("DefaultActions.member.1.Type", "forward")
                 .formParam("DefaultActions.member.1.TargetGroupArn", targetGroupArn)
-                .header("Authorization", AUTH)
+                .header("Authorization", auth(DEFAULT_ACCOUNT))
             .when()
                 .post("/")
             .then()
@@ -114,15 +129,27 @@ public final class AlbFixtures {
     }
 
     public static void deleteListener(String listenerArn) {
-        delete("DeleteListener", "ListenerArn", listenerArn);
+        deleteListener(DEFAULT_ACCOUNT, listenerArn);
+    }
+
+    public static void deleteListener(String account, String listenerArn) {
+        delete(account, "DeleteListener", "ListenerArn", listenerArn);
     }
 
     public static void deleteTargetGroup(String targetGroupArn) {
-        delete("DeleteTargetGroup", "TargetGroupArn", targetGroupArn);
+        deleteTargetGroup(DEFAULT_ACCOUNT, targetGroupArn);
+    }
+
+    public static void deleteTargetGroup(String account, String targetGroupArn) {
+        delete(account, "DeleteTargetGroup", "TargetGroupArn", targetGroupArn);
     }
 
     public static void deleteLoadBalancer(String loadBalancerArn) {
-        delete("DeleteLoadBalancer", "LoadBalancerArn", loadBalancerArn);
+        deleteLoadBalancer(DEFAULT_ACCOUNT, loadBalancerArn);
+    }
+
+    public static void deleteLoadBalancer(String account, String loadBalancerArn) {
+        delete(account, "DeleteLoadBalancer", "LoadBalancerArn", loadBalancerArn);
     }
 
     /** Sends {@code text} on the socket and returns the next text message it receives. */
@@ -133,17 +160,21 @@ public final class AlbFixtures {
         return reply.get(5, TimeUnit.SECONDS);
     }
 
-    private static void delete(String action, String arnParameter, String arn) {
+    private static void delete(String account, String action, String arnParameter, String arn) {
         if (arn == null) {
             return;
         }
         given()
                 .formParam("Action", action)
                 .formParam(arnParameter, arn)
-                .header("Authorization", AUTH)
+                .header("Authorization", auth(account))
             .when()
                 .post("/")
             .then()
                 .statusCode(anyOf(equalTo(200), equalTo(204)));
+    }
+
+    private static String auth(String account) {
+        return "AWS4-HMAC-SHA256 Credential=" + account + "/20261101/us-east-1/elasticloadbalancing/aws4_request";
     }
 }
