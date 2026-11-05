@@ -28,6 +28,7 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
 
     private static final String ACCOUNT = "000000000000";
     private static final Region REGION = Region.US_EAST_1;
+    private static final String SSL_POLICY = "ELBSecurityPolicy-TLS13-1-2-2021-06";
     private ElasticLoadBalancingV2Client elb;
     private AcmClient acm;
     private String loadBalancer;
@@ -113,6 +114,39 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
     }
 
     @Test
+    void listenerResponsesOmitAbsentSslPolicies() {
+        Listener created = createListener("HTTP", 80);
+        Listener described = elb.describeListeners(request -> request.listenerArns(created.listenerArn()))
+                .listeners().getFirst();
+        Listener modified = elb.modifyListener(request -> request.listenerArn(created.listenerArn()).port(81))
+                .listeners().getFirst();
+        String xml = rawDescribe("DescribeListeners", Map.of("ListenerArns.member.1", created.listenerArn()));
+
+        assertAll("HTTP listener responses omit the absent SSL policy",
+                () -> assertNull(created.sslPolicy()),
+                () -> assertNull(described.sslPolicy()),
+                () -> assertNull(modified.sslPolicy()),
+                () -> assertFalse(xml.contains("<SslPolicy"), xml));
+    }
+
+    @Test
+    void listenerResponsesRetainConfiguredSslPolicies() {
+        Listener created = createListener("HTTPS", 443);
+        Listener described = elb.describeListeners(request -> request.listenerArns(created.listenerArn()))
+                .listeners().getFirst();
+        String replacement = "ELBSecurityPolicy-2016-08";
+        Listener modified = elb.modifyListener(request -> request.listenerArn(created.listenerArn())
+                .sslPolicy(replacement)).listeners().getFirst();
+        String xml = rawDescribe("DescribeListeners", Map.of("ListenerArns.member.1", created.listenerArn()));
+
+        assertAll("HTTPS listener responses retain their configured SSL policy",
+                () -> assertEquals(SSL_POLICY, created.sslPolicy()),
+                () -> assertEquals(SSL_POLICY, described.sslPolicy()),
+                () -> assertEquals(replacement, modified.sslPolicy()),
+                () -> assertTrue(xml.contains("<SslPolicy>" + replacement + "</SslPolicy>"), xml));
+    }
+
+    @Test
     void everyDescribeResponseOmitsTerminalMarker() {
         assertTrue(elb.describeListeners(request -> request.loadBalancerArn(loadBalancer)).listeners().isEmpty());
         assertNull(elb.describeListeners(request -> request.loadBalancerArn(loadBalancer)).nextMarker());
@@ -142,7 +176,8 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
                     .defaultActions(action -> action.type("fixed-response").fixedResponseConfig(response ->
                             response.statusCode("200").contentType("text/plain").messageBody("ok")));
             if (protocol.equals("HTTPS")) {
-                request.certificates(Certificate.builder().certificateArn(certificate).build());
+                request.sslPolicy(SSL_POLICY)
+                        .certificates(Certificate.builder().certificateArn(certificate).build());
             }
         }).listeners().getFirst();
     }

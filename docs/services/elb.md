@@ -50,6 +50,9 @@ HTTPS listeners require a default certificate. Supply one when creating a listen
 Listener responses omit `Certificates` when the listener has none. Configured certificates
 remain present in create, describe and modify responses.
 
+Listener responses also omit `SslPolicy` when it is unset. Configured policies remain
+present in create, describe and modify responses.
+
 Gateway Load Balancer listeners require omitted `Port` and `Protocol` fields on both create and modify requests. Their portless control-plane configuration does not provide GENEVE packet forwarding.
 
 | Action | Description |
