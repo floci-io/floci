@@ -139,6 +139,8 @@ grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine
 # Read that override so its first CreateDBInstance does not also have to pull PostGIS.
 POSTGIS_TEST="$(find src/test/java -name RdsTemplateDatabaseRestoreIntegrationTest.java -print -quit)"
 POSTGIS_IMAGE="$(awk -F'"' '$2 == "floci.services.rds.default-postgres-image" { print $4 }' "${POSTGIS_TEST:-/dev/null}")"
+[ -n "$POSTGIS_IMAGE" ] \
+    || echo "$(date -u +%H:%M:%S) prefetch skipped: RdsTemplateDatabaseRestoreIntegrationTest default-postgres-image not readable" >> "$PREFETCH_LOG"
 starts RdsTemplateDatabaseRestoreIntegrationTest \
     && [ -n "$POSTGIS_IMAGE" ] && pull "$POSTGIS_IMAGE"
 # These DSQL fixtures start the configured PostgreSQL sidecar; unit-only shards do not.
