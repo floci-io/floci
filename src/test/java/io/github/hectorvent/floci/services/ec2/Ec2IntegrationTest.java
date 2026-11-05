@@ -3218,7 +3218,73 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(51)
+    void describeVpcEndpointServicesRejectsUnknownFilterName() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "invalid-filter")
+            .formParam("Filter.1.Value.1", "any")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidFilter"))
+            .body("Response.Errors.Error.Message", containsString("invalid-filter"));
+    }
+
+    @Test
     @Order(52)
+    void describeVpcEndpointServicesRejectsUnsupportedBracket() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "service-name")
+            .formParam("Filter.1.Value.1", "[")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidFilter"))
+            .body("Response.Errors.Error.Message", containsString("contains unsupported characters"));
+    }
+
+    @Test
+    @Order(53)
+    void describeVpcEndpointServicesRejectsUnsupportedPlus() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "service-name")
+            .formParam("Filter.1.Value.1", "com.amazonaws.us-east-1.s3+")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidFilter"))
+            .body("Response.Errors.Error.Message", containsString("contains unsupported characters"));
+    }
+
+    @Test
+    @Order(54)
+    void describeVpcEndpointServicesRejectsUnsupportedAfterEmptyFilter() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "service-name")
+            .formParam("Filter.1.Value.1", "nonexistent-service-xyz")
+            .formParam("Filter.2.Name", "service-name")
+            .formParam("Filter.2.Value.1", "[")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidFilter"))
+            .body("Response.Errors.Error.Message", containsString("contains unsupported characters"));
+    }
+
+    @Test
+    @Order(55)
     void describeVpcEndpointServicesFilterByTagValueReturnsEmpty() {
         given()
             .formParam("Action", "DescribeVpcEndpointServices")
