@@ -17,6 +17,7 @@ import org.jboss.logging.Logger;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -235,11 +236,7 @@ public class BedrockAgentCoreEventService {
         long millis = Math.round(eventTimestampSeconds * 1000d);
         byte[] suffix = new byte[4];
         RANDOM.nextBytes(suffix);
-        StringBuilder hex = new StringBuilder();
-        for (byte b : suffix) {
-            hex.append(String.format("%02x", b));
-        }
-        return String.format("%019d", millis) + "#" + hex;
+        return String.format("%019d", millis) + "#" + HexFormat.of().formatHex(suffix);
     }
 
     private static MemoryEvent withoutPayload(MemoryEvent source) {
