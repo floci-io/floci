@@ -8,6 +8,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -103,6 +105,41 @@ class CognitoCustomDomainRoutingIntegrationTest {
     @Order(3)
     void hostWithPortAndMixedCaseStillMatches() {
         assertNull(expect(200, DOMAIN.toUpperCase() + ":4566", clientA, secretA, "/oauth2/token"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"x%25y", "trailing%25", "a%252Fb", "a%2Fb", "a%20b"})
+    @Order(2)
+    void unknownEncodedOauthPathsKeepTheJsonNotFoundResponse(String suffix) {
+        given().urlEncodingEnabled(false).header("Host", DOMAIN)
+        .when()
+                .get("/oauth2/" + suffix)
+        .then()
+                .statusCode(404)
+                .contentType(containsString("application/json"))
+                .body("error", equalTo("This URL doesn't exist on the authorization server."));
+    }
+
+    @Test
+    @Order(2)
+    void managedLoginPreservesEncodedQueryValues() throws Exception {
+        String clientId = cognitoJson("CreateUserPoolClient", """
+                {"UserPoolId":"%s","ClientName":"encoded-query-client",
+                 "AllowedOAuthFlowsUserPoolClient":true,"AllowedOAuthFlows":["code"],
+                 "AllowedOAuthScopes":["openid"],"CallbackURLs":["https://app.example.test/callback"],
+                 "SupportedIdentityProviders":["COGNITO"]}
+                """.formatted(poolA)).path("UserPoolClient").path("ClientId").asText();
+
+        given().urlEncodingEnabled(false).header("Host", DOMAIN)
+        .when()
+                .get("/login?response_type=code&client_id=" + clientId
+                        + "&redirect_uri=https%3A%2F%2Fapp.example.test%2Fcallback&scope=openid"
+                        + "&state=x%25y%252F%26z%2B")
+        .then()
+                .statusCode(200)
+                .contentType(startsWith("text/html"))
+                .body(containsString("name=\"state\" value=\"x%y%2F&amp;z+\""))
+                .body(containsString("name=\"redirect_uri\" value=\"https://app.example.test/callback\""));
     }
 
     @Test
