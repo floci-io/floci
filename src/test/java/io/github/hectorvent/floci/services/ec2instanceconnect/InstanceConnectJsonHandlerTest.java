@@ -128,10 +128,11 @@ class InstanceConnectJsonHandlerTest {
 
     @Test
     void acceptsWellFormedEd25519AndEcdsaKeys() {
+        // ECDSA lines are real ssh-keygen -t ecdsa output (throwaway keys, public half only).
         handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", sshKey("ssh-ed25519", new byte[32])), REGION);
-        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", ecdsaKey("nistp256", "nistp256", 65, (byte) 4)), REGION);
-        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", ecdsaKey("nistp384", "nistp384", 97, (byte) 4)), REGION);
-        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", ecdsaKey("nistp521", "nistp521", 133, (byte) 4)), REGION);
+        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBKhKXIBq6uSFm4w/wDQuFN9HzZFxgqLbSpaTJB+J6aAHWXBU7rpF1xa7s4dpFzLTSb+xn8JbKWbLozKoeIWV8hw= test"), REGION);
+        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", "ecdsa-sha2-nistp384 AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABhBJFY0hkoTsJID0TIS1BgpJVWTDguQ7sTojV4dfGqMEKjMSAoOnXUdGV1Y+AIhF4rZE9IKsHsjtxg4JYesYz7FR+9CTxHjog7BGzYmVcsVSnRL3t68fT7S3cXhoVkV/3WZA== test"), REGION);
+        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBABCp6D79VfVN1Td7nP/lhUWST6qIkN28rgBp1FhyKO2UCTwxObXTOEL7WvfyQ+/J60K21J1ovjtlcC61YhWx0F7eAC/glgVeIBd0leLmmv3YGJkmE7POLgg4nfVXNLJayW3Q8rgyNAROCIC++3Avdn9GZIPrrFnyo1M0aNeW03/dLE2Xg== test"), REGION);
         verify(keys, org.mockito.Mockito.times(4)).add(any());
     }
 
