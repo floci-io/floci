@@ -26,6 +26,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -232,6 +233,26 @@ class StepFunctionsTaskCredentialsIntegrationTest {
 
         assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
         assertEquals("hello", queue.receive().getFirst().getBody());
+        assertEquals(taskRole, taskScheduled(execution).path("taskCredentials").path("roleArn").asText());
+    }
+
+    /** Nothing evaluates a role that does not exist, nor a publisher no policy allows. */
+    @ParameterizedTest
+    @ValueSource(strings = {"sns:publish", "aws-sdk:sns:publish", "events:putEvents"})
+    void messagingCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
+        Map<String, Object> arguments = integration.contains("sns")
+                ? Map.of("TopicArn", EnforcementFixtures.createTopic(cleanup, baseUri.getPort(), auth(SOURCE, "sns"),
+                        "credentials-" + UUID.randomUUID()), "Message", "hello")
+                : Map.of("Entries", List.of(Map.of("Source", "credentials", "DetailType", "t", "Detail", "{}")));
+        String taskRole = "arn:aws:iam::" + TARGET + ":role/no-such-role";
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
+                "Type", "Task", "Resource", "arn:aws:states:::" + integration,
+                "Credentials", Map.of("RoleArn", taskRole), "Parameters", arguments, "End", true))));
+
+        String execution = start(machine(SOURCE, definition, "STANDARD"), "{}");
+        Response done = terminal(SOURCE, execution);
+
+        assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
         assertEquals(taskRole, taskScheduled(execution).path("taskCredentials").path("roleArn").asText());
     }
 

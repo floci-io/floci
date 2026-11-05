@@ -1424,6 +1424,22 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return !(value instanceof String s) || s.isBlank();
     }
 
+    /**
+     * The ARN of the event bus a {@code PutEvents} entry's {@code EventBusName} reaches: the bus of that
+     * name, or of the name its ARN gives, in the {@code account} and {@code region} the call runs in, as
+     * {@link #putEventsFromRequest} looks it up whatever account and Region the ARN names. Empty for an
+     * ARN that request refuses as malformed.
+     */
+    public static Optional<String> eventBusArn(String eventBusName, String partition, String region, String account) {
+        try {
+            return Optional.of(new AwsArnUtils.Arn(partition, "events", region, account,
+                    "event-bus/" + resolvedBusName(eventBusName)).toString());
+        } catch (AwsException e) {
+            LOG.debugv("EventBusName {0} is malformed, so it names no bus: {1}", eventBusName, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
     private static String resolvedBusName(String busName) {
         if (busName == null || busName.isBlank()) {
             return "default";
