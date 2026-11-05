@@ -28,6 +28,10 @@ class CloudFormationStackPersistenceTest {
     Path tempDir;
 
     private static final String KEY = "000000000000/my-stack:us-east-1";
+    private static final String STACK_POLICY =
+            "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"Update:*\",\"Principal\":\"*\",\"Resource\":\"*\"}]}";
+    private static final String PENDING_POLICY =
+            "{\"Statement\":[{\"Effect\":\"Deny\",\"Action\":\"Update:*\",\"Principal\":\"*\",\"Resource\":\"*\"}]}";
 
     @Test
     void stackGraphPersistsAcrossInstances() {
@@ -43,6 +47,7 @@ class CloudFormationStackPersistenceTest {
         stack.getOutputs().put("BucketArn", "arn:aws:s3:::my-bucket");
         stack.getExports().put("MyExport", "exported-value");
         stack.getTags().put("team", "platform");
+        stack.setStackPolicyBody(STACK_POLICY);
 
         StackResource resource = new StackResource();
         resource.setLogicalId("MyBucket");
@@ -62,6 +67,7 @@ class CloudFormationStackPersistenceTest {
         changeSet.setChangeSetName("initial-create");
         changeSet.setStackName("my-stack");
         changeSet.setStatus("CREATE_COMPLETE");
+        changeSet.setStackPolicyBody(PENDING_POLICY);
         stack.getChangeSets().put("initial-create", changeSet);
 
         PersistentStorage<String, Stack> writer = new PersistentStorage<>(
@@ -86,6 +92,7 @@ class CloudFormationStackPersistenceTest {
         assertEquals("arn:aws:s3:::my-bucket", loaded.getOutputs().get("BucketArn"));
         assertEquals("exported-value", loaded.getExports().get("MyExport"));
         assertEquals("platform", loaded.getTags().get("team"));
+        assertEquals(STACK_POLICY, loaded.getStackPolicyBody());
 
         StackResource loadedResource = loaded.getResources().get("MyBucket");
         assertNotNull(loadedResource, "Nested stack resources must round-trip");
@@ -98,6 +105,7 @@ class CloudFormationStackPersistenceTest {
         assertEquals("CREATE_COMPLETE", loaded.getEvents().get(0).getResourceStatus());
         assertTrue(loaded.getChangeSets().containsKey("initial-create"));
         assertEquals("CREATE_COMPLETE", loaded.getChangeSets().get("initial-create").getStatus());
+        assertEquals(PENDING_POLICY, loaded.getChangeSets().get("initial-create").getStackPolicyBody());
     }
 
     @Test
