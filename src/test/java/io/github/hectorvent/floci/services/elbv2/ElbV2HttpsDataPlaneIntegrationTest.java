@@ -744,7 +744,8 @@ class ElbV2HttpsDataPlaneIntegrationTest {
     }
 
     private static void awaitPlainResponse(String host, int port, String body) {
-        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100)).untilAsserted(() ->
+        await().ignoreException(ConnectException.class)
+                .atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100)).untilAsserted(() ->
                 assertPlainResponse(host, port, body));
     }
 
