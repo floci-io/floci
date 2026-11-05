@@ -259,9 +259,10 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * Stores a stack's policy (CloudFormation {@code SetStackPolicy}). The checks run in AWS's order:
-     * the policy source, the stack, the stack's state, then the policy itself.
+     * the stack's name, the policy source, the stack, the stack's state, then the policy itself.
      */
     public void setStackPolicy(String stackName, String body, String url, String region) {
+        validateStackName(stackName);
         if (isNullOrEmpty(body) && isNullOrEmpty(url)) {
             // AWS's own spelling.
             throw new AwsException("ValidationError", "Ether StackPolicyURL or StackPolicyBody must be specified.", 400);
@@ -294,6 +295,7 @@ public class CloudFormationService implements ResourceProvider {
 
     /** The stack's policy as it was submitted, or null when it has none. A deleted stack keeps it. */
     public String getStackPolicy(String stackName, String region) {
+        validateStackName(stackName);
         return stackForPolicy(stackName, region).getStackPolicyBody();
     }
 
@@ -1701,6 +1703,26 @@ public class CloudFormationService implements ResourceProvider {
      * {@code ValidationError}, with AWS's texts. A skip has no length limit.
      */
     private static void validateContinueUpdateRollback(String stackNameOrArn, List<String> resourcesToSkip) {
+        List<String> violations = stackNameViolations(stackNameOrArn);
+        if (resourcesToSkip.stream().anyMatch(skip -> !RESOURCE_TO_SKIP.matcher(skip).matches())) {
+            violations.add("Value '" + resourcesToSkip + "' at 'resourcesToSkip' failed to satisfy constraint:"
+                    + " Member must satisfy constraint: [Member must satisfy regular expression pattern: "
+                    + RESOURCE_TO_SKIP.pattern() + "]");
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+    }
+
+    /** Refuses a {@code StackName} AWS's model refuses, before anything else in the request is checked. */
+    private static void validateStackName(String stackNameOrArn) {
+        List<String> violations = stackNameViolations(stackNameOrArn);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationError(violations);
+        }
+    }
+
+    private static List<String> stackNameViolations(String stackNameOrArn) {
         List<String> violations = new ArrayList<>();
         if (stackNameOrArn == null) {
             violations.add(SmithyValidationErrors.notNull("stackName"));
@@ -1714,14 +1736,7 @@ public class CloudFormationService implements ResourceProvider {
                         + " Member must satisfy regular expression pattern: " + STACK_NAME.pattern());
             }
         }
-        if (resourcesToSkip.stream().anyMatch(skip -> !RESOURCE_TO_SKIP.matcher(skip).matches())) {
-            violations.add("Value '" + resourcesToSkip + "' at 'resourcesToSkip' failed to satisfy constraint:"
-                    + " Member must satisfy constraint: [Member must satisfy regular expression pattern: "
-                    + RESOURCE_TO_SKIP.pattern() + "]");
-        }
-        if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.validationError(violations);
-        }
+        return violations;
     }
 
     private StackMutationSnapshot snapshot(Stack stack) {

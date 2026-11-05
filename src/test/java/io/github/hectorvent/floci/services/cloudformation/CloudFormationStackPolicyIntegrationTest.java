@@ -78,6 +78,20 @@ class CloudFormationStackPolicyIntegrationTest {
                 .body(containsString("<Message>Stack: never-created does not exist</Message>"));
     }
 
+    /** Before the policy source, so a request without a name never reaches a stack named "null". */
+    @Test
+    void aMissingOrMalformedStackNameIsRefusedFirst() {
+        String missing = "1 validation error detected: Value null at 'stackName' failed to satisfy constraint:"
+                + " Member must not be null";
+        assertEquals(missing, validationError(cfn("SetStackPolicy", null)));
+        assertEquals(missing, validationError(policyOf(null)));
+        assertEquals("2 validation errors detected: Value '' at 'stackName' failed to satisfy constraint:"
+                        + " Member must have length greater than or equal to 1; Value '' at 'stackName' failed"
+                        + " to satisfy constraint: Member must satisfy regular expression pattern:"
+                        + " [a-zA-Z][-a-zA-Z0-9]*|arn:[-a-zA-Z0-9:/._+]*",
+                validationError(policyOf("")));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
         "nope",
@@ -291,6 +305,11 @@ class CloudFormationStackPolicyIntegrationTest {
         Response response = policyOf(stackName);
         response.then().statusCode(200);
         return response.xmlPath().getString("GetStackPolicyResponse.GetStackPolicyResult.StackPolicyBody");
+    }
+
+    private static String validationError(Response response) {
+        return response.then().statusCode(400).body(containsString("<Code>ValidationError</Code>"))
+                .extract().xmlPath().getString("ErrorResponse.Error.Message");
     }
 
     /** How many events the stack's one resource has, so a policy-only update can be shown not to touch it. */
