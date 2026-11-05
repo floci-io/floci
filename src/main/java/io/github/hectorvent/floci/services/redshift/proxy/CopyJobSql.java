@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.Kind;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.Token;
@@ -87,19 +88,20 @@ public final class CopyJobSql {
             case "LIST" -> arguments.isEmpty() ? SYS_COPY_JOB + " ORDER BY job_id"
                     : reject("42601", "COPY JOB LIST takes no arguments");
             case "SHOW" -> hasName && arguments.size() == 1
-                    ? SYS_COPY_JOB + " WHERE job_name = " + literal(arguments.getFirst().identifier())
+                    ? SYS_COPY_JOB + " WHERE job_name = " + PostgresWire.quoteLiteral(arguments.getFirst().identifier())
                     : reject("42601", "COPY JOB SHOW needs a job name");
             case "DROP" -> {
                 if (!hasName || arguments.size() != 1) {
                     yield reject("42601", "COPY JOB DROP needs a job name");
                 }
                 yield inTransaction ? reject("25001", "COPY JOB DROP cannot run inside a transaction block")
-                        : "CALL floci_internal.drop_copy_job(" + literal(arguments.getFirst().identifier()) + ")";
+                        : "CALL floci_internal.drop_copy_job("
+                                + PostgresWire.quoteLiteral(arguments.getFirst().identifier()) + ")";
             }
             case "ALTER" -> hasName && arguments.size() == 3 && arguments.get(1).keyword("AUTO")
                     && isAutoValue(arguments.get(2))
-                    ? "CALL floci_internal.alter_copy_job(" + literal(arguments.getFirst().identifier()) + ", "
-                            + arguments.get(2).keyword("ON") + ")"
+                    ? "CALL floci_internal.alter_copy_job(" + PostgresWire.quoteLiteral(arguments.getFirst().identifier())
+                            + ", " + arguments.get(2).keyword("ON") + ")"
                     : reject("42601", "COPY JOB ALTER needs a job name and AUTO ON or AUTO OFF");
             case "RUN" -> reject("0A000", "COPY JOB RUN is not supported");
             default -> reject("42601", "Unknown COPY JOB command");
@@ -170,9 +172,10 @@ public final class CopyJobSql {
         }
         String copy = sql.substring(tokens.getFirst().start(), tokens.get(job).start()).trim();
         boolean auto = arguments.size() == 1 || arguments.get(2).keyword("ON");
-        return "CALL floci_internal.create_copy_job(" + literal(name) + ", " + literal(role) + ", "
-                + literal(copy) + ", " + auto + ", " + literal(table) + ", " + literal(bucket) + ", "
-                + literal(prefix) + ")";
+        return "CALL floci_internal.create_copy_job(" + PostgresWire.quoteLiteral(name) + ", "
+                + PostgresWire.quoteLiteral(role) + ", " + PostgresWire.quoteLiteral(copy) + ", " + auto + ", "
+                + PostgresWire.quoteLiteral(table) + ", " + PostgresWire.quoteLiteral(bucket) + ", "
+                + PostgresWire.quoteLiteral(prefix) + ")";
     }
 
     private static String targetTable(String sql, List<Token> tokens, int from) {
@@ -222,11 +225,7 @@ public final class CopyJobSql {
     }
 
     private static String reject(String sqlState, String message) {
-        return "CALL floci_internal.reject_copy_job(" + literal(sqlState) + ", " + literal(message) + ")";
-    }
-
-    private static String literal(String value) {
-        String escaped = value.replace("'", "''");
-        return value.indexOf('\\') < 0 ? "'" + escaped + "'" : "E'" + escaped.replace("\\", "\\\\") + "'";
+        return "CALL floci_internal.reject_copy_job(" + PostgresWire.quoteLiteral(sqlState) + ", "
+                + PostgresWire.quoteLiteral(message) + ")";
     }
 }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
@@ -275,13 +276,9 @@ public class SpectrumQueryPreparation {
 
     private static void requireSchemaOwner(BackendSql backend, String schemaName) {
         String body = "BEGIN IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = "
-                + sqlLiteral(schemaName) + " AND pg_catalog.pg_has_role(current_user, n.nspowner, 'USAGE')) THEN "
+                + PostgresWire.quoteLiteral(schemaName) + " AND pg_catalog.pg_has_role(current_user, n.nspowner, 'USAGE')) THEN "
                 + "RAISE EXCEPTION 'Must be owner of external schema' USING ERRCODE = '42501'; END IF; END";
-        backend.execute("DO " + sqlLiteral(body));
-    }
-
-    private static String sqlLiteral(String value) {
-        return "'" + value.replace("'", "''") + "'";
+        backend.execute("DO " + PostgresWire.quoteLiteral(body));
     }
 
     private boolean createSchema(ExternalStatement.CreateSchema schema, SpectrumSession session, BackendSql backend) {
