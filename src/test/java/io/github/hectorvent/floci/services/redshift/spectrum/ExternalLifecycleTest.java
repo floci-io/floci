@@ -145,7 +145,7 @@ class ExternalLifecycleTest {
     void cascadeUnregistersSchemaWithoutDeletingGlueDatabaseOrTables() {
         assertTrue(preparation.handlesDdl("DROP SCHEMA lake CASCADE", SESSION));
         assertTrue(preparation.prepare("DROP SCHEMA lake CASCADE", SESSION, backend));
-        verify(backend).execute("DROP SCHEMA \"lake\" CASCADE; SELECT floci_internal.purge_external_schema('lake')");
+        verify(backend).execute("DROP SCHEMA \"lake\" CASCADE; SELECT floci_internal.purge_external_schema(E'lake')");
         verify(registry).unbind(SESSION.accountId(), SESSION.clusterKey(), "dev", "lake");
         verify(materializer).forgetSchema(SESSION.clusterKey(), "dev", "lake");
         verify(glue, never()).deleteDatabase(anyString());
@@ -246,7 +246,7 @@ class ExternalLifecycleTest {
     void dropsLocalSchemaWhenGlueDatabaseIsAlreadyGone() {
         when(glue.getTables("analytics")).thenThrow(new AwsException("EntityNotFoundException", "gone", 400));
         assertTrue(preparation.prepare("DROP SCHEMA IF EXISTS lake", SESSION, backend));
-        verify(backend).execute("DROP SCHEMA IF EXISTS \"lake\" RESTRICT; SELECT floci_internal.purge_external_schema('lake')");
+        verify(backend).execute("DROP SCHEMA IF EXISTS \"lake\" RESTRICT; SELECT floci_internal.purge_external_schema(E'lake')");
         verify(registry).unbind(SESSION.accountId(), SESSION.clusterKey(), "dev", "lake");
         verify(materializer).forgetSchema(SESSION.clusterKey(), "dev", "lake");
     }
