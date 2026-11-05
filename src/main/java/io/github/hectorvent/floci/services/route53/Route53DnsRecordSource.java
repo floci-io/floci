@@ -27,7 +27,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Resolves private IPv4 records and public TXT/NS/SOA records for the embedded DNS server.
+ * Resolves private IPv4/SRV records and public TXT/NS/SOA records for the embedded DNS server.
  *
  * <p>Discovered via CDI as a {@link DnsRecordSource} implementation, keeping
  * the embedded DNS server decoupled from Route 53 service classes.
@@ -148,6 +148,54 @@ public class Route53DnsRecordSource implements DnsRecordSource {
             LOG.debugv("Cannot encode public DNS records for {0}: {1}", name, e.getMessage());
             return Optional.of(DnsAnswer.refused());
         }
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolve(String name, int type) {
+        if (type != 33) {
+            return DnsRecordSource.super.resolve(name, type);
+        }
+        if (name == null || name.isBlank() || !route53Service.isCoveredByPrivateZone(name)) {
+            return Optional.empty();
+        }
+        List<ResourceRecordSet> sets = route53Service.findPrivateRecordsForName(name);
+        List<DnsRecord> records = new ArrayList<>();
+        int ttl = Integer.MAX_VALUE;
+        try {
+            for (ResourceRecordSet set : sets) {
+                if (!"SRV".equalsIgnoreCase(set.getType())) {
+                    continue;
+                }
+                if (set.getSetIdentifier() != null || set.getAliasTarget() != null
+                        || set.getWeight() != null || set.getRegion() != null
+                        || set.getFailover() != null || set.getHealthCheckId() != null
+                        || set.getRecords() == null) {
+                    return Optional.of(DnsAnswer.refused());
+                }
+                for (ResourceRecord value : set.getRecords()) {
+                    if (value == null || value.getValue() == null) {
+                        return Optional.of(DnsAnswer.refused());
+                    }
+                    String[] fields = value.getValue().trim().split("\\s+");
+                    if (fields.length != 4) {
+                        return Optional.of(DnsAnswer.refused());
+                    }
+                    DnsRecord.Srv record = new DnsRecord.Srv(Integer.parseInt(fields[0]),
+                            Integer.parseInt(fields[1]), Integer.parseInt(fields[2]), fields[3]);
+                    record.data();
+                    records.add(record);
+                }
+                ttl = Math.min(ttl, ttlOf(set));
+            }
+        } catch (IllegalArgumentException e) {
+            LOG.debugv("Cannot encode private SRV records for {0}: {1}", name, e.getMessage());
+            return Optional.of(DnsAnswer.refused());
+        }
+        if (!records.isEmpty()) {
+            return Optional.of(DnsAnswer.typedRecords(records, ttl));
+        }
+        return Optional.of(!sets.isEmpty() || route53Service.hasPrivateRecordsBeneath(name)
+                ? DnsAnswer.noData() : DnsAnswer.nxDomain());
     }
 
     @Override

@@ -33,6 +33,31 @@ class DnsRecordTest {
     }
 
     @Test
+    void srvPreservesUnsignedFieldsAndCloudMapDefaults() {
+        for (int value : List.of(0, 100, 65535)) {
+            ByteBuffer data = ByteBuffer.wrap(new DnsRecord.Srv(value, value, value, "task.example.").data());
+            assertEquals(value, Short.toUnsignedInt(data.getShort()));
+            assertEquals(value, Short.toUnsignedInt(data.getShort()));
+            assertEquals(value, Short.toUnsignedInt(data.getShort()));
+            byte[] target = new byte[data.remaining()];
+            data.get(target);
+            assertArrayEquals(new byte[]{4, 't', 'a', 's', 'k', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0}, target);
+        }
+        assertArrayEquals(new DnsRecord.Srv(1, 1, 8080, "task.example").data(),
+                new DnsRecord.Srv(8080, "task.example").data());
+        assertArrayEquals(new byte[7], new DnsRecord.Srv(0, 0, 0, ".").data());
+    }
+
+    @Test
+    void srvRejectsOutOfRangePriorityWeightAndPort() {
+        for (int value : List.of(-1, 65536)) {
+            assertThrows(IllegalArgumentException.class, () -> new DnsRecord.Srv(value, 0, 0, "task.example"));
+            assertThrows(IllegalArgumentException.class, () -> new DnsRecord.Srv(0, value, 0, "task.example"));
+            assertThrows(IllegalArgumentException.class, () -> new DnsRecord.Srv(0, 0, value, "task.example"));
+        }
+    }
+
+    @Test
     void namesEncodeLabelsAndIgnoreOneTrailingDot() {
         assertArrayEquals(new byte[]{1, 'a', 1, 'b', 0}, DnsRecord.encodeName("a.b."));
         assertThrows(IllegalArgumentException.class, () -> DnsRecord.encodeName("a..b"));
