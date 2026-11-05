@@ -4,10 +4,12 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsProxyServer;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RequestHost;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.WebSocketUpgrades;
 import io.github.hectorvent.floci.core.common.tls.ReloadingKeyManager;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -698,7 +700,8 @@ public class ElbV2DataPlane {
                 .filter(candidate -> candidate != null && "forward".equals(candidate.getType()))
                 .findFirst().orElse(null);
         String tgArn = action == null ? null : resolveTgArn(action);
-        TargetGroup tg = tgArn == null ? null : elbV2Service.getTargetGroup(listener.region(), tgArn);
+        TargetGroup tg = tgArn == null ? null
+                : asOwner(listener.arn(), () -> elbV2Service.getTargetGroup(listener.region(), tgArn));
         if (tg == null || "lambda".equals(tg.getTargetType())) {
             socket.close();
             return;
@@ -1105,7 +1108,7 @@ public class ElbV2DataPlane {
             req.response().setStatusCode(502).end("No target group");
             return;
         }
-        TargetGroup tg = elbV2Service.getTargetGroup(region, tgArn);
+        TargetGroup tg = asOwner(listenerArn, () -> elbV2Service.getTargetGroup(region, tgArn));
         if (tg == null) {
             req.response().setStatusCode(502).end("Target group not found");
             return;
@@ -1167,11 +1170,17 @@ public class ElbV2DataPlane {
         if (binding == null) {
             return null;
         }
-        LoadBalancer loadBalancer = elbV2Service.getLoadBalancer(region, binding.loadBalancerArn());
+        LoadBalancer loadBalancer = asOwner(listenerArn,
+                () -> elbV2Service.getLoadBalancer(region, binding.loadBalancerArn()));
         if (loadBalancer == null || loadBalancer.getAttributes() == null) {
             return null;
         }
         return loadBalancer.getAttributes().get(key);
+    }
+
+    /** A request on a listener port carries no credentials, so its reads run as the listener's owner. */
+    private static <T> T asOwner(String listenerArn, Supplier<T> read) {
+        return RequestScopes.callAs(AwsArnUtils.parse(listenerArn).accountId(), read);
     }
 
     private long parseTimeoutMillis(String configured, String attributeKey, long defaultSeconds) {
@@ -1192,7 +1201,7 @@ public class ElbV2DataPlane {
     }
 
     private String listenerAttribute(String listenerArn, String region, String key) {
-        Listener listener = elbV2Service.getListener(region, listenerArn);
+        Listener listener = asOwner(listenerArn, () -> elbV2Service.getListener(region, listenerArn));
         if (listener == null || listener.getAttributes() == null) {
             return null;
         }
