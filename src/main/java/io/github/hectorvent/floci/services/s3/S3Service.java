@@ -117,6 +117,8 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String INTERNAL_BUCKET_PREFIX = "floci-internal-";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_BUCKET =
             INTERNAL_BUCKET_PREFIX + "redshift-spectrum-scratch";
+    public static final String REDSHIFT_UNLOAD_STAGING_BUCKET = INTERNAL_BUCKET_PREFIX + "redshift-unload-staging";
+    public static final String REDSHIFT_UNLOAD_STAGING_TAG_VALUE = "redshift-unload-staging";
     public static final String INTERNAL_BUCKET_TAG_KEY = "floci:internal";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
@@ -614,26 +616,16 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public List<Bucket> listBuckets() {
         return bucketStore.scan(key -> true).stream()
-                .filter(bucket -> !isSpectrumScratchBucket(bucket))
+                .filter(bucket -> !isScratchBucket(bucket))
                 .toList();
     }
 
-    /**
-     * The Spectrum scratch bucket is told apart from a user bucket of the same name by the tag the
-     * materializer puts on it, so a user's own bucket is never hidden or treated as scratch space.
-     */
-    private static boolean isSpectrumScratchBucket(Bucket bucket) {
-        return REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(bucket.getName())
-                && bucket.getTags() != null
-                && REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE.equals(bucket.getTags().get(INTERNAL_BUCKET_TAG_KEY));
+    private static boolean isScratchBucket(Bucket bucket) {
+        return Arrays.stream(S3ScratchSpace.values()).anyMatch(space -> space.matchesBucket(bucket));
     }
 
-    /**
-     * Returns true if the named bucket is Floci's internal Redshift Spectrum scratch bucket,
-     * verified by its name and internal tag.
-     */
-    public boolean isSpectrumScratchBucket(String bucketName) {
-        return resolveBucket(bucketName).filter(S3Service::isSpectrumScratchBucket).isPresent();
+    public boolean isScratchBucket(String bucketName) {
+        return resolveBucket(bucketName).filter(S3Service::isScratchBucket).isPresent();
     }
 
     public String getBucketOwnerAccountId(String bucketName) {

@@ -78,7 +78,7 @@ class RedshiftInterceptingBridgeTest {
         s3Stub = Mockito.mock(S3Service.class);
         RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(
                 bridgeClientEnd, bridgeBackendEnd, s3Stub, Mockito.mock(IamService.class), "000000000000", List.of(),
-                spectrumInterceptor, "000000000000:c", "dev", null, audit, "analyst");
+                spectrumInterceptor, "000000000000:c", "dev", null, audit, "analyst", null);
         bridgeThread = Thread.ofVirtual().name("bridge-under-test").start(bridge::run);
     }
 
