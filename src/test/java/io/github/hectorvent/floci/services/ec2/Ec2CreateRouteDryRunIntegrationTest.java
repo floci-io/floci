@@ -63,7 +63,7 @@ class Ec2CreateRouteDryRunIntegrationTest {
                 Ec2Exception error = assertThrows(Ec2Exception.class, () -> caller.createRoute(fixture.request()
                         .gatewayId(fixture.gatewayId).dryRun(true).build()));
                 assertEquals(403, error.statusCode());
-                assertTrue(error.awsErrorDetails().rawResponse().asUtf8String().contains("<Code>AccessDenied</Code>"));
+                assertEquals("UnauthorizedOperation", error.awsErrorDetails().errorCode());
             }
             assertEquals(before, fixture.routes());
         }
@@ -106,7 +106,7 @@ class Ec2CreateRouteDryRunIntegrationTest {
                     .then().statusCode(200);
             Ec2Exception denied = assertThrows(Ec2Exception.class, () -> caller.createRoute(request));
             assertEquals(403, denied.statusCode());
-            assertTrue(denied.awsErrorDetails().rawResponse().asUtf8String().contains("<Code>AccessDenied</Code>"));
+            assertEquals("UnauthorizedOperation", denied.awsErrorDetails().errorCode());
             assertEquals(before, fixture.routes());
         }
     }

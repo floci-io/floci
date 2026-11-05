@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
+import io.github.hectorvent.floci.core.common.Ec2ErrorResponses;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SshPublicKeys;
@@ -378,32 +379,12 @@ public class Ec2QueryHandler {
                 case "AllocateIpamPoolCidr" -> handleAllocateIpamPoolCidr(params, region);
                 case "ReleaseIpamPoolAllocation" -> handleReleaseIpamPoolAllocation(params, region);
                 case "GetIpamPoolAllocations" -> handleGetIpamPoolAllocations(params, region);
-                default -> ec2Error("UnsupportedOperation",
+                default -> Ec2ErrorResponses.of("UnsupportedOperation",
                         "Operation " + action + " is not supported.", 400);
             };
         } catch (AwsException e) {
-            return ec2Error(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return Ec2ErrorResponses.of(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
-    }
-
-    /**
-     * EC2 uses a different error envelope than other Query-protocol services.
-     * The AWS SDK v2 EC2 client parses {@code <Response><Errors><Error><Code>},
-     * not the standard {@code <ErrorResponse><Error><Code>} shape.
-     */
-    private Response ec2Error(String code, String message, int status) {
-        String xml = new XmlBuilder()
-                .start("Response")
-                .start("Errors")
-                .start("Error")
-                .elem("Code", code)
-                .elem("Message", message)
-                .end("Error")
-                .end("Errors")
-                .elem("RequestID", UUID.randomUUID().toString())
-                .end("Response")
-                .build();
-        return Response.status(status).entity(xml).type(MediaType.APPLICATION_XML).build();
     }
 
     // ─── Parameter helpers ────────────────────────────────────────────────────
@@ -1963,7 +1944,7 @@ public class Ec2QueryHandler {
             // Apply filters
             services = applyVpcEndpointServiceFilters(services, filters);
         } catch (AwsException e) {
-            return ec2Error(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+            return Ec2ErrorResponses.of(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
 
         XmlBuilder xml = new XmlBuilder()
@@ -2158,7 +2139,7 @@ public class Ec2QueryHandler {
             resourceIds = getList(p, "ResourceIds.member");
         }
         if (resourceIds.isEmpty()) {
-            return ec2Error("MissingParameter", "The request must contain at least one ResourceId.", 400);
+            return Ec2ErrorResponses.of("MissingParameter", "The request must contain at least one ResourceId.", 400);
         }
 
         XmlBuilder xml = new XmlBuilder()
