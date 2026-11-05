@@ -86,7 +86,8 @@ import java.util.function.UnaryOperator;
  * <p>Errors follow the protocol the request used: a Query or REST-XML request (Route 53,
  * CloudFront, S3 Control) receives an {@code <ErrorResponse>}, a CBOR request a CBOR body, and
  * everything else JSON, which REST-JSON clients read through {@code X-Amzn-Errortype}. The codes
- * are AWS's: {@code IncompleteSignature} for a header that cannot be checked,
+ * use EC2's {@code Response/Errors/Error} envelope when the Query request identifies EC2.
+ * The codes are AWS's: {@code IncompleteSignature} for a header that cannot be checked,
  * {@code InvalidClientTokenId} / {@code UnrecognizedClientException} for an access key Floci does
  * not know (EC2 instead answers {@code AuthFailure} in its own envelope), and
  * {@code SignatureDoesNotMatch} / {@code InvalidSignatureException} for a signature
@@ -462,6 +463,10 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
      */
     private void abort(ContainerRequestContext ctx, Class<?> resource, int status, String queryCode,
                        String jsonCode, String message) {
+        if (resource == AwsQueryController.class && Ec2ErrorResponses.isQueryRequest(ctx)) {
+            ctx.abortWith(Ec2ErrorResponses.of(queryCode, message, status));
+            return;
+        }
         String contentType = requestContentType(ctx);
         if (isCbor(ctx, contentType)) {
             ctx.abortWith(CborErrorResponses.of(new AwsException(jsonCode, message, status),

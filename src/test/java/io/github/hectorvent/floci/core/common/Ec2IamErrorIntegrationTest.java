@@ -22,6 +22,10 @@ import java.net.URI;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.emptyOrNullString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -75,6 +79,22 @@ class Ec2IamErrorIntegrationTest {
         AwsRequestSigner signer = AwsRequestSigner.signedAs("AKIAUNKNOWNACCESSKEY", "some-secret", "ec2");
         Ec2ErrorAssertions.assertGetError(signer, endpoint, presigned, 401, "AuthFailure",
                 "AWS was not able to validate the provided access credentials");
+    }
+
+    @Test
+    void missingCredentialsUseEc2Envelope() {
+        given().formParam("Action", "DescribeVpcs").formParam("Version", "2016-11-15")
+                .post(endpoint).then().statusCode(403)
+                .body("Response.Errors.Error.Code", equalTo("MissingAuthenticationToken"))
+                .body("Response.RequestID", not(emptyOrNullString()));
+    }
+
+    @Test
+    void unreadableCredentialUsesEc2Envelope() {
+        given().header("Authorization", "AWS4-HMAC-SHA256 broken")
+                .formParam("Action", "DescribeVpcs").formParam("Version", "2016-11-15")
+                .post(endpoint).then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("IncompleteSignature"));
     }
 
     private UserCredentials user(String name) {

@@ -50,6 +50,33 @@ class Ec2SignatureErrorIntegrationTest {
                 "AWS was not able to validate the provided access credentials");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void badSignaturesOnSignedAndPresignedGetUseEc2Envelope(boolean presigned) throws Exception {
+        AwsRequestSigner signer = AwsRequestSigner.signedAs("test", "wrong-secret", "ec2");
+        Ec2ErrorAssertions.assertGetError(signer, endpoint, presigned, 403, "SignatureDoesNotMatch",
+                "The request signature we calculated does not match");
+    }
+
+    @Test
+    void sdkParsesBadSignature() {
+        try (Ec2Client client = AwsTestClients.create(Ec2Client.builder(),
+                "test", "wrong-secret", Region.US_EAST_1, endpoint)) {
+            Ec2Exception denied = assertThrows(Ec2Exception.class, client::describeVpcs);
+            assertEquals(403, denied.statusCode());
+            assertEquals("SignatureDoesNotMatch", denied.awsErrorDetails().errorCode());
+            assertNotNull(denied.requestId());
+        }
+    }
+
+    @Test
+    void incompleteSignatureUsesEc2Envelope() {
+        given().header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20261105/us-east-1/ec2/aws4_request")
+                .queryParam("Action", "DescribeVpcs").queryParam("Version", "2016-11-15")
+                .get(endpoint).then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("IncompleteSignature"));
+    }
+
     @Test
     void anEc2SigningScopeDoesNotChangeRestJsonErrors() {
         given().filter(AwsRequestSigner.signedAs("AKIAUNKNOWNACCESSKEY", "some-secret", "ec2"))
