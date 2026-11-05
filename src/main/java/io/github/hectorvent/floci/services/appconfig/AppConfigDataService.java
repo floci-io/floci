@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
@@ -33,8 +34,9 @@ public class AppConfigDataService {
 
     @Inject
     public AppConfigDataService(StorageFactory storageFactory, AppConfigService appConfigService,
-                                ObjectMapper objectMapper) {
-        this.sessionStore = storageFactory.create("appconfigdata", "appconfigdata-sessions.json", new TypeReference<>() {});
+                                ObjectMapper objectMapper, RegionResolver regions) {
+        this.sessionStore = new AppConfigStorage<>(storageFactory, regions,
+                "appconfigdata", "appconfigdata-sessions.json", new TypeReference<>() {});
         this.appConfigService = appConfigService;
         this.objectMapper = objectMapper;
     }
