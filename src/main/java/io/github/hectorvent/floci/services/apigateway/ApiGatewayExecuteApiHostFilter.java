@@ -262,6 +262,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         // AWS_IAM dispatch rebuilds the caller's canonical request, which covers the path they
         // signed: the virtual-host path, not the /execute-api/... form this rewrite produces.
         routeContext.recordSignedRequestPath(originalPath);
+        routeContext.recordRewrittenRequestPath(newUri.getRawPath());
         RequestUriRewrite.apply(requestContext, newUri);
     }
 
@@ -274,6 +275,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         LOG.debugv("REST execute-api host routing: {0} -> {1}", originalPath, newUri.getRawPath());
         routeContext.routeToRestApi();
         routeContext.recordSignedRequestPath(originalPath);
+        routeContext.recordRewrittenRequestPath(newUri.getRawPath());
         RequestUriRewrite.apply(requestContext, newUri);
     }
 

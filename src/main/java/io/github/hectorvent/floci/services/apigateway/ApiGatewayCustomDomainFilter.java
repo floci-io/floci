@@ -121,6 +121,7 @@ public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
                                 || !apiGatewayV2Service.hasApi(mappedRegion, restApiId)));
         routeContext.routeToMappedApi(domain, restApi);
         routeContext.recordSignedRequestPath(path);
+        routeContext.recordRewrittenRequestPath(newUri.getRawPath());
         requestContext.setProperty(ROUTED_PROPERTY, Boolean.TRUE);
         RequestUriRewrite.apply(requestContext, newUri);
     }
