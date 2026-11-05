@@ -183,8 +183,10 @@ class BedrockAgentCoreEndpointIntegrationTest {
                 given().when().get("/tags/" + foreign)
                         .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
                 given().contentType("application/json").body("{\"tags\":{\"env\":\"stolen\"}}")
-                        .when().post("/tags/" + foreign).then().statusCode(404);
-                given().when().delete("/tags/" + foreign + "?tagKeys=env").then().statusCode(404);
+                        .when().post("/tags/" + foreign).then().statusCode(404)
+                        .body("__type", equalTo("ResourceNotFoundException"));
+                given().when().delete("/tags/" + foreign + "?tagKeys=env")
+                        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
             }
             given().when().get("/tags/" + endpointArn).then().statusCode(200).body("tags.env", equalTo("prod"));
 
@@ -192,8 +194,25 @@ class BedrockAgentCoreEndpointIntegrationTest {
             given().when().get("/tags/" + endpointArn)
                     .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
             given().contentType("application/json").body("{\"tags\":{\"a\":\"b\"}}")
-                    .when().post("/tags/" + endpointArn).then().statusCode(404);
-            given().when().delete("/tags/" + endpointArn + "?tagKeys=a").then().statusCode(404);
+                    .when().post("/tags/" + endpointArn).then().statusCode(404)
+                    .body("__type", equalTo("ResourceNotFoundException"));
+            given().when().delete("/tags/" + endpointArn + "?tagKeys=a")
+                    .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+
+            String missingRuntimeArn = endpointArn.replaceAll("agentEndpoint/.*", "agent/missing0000-AbCdEfGhIj");
+            String existingRuntimeArn = endpointArn.replaceAll("agentEndpoint/.*", "agent/" + id);
+            for (String runtimeTarget : new String[] {missingRuntimeArn,
+                    existingRuntimeArn.replace(":000000000000:", ":222222222222:"),
+                    existingRuntimeArn.replace(":us-east-1:", ":eu-west-1:"),
+                    existingRuntimeArn.replace("arn:aws:", "arn:aws-cn:")}) {
+                given().when().get("/tags/" + runtimeTarget)
+                        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+                given().contentType("application/json").body("{\"tags\":{\"a\":\"b\"}}")
+                        .when().post("/tags/" + runtimeTarget).then().statusCode(404)
+                        .body("__type", equalTo("ResourceNotFoundException"));
+                given().when().delete("/tags/" + runtimeTarget + "?tagKeys=a")
+                        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+            }
         } finally {
             given().when().delete("/runtimes/" + id + "/").then().statusCode(202);
         }

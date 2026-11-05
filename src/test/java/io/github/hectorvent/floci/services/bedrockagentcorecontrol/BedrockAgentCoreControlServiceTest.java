@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -452,6 +453,48 @@ class BedrockAgentCoreControlServiceTest {
         assertEquals(Map.of("owner", "runtime"),
                 service.getTagsByArn(REGION, service.arn(rt, "1", REGION)));
         assertTrue(service.getEndpoint(id, "DEFAULT", REGION).getTags().isEmpty());
+    }
+
+    @Test
+    void endpointTagSnapshotsStayStableWhileTagsAreWrittenConcurrently() throws Exception {
+        AgentRuntime rt = create("myAgent");
+        String id = rt.getAgentRuntimeId();
+        AgentRuntimeEndpoint ep = service.createEndpoint(id, "prod", null, null,
+                Map.of("fixed", "1"), null, REGION);
+        String endpointArn = service.endpointArn(ep, REGION);
+        AtomicInteger inconsistent = new AtomicInteger();
+        try (ExecutorService executor = Executors.newFixedThreadPool(3)) {
+            Future<?> writer = executor.submit(() -> {
+                for (int i = 0; i < 2000; i++) {
+                    service.tagEndpointByArn(REGION, endpointArn, Map.of("a", "x", "b", "x"));
+                    service.untagEndpointByArn(REGION, endpointArn, List.of("a", "b"));
+                }
+                service.tagEndpointByArn(REGION, endpointArn, Map.of("final", "yes"));
+            });
+            List<Future<?>> readers = List.of(
+                    executor.submit(() -> readEndpointTagSnapshots(endpointArn, writer, inconsistent)),
+                    executor.submit(() -> readEndpointTagSnapshots(endpointArn, writer, inconsistent)));
+            writer.get(60, TimeUnit.SECONDS);
+            for (Future<?> reader : readers) {
+                reader.get(60, TimeUnit.SECONDS);
+            }
+        }
+        assertEquals(0, inconsistent.get(), "a snapshot must never show a partial tag write");
+        assertEquals(Map.of("fixed", "1", "final", "yes"), service.getEndpointTagsByArn(REGION, endpointArn));
+    }
+
+    private void readEndpointTagSnapshots(String endpointArn, Future<?> writer, AtomicInteger inconsistent) {
+        while (!writer.isDone()) {
+            Map<String, String> snapshot = service.getEndpointTagsByArn(REGION, endpointArn);
+            int size = 0;
+            for (String ignored : snapshot.keySet()) {
+                size++;
+            }
+            if (snapshot.containsKey("a") != snapshot.containsKey("b") || !"1".equals(snapshot.get("fixed"))
+                    || size != snapshot.size()) {
+                inconsistent.incrementAndGet();
+            }
+        }
     }
 
     @Test
