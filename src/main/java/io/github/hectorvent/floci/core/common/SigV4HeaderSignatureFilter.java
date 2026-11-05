@@ -92,6 +92,7 @@ import java.util.function.UnaryOperator;
  * not know (EC2 instead answers {@code AuthFailure} in its own envelope), and
  * {@code SignatureDoesNotMatch} / {@code InvalidSignatureException} for a signature
  * that does not verify, exceeds its query expiry or falls outside the header clock-skew window.
+ * EC2 uses {@code RequestExpired} for expiry and clock skew, including expired temporary credentials.
  *
  * <p>Nothing here runs with the flag off: the filter returns before reading a single header.
  */
@@ -237,6 +238,10 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
             LOG.debugv("Refusing {0} request signed with unknown access key {1}",
                     scope.service(), SigV4RequestValidator.sanitizeForLog(scope.accessKeyId()));
             if (resource == AwsQueryController.class && "ec2".equals(scope.service())) {
+                if (iamService.isExpiredSessionToken(scope.accessKeyId(), token)) {
+                    ctx.abortWith(IamEnforcementFilter.expiredTokenResponse(scope.service(), ctx));
+                    return;
+                }
                 ctx.abortWith(Ec2ErrorResponses.authFailure());
                 return;
             }
@@ -247,17 +252,17 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
         String amzDate = AMZ_DATE.format(requestTime);
         Instant now = Instant.now();
         if (presigned && !now.isBefore(requestTime.plusSeconds(expires))) {
-            signatureDoesNotMatch(ctx, resource, "Signature expired: " + amzDate + " is now earlier than "
+            requestExpired(ctx, resource, "Signature expired: " + amzDate + " is now earlier than "
                     + AMZ_DATE.format(now.minusSeconds(expires)));
             return;
         }
         if (requestTime.isAfter(now.plus(MAX_CLOCK_SKEW))) {
-            signatureDoesNotMatch(ctx, resource, "Signature not yet current: " + amzDate + " is still later than "
+            requestExpired(ctx, resource, "Signature not yet current: " + amzDate + " is still later than "
                     + AMZ_DATE.format(now.plus(MAX_CLOCK_SKEW)));
             return;
         }
         if (!presigned && requestTime.isBefore(now.minus(MAX_CLOCK_SKEW))) {
-            signatureDoesNotMatch(ctx, resource, "Signature expired: " + amzDate + " is now earlier than "
+            requestExpired(ctx, resource, "Signature expired: " + amzDate + " is now earlier than "
                     + AMZ_DATE.format(now.minus(MAX_CLOCK_SKEW)));
             return;
         }
@@ -450,6 +455,14 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
         abort(ctx, resource, 400, "IncompleteSignature", "IncompleteSignatureException", message);
     }
 
+    private void requestExpired(ContainerRequestContext ctx, Class<?> resource, String message) {
+        if (resource == AwsQueryController.class && Ec2ErrorResponses.isEc2QueryRequest(ctx)) {
+            ctx.abortWith(Ec2ErrorResponses.of("RequestExpired", message, 403));
+            return;
+        }
+        signatureDoesNotMatch(ctx, resource, message);
+    }
+
     private void signatureDoesNotMatch(ContainerRequestContext ctx, Class<?> resource, String message) {
         abort(ctx, resource, 403, "SignatureDoesNotMatch", "InvalidSignatureException", message);
     }
@@ -463,7 +476,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
      */
     private void abort(ContainerRequestContext ctx, Class<?> resource, int status, String queryCode,
                        String jsonCode, String message) {
-        if (resource == AwsQueryController.class && Ec2ErrorResponses.isQueryRequest(ctx)) {
+        if (resource == AwsQueryController.class && Ec2ErrorResponses.isEc2QueryRequest(ctx)) {
             ctx.abortWith(Ec2ErrorResponses.of(queryCode, message, status));
             return;
         }

@@ -1,20 +1,32 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.AwsTestClients;
+import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.apache5.Apache5HttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 
 import java.net.URI;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -28,6 +40,49 @@ class Ec2SignatureErrorIntegrationTest {
 
     @TestHTTPResource("/")
     URI endpoint;
+
+    @Inject
+    IamService iamService;
+
+    @RegisterExtension
+    final PartitionCleanup cleanup = new PartitionCleanup();
+
+    @ParameterizedTest
+    @ValueSource(strings = {"matching", "wrong", "missing", "live"})
+    void temporaryCredentialExpiryRequiresTheMatchingToken(String tokenMode) throws Exception {
+        String key = "ASIA" + UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        cleanup.register(() -> iamService.unregisterSession("000000000000", key));
+        iamService.registerSession(key, "session-secret", "issued-token",
+                "arn:aws:iam::000000000000:role/expired-session", "live".equals(tokenMode)
+                        ? Instant.now().plusSeconds(3600) : Instant.parse("2020-01-01T00:00:00Z"), null);
+        AwsCredentials credentials = "missing".equals(tokenMode)
+                ? AwsBasicCredentials.create(key, "session-secret")
+                : AwsSessionCredentials.create(key, "session-secret",
+                        "wrong".equals(tokenMode) ? "wrong-token" : "issued-token");
+        try (Ec2Client client = Ec2Client.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                .httpClientBuilder(Apache5HttpClient.builder())
+                .credentialsProvider(StaticCredentialsProvider.create(credentials)).build()) {
+            if ("live".equals(tokenMode)) {
+                assertNotNull(client.describeVpcs().vpcs());
+                return;
+            }
+            Ec2Exception denied = assertThrows(Ec2Exception.class, client::describeVpcs);
+            assertEquals("matching".equals(tokenMode) ? 403 : 401, denied.statusCode());
+            assertEquals("matching".equals(tokenMode) ? "RequestExpired" : "AuthFailure",
+                    denied.awsErrorDetails().errorCode());
+            assertNotNull(denied.requestId());
+        }
+        Map<String, String> query = new HashMap<>(Map.of("Action", "DescribeVpcs", "Version", "2016-11-15"));
+        if (!"missing".equals(tokenMode)) {
+            query.put("X-Amz-Security-Token", "wrong".equals(tokenMode) ? "wrong-token" : "issued-token");
+        }
+        URI presigned = AwsRequestSigner.signedAs(key, "session-secret", "ec2")
+                .presignedUri("GET", endpoint, query, new byte[0]);
+        given().urlEncodingEnabled(false).get(presigned).then()
+                .statusCode("matching".equals(tokenMode) ? 403 : 401)
+                .body("Response.Errors.Error.Code",
+                        equalTo("matching".equals(tokenMode) ? "RequestExpired" : "AuthFailure"));
+    }
 
     @Test
     void sdkParsesAnUnknownAccessKeyWithSignatureValidation() {
@@ -56,6 +111,24 @@ class Ec2SignatureErrorIntegrationTest {
         AwsRequestSigner signer = AwsRequestSigner.signedAs("test", "wrong-secret", "ec2");
         Ec2ErrorAssertions.assertGetError(signer, endpoint, presigned, 403, "SignatureDoesNotMatch",
                 "The request signature we calculated does not match");
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {-1800, 1800})
+    void headerTimestampSkewUsesRequestExpired(long offset) throws Exception {
+        AwsRequestSigner signer = AwsRequestSigner.signedAs("test", "test", "ec2")
+                .signedAt(Instant.now().plusSeconds(offset));
+        Ec2ErrorAssertions.assertGetError(signer, endpoint, false, 403, "RequestExpired",
+                offset < 0 ? "Signature expired:" : "Signature not yet current:");
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {-1800, 1800})
+    void presignedExpiryAndFutureTimestampUseRequestExpired(long offset) throws Exception {
+        AwsRequestSigner signer = AwsRequestSigner.signedAs("test", "test", "ec2")
+                .signedAt(Instant.now().plusSeconds(offset));
+        Ec2ErrorAssertions.assertGetError(signer, endpoint, true, 403, "RequestExpired",
+                offset < 0 ? "Signature expired:" : "Signature not yet current:");
     }
 
     @Test

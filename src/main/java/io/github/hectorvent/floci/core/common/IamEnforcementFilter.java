@@ -2063,12 +2063,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     /**
      * The response for a session whose temporary credentials have expired. S3's error list names it
-     * {@code ExpiredToken}, 400. The other services' common errors name it
+     * {@code ExpiredToken}, 400. EC2 names it {@code RequestExpired}. The other services' common errors name it
      * {@code ExpiredTokenException}, 403, under the same name for Query services as for JSON ones.
      */
     static Response expiredTokenResponse(String credentialScope, ContainerRequestContext ctx) {
         if ("ec2".equals(credentialScope)) {
-            return Ec2ErrorResponses.of("ExpiredTokenException", EXPIRED_TOKEN, 403);
+            return Ec2ErrorResponses.of("RequestExpired", EXPIRED_TOKEN, 403);
         }
         if ("s3".equals(credentialScope)) {
             return s3XmlError("ExpiredToken", S3_EXPIRED_TOKEN, 400);
@@ -2096,7 +2096,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      */
     static Response incompleteSignatureResponse(String credentialScope, ContainerRequestContext ctx,
                                                 String message) {
-        if ("ec2".equals(credentialScope) || Ec2ErrorResponses.isQueryRequest(ctx)) {
+        if ("ec2".equals(credentialScope) || Ec2ErrorResponses.isEc2QueryRequest(ctx)) {
             return Ec2ErrorResponses.of("IncompleteSignature", message, 400);
         }
         if ("s3".equals(credentialScope)) {
@@ -2168,7 +2168,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * returns for the same failure on its own path.
      */
     static Response missingAuthenticationTokenResponse(WireProtocol protocol, ContainerRequestContext ctx) {
-        if (protocol == WireProtocol.AWS_QUERY && Ec2ErrorResponses.isQueryRequest(ctx)) {
+        if (protocol == WireProtocol.AWS_QUERY && Ec2ErrorResponses.isEc2QueryRequest(ctx)) {
             return Ec2ErrorResponses.of("MissingAuthenticationToken", MISSING_AUTHENTICATION_TOKEN, 403);
         }
         return protocolError(protocol, ctx, "MissingAuthenticationToken", "MissingAuthenticationTokenException",

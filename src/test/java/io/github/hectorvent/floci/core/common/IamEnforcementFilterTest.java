@@ -757,7 +757,7 @@ class IamEnforcementFilterTest {
         ArgumentCaptor<Response> response = ArgumentCaptor.captor();
         verify(containerRequest).abortWith(response.capture());
         assertEquals(403, response.getValue().getStatus());
-        assertTrue(entityString(response.getValue()).contains("<Response><Errors><Error><Code>ExpiredTokenException</Code>"),
+        assertTrue(entityString(response.getValue()).contains("<Response><Errors><Error><Code>RequestExpired</Code>"),
                 entityString(response.getValue()));
     }
 

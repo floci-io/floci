@@ -13,7 +13,7 @@ public final class Ec2ErrorResponses {
     private Ec2ErrorResponses() {
     }
 
-    static boolean isQueryRequest(ContainerRequestContext ctx) {
+    static boolean isEc2QueryRequest(ContainerRequestContext ctx) {
         if (!(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
                 || claim.protocol() != WireProtocol.AWS_QUERY) {
             return false;
