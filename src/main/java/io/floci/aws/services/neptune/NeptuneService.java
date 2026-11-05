@@ -46,6 +46,7 @@ public class NeptuneService {
     private final NeptuneContainerManager containerManager;
     private final NeptuneProxyManager proxyManager;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
+    private final Set<String> provisioningClusterNames = ConcurrentHashMap.newKeySet();
 
     @Inject
     public NeptuneService(EmulatorConfig config,
@@ -72,6 +73,20 @@ public class NeptuneService {
     public NeptuneCluster createDbCluster(String id, String engineVersion, boolean iamEnabled,
                                           NeptuneClusterSettings settings, Map<String, String> tags) {
         settings.validate();
+        String identity = resourceIdentity(currentAccount(), currentRegion(), id);
+        if (!provisioningClusterNames.add(identity)) {
+            throw new AwsException("DBClusterAlreadyExistsFault",
+                    "Neptune cluster " + id + " already exists.", 400);
+        }
+        try {
+            return provisionDbCluster(id, engineVersion, iamEnabled, settings, tags);
+        } finally {
+            provisioningClusterNames.remove(identity);
+        }
+    }
+
+    private NeptuneCluster provisionDbCluster(String id, String engineVersion, boolean iamEnabled,
+                                             NeptuneClusterSettings settings, Map<String, String> tags) {
         if (getStoredCluster(id).isPresent()) {
             throw new AwsException("DBClusterAlreadyExistsFault",
                     "Neptune cluster " + id + " already exists.", 400);

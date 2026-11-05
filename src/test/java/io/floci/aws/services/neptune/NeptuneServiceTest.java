@@ -1,5 +1,6 @@
 package io.floci.aws.services.neptune;
 
+import com.github.dockerjava.api.exception.ConflictException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -19,6 +20,12 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -34,6 +41,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -90,6 +98,98 @@ class NeptuneServiceTest {
         doNothing().when(proxyManager).startProxy(anyString(), anyInt(), anyString(), anyInt());
 
         service = new NeptuneService(config, regionResolver, containerManager, proxyManager, storageFactory);
+    }
+
+    @Test
+    void duplicateCreateDuringProvisioningCannotStartOrCleanUpTheOwner() throws Exception {
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        AtomicInteger launches = new AtomicInteger();
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
+                .thenAnswer(call -> {
+                    if (launches.incrementAndGet() != 1) {
+                        throw new ConflictException("The first create owns this container name");
+                    }
+                    started.countDown();
+                    assertTrue(finish.await(5, TimeUnit.SECONDS), "The test must release backend startup");
+                    return new NeptuneContainerHandle("owner-container", "shared", "localhost", 8182);
+                });
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<NeptuneCluster> owner = executor.submit(
+                    () -> service.createDbCluster("shared", "1.3.2.1", false));
+            try {
+                assertTrue(started.await(5, TimeUnit.SECONDS), "The first create must enter backend startup");
+                AwsException duplicate = assertThrows(AwsException.class,
+                        () -> service.createDbCluster("shared", "1.3.2.1", false));
+                assertEquals("DBClusterAlreadyExistsFault", duplicate.getErrorCode());
+                verify(containerManager, times(1)).tryStart(
+                        anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString());
+                verify(containerManager, never()).stopByClusterId(anyString());
+                verify(proxyManager, never()).stopProxy(anyString());
+            } finally {
+                finish.countDown();
+            }
+            assertEquals("owner-container", owner.get(5, TimeUnit.SECONDS).getContainerId());
+            assertEquals("owner-container", service.getDbCluster("shared").getContainerId());
+        }
+    }
+
+    @Test
+    void failedCreateReleasesItsIdentifierForAnExplicitRetry() {
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
+                .thenThrow(new IllegalStateException("Backend startup failed"))
+                .thenReturn(new NeptuneContainerHandle("retry-container", "same", "localhost", 8182));
+
+        assertThrows(IllegalStateException.class, () -> service.createDbCluster("same", "1.3.2.1", false));
+        NeptuneCluster recovered = service.createDbCluster("same", "1.3.2.1", false);
+
+        assertEquals("retry-container", recovered.getContainerId());
+        assertEquals(18182, recovered.getProxyPort());
+        verify(containerManager, times(1)).stopByClusterId("000000000000-us-east-1-same");
+    }
+
+    @Test
+    void pendingCreateDoesNotClaimTheSameNameInAnotherAccountOrRegion() throws Exception {
+        ThreadLocal<String> account = ThreadLocal.withInitial(() -> "000000000000");
+        ThreadLocal<String> region = ThreadLocal.withInitial(() -> "us-east-1");
+        when(regionResolver.getAccountId()).thenAnswer(call -> account.get());
+        when(regionResolver.getRegion()).thenAnswer(call -> region.get());
+        when(regionResolver.buildArn(anyString(), anyString(), anyString()))
+                .thenAnswer(call -> "arn:aws:" + call.getArgument(0) + ":" + call.getArgument(1)
+                        + ":" + account.get() + ":" + call.getArgument(2));
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch finish = new CountDownLatch(1);
+        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
+                .thenAnswer(call -> {
+                    if ("000000000000".equals(call.getArgument(3)) && "us-east-1".equals(call.getArgument(4))) {
+                        started.countDown();
+                        assertTrue(finish.await(5, TimeUnit.SECONDS), "The test must release backend startup");
+                    }
+                    return new NeptuneContainerHandle(
+                            call.getArgument(3) + "-" + call.getArgument(4), "shared", "localhost", 8182);
+                });
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<NeptuneCluster> owner = executor.submit(
+                    () -> service.createDbCluster("shared", "1.3.2.1", false));
+            try {
+                assertTrue(started.await(5, TimeUnit.SECONDS), "The first create must enter backend startup");
+                account.set("111111111111");
+                assertEquals("111111111111-us-east-1",
+                        service.createDbCluster("shared", "1.3.2.1", false).getContainerId());
+                account.set("000000000000");
+                region.set("eu-west-1");
+                assertEquals("000000000000-eu-west-1",
+                        service.createDbCluster("shared", "1.3.2.1", false).getContainerId());
+                verify(containerManager, never()).stopByClusterId(anyString());
+            } finally {
+                finish.countDown();
+                account.remove();
+                region.remove();
+            }
+            assertEquals("000000000000-us-east-1", owner.get(5, TimeUnit.SECONDS).getContainerId());
+        }
     }
 
     @Test
