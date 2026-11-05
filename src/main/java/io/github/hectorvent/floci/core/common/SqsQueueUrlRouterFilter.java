@@ -29,7 +29,8 @@ import java.util.regex.Pattern;
  * For the query (form-encoded) protocol, AWS SDK v1 omits QueueUrl from the body and
  * uses the queue URL as the HTTP path instead. This filter appends it back into the
  * entity stream so SqsQueryHandler can look up the queue normally. Like AWS, a query request
- * is only rewritten on the unprefixed path, because the path names the queue.
+ * is only rewritten on the unprefixed path, because the path names the queue. A query request signed
+ * for SQS on the prefixed path is rejected with 404 InvalidAddress, as AWS rejects it.
  * <p>
  * S3 object POSTs, which always carry uploads, uploadId, restore or select, are never rewritten.
  */
@@ -85,9 +86,20 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
 
         // A form-encoded S3 POST to /{bucket}/{key} carries one of S3_OBJECT_POST_PARAMS, handled above.
         // S3 presigned POST always goes to /{bucket}, not /{bucket}/{key}.
-        boolean isSqsQuery = !hasRegionPrefix
-                && "application".equals(mt.getType())
+        boolean isSqsQuery = "application".equals(mt.getType())
                 && "x-www-form-urlencoded".equals(mt.getSubtype());
+
+        if (isSqsQuery && hasRegionPrefix) {
+            // AWS does not read a queue from this path. The signing scope names the service, as the AWS endpoint
+            // does, so the body need not be read here, and requests for other services keep their routing.
+            String authorization = IamEnforcementFilter.requestAuthorization(
+                    ctx.getHeaderString("Authorization"), queryParams);
+            if (SigV4CredentialScope.serviceName(authorization).filter("sqs"::equals).isPresent()) {
+                ctx.abortWith(AwsQueryResponse.error("InvalidAddress", "The specified ID is invalid.",
+                        AwsNamespaces.SQS, 404));
+            }
+            return;
+        }
 
         if (!isSqsJson && !isSqsQuery) {
             return;

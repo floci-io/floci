@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -20,13 +21,13 @@ import static io.restassured.RestAssured.given;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.not;
 
 /**
  * SDKs that use the queue URL as the request endpoint post SQS calls to the queue path instead of "/". Routing
  * follows AWS: a JSON request names the queue in its QueueUrl body field, so it reaches SQS on the queue path, on
  * a /queue/{region}/ prefixed path and on either with a trailing slash. A Query request without a QueueUrl is
- * named by its path, so it reaches SQS only on the queue path, with or without a trailing slash.
+ * named by its path, so it reaches SQS only on the queue path, with or without a trailing slash, and AWS rejects it
+ * on a prefixed path with 404 InvalidAddress.
  */
 @QuarkusTest
 class SqsQueueUrlPathRoutingIntegrationTest {
@@ -35,6 +36,8 @@ class SqsQueueUrlPathRoutingIntegrationTest {
     private static final String FORM_CONTENT_TYPE = "application/x-www-form-urlencoded";
     private static final String QUEUE_NAME = "path-routing-queue";
     private static final String QUEUE_ARN = "arn:aws:sqs:us-east-1:000000000000:" + QUEUE_NAME;
+    private static final String SQS_AUTHORIZATION =
+            "AWS4-HMAC-SHA256 Credential=test/20261105/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=abc";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -91,12 +94,43 @@ class SqsQueueUrlPathRoutingIntegrationTest {
         "/queue/us-east-1/000000000000/" + QUEUE_NAME,
         "/queue/us-east-1/000000000000/" + QUEUE_NAME + "/"
     })
-    void queryRequestPostedToPrefixedQueuePathWithoutQueueUrlIsNotRoutedToSqs(String path) {
-        // AWS rejects these with 404 InvalidAddress.
-        postQueryWithoutQueueUrl(path)
+    void queryRequestPostedToPrefixedQueuePathWithoutQueueUrlIsRejectedAsInvalidAddress(String path) {
+        given()
+            .contentType(FORM_CONTENT_TYPE)
+            .header("Authorization", SQS_AUTHORIZATION)
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("AttributeName.1", "QueueArn")
+        .when()
+            .post(path)
         .then()
-            .statusCode(not(equalTo(200)))
-            .body(not(containsString(QUEUE_ARN)));
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidAddress"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "",
+        "AWS4-HMAC-SHA256 Credential=test/20261105/us-east-1/s3/aws4_request, SignedHeaders=host, Signature=abc"
+    })
+    void formEncodedPostNotSignedForSqsOnPrefixedQueuePathStaysWithS3(String authorization) {
+        given()
+        .when()
+            .put("/queue")
+        .then()
+            .statusCode(200);
+
+        RequestSpecification request = given()
+            .contentType(FORM_CONTENT_TYPE)
+            .formParam("field", "value");
+        if (!authorization.isEmpty()) {
+            request.header("Authorization", authorization);
+        }
+        request
+        .when()
+            .post("/queue/us-east-1/000000000000/form")
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidArgument"));
     }
 
     @ParameterizedTest
