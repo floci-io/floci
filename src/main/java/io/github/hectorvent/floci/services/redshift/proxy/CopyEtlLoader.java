@@ -18,7 +18,6 @@ import java.io.OutputStream;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.IntConsumer;
@@ -151,13 +150,13 @@ final class CopyEtlLoader {
                                      List<Integer> widths, List<CopyRecordTransformer.ColumnKind> kinds)
             throws IOException {
         CopyStatementParser.S3CopyFrom spec = input.spec();
-        List<String> jsonColumns = discovered != null ? discovered : jsonColumns(spec);
+        List<String> jsonColumns = S3CopySimulator.jsonColumns(spec, discovered);
         String sql = S3CopySimulator.copyBackendSql(spec, discovered);
         String rowSavepoint = "floci_row_" + UUID.randomUUID().toString().replace("-", "");
         long accepted = 0;
         int rejected = 0;
         for (String key : input.keys()) {
-            authorize(input, key);
+            S3CopySimulator.authorizeCopyObject(spec, input.s3(), input.iamService(), input.roleSession(), key);
             S3Object object = input.s3().getObject(spec.bucket(), key);
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
             try (InputStream raw = new ByteArrayInputStream(data);
@@ -249,19 +248,4 @@ final class CopyEtlLoader {
         });
     }
 
-    private static List<String> jsonColumns(CopyStatementParser.S3CopyFrom spec) {
-        return spec.columns() == null ? List.of() : spec.columns().stream().map(column ->
-                column.startsWith("\"") ? column.substring(1, column.length() - 1).replace("\"\"", "\"")
-                        : column.toLowerCase(Locale.ROOT)).toList();
-    }
-
-    private static void authorize(CopyInput input, String key) {
-        CopyStatementParser.S3CopyFrom spec = input.spec();
-        if (input.roleSession() == null) {
-            input.s3().authorizeAnonymousGetObject(spec.bucket(), key);
-        } else {
-            input.s3().authorizeSignedGetObject(input.roleSession().accessKeyId(), input.roleSession().sessionToken(),
-                    spec.bucket(), key);
-        }
-    }
 }

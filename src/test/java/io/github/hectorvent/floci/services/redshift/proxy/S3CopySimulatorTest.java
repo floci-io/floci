@@ -2174,7 +2174,7 @@ class S3CopySimulatorTest {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "users", List.of("\"col one\"", "Id"), "wh", "users.json", null, 0, false, false, null, null, true, false);
 
-        String ndjson = "{\"col one\": \"Alice\", \"Id\": 10}\n";
+        String ndjson = "{\"col one\": \"Alice\", \"id\": 10, \"Id\": 99}\n";
         S3Object dataObj = new S3Object("wh", "users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
         when(s3.getObject("wh", "users.json")).thenReturn(dataObj);
 
@@ -2266,7 +2266,7 @@ class S3CopySimulatorTest {
 
     @Test
     void runCopyFrom_withQuotedAndMixedCaseColumns_passesThroughToBackendAndMatchesJsonKeys() throws Exception {
-        String ndjson = "{\"col one\": \"Alice\", \"MixedCase\": 10}\n";
+        String ndjson = "{\"col one\": \"Alice\", \"mixedcase\": 10, \"MixedCase\": 99}\n";
         S3Object dataObj = new S3Object("wh", "users.json", ndjson.getBytes(StandardCharsets.UTF_8), "application/json");
         when(s3.objectExists("wh", "users.json")).thenReturn(true);
         when(s3.getObject("wh", "users.json")).thenReturn(dataObj);

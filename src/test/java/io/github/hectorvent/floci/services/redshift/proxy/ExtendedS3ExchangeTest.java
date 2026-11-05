@@ -2,12 +2,16 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -18,6 +22,7 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -28,7 +33,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -97,6 +104,58 @@ class ExtendedS3ExchangeTest {
         assertTrue(coordinator.awaitIdle(1, TimeUnit.SECONDS));
         testClient.setSoTimeout(200);
         assertThrows(SocketTimeoutException.class, () -> testClient.getInputStream().read());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " MAXERROR 2"})
+    void jsonAutoNormalizesUnquotedColumnsAndPreservesQuotedColumns(String tolerance) throws Exception {
+        when(s3.objectExists("b", "in/data")).thenReturn(true);
+        when(s3.getObject("b", "in/data")).thenReturn(new S3Object("b", "in/data",
+                "{\"id\":1,\"ID\":99,\"MixedCase\":2,\"col one\":3}\n".getBytes(StandardCharsets.UTF_8),
+                "application/json"));
+        CopyStatementParser.S3CopyFrom copy = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t (ID, \"MixedCase\", \"col one\") FROM 's3://b/in/data' JSON 'auto'" + tolerance);
+        ByteArrayOutputStream copied = new ByteArrayOutputStream();
+        Thread backend = backendThread(() -> new FakeCopyBackend(testBackend).serveUntilLoadComplete(copied));
+
+        long accepted = CopyEtlLoader.execute(new CopyBackendSession(simBackend, response -> { }),
+                copy, s3, iamService, null, List.of(), false);
+        joinBackend(backend);
+
+        assertEquals(1, accepted);
+        assertEquals("1,2,3\n", copied.toString(StandardCharsets.UTF_8));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " MAXERROR 2"})
+    void copyRechecksRolePolicyAfterPreflightBeforeReadingObject(String tolerance) throws Exception {
+        String roleArn = "arn:aws:iam::000000000000:role/CopyRole";
+        IamRole role = mock(IamRole.class);
+        when(role.getArn()).thenReturn(roleArn);
+        when(iamService.findRole("000000000000", "CopyRole")).thenReturn(Optional.of(role));
+        when(iamService.resolvePrincipalContext(roleArn)).thenReturn(CallerContext.of(List.of(
+                "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}]}")));
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(s3.objectExists("b", "in/data")).thenReturn(true);
+        when(s3.getObject("b", "in/data")).thenReturn(new S3Object("b", "in/data",
+                "1\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        doAnswer(invocation -> {
+            when(iamService.resolvePrincipalContext(roleArn)).thenReturn(CallerContext.of(List.of()));
+            return null;
+        }).when(s3).authorizeSignedGetObject(any(), any(), eq("b"), eq("in/data"));
+        CopyStatementParser.S3CopyFrom copy = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t FROM 's3://b/in/data' IAM_ROLE '" + roleArn + "'" + tolerance);
+        Thread backend = backendThread(() -> new FakeCopyBackend(testBackend).serveUntilSync(false, sql -> { }));
+        CopyBackendSession session = new CopyBackendSession(simBackend, response -> { });
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> CopyEtlLoader.execute(session, copy, s3, iamService, null, List.of(), false));
+        session.finish(true);
+        session.synchronize();
+        joinBackend(backend);
+
+        assertEquals("42501", error.sqlState());
+        verify(s3, never()).getObject("b", "in/data");
     }
 
     @Test

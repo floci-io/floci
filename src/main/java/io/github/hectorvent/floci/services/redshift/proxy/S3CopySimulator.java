@@ -133,13 +133,7 @@ public final class S3CopySimulator {
         try {
             try {
                 if (spec.manifest()) {
-                    if (roleSession != null) {
-                        RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
-                                "s3:GetObject", copyObjectArn(spec, s3, spec.keyOrPrefix()));
-                        s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), spec.keyOrPrefix());
-                    } else {
-                        s3.authorizeAnonymousGetObject(spec.bucket(), spec.keyOrPrefix());
-                    }
+                    authorizeCopyObject(spec, s3, iamService, roleSession, spec.keyOrPrefix());
                 } else {
                     if (roleSession != null) {
                         RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
@@ -169,13 +163,7 @@ public final class S3CopySimulator {
 
             try {
                 for (String key : keys) {
-                    if (roleSession != null) {
-                        RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
-                                "s3:GetObject", copyObjectArn(spec, s3, key));
-                        s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
-                    } else {
-                        s3.authorizeAnonymousGetObject(spec.bucket(), key);
-                    }
+                    authorizeCopyObject(spec, s3, iamService, roleSession, key);
                 }
             } catch (AwsException e) {
                 throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
@@ -540,12 +528,31 @@ public final class S3CopySimulator {
         return sql.toString();
     }
 
-    private static String unquoteIdentifier(String identifier) {
+    static List<String> jsonColumns(CopyStatementParser.S3CopyFrom spec, List<String> discoveredColumns) {
+        if (discoveredColumns != null && !discoveredColumns.isEmpty()) {
+            return discoveredColumns;
+        }
+        return spec.columns() == null ? List.of()
+                : spec.columns().stream().map(S3CopySimulator::normalizeColumnName).toList();
+    }
+
+    private static String normalizeColumnName(String identifier) {
         if (identifier != null && identifier.length() >= 2
                 && identifier.startsWith("\"") && identifier.endsWith("\"")) {
             return identifier.substring(1, identifier.length() - 1).replace("\"\"", "\"");
         }
-        return identifier;
+        return identifier == null ? null : identifier.toLowerCase(Locale.ROOT);
+    }
+
+    static void authorizeCopyObject(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+                                    RedshiftRoleAccess.RoleSession roleSession, String key) {
+        if (roleSession != null) {
+            RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                    "s3:GetObject", copyObjectArn(spec, s3, key));
+            s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
+        } else {
+            s3.authorizeAnonymousGetObject(spec.bucket(), key);
+        }
     }
 
     /**
@@ -575,23 +582,13 @@ public final class S3CopySimulator {
         }
         byte[] buffer = new byte[CHUNK];
         for (int i = 0; i < keys.size(); i++) {
-            if (roleSession != null) {
-                RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
-                        "s3:GetObject", copyObjectArn(spec, s3, keys.get(i)));
-                s3.authorizeSignedGetObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), keys.get(i));
-            } else {
-                s3.authorizeAnonymousGetObject(spec.bucket(), keys.get(i));
-            }
+            authorizeCopyObject(spec, s3, iamService, roleSession, keys.get(i));
             S3Object object = s3.getObject(spec.bucket(), keys.get(i));
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
             InputStream rawIn = new ByteArrayInputStream(data);
             try (InputStream in = CopySourceInputStream.open(rawIn, spec.gzip())) {
                 if (spec.jsonAuto()) {
-                    List<String> targetCols = (discoveredColumns != null && !discoveredColumns.isEmpty())
-                            ? discoveredColumns
-                            : (spec.columns() != null
-                                    ? spec.columns().stream().map(S3CopySimulator::unquoteIdentifier).toList()
-                                    : List.of());
+                    List<String> targetCols = jsonColumns(spec, discoveredColumns);
                     CopyDataOutputStream copyDataOut = new CopyDataOutputStream(backendOut);
                     JsonLinesToCsvConverter.convert(in, targetCols, copyDataOut, spec.jsonAutoIgnoreCase());
                     copyDataOut.flush();
@@ -710,7 +707,7 @@ public final class S3CopySimulator {
         }
         List<T> aligned = new ArrayList<>();
         for (String column : spec.columns()) {
-            String key = column.startsWith("\"") ? unquoteIdentifier(column) : column.toLowerCase(Locale.ROOT);
+            String key = normalizeColumnName(column);
             aligned.add(byName.get(key));
         }
         return aligned;

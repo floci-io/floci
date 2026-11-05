@@ -85,6 +85,10 @@ final class FakeCopyBackend {
                     PostgresWire.write(out, 'C', PostgresWire.cStringBytes("COPY 1"));
                     copyCompleted = true;
                 }
+                case 'f' -> {
+                    PostgresWire.write(out, 'E', S3CopySimulator.errorBody("57014", "COPY input failed"));
+                    failed = true;
+                }
                 case 'C' -> {
                     PostgresWire.write(out, '3');
                     if (finishing) {
