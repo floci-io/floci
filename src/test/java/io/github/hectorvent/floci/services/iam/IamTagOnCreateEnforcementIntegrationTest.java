@@ -25,6 +25,7 @@ import java.util.Map;
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -374,6 +375,37 @@ class IamTagOnCreateEnforcementIntegrationTest {
     }
 
     /**
+     * An analyzer created with tags needs {@code access-analyzer:TagResource} on the analyzer its body names, and
+     * {@code CreateAnalyzer} is checked with the tags it carries; one created with none needs {@code CreateAnalyzer}
+     * alone.
+     */
+    @Test
+    void anAnalyzerCreatedWithTagsNeedsTagResourceOnTheAnalyzer() {
+        User user = user("tag-analyzer");
+        String name = "tag-analyzer-" + suffix();
+        String tagResource = "{\"Effect\":\"Allow\",\"Action\":\"access-analyzer:TagResource\",\"Resource\":"
+                + "\"arn:aws:access-analyzer:us-east-1:" + ACCOUNT + ":analyzer/" + name + "\"}";
+        user.policy(allow("access-analyzer:CreateAnalyzer"));
+        refusedRest(user.rest("access-analyzer").body(analyzer(name, "blue")).put("/analyzer").then(),
+                "access-analyzer:TagResource");
+
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"access-analyzer:CreateAnalyzer\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"blue\"}}}," + tagResource);
+        refusedRest(user.rest("access-analyzer").body(analyzer(name, "red")).put("/analyzer").then(),
+                "access-analyzer:CreateAnalyzer");
+        refusedRest(user.rest("access-analyzer").body(analyzer(name + "-other", "blue")).put("/analyzer").then(),
+                "access-analyzer:TagResource");
+        user.rest("access-analyzer").body(analyzer(name, "blue")).put("/analyzer").then().statusCode(200);
+        cleanup.register(() -> admin("access-analyzer").delete("/analyzer/{name}", name));
+        admin("access-analyzer").get("/analyzer/{name}", name).then().statusCode(200)
+                .body("analyzer.tags.team", equalTo("blue"));
+
+        user.policy(allow("access-analyzer:CreateAnalyzer"));
+        user.rest("access-analyzer").body(analyzer(name + "-untagged", null)).put("/analyzer").then().statusCode(200);
+        cleanup.register(() -> admin("access-analyzer").delete("/analyzer/{name}", name + "-untagged"));
+    }
+
+    /**
      * CodeDeploy's handler reads a tag's key and value in either case, so the tagging action is checked for both,
      * and the create's own action sees them.
      */
@@ -432,6 +464,12 @@ class IamTagOnCreateEnforcementIntegrationTest {
         return """
                 {"FunctionName":"%s","Runtime":"nodejs20.x","Handler":"index.handler","Role":"%s",
                  "Tags":{"team":"blue"}}""".formatted(name, role);
+    }
+
+    /** A {@code CreateAnalyzer} body tagging the analyzer with the {@code team} given, or with no tags. */
+    private static String analyzer(String name, String team) {
+        String tags = team == null ? "" : ",\"tags\":{\"team\":\"" + team + "\"}";
+        return "{\"analyzerName\":\"" + name + "\",\"type\":\"ORGANIZATION\"" + tags + "}";
     }
 
     private static ValidatableResponse createTopic(User user, String name, Map<String, String> tags) {

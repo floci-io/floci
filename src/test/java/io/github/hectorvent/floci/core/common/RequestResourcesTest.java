@@ -886,6 +886,24 @@ class RequestResourcesTest {
                 "aws", "us-east-1", "111111111111", null, Map.of()));
     }
 
+    /**
+     * An Access Analyzer request names its analyzer by the label of its path ({@code GetAnalyzer}) or by its body's
+     * {@code analyzerName} ({@code CreateAnalyzer}), and an archive rule by both, {@code CreateArchiveRule} taking the
+     * analyzer from its path, where a body's {@code analyzerName} names nothing, and the rule from its body.
+     */
+    @Test
+    void anAccessAnalyzerRequestNamesTheAnalyzerItsPathOrBodyGives() {
+        String analyzer = "arn:aws:access-analyzer:us-east-1:111111111111:analyzer/a";
+        assertEquals(List.of(analyzer), RequestResources.of("access-analyzer:GetAnalyzer", rest("GET", null, Map.of()),
+                "aws", "us-east-1", "111111111111", null, Map.of("analyzerName", "a")));
+        assertEquals(List.of(analyzer), RequestResources.of("access-analyzer:CreateAnalyzer",
+                rest("PUT", "{\"analyzerName\":\"a\",\"type\":\"ACCOUNT\"}", Map.of()), "aws", "us-east-1",
+                "111111111111", null, Map.of()));
+        assertEquals(List.of(analyzer + "/archive-rule/r"), RequestResources.of("access-analyzer:CreateArchiveRule",
+                rest("PUT", "{\"analyzerName\":\"other\",\"ruleName\":\"r\"}", Map.of()), "aws", "us-east-1",
+                "111111111111", null, Map.of("analyzerName", "a")));
+    }
+
     private static ContainerRequestContext rest(String method, String body, Map<String, String> query) {
         return rest(method, "application/json", body, query);
     }
