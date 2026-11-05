@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ec2instanceconnect;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
@@ -32,11 +33,11 @@ class InstanceConnectTunnelAccountIntegrationTest {
 
     @Test
     void theEndpointIsLookedUpInTheCredentialsAccountOnly() {
-        String vpcId = ec2("CreateVpc", "CidrBlock", "10.91.0.0/16").replaceAll("(?s).*<vpcId>([^<]+)</vpcId>.*", "$1");
-        String subnetId = ec2("CreateSubnet", "VpcId", vpcId, "CidrBlock", "10.91.1.0/24")
-                .replaceAll("(?s).*<subnetId>([^<]+)</subnetId>.*", "$1");
-        String endpointId = ec2("CreateInstanceConnectEndpoint", "SubnetId", subnetId)
-                .replaceAll("(?s).*<instanceConnectEndpointId>([^<]+)</instanceConnectEndpointId>.*", "$1");
+        String vpcId = XmlParser.extractFirst(ec2("CreateVpc", "CidrBlock", "10.91.0.0/16"), "vpcId", null);
+        String subnetId = XmlParser.extractFirst(
+                ec2("CreateSubnet", "VpcId", vpcId, "CidrBlock", "10.91.1.0/24"), "subnetId", null);
+        String endpointId = XmlParser.extractFirst(
+                ec2("CreateInstanceConnectEndpoint", "SubnetId", subnetId), "instanceConnectEndpointId", null);
         assertTrue(endpointId.startsWith("eice-"), endpointId);
 
         InstanceConnectTunnelHandler.Refusal asOwner = refusal(ACCOUNT, endpointId);
