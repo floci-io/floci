@@ -1631,6 +1631,78 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /** A monthly cost budget of the name, with a billing view ARN when one is given. */
+    /**
+     * A Redshift parameter group is checked on {@code parametergroup:<name>}, the ARN its handler tags it under, and a
+     * tag request on the ARN its {@code ResourceName} gives, a member whose name does not end in Arn.
+     */
+    @Test
+    void aRedshiftParameterGroupIsCheckedOnTheArnItsHandlerMints() {
+        String name = "res-pg-" + suffix();
+        admin("redshift").formParam("Action", "CreateClusterParameterGroup").formParam("Version", "2012-12-01")
+                .formParam("ParameterGroupName", name).formParam("ParameterGroupFamily", "redshift-1.0")
+                .formParam("Description", "d").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("redshift").formParam("Action", "DeleteClusterParameterGroup")
+                .formParam("Version", "2012-12-01").formParam("ParameterGroupName", name).post("/"));
+        String arn = REDSHIFT + "parametergroup:" + name;
+
+        User user = user("res-redshift-pg");
+        user.policy(allowOn("redshift:CreateTags", arn) + "," + allowOn("redshift:DescribeClusterParameters", arn));
+        redshiftTag(user, arn).statusCode(200);
+        refused(redshiftTag(user, arn + "-other"), "redshift:CreateTags");
+        user.query("redshift", "DescribeClusterParameters").formParam("Version", "2012-12-01")
+                .formParam("ParameterGroupName", name).post("/").then().statusCode(200);
+        refused(user.query("redshift", "DescribeClusterParameters").formParam("Version", "2012-12-01")
+                .formParam("ParameterGroupName", name + "-other").post("/").then(), "redshift:DescribeClusterParameters");
+        admin("redshift").formParam("Action", "DescribeTags").formParam("Version", "2012-12-01")
+                .formParam("ResourceName", arn).post("/").then().statusCode(200)
+                .body("DescribeTagsResponse.DescribeTagsResult.TaggedResources.TaggedResource.ResourceName",
+                        equalTo(arn));
+    }
+
+    /** A Redshift cluster is checked on {@code cluster:<identifier>}, before the cluster is looked up. */
+    @Test
+    void aRedshiftClusterIsCheckedOnItsIdentifier() {
+        String cluster = "res-cluster-" + suffix();
+        User user = user("res-redshift-cluster");
+        user.policy(allowOn("redshift:DescribeClusters", REDSHIFT + "cluster:" + cluster));
+        describeCluster(user, cluster).statusCode(404).body(containsString("ClusterNotFound"));
+        refused(describeCluster(user, cluster + "-other"), "redshift:DescribeClusters");
+    }
+
+    /**
+     * A restore is checked on the snapshot of the cluster its {@code SnapshotClusterIdentifier} names, the cluster the
+     * snapshot was taken from, and on the new cluster its {@code ClusterIdentifier} names.
+     */
+    @Test
+    void aRedshiftRestoreIsCheckedOnTheSnapshotOfItsSourceCluster() {
+        String source = "res-source-" + suffix();
+        String restored = "res-restored-" + suffix();
+        User user = user("res-redshift-restore");
+        user.policy(allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "cluster:" + restored) + ","
+                + allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "snapshot:" + source + "/snap"));
+        restore(user, restored, source).statusCode(404).body(containsString("ClusterSnapshotNotFound"));
+
+        user.policy(allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "cluster:" + restored) + ","
+                + allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "snapshot:" + restored + "/snap"));
+        refused(restore(user, restored, source), "redshift:RestoreFromClusterSnapshot");
+    }
+
+    private static ValidatableResponse redshiftTag(User user, String arn) {
+        return user.query("redshift", "CreateTags").formParam("Version", "2012-12-01").formParam("ResourceName", arn)
+                .formParam("Tags.Tag.1.Key", "team").formParam("Tags.Tag.1.Value", "data").post("/").then();
+    }
+
+    private static ValidatableResponse describeCluster(User user, String cluster) {
+        return user.query("redshift", "DescribeClusters").formParam("Version", "2012-12-01")
+                .formParam("ClusterIdentifier", cluster).post("/").then();
+    }
+
+    private static ValidatableResponse restore(User user, String cluster, String snapshotCluster) {
+        return user.query("redshift", "RestoreFromClusterSnapshot").formParam("Version", "2012-12-01")
+                .formParam("ClusterIdentifier", cluster).formParam("SnapshotIdentifier", "snap")
+                .formParam("SnapshotClusterIdentifier", snapshotCluster).post("/").then();
+    }
+
     private static String budget(String name, String billingViewArn) {
         return "{\"BudgetName\":\"" + name + "\",\"BudgetType\":\"COST\",\"TimeUnit\":\"MONTHLY\",\"BudgetLimit\":"
                 + "{\"Amount\":\"100\",\"Unit\":\"USD\"}" + (billingViewArn == null ? ""

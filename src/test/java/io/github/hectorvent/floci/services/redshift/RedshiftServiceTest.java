@@ -1749,6 +1749,52 @@ class RedshiftServiceTest {
         verify(clusterBackend, atLeastOnce()).flush();
     }
 
+    /**
+     * A request is authorized on snapshot:<cluster>/<name> for the cluster it names, so a snapshot of the same name
+     * taken from another cluster is not found, and nothing is restored, deleted or described.
+     */
+    @Test
+    void restoreFromClusterSnapshotOfAnotherClusterIsNotFound() {
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshotOf("snap-1", "protected")));
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "snap-1", "allowed", null));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
+        verify(clusterBackend, never()).put(eq("c1"), any());
+        verifyNoInteractions(cm);
+    }
+
+    @Test
+    void deleteSnapshotOfAnotherClusterIsNotFoundAndKept() {
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshotOf("snap-1", "protected")));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.deleteSnapshot("snap-1", "allowed"));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        verify(snapshotBackend, never()).delete("snap-1");
+
+        service.deleteSnapshot("snap-1", "protected");
+        verify(snapshotBackend).delete("snap-1");
+    }
+
+    @Test
+    void describeSnapshotsByIdentifierOfAnotherClusterIsNotFound() {
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshotOf("snap-1", "protected")));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.describeSnapshots("snap-1", "allowed"));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        assertEquals(1, service.describeSnapshots("snap-1", "protected").size());
+    }
+
+    private static Snapshot snapshotOf(String snapshotIdentifier, String clusterIdentifier) {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier(snapshotIdentifier);
+        snapshot.setClusterIdentifier(clusterIdentifier);
+        snapshot.setSnapshotType("manual");
+        return snapshot;
+    }
+
     @Test
     void restoreFromClusterSnapshotKeepsMetadataWhenProxyStopFails() {
         when(clusterBackend.accountId()).thenReturn("111111111111");

@@ -7,7 +7,7 @@ name: IAM Data Drift
 # operations that pass a Lambda network connector, the table of the
 # tagging actions operations that tag what they create need, the table of the resources each
 # operation's request names, the DynamoDB condition key table, the IAM condition key table, the
-# S3 Control tag condition key table, and the Lambda Web condition key table. That
+# S3 Control tag condition key table, and the request condition key table (Lambda Web and Redshift). That
 # needs the live service reference index, so unlike every other check here it can
 # fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
 # retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
@@ -66,9 +66,9 @@ on:
       - 'src/main/resources/aws/s3control-tag-condition-keys.json'
       - 'tools/aws/regen_s3control_tag_condition_keys.py'
       - 'tools/aws/test_regen_s3control_tag_condition_keys.py'
-      - 'src/main/resources/aws/lambda-web-condition-keys.json'
-      - 'tools/aws/regen_lambda_web_condition_keys.py'
-      - 'tools/aws/test_regen_lambda_web_condition_keys.py'
+      - 'src/main/resources/aws/request-condition-keys.json'
+      - 'tools/aws/regen_request_condition_keys.py'
+      - 'tools/aws/test_regen_request_condition_keys.py'
       - 'tools/aws/regen_partitions.py'
       - 'tools/aws/regen_query_services.py'
       - '.github/workflows/iam-data-drift.yml'
