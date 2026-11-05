@@ -2,9 +2,11 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -36,6 +38,41 @@ class StepFunctionsCallbackTokenTest {
             resolver, mock(AslExecutor.class), new ObjectMapper(), mock(SfnMockLoader.class),
             mock(StepFunctionsEventPublisher.class));
 
+    @BeforeEach
+    void defaultRegion() {
+        when(resolver.getRegion()).thenReturn("us-east-1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"success", "failure", "heartbeat", "resource"})
+    void callbacksCannotUseATokenFromAnotherRegion(String operation) {
+        when(resolver.getAccountId()).thenReturn(OWNER);
+        when(resolver.getRegion()).thenReturn("us-west-2");
+        CompletableFuture<JsonNode> future = service.registerPendingToken("regional", OWNER, RESOURCE);
+        long heartbeat = service.lastTaskHeartbeatNanos("regional");
+        refuses("InvalidToken", () -> {
+            switch (operation) {
+                case "success" -> service.sendTaskSuccess("regional", "{}");
+                case "failure" -> service.sendTaskFailure("regional", "cause", "error");
+                case "heartbeat" -> service.sendTaskHeartbeat("regional");
+                default -> service.callbackResourceArn("regional", OWNER);
+            }
+        });
+        assertFalse(future.isDone());
+        assertEquals(heartbeat, service.lastTaskHeartbeatNanos("regional"));
+        when(resolver.getRegion()).thenReturn("us-east-1");
+        assertTrue(service.sendTaskSuccess("regional", "{}"));
+        assertTrue(future.isDone());
+    }
+
+    @Test
+    void iamTokenLookupHonorsItsExplicitRegion() {
+        when(resolver.getAccountId()).thenReturn(OWNER);
+        when(resolver.getRegion()).thenReturn("us-east-1");
+        service.registerPendingToken("regional", OWNER, RESOURCE);
+        refuses("InvalidToken", () -> service.findByMembers("statemachine", List.of("regional"), "us-west-2"));
+    }
+
     @ParameterizedTest
     @CsvSource({
             "arn:aws:states:us-east-1:111111111111:stateMachine:callback,arn:aws:states:us-east-1:111111111111:stateMachine:callback",
@@ -43,6 +80,7 @@ class StepFunctionsCallbackTokenTest {
             "arn:aws-cn:states:cn-north-1:111111111111:activity:callback,arn:aws-cn:states:cn-north-1:111111111111:activity:callback"
     })
     void callbackResourceSurvivesCompletionAndRetirementWithoutClaimingTheToken(String resource, String expected) {
+        when(resolver.getRegion()).thenReturn(AwsArnUtils.parse(resource).region());
         when(resolver.getAccountId()).thenReturn(OWNER);
         CompletableFuture<JsonNode> future = service.registerPendingToken("resource", OWNER, resource);
         assertEquals(expected, service.callbackResourceArn("resource", OWNER));

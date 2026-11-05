@@ -1321,22 +1321,26 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
         // The token selects one of the table's two resource kinds. Both lookups return that same ARN,
         // so the reader deduplicates it without synthesizing a wildcard for the other kind.
         return Optional.of(callbackResourceArn(names.size() == 1 ? names.getFirst() : null,
-                regionResolver.getAccountId()));
+                regionResolver.getAccountId(), region));
     }
 
     /**
      * AWS authorizes activity callbacks on the activity and integration callbacks on the state machine.
      * Retain that resource after completion so authorized retries still reach TaskTimedOut.
      */
-    public synchronized String callbackResourceArn(String token, String callerAccountId) {
+    public String callbackResourceArn(String token, String callerAccountId) {
+        return callbackResourceArn(token, callerAccountId, regionResolver.getRegion());
+    }
+
+    private synchronized String callbackResourceArn(String token, String callerAccountId, String region) {
         PendingTask pending = token == null ? null : pendingTaskTokens.get(token);
         if (pending != null) {
-            requireTokenOwner(pending.accountId(), callerAccountId);
+            requireTokenScope(pending.accountId(), pending.resourceArn(), callerAccountId, region);
             return pending.resourceArn();
         }
         ClosedTask closed = token == null ? null : closedTaskTokens.get(token);
         if (closed != null && System.nanoTime() - closed.closedAtNanos() < CLOSED_TOKEN_RETENTION_NANOS) {
-            requireTokenOwner(closed.accountId(), callerAccountId);
+            requireTokenScope(closed.accountId(), closed.resourceArn(), callerAccountId, region);
             return closed.resourceArn();
         }
         throw new AwsException("InvalidToken", "Invalid Token: 'Invalid token'", 400);
@@ -1404,7 +1408,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
         String accountId = regionResolver.getAccountId();
         PendingTask pending = token == null ? null : pendingTaskTokens.get(token);
         if (pending != null) {
-            requireTokenOwner(pending.accountId(), accountId);
+            requireTokenScope(pending.accountId(), pending.resourceArn(), accountId, regionResolver.getRegion());
             if (pending.result() != null) {
                 throw new AwsException("TaskTimedOut", "The associated task has already been closed.", 400);
             }
@@ -1416,15 +1420,18 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
             closed = null;
         }
         if (closed != null) {
-            requireTokenOwner(closed.accountId(), accountId);
+            requireTokenScope(closed.accountId(), closed.resourceArn(), accountId, regionResolver.getRegion());
             throw new AwsException("TaskTimedOut", "The associated task has already been closed.", 400);
         }
         throw new AwsException("InvalidToken", "Invalid Token: 'Invalid token'", 400);
     }
 
-    private void requireTokenOwner(String owner, String caller) {
+    private void requireTokenScope(String owner, String resourceArn, String caller, String region) {
         if (!owner.equals(caller)) {
             throw new AwsException("AccessDeniedException", "Not authorized to access this resource.", 400);
+        }
+        if (!AwsArnUtils.isArnFor(resourceArn, "states") || !AwsArnUtils.parse(resourceArn).region().equals(region)) {
+            throw new AwsException("InvalidToken", "Invalid Token: 'Invalid token'", 400);
         }
     }
 
