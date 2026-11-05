@@ -82,10 +82,13 @@ class ElbV2OtherAccountDataPlaneIntegrationTest {
 
             awaitForwarded(listenerPort);
         } finally {
-            delete("DeleteListener", "ListenerArn", listenerArn);
-            delete("DeleteTargetGroup", "TargetGroupArn", targetGroupArn);
-            delete("DeleteLoadBalancer", "LoadBalancerArn", loadBalancerArn);
-            backend.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            try {
+                delete("DeleteListener", "ListenerArn", listenerArn);
+                delete("DeleteTargetGroup", "TargetGroupArn", targetGroupArn);
+                delete("DeleteLoadBalancer", "LoadBalancerArn", loadBalancerArn);
+            } finally {
+                backend.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
         }
     }
 
