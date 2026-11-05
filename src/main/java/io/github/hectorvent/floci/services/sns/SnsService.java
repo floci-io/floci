@@ -1148,7 +1148,7 @@ public class SnsService implements Resettable, ResourceProvider {
             deliverMessage(sub, message, subject, messageAttributes, notification, effectiveArn, messageGroupId, dedupId,
                     messageStructure);
         }
-        LOG.infov("Published message {0} to topic {1}", messageId, effectiveArn);
+        LOG.debugv("Published message {0} to topic {1}", messageId, effectiveArn);
         return messageId;
     }
 
