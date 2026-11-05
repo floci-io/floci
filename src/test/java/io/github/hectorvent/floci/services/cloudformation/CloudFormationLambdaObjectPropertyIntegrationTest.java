@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnRequests;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
@@ -316,17 +317,7 @@ class CloudFormationLambdaObjectPropertyIntegrationTest {
                     """.formatted(bucket, key));
             assertEquals("String".equals(type) ? "ROLLBACK_COMPLETE" : "CREATE_COMPLETE",
                     CfnStackWaits.awaitTerminal(parent, CFN_AUTH).status(), type);
-            String childStack = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", "DescribeStackResource")
-                .formParam("StackName", parent)
-                .formParam("LogicalResourceId", "Child")
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract().xmlPath().getString("**.find { it.name() == 'PhysicalResourceId' }");
+            String childStack = CfnRequests.physicalId(parent, "Child", CFN_AUTH);
             if ("String".equals(type)) {
                 assertEventReason(childStack, "Property [Architectures] expected type: JSONArray, found: String");
             } else {

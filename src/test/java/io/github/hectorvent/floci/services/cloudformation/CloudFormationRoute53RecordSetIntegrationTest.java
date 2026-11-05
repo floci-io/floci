@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.route53.Route53HostedZoneTestSupport;
 import io.github.hectorvent.floci.services.route53.Route53Service;
+import io.github.hectorvent.floci.testing.CfnRequests;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -398,12 +399,12 @@ class CloudFormationRoute53RecordSetIntegrationTest {
         String stackName = "r53-hc-replace-" + Long.toString(System.nanoTime(), 36);
         createStack(stackName, healthCheckTemplate(30, false, false));
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
-        String oldId = physicalId(stackName, "Check");
+        String oldId = CfnRequests.physicalId(stackName, "Check", CFN_AUTH);
         try {
             updateStack(stackName, healthCheckTemplate(10, false, false));
             assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
-            String newId = physicalId(stackName, "Check");
+            String newId = CfnRequests.physicalId(stackName, "Check", CFN_AUTH);
             assertNotEquals(oldId, newId);
             assertTrue(healthCheck(newId).contains("<RequestInterval>10</RequestInterval>"));
             healthCheckRequest(oldId).then().statusCode(404);
@@ -418,12 +419,12 @@ class CloudFormationRoute53RecordSetIntegrationTest {
         String stackName = "r53-hc-retain-" + Long.toString(System.nanoTime(), 36);
         createStack(stackName, healthCheckTemplate(30, true, false));
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
-        String oldId = physicalId(stackName, "Check");
+        String oldId = CfnRequests.physicalId(stackName, "Check", CFN_AUTH);
         try {
             updateStack(stackName, healthCheckTemplate(10, true, false));
             assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
-            assertNotEquals(oldId, physicalId(stackName, "Check"));
+            assertNotEquals(oldId, CfnRequests.physicalId(stackName, "Check", CFN_AUTH));
             assertTrue(healthCheck(oldId).contains("<RequestInterval>30</RequestInterval>"));
         } finally {
             deleteStack(stackName);
@@ -438,12 +439,12 @@ class CloudFormationRoute53RecordSetIntegrationTest {
         String stackName = "r53-hc-rollback-" + Long.toString(System.nanoTime(), 36);
         createStack(stackName, healthCheckTemplate(30, false, false));
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
-        String oldId = physicalId(stackName, "Check");
+        String oldId = CfnRequests.physicalId(stackName, "Check", CFN_AUTH);
         try {
             updateStack(stackName, healthCheckTemplate(10, false, true));
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
-            assertEquals(oldId, physicalId(stackName, "Check"));
+            assertEquals(oldId, CfnRequests.physicalId(stackName, "Check", CFN_AUTH));
             assertTrue(healthCheck(oldId).contains("<RequestInterval>30</RequestInterval>"));
             String checks = given().header("Authorization", ROUTE53_AUTH)
                 .when().get("/2013-04-01/healthcheck")
@@ -473,7 +474,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             // AWS documents Ref as the group's name, for example MyRecordSetGroup, and Fn::GetAtt Id as
             // the ID GetChange takes.
             assertEquals("Group", stackOutput(stackName, "GroupRef"));
-            assertEquals("Group", physicalId(stackName, "Group"));
+            assertEquals("Group", CfnRequests.physicalId(stackName, "Group", CFN_AUTH));
             firstChange = stackOutput(stackName, "GroupChange");
             assertChangeInSync(firstChange);
             String created = listResourceRecordSets(zoneId);
@@ -540,7 +541,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
         parameterizedStackRequest(stackName, "CreateStack", template, "BlueWeight", "70");
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
         try {
-            String checkId = physicalId(stackName, "Check");
+            String checkId = CfnRequests.physicalId(stackName, "Check", CFN_AUTH);
             String created = listResourceRecordSets(zoneId);
             assertTrue(created.contains("<SetIdentifier>blue</SetIdentifier><Weight>70</Weight>"), created);
             assertTrue(created.contains("<SetIdentifier>green</SetIdentifier><Weight>30</Weight>"), created);
@@ -1057,17 +1058,6 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200);
-    }
-
-    private String physicalId(String stackName, String logicalId) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStackResource")
-            .formParam("StackName", stackName)
-            .formParam("LogicalResourceId", logicalId)
-        .when().post("/").then().statusCode(200)
-            .extract().xmlPath().getString("**.find { it.name() == 'PhysicalResourceId' }");
     }
 
     private Response healthCheckRequest(String id) {

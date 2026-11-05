@@ -35,7 +35,7 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
             """));
         CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", EnforcementFixtures.auth(account, "cloudformation"));
 
-        String keyId = physicalId(account, stack);
+        String keyId = CfnRequests.physicalId(stack, KEY_RESOURCE, EnforcementFixtures.auth(account, "cloudformation"));
         JsonPath key = kms(account, "DescribeKey", "{\"KeyId\":\"%s\"}".formatted(keyId));
         assertAll(
                 () -> assertEquals(keyId, key.getString("KeyMetadata.KeyId")),
@@ -50,7 +50,7 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
         createStack(account, stack, template(""));
         CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", EnforcementFixtures.auth(account, "cloudformation"));
 
-        String keyId = physicalId(account, stack);
+        String keyId = CfnRequests.physicalId(stack, KEY_RESOURCE, EnforcementFixtures.auth(account, "cloudformation"));
         JsonPath key = kms(account, "DescribeKey", "{\"KeyId\":\"%s\"}".formatted(keyId));
 
         assertAll(
@@ -83,17 +83,6 @@ class CloudFormationKmsKeyPropertiesIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-    }
-
-    private static String physicalId(String account, String stack) {
-        return CfnRequests.cfn("DescribeStackResource", stack)
-            .header("Authorization", EnforcementFixtures.auth(account, "cloudformation"))
-            .formParam("LogicalResourceId", KEY_RESOURCE)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().xmlPath().getString("**.find { it.name() == 'PhysicalResourceId' }");
     }
 
     private static JsonPath kms(String account, String action, String body) {
