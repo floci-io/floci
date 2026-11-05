@@ -1920,6 +1920,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private static Response accessDeniedResponse(String action, String credentialScope, MediaType requestMediaType,
                                                  String resourceArn, WireProtocol protocol, boolean restXml) {
         String message = accessDeniedMessage(action);
+        if ("ec2".equals(credentialScope)) {
+            return Ec2ErrorResponses.of("UnauthorizedOperation",
+                    "You are not authorized to perform this operation. " + message, 403);
+        }
         if ("s3".equals(credentialScope)) {
             String resourcePath = formatS3ResourcePath(resourceArn);
             return s3XmlAccessDenied(message, resourcePath);
@@ -2031,7 +2035,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * The response for an access key that exists nowhere, in each protocol's own vocabulary for
      * the same failure. S3 answers with {@code InvalidAccessKeyId}, as
-     * {@code S3HeaderSignatureFilter} already does. Query services answer with
+     * {@code S3HeaderSignatureFilter} already does. EC2 answers {@code AuthFailure}
+     * in its own error envelope. Other Query services answer with
      * {@code InvalidClientTokenId}: neither code is modelled by sts, iam or sqs, but botocore's
      * own integration tests retry on {@code InvalidClientTokenId} from {@code sts:AssumeRole} and
      * {@code iam:ListGroups} while credentials propagate. JSON services answer with
@@ -2039,6 +2044,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * and what the API Gateway execute path already returns.
      */
     static Response unrecognizedClientResponse(String credentialScope, ContainerRequestContext ctx) {
+        if ("ec2".equals(credentialScope)) {
+            return Ec2ErrorResponses.authFailure();
+        }
         if ("s3".equals(credentialScope)) {
             return s3XmlError("InvalidAccessKeyId", S3_INVALID_ACCESS_KEY_ID, 403);
         }

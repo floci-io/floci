@@ -88,7 +88,8 @@ import java.util.function.UnaryOperator;
  * everything else JSON, which REST-JSON clients read through {@code X-Amzn-Errortype}. The codes
  * are AWS's: {@code IncompleteSignature} for a header that cannot be checked,
  * {@code InvalidClientTokenId} / {@code UnrecognizedClientException} for an access key Floci does
- * not know, and {@code SignatureDoesNotMatch} / {@code InvalidSignatureException} for a signature
+ * not know (EC2 instead answers {@code AuthFailure} in its own envelope), and
+ * {@code SignatureDoesNotMatch} / {@code InvalidSignatureException} for a signature
  * that does not verify, exceeds its query expiry or falls outside the header clock-skew window.
  *
  * <p>Nothing here runs with the flag off: the filter returns before reading a single header.
@@ -234,6 +235,10 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
         if (secretKey.isEmpty()) {
             LOG.debugv("Refusing {0} request signed with unknown access key {1}",
                     scope.service(), SigV4RequestValidator.sanitizeForLog(scope.accessKeyId()));
+            if (resource == AwsQueryController.class && "ec2".equals(scope.service())) {
+                ctx.abortWith(Ec2ErrorResponses.authFailure());
+                return;
+            }
             abort(ctx, resource, 403, "InvalidClientTokenId", "UnrecognizedClientException", INVALID_TOKEN_MESSAGE);
             return;
         }
