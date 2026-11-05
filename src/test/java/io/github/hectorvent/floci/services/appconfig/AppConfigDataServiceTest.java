@@ -3,7 +3,8 @@ package io.github.hectorvent.floci.services.appconfig;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationSession;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
@@ -36,8 +37,9 @@ class AppConfigDataServiceTest {
     void concurrentPollsConsumeAConfigurationTokenOnlyOnce() throws Exception {
         InMemoryStorageFactory factory = new InMemoryStorageFactory("000000000000");
         AppConfigService appConfig = mock(AppConfigService.class);
-        AppConfigDataService service = new AppConfigDataService(factory, appConfig, MAPPER);
-        AccountAwareStorageBackend<ConfigurationSession> sessions = factory.create("appconfigdata",
+        RegionResolver regions = new RegionResolver("us-east-1", "000000000000");
+        AppConfigDataService service = new AppConfigDataService(factory, appConfig, MAPPER, regions);
+        StorageBackend<String, ConfigurationSession> sessions = new AppConfigStorage<>(factory, regions, "appconfigdata",
                 "appconfigdata-sessions.json", new TypeReference<Map<String, ConfigurationSession>>() {});
         ConfigurationSession session = new ConfigurationSession();
         session.setApplicationId("app");

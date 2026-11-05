@@ -2,6 +2,11 @@
 
 Floci supports AWS AppConfig and AppConfigData for local configuration management.
 
+Resources, name lookups, pagination and configuration-session tokens are isolated by
+the calling account and region. Persisted records from older versions that did not
+record a region remain available only in `floci.default-region`. New writes store
+their region explicitly in all storage modes.
+
 ## Management Plane (AppConfig)
 
 The management plane allows you to create and manage applications, environments, configuration profiles, and hosted configuration versions.
