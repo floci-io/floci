@@ -1580,6 +1580,12 @@ class ResourceArnBuilderTest {
     // ── SQS ─────────────────────────────────────────────────────────────────────
 
     @Test
+    void sqsNamesTheAccountTheQueueUrlNames() {
+        queryParams.putSingle("QueueUrl", "http://localhost:4566/111122223333/orders");
+        assertEquals("arn:aws:sqs:us-east-1:111122223333:orders", builder.build("sqs", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
     void sqsBuildsArnFromJsonQueueName() {
         setJsonBody("{\"QueueName\":\"order-queue\"}");
         String arn = builder.build("sqs", ctx, "us-east-1", "000000000000");

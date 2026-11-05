@@ -872,12 +872,12 @@ public class PostgresProtocolHandler {
         MessageDigest md5 = Digests.md5Digest();
         md5.update(password.getBytes(StandardCharsets.UTF_8));
         md5.update(username.getBytes(StandardCharsets.UTF_8));
-        String hex1 = bytesToHex(md5.digest());
+        String hex1 = HexFormat.of().formatHex(md5.digest());
 
         md5.reset();
         md5.update(hex1.getBytes(StandardCharsets.UTF_8));
         md5.update(salt);
-        return "md5" + bytesToHex(md5.digest());
+        return "md5" + HexFormat.of().formatHex(md5.digest());
     }
 
     // ── Post-auth buffering ───────────────────────────────────────────────────
@@ -1025,7 +1025,7 @@ public class PostgresProtocolHandler {
                 + "FROM pg_catalog.pg_db_role_setting s "
                 + "JOIN pg_catalog.pg_roles r ON r.oid = s.setrole "
                 + "CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) WITH ORDINALITY AS c(cfg, n) "
-                + "WHERE r.rolname = " + quoteLiteral(role) + " AND s.setdatabase IN (0, "
+                + "WHERE r.rolname = " + PostgresWire.quoteLiteral(role) + " AND s.setdatabase IN (0, "
                 + "(SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())) "
                 + "ORDER BY s.setdatabase = 0 DESC, c.n";
     }
@@ -1424,20 +1424,12 @@ public class PostgresProtocolHandler {
                 sql.append(", ");
             }
             sql.append("pg_catalog.set_config(")
-                    .append(quoteLiteral(settings.get(i).name()))
+                    .append(PostgresWire.quoteLiteral(settings.get(i).name()))
                     .append(", ")
-                    .append(quoteLiteral(settings.get(i).value()))
+                    .append(PostgresWire.quoteLiteral(settings.get(i).value()))
                     .append(", false)");
         }
         return sql.toString();
-    }
-
-    /**
-     * An escape-string literal, so it reads the same whatever standard_conforming_strings says.
-     * Apostrophes are doubled rather than backslash-escaped, which backslash_quote can forbid.
-     */
-    static String quoteLiteral(String value) {
-        return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'";
     }
 
     /**
@@ -1684,14 +1676,6 @@ public class PostgresProtocolHandler {
     }
 
     // ── Wire helpers ──────────────────────────────────────────────────────────
-
-    private static String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
-    }
 
     static void closeQuietly(Socket s) {
         try { s.close(); } catch (IOException ignored) {}

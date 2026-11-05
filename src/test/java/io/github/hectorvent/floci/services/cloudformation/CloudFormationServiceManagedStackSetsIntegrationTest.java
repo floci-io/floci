@@ -433,6 +433,52 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
                 .body(containsString("all features"));
     }
 
+    @Test
+    void describeServiceManagedStackSetListsTargetedOrganizationalUnitsAndTags() {
+        String management = "616161616161";
+        organizations(management, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
+                .post("/").then().statusCode(200);
+        String rootId = organizations(management, "ListRoots", "{}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("Roots[0].Id");
+        String targetOu = organizations(management, "CreateOrganizationalUnit",
+                "{\"ParentId\":\"" + rootId + "\",\"Name\":\"DescribeTarget\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("OrganizationalUnit.Id");
+        cloudFormation(management, "ActivateOrganizationsAccess")
+                .post("/").then().statusCode(200);
+
+        String stackSet = "describe-targets-" + UUID.randomUUID().toString().substring(0, 8);
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate("unused"))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .formParam("AutoDeployment.Enabled", "true")
+                .formParam("Tags.member.1.Key", "DeploymentVersion")
+                .formParam("Tags.member.1.Value", "20261101-abcdef12")
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "DescribeStackSet")
+                .formParam("StackSetName", stackSet)
+                .post("/").then().statusCode(200)
+                .body(containsString("<Tags>"))
+                .body(containsString("<Key>DeploymentVersion</Key>"))
+                .body(containsString("<Value>20261101-abcdef12</Value>"))
+                .body(not(containsString("<OrganizationalUnitIds>")));
+
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", rootId)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.2", targetOu)
+                .formParam("Regions.member.1", REGION)
+                .post("/").then().statusCode(200);
+        cloudFormation(management, "DescribeStackSet")
+                .formParam("StackSetName", stackSet)
+                .post("/").then().statusCode(200)
+                .body(containsString("<OrganizationalUnitIds>"))
+                .body(containsString("<member>" + rootId + "</member>"))
+                .body(containsString("<member>" + targetOu + "</member>"));
+    }
+
     private String createAccount(String email, String name) {
         JsonPath response = organizations("CreateAccount",
                 "{\"Email\":\"" + email + "\",\"AccountName\":\"" + name + "\"}")

@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.appsync.model.Resolver;
 import io.github.hectorvent.floci.services.appsync.model.ResolverKind;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
+import io.github.hectorvent.floci.services.cloudformation.CfnDropPolicyTable;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
@@ -26,6 +27,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -1516,5 +1518,31 @@ class AppSyncCfnProvisionerTest {
                         "AWS::AppSync::DataSource", "AWS::AppSync::FunctionConfiguration",
                         "AWS::AppSync::Resolver", "AWS::AppSync::ApiKey"),
                 provisioner.resourceTypes());
+    }
+
+    /**
+     * The AppSync rows of drop-policy.tsv are what {@code clearDropped} acts on. A {@code keep} row
+     * carries its reason after the colon, which the accessor does not repeat.
+     */
+    @Test
+    void appSyncDropPolicyRowsMatchWhatClearDroppedActsOn() {
+        List<String> mismatched = new ArrayList<>();
+        int checked = 0;
+        for (Map.Entry<String, CfnDropPolicyTable.Row> entry : CfnDropPolicyTable.load().entrySet()) {
+            String[] key = entry.getKey().split("\t");
+            if (!key[0].startsWith("AWS::AppSync::")) {
+                continue;
+            }
+            checked++;
+            CfnDropPolicyTable.Row row = entry.getValue();
+            String expected = AppSyncCfnProvisioner.dropPolicy(key[0], key[1]);
+            String recorded = "keep".equals(row.kind()) ? "keep" : row.policy();
+            if (!expected.equals(recorded)) {
+                mismatched.add(key[0] + " " + key[1] + ": file says " + row.policy() + ", code says " + expected);
+            }
+        }
+        assertTrue(checked > 0, "no AppSync rows in " + CfnDropPolicyTable.FILE);
+        assertTrue(mismatched.isEmpty(), "Rows in " + CfnDropPolicyTable.FILE
+                + " that differ from AppSyncCfnProvisioner.dropPolicy: " + mismatched);
     }
 }

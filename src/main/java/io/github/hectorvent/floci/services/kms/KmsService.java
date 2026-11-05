@@ -152,7 +152,7 @@ public class KmsService implements ResourceProvider {
         KmsKeyUsage effectiveUsage = Optional.ofNullable(keyUsage)
                 .map(KmsKeyUsage::fromString)
                 .orElse(KmsKeyUsage.ENCRYPT_DECRYPT);
-        KmsKeySpec effectiveSpec = Optional.of(keySpec)
+        KmsKeySpec effectiveSpec = Optional.ofNullable(keySpec)
                 .map(KmsKeySpec::fromString)
                 .orElse(KmsKeySpec.SYMMETRIC_DEFAULT);
         validateKeyUsageForSpec(effectiveUsage, effectiveSpec);

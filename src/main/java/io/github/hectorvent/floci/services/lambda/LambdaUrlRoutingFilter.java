@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.core.common.RequestHost;
+import io.github.hectorvent.floci.core.common.RequestUriRewrite;
 import jakarta.annotation.Priority;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -48,7 +49,7 @@ public class LambdaUrlRoutingFilter implements ContainerRequestFilter {
                         .build();
 
                 LOG.debugv("Routing Lambda URL: {0} -> {1}", host, newUri.getPath());
-                requestContext.setRequestUri(newUri);
+                RequestUriRewrite.apply(requestContext, newUri);
             }
         }
     }

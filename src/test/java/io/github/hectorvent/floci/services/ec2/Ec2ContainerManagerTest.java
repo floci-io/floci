@@ -1159,63 +1159,79 @@ class Ec2ContainerManagerTest {
 
     @Test
     void aLookupThatOutlivesAContainerReplacementDoesNotOverwriteTheNewAddress() throws Exception {
-        CountDownLatch staleInspectStarted = new CountDownLatch(1);
-        CountDownLatch releaseStaleInspect = new CountDownLatch(1);
         DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
         InspectContainerResponse oldGuest = inspectWithNetworks(
                 Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.9")));
         InspectContainerResponse newGuest = inspectWithNetworks(
                 Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.21")));
-        when(docker.inspectContainerCmd("old-container").exec()).thenAnswer(invocation -> {
-            staleInspectStarted.countDown();
-            releaseStaleInspect.await(5, TimeUnit.SECONDS);
-            return oldGuest;
-        });
+        PausedLookup stale = PausedLookup.onInspect(docker, "old-container", oldGuest, oldGuest);
         when(docker.inspectContainerCmd("new-container").exec()).thenReturn(newGuest);
         Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
         Instance instance = serviceNetworkInstance();
         instance.setDockerContainerId("old-container");
 
-        Thread staleLookup = Thread.ofVirtual().start(() -> manager.refreshServiceNetworkIp(instance));
-        assertTrue(staleInspectStarted.await(5, TimeUnit.SECONDS));
+        stale.start(manager, instance);
         synchronized (instance) {
             instance.setDockerContainerId("new-container");
         }
         manager.refreshServiceNetworkIp(instance);
-        releaseStaleInspect.countDown();
-        staleLookup.join(Duration.ofSeconds(5));
+        stale.finish();
 
-        assertFalse(staleLookup.isAlive());
         assertEquals("172.20.0.21", instance.getServiceNetworkIp());
         assertEquals("172.20.0.21", manager.reachablePublicAddress(instance));
     }
 
     @Test
+    void aLookupThatOutlivesAStopAndStartDoesNotOverwriteTheNewAddress() throws Exception {
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        // A start keeps the container, so both lookups inspect the same id.
+        InspectContainerResponse beforeStop = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.9")));
+        InspectContainerResponse afterStart = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.33")));
+        PausedLookup stale = PausedLookup.onInspect(docker, TEST_CONTAINER_ID, beforeStop, afterStart);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+
+        stale.start(manager, instance);
+        manager.refreshServiceNetworkIp(instance);
+        stale.finish();
+
+        assertEquals("172.20.0.33", instance.getServiceNetworkIp());
+        assertEquals("172.20.0.33", manager.reachablePublicAddress(instance));
+    }
+
+    @Test
+    void terminationDropsTheLookupStateAndALaterLookupLeavesNone() {
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+        manager.refreshServiceNetworkIp(instance);
+        assertTrue(manager.hasServiceNetworkLookupStateForTest(instance.getInstanceId()));
+
+        manager.terminate(instance, null);
+        clearInvocations(docker);
+        // A retry queued before the teardown runs after it.
+        manager.refreshServiceNetworkIp(instance);
+
+        assertFalse(manager.hasServiceNetworkLookupStateForTest(instance.getInstanceId()));
+        verify(docker, never()).inspectContainerCmd(anyString());
+    }
+
+    @Test
     void aLookupInFlightDuringTeardownCannotRestoreTheAddress() throws Exception {
-        CountDownLatch staleInspectStarted = new CountDownLatch(1);
-        CountDownLatch releaseStaleInspect = new CountDownLatch(1);
-        AtomicBoolean firstInspect = new AtomicBoolean(true);
         DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
         InspectContainerResponse guest = inspectWithNetworks(
                 Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.9")));
-        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec()).thenAnswer(invocation -> {
-            if (firstInspect.getAndSet(false)) {
-                staleInspectStarted.countDown();
-                releaseStaleInspect.await(5, TimeUnit.SECONDS);
-            }
-            return guest;
-        });
+        PausedLookup stale = PausedLookup.onInspect(docker, TEST_CONTAINER_ID, guest, guest);
         Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
         Instance instance = serviceNetworkInstance();
         instance.setState(InstanceState.pending());
 
-        Thread staleLookup = Thread.ofVirtual().start(() -> manager.refreshServiceNetworkIp(instance));
-        assertTrue(staleInspectStarted.await(5, TimeUnit.SECONDS));
+        stale.start(manager, instance);
         assertTrue(manager.cancelLaunch(instance));
-        releaseStaleInspect.countDown();
-        staleLookup.join(Duration.ofSeconds(5));
+        stale.finish();
 
-        assertFalse(staleLookup.isAlive());
         assertNull(instance.getDockerContainerId());
         assertNull(instance.getServiceNetworkIp());
     }
@@ -1264,6 +1280,45 @@ class Ec2ContainerManagerTest {
         manager.refreshServiceNetworkIp(instance);
 
         assertEquals("127.0.0.1", manager.reachablePublicAddress(instance));
+    }
+
+    /**
+     * A service-network lookup held inside its first Docker inspect of one container, so a test can
+     * replace, restart or tear the instance down underneath it. That inspect answers {@code first}
+     * once released; later inspects of the container answer {@code later} at once.
+     */
+    private static final class PausedLookup {
+        private final CountDownLatch started = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+        private Thread lookup;
+
+        static PausedLookup onInspect(DockerClient docker, String containerId,
+                                      InspectContainerResponse first, InspectContainerResponse later) {
+            PausedLookup paused = new PausedLookup();
+            AtomicBoolean firstInspect = new AtomicBoolean(true);
+            when(docker.inspectContainerCmd(containerId).exec()).thenAnswer(invocation -> {
+                if (firstInspect.getAndSet(false)) {
+                    paused.started.countDown();
+                    paused.release.await(5, TimeUnit.SECONDS);
+                    return first;
+                }
+                return later;
+            });
+            return paused;
+        }
+
+        /** Starts the lookup and returns once it is held inside the inspect. */
+        void start(Ec2ContainerManager manager, Instance instance) throws InterruptedException {
+            lookup = Thread.ofVirtual().start(() -> manager.refreshServiceNetworkIp(instance));
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+        }
+
+        /** Lets the held inspect answer and waits for the lookup to finish. */
+        void finish() throws InterruptedException {
+            release.countDown();
+            lookup.join(Duration.ofSeconds(5));
+            assertFalse(lookup.isAlive());
+        }
     }
 
     private static Instance serviceNetworkInstance() {

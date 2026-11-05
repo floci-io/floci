@@ -51,6 +51,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * <p>Known limit: a property counts as read when its name appears as a literal in a read call or in
  * a helper's arguments in the type's reachable code, so the scan can credit a property that is not
  * applied. It is a ratchet on what the sources mention, not proof that a value takes effect.
+ *
+ * <p>The same scan pins {@code drop-policy.tsv}: one row for each writable property that an arm
+ * calling {@code droppedProperties} reads, saying what an update that drops it does. Only the
+ * presence of a row and the {@code create-only} rows are checked here; the AppSync values
+ * are checked against {@code AppSyncCfnProvisioner.dropPolicy} in {@code AppSyncCfnProvisionerTest},
+ * and the EC2 values are not checked against the code.
  */
 class CfnSchemaCoverageTest {
 
@@ -141,6 +147,8 @@ class CfnSchemaCoverageTest {
             "requestBody(props, ctx)",
             "request(props, ctx)");
     private static final String ALL_PROPERTIES = "*";
+    /** A call that makes an arm decide what a dropped property means, see {@code drop-policy.tsv}. */
+    private static final String DROPPED_PROPERTIES_CALL = "droppedProperties(";
 
     /** What the registry schemas declare for one resource type, see {@link #schemaSurface}. */
     private record SchemaSurface(Set<String> readOnly, Set<String> writable) { }
@@ -253,6 +261,84 @@ class CfnSchemaCoverageTest {
         }
     }
 
+    /**
+     * The drop-policy rows are the writable properties that the arms calling {@code droppedProperties}
+     * read, one row each, no more and no fewer. Same scan as the property gaps, so a provisioner that
+     * starts reading a property in such an arm, or a new arm that calls it, needs a row.
+     */
+    @Test
+    void dropPolicyRowsMatchTheArmsThatCallDroppedProperties() {
+        assertSameLines(render(recordedDropPolicyKeys()), render(actualDropPolicyKeys()),
+                "The set of properties with a recorded drop policy changed.",
+                "(an arm that calls droppedProperties reads a property, or a new such arm arrived): "
+                        + "add a row with its policy to " + CfnDropPolicyTable.FILE,
+                "(no longer read in an arm that calls droppedProperties): delete their rows from "
+                        + CfnDropPolicyTable.FILE);
+    }
+
+    @Test
+    void everyDropPolicyRowIsStillReal() {
+        Map<String, String> actual = actualDropPolicyKeys();
+        List<String> stale = CfnDropPolicyTable.load().keySet().stream()
+                .filter(key -> !actual.containsKey(key))
+                .sorted()
+                .toList();
+
+        if (!stale.isEmpty()) {
+            throw new AssertionError("These properties are no longer read by an arm that calls "
+                    + "droppedProperties, so their rows in " + CfnDropPolicyTable.FILE
+                    + " are stale and should be deleted: " + stale);
+        }
+    }
+
+    @Test
+    void everyKeepPolicyNamesItsReason() {
+        List<String> unexplained = CfnDropPolicyTable.load().entrySet().stream()
+                .filter(e -> "keep".equals(e.getValue().kind())
+                        && (e.getValue().detail().isBlank() || e.getValue().detail().startsWith("TODO")))
+                .map(Map.Entry::getKey)
+                .sorted()
+                .toList();
+
+        if (!unexplained.isEmpty()) {
+            throw new AssertionError("A 'keep' policy in " + CfnDropPolicyTable.FILE
+                    + " must say why the value stays, as keep:<reason>: " + unexplained);
+        }
+    }
+
+    /** {@code create-only} is the class: a drop there is skipped or refused, never cleared. */
+    @Test
+    void everyCreateOnlyPolicyIsACreateOnlyProperty() {
+        List<String> wrong = CfnDropPolicyTable.load().entrySet().stream()
+                .filter(e -> "create-only".equals(e.getValue().kind()))
+                .map(Map.Entry::getKey)
+                .filter(key -> {
+                    String[] parts = key.split("\t");
+                    return !CfnCreateOnlyProperties.isCreateOnly(parts[0], parts[1]);
+                })
+                .sorted()
+                .toList();
+
+        if (!wrong.isEmpty()) {
+            throw new AssertionError("These 'create-only' rows in " + CfnDropPolicyTable.FILE
+                    + " are not create-only in create-only-properties.json: " + wrong);
+        }
+    }
+
+    @Test
+    void aDuplicateDropPolicyRowIsRefused() {
+        AssertionError e = assertThrows(AssertionError.class, () -> CfnDropPolicyTable.parse(List.of(
+                "AWS::EC2::Subnet\tTags\tclear", "AWS::EC2::Subnet\tTags\tclear")));
+        assertTrue(e.getMessage().contains("AWS::EC2::Subnet Tags"), e.getMessage());
+    }
+
+    @Test
+    void anUnknownDropPolicyIsRefused() {
+        AssertionError e = assertThrows(AssertionError.class,
+                () -> CfnDropPolicyTable.parse(List.of("AWS::EC2::Subnet\tTags\tremove")));
+        assertTrue(e.getMessage().contains("remove"), e.getMessage());
+    }
+
     /** An entry no provisioner contains credits nothing: a renamed helper must not leave it behind. */
     @Test
     void everyWholesaleCallAndHelperReadStillOccursInAProvisioner() {
@@ -348,6 +434,36 @@ class CfnSchemaCoverageTest {
         return gaps;
     }
 
+    /** "AWS::EC2::Subnet\tTags" for each row of {@code drop-policy.tsv}. */
+    private static Map<String, String> recordedDropPolicyKeys() {
+        Map<String, String> keys = new TreeMap<>();
+        CfnDropPolicyTable.load().keySet().forEach(key -> keys.put(key, ""));
+        return keys;
+    }
+
+    /**
+     * The writable properties read by the arms whose reachable code calls {@code droppedProperties},
+     * keyed as in {@link CfnDropPolicyTable}.
+     */
+    private static Map<String, String> actualDropPolicyKeys() {
+        Map<String, ProvisionerScan> scans = scanProvisioners();
+        Map<String, String> keys = new TreeMap<>();
+        for (Map.Entry<String, String> entry : inventory().entrySet()) {
+            String type = entry.getKey();
+            ProvisionerScan scan = scans.get(entry.getValue());
+            if (scan == null || !scan.reaches(type, DROPPED_PROPERTIES_CALL)) {
+                continue;
+            }
+            Set<String> read = scan.propertiesReadBy(type);
+            for (String property : schemaWritableProperties(type)) {
+                if (read.contains(ALL_PROPERTIES) || read.contains(property)) {
+                    keys.put(type + "\t" + property, "");
+                }
+            }
+        }
+        return keys;
+    }
+
     /** The gaps computed from the schemas and the provisioner sources, keyed the same way. */
     private static Map<String, String> actualGaps() {
         Map<String, ProvisionerScan> scans = scanProvisioners();
@@ -430,6 +546,12 @@ class CfnSchemaCoverageTest {
                 }
             });
             return read;
+        }
+
+        /** Whether the code reachable from the type's arm contains {@code call}. */
+        boolean reaches(String resourceType, String call) {
+            String code = codeByType.isEmpty() ? classCode : codeByType.get(resourceType);
+            return code != null && code.contains(call);
         }
 
         Set<String> attributesFor(String resourceType) {

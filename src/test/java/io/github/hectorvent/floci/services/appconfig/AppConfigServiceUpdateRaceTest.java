@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appconfig;
 
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
@@ -129,6 +130,7 @@ class AppConfigServiceUpdateRaceTest {
 
     /** An AppConfig service whose {@code fileName} store is {@code store} and every other store in memory. */
     private static AppConfigService serviceWithStore(String fileName, StorageBackend<String, ?> store) {
-        return new AppConfigService(new InMemoryStorageFactory(ACCOUNT).withStore(fileName, store), null);
+        return new AppConfigService(new InMemoryStorageFactory(ACCOUNT).withStore(fileName, store),
+                new RegionResolver("us-east-1", ACCOUNT));
     }
 }

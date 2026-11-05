@@ -16,6 +16,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -296,7 +297,7 @@ final class EksTokenMinter {
         String stringToSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + credentialScope + "\n"
                 + Digests.sha256Hex(canonicalRequest);
         byte[] signingKey = deriveSigningKey(credentials.secretAccessKey(), dateStamp, region, "sts");
-        String signature = hexEncode(hmacSha256(signingKey, stringToSign));
+        String signature = HexFormat.of().formatHex(hmacSha256(signingKey, stringToSign));
 
         String url = "https://" + host + "/?" + canonicalQueryString + "&X-Amz-Signature=" + signature;
         return TOKEN_PREFIX + Base64Url.encode(url);
@@ -458,13 +459,5 @@ final class EksTokenMinter {
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("Could not compute HMAC-SHA256: " + e.getMessage(), e);
         }
-    }
-
-    private static String hexEncode(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 }

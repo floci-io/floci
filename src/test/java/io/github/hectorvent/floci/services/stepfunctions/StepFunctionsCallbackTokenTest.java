@@ -65,6 +65,26 @@ class StepFunctionsCallbackTokenTest {
         assertTrue(future.isDone());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void completedAndRetiredTokensKeepTheirRegionBoundary(boolean retired) {
+        when(resolver.getAccountId()).thenReturn(OWNER);
+        service.registerPendingToken("completed-regional", OWNER, RESOURCE);
+        service.sendTaskSuccess("completed-regional", "{}");
+        if (retired) {
+            service.discardPendingToken("completed-regional");
+        }
+        when(resolver.getRegion()).thenReturn("us-west-2");
+        refuses("InvalidToken", () -> service.sendTaskSuccess("completed-regional", "{}"));
+        refuses("InvalidToken", () -> service.sendTaskFailure("completed-regional", "cause", "error"));
+        refuses("InvalidToken", () -> service.sendTaskHeartbeat("completed-regional"));
+        refuses("InvalidToken", () -> service.callbackResourceArn("completed-regional", OWNER));
+        refuses("InvalidToken", () -> service.findByMembers("statemachine", List.of("completed-regional"), "us-west-2"));
+        when(resolver.getRegion()).thenReturn("us-east-1");
+        assertEquals(RESOURCE, service.callbackResourceArn("completed-regional", OWNER));
+        refuses("TaskTimedOut", () -> service.sendTaskHeartbeat("completed-regional"));
+    }
+
     @Test
     void iamTokenLookupHonorsItsExplicitRegion() {
         when(resolver.getAccountId()).thenReturn(OWNER);

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appconfig;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appconfig.model.Deployment;
@@ -57,7 +58,7 @@ class AppConfigServicePersistenceTest {
                   "State": "COMPLETE", "Description": null}}
                 """);
 
-        AppConfigService service = new AppConfigService(newFactory(), mock(EmulatorConfig.class));
+        AppConfigService service = new AppConfigService(newFactory(), new RegionResolver("us-east-1", "000000000000"));
 
         Environment environment = service.getEnvironment("app1", "env1");
         assertEquals("stored-env", environment.getName());
@@ -87,7 +88,7 @@ class AppConfigServicePersistenceTest {
     @Test
     void deploymentStrategySettingsSurviveARestart() {
         StorageFactory first = newFactory();
-        AppConfigService service = new AppConfigService(first, mock(EmulatorConfig.class));
+        AppConfigService service = new AppConfigService(first, new RegionResolver("us-east-1", "000000000000"));
         String appId = service.createApplication(Map.of("Name", "restarted-app")).getId();
         String environmentId = service.createEnvironment(appId, Map.of("Name", "restarted-env")).getId();
         String profileId = service.createConfigurationProfile(appId, Map.of(
@@ -101,7 +102,7 @@ class AppConfigServicePersistenceTest {
                 "DeploymentStrategyId", strategyId));
         first.shutdownAll();
 
-        AppConfigService restarted = new AppConfigService(newFactory(), mock(EmulatorConfig.class));
+        AppConfigService restarted = new AppConfigService(newFactory(), new RegionResolver("us-east-1", "000000000000"));
         // With the strategy gone, the settings can only come from the stored deployment.
         restarted.deleteDeploymentStrategy(strategyId);
 
@@ -115,7 +116,7 @@ class AppConfigServicePersistenceTest {
     @Test
     void monitorsAndDeploymentLocationsSurviveARestart() {
         StorageFactory first = newFactory();
-        AppConfigService service = new AppConfigService(first, mock(EmulatorConfig.class));
+        AppConfigService service = new AppConfigService(first, new RegionResolver("us-east-1", "000000000000"));
         String appId = service.createApplication(Map.of("Name", "restarted-app")).getId();
         String monitoredId = service.createEnvironment(appId, Map.of("Name", "monitored", "Monitors", List.of(
                 Map.of("AlarmArn", ALARM_ARN, "AlarmRoleArn", ALARM_ROLE_ARN),
@@ -129,7 +130,7 @@ class AppConfigServicePersistenceTest {
                 "DeploymentStrategyId", "AppConfig.AllAtOnce")).getDeploymentNumber();
         first.shutdownAll();
 
-        AppConfigService restarted = new AppConfigService(newFactory(), mock(EmulatorConfig.class));
+        AppConfigService restarted = new AppConfigService(newFactory(), new RegionResolver("us-east-1", "000000000000"));
 
         assertEquals(List.of(new Monitor(ALARM_ARN, ALARM_ROLE_ARN), new Monitor(SECOND_ALARM_ARN, null)),
                 restarted.getEnvironment(appId, monitoredId).getMonitors());

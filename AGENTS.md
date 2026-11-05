@@ -377,7 +377,8 @@ the registry and stubs what nothing serves; never add type-specific code to it.
     `CfnSchemaCoverageTest` requires every unset attribute to be fixed or recorded.
     A new type also needs its row in `schema-surface.tsv` (same directory): run
     `make cfn-schema-surface-sync`. A writable property the provisioner never reads goes in
-    `writable-property-gaps.tsv`.
+    `writable-property-gaps.tsv`. A provisioner arm that calls `droppedProperties` records, for each
+    writable property it reads, what a drop does in `drop-policy.tsv` (same directory).
 
 References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
 (update-in-place and replacement), `LogsCfnProvisioner` (reconcile-vs-replace update).

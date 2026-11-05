@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appconfig;
 
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
 import io.github.hectorvent.floci.services.appconfig.model.DeploymentStrategy;
@@ -24,7 +25,8 @@ class AppConfigServiceUpdateIsolationTest {
 
     private static final String ALARM = "arn:aws:cloudwatch:us-east-1:000000000000:alarm:configuration-errors";
 
-    private final AppConfigService service = new AppConfigService(new InMemoryStorageFactory("000000000000"), null);
+    private final AppConfigService service = new AppConfigService(new InMemoryStorageFactory("000000000000"),
+            new RegionResolver("us-east-1", "000000000000"));
 
     @Test
     void aStrategyReadBeforeAnUpdateKeepsItsPriorSettings() {

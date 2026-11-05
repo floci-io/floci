@@ -22,6 +22,8 @@ import io.vertx.mutiny.core.Vertx;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -49,6 +51,8 @@ class AslExecutorTaskHistoryEventsTest {
 
     private static final String REGION = "us-east-2";
     private static final String ACCOUNT = "000000000000";
+    private static final String SQS_RESOURCE = "arn:aws:states:::aws-sdk:sqs:sendMessage";
+    private static final String TASK_ROLE = "arn:aws:iam::000000000000:role/task-role";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private LambdaExecutorService lambdaExecutor;
@@ -69,8 +73,13 @@ class AslExecutorTaskHistoryEventsTest {
     }
 
     private AslExecutor newExecutor(DynamoDbFacade dynamoDb) {
+        return newExecutor(dynamoDb, false);
+    }
+
+    private AslExecutor newExecutor(DynamoDbFacade dynamoDb, boolean enforcing) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().stepfunctions().maxWaitSeconds()).thenReturn(30);
+        when(config.services().iam().enforcementEnabled()).thenReturn(enforcing);
 
         return AslExecutorFixture.builder()
                 .lambdaExecutor(lambdaExecutor)
@@ -149,6 +158,100 @@ class AslExecutorTaskHistoryEventsTest {
         JsonNode parameters = objectMapper.readTree((String) scheduled.getDetails().get("parameters"));
         assertEquals("https://sqs.us-east-2.amazonaws.com/000000000000/q", parameters.path("QueueUrl").asText());
         assertEquals("hello", parameters.path("MessageBody").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void declaredCredentialsAppearInTaskScheduled(boolean enforcing) throws Exception {
+        executor = newExecutor(mock(DynamoDbFacade.class), enforcing);
+
+        Map<String, Object> details = scheduledDetails("TaskScheduled", SQS_RESOURCE,
+                "\"Credentials\": {\"RoleArn\": \"" + TASK_ROLE + "\"},", "{}");
+
+        assertEquals(Map.of("roleArn", TASK_ROLE), details.get("taskCredentials"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void credentialsResolvedFromTheInputAppearInTaskScheduled(boolean enforcing) throws Exception {
+        executor = newExecutor(mock(DynamoDbFacade.class), enforcing);
+
+        Map<String, Object> details = scheduledDetails("TaskScheduled", SQS_RESOURCE,
+                "\"Credentials\": {\"RoleArn.$\": \"$.role\"},", "{\"role\":\"" + TASK_ROLE + "\"}");
+
+        assertEquals(Map.of("roleArn", TASK_ROLE), details.get("taskCredentials"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void declaredCredentialsAppearInLambdaFunctionScheduled(boolean enforcing) throws Exception {
+        executor = newExecutor(mock(DynamoDbFacade.class), enforcing);
+
+        Map<String, Object> details = scheduledDetails("LambdaFunctionScheduled", lambdaArn("worker"),
+                "\"Credentials\": {\"RoleArn\": \"" + TASK_ROLE + "\"},", "{}");
+
+        assertEquals(Map.of("roleArn", TASK_ROLE), details.get("taskCredentials"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void noCredentialsMeansNoTaskCredentials(boolean enforcing) throws Exception {
+        executor = newExecutor(mock(DynamoDbFacade.class), enforcing);
+
+        assertFalse(scheduledDetails("TaskScheduled", SQS_RESOURCE, "", "{}").containsKey("taskCredentials"));
+    }
+
+    /** ActivityScheduledEventDetails has no taskCredentials member, so strict SDKs would not expect one. */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anActivityNeverRecordsTaskCredentials(boolean enforcing) throws Exception {
+        executor = newExecutor(mock(DynamoDbFacade.class), enforcing);
+
+        assertFalse(scheduledDetails("ActivityScheduled",
+                "arn:aws:states:%s:%s:activity:work".formatted(REGION, ACCOUNT),
+                "\"Credentials\": {\"RoleArn\": \"" + TASK_ROLE + "\"},", "{}").containsKey("taskCredentials"));
+    }
+
+    /** With enforcement off Credentials have no effect on a task, so one that cannot resolve must not fail it. */
+    @Test
+    void credentialsThatDoNotResolveAreOmittedWithEnforcementOff() throws Exception {
+        assertFalse(scheduledDetails("TaskScheduled", SQS_RESOURCE,
+                "\"Credentials\": {\"RoleArn.$\": \"$.missing\"},", "{}").containsKey("taskCredentials"));
+    }
+
+    @Test
+    void jsonataCredentialsThatDoNotResolveAreOmittedWithEnforcementOff() throws Exception {
+        ArrayList<HistoryEvent> history = new ArrayList<>();
+        Execution execution = run("""
+                {"QueryLanguage": "JSONata", "StartAt": "Send", "States": {"Send": {"Type": "Task",
+                  "Resource": "arn:aws:states:::aws-sdk:sqs:sendMessage",
+                  "Credentials": {"RoleArn": "{% $missing.role.$error() %}"},
+                  "Arguments": {"QueueUrl": "q", "MessageBody": "x"}, "End": true}}}
+                """, "{}", testCase(Map.of("Send", List.of(returnStep(0, 0, "{}")))), history);
+
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        assertFalse(detailsOf(history, "TaskScheduled").containsKey("taskCredentials"));
+    }
+
+    @Test
+    void credentialsNamingNoRoleAreOmitted() throws Exception {
+        assertFalse(scheduledDetails("TaskScheduled", SQS_RESOURCE,
+                "\"Credentials\": {\"RoleArn\": 42},", "{}").containsKey("taskCredentials"));
+    }
+
+    private Map<String, Object> scheduledDetails(String eventType, String resource, String credentials, String input)
+            throws Exception {
+        ArrayList<HistoryEvent> history = new ArrayList<>();
+        Execution execution = run("""
+                {"StartAt": "Send", "States": {"Send": {"Type": "Task", "Resource": "%s", %s "End": true}}}
+                """.formatted(resource, credentials), input,
+                testCase(Map.of("Send", List.of(returnStep(0, 0, "{}")))), history);
+        assertEquals("SUCCEEDED", execution.getStatus(), execution.getCause());
+        return detailsOf(history, eventType);
+    }
+
+    private static Map<String, Object> detailsOf(List<HistoryEvent> history, String eventType) {
+        return history.stream().filter(event -> eventType.equals(event.getType())).findFirst().orElseThrow().getDetails();
     }
 
     @Test

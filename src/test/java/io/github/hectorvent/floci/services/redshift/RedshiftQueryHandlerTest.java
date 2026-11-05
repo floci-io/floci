@@ -597,7 +597,7 @@ class RedshiftQueryHandlerTest {
         params.putSingle("SnapshotIdentifier", "test-snapshot");
 
         Snapshot snapshot = new Snapshot("test-snapshot", "test-cluster", "deleted", 5439, "admin");
-        when(service.deleteSnapshot("test-snapshot")).thenReturn(snapshot);
+        when(service.deleteSnapshot("test-snapshot", null)).thenReturn(snapshot);
 
         Response response = handler.handle("DeleteClusterSnapshot", params);
         assertEquals(200, response.getStatus());
@@ -619,7 +619,7 @@ class RedshiftQueryHandlerTest {
         cluster.setMasterUsername("admin");
         cluster.setClusterStatus("available");
         cluster.setEndpoint(new Endpoint("localhost", 5439));
-        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "dc2.large")).thenReturn(cluster);
+        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", null, "dc2.large")).thenReturn(cluster);
 
         Response response = handler.handle("RestoreFromClusterSnapshot", params);
         assertEquals(200, response.getStatus());
@@ -636,11 +636,11 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:acc:snapshot:src/my-snap");
         Cluster cluster = availableCluster("restored-cluster");
-        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", null)).thenReturn(cluster);
+        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null)).thenReturn(cluster);
 
         Response response = handler.handle("RestoreFromClusterSnapshot", params, "auth");
         assertEquals(200, response.getStatus());
-        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", null);
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null);
     }
 
     @Test
@@ -674,7 +674,7 @@ class RedshiftQueryHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
     }
 
     @Test
@@ -688,7 +688,59 @@ class RedshiftQueryHandlerTest {
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("InvalidParameterCombination", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+    }
+
+    /** The cluster a request is authorized on, snapshot:<cluster>/<name>, is the one its snapshot must be of. */
+    @Test
+    void deleteClusterSnapshotPassesTheClusterItNamesTheSnapshotBy() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SnapshotIdentifier", "test-snapshot");
+        params.putSingle("SnapshotClusterIdentifier", "prod");
+        Snapshot snapshot = new Snapshot("test-snapshot", "prod", "deleted", 5439, "admin");
+        when(service.deleteSnapshot("test-snapshot", "prod")).thenReturn(snapshot);
+
+        assertEquals(200, handler.handle("DeleteClusterSnapshot", params).getStatus());
+        verify(service).deleteSnapshot("test-snapshot", "prod");
+    }
+
+    @Test
+    void restoreFromClusterSnapshotPassesTheClusterItNamesTheSnapshotBy() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotIdentifier", "test-snapshot");
+        params.putSingle("SnapshotClusterIdentifier", "prod");
+        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null))
+                .thenReturn(availableCluster("restored-cluster"));
+
+        assertEquals(200, handler.handle("RestoreFromClusterSnapshot", params, "auth").getStatus());
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null);
+    }
+
+    @Test
+    void restoreFromClusterSnapshotNamingTwoClustersIsNotFound() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:acc:snapshot:src/my-snap");
+        params.putSingle("SnapshotClusterIdentifier", "other");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+    }
+
+    @Test
+    void restoreFromClusterSnapshotArnWithoutAClusterIsNotFound() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:acc:snapshot:/my-snap");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
     }
 
     @Test

@@ -30,7 +30,6 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
-import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -396,7 +395,7 @@ class ElbV2ServiceTest {
         assertEquals("HTTP", listener.getProtocol());
         assertEquals(9080, listener.getPort());
         assertEquals(List.of(), listener.getCertificates());
-        service.modifyListener(REGION, listener.getListenerArn(), "HTTPS", 9443, null,
+        service.modifyListener(REGION, listener.getListenerArn(), "HTTPS", 9443, "ELBSecurityPolicy-2016-08",
                 List.of(HELD_CERTIFICATE), null, null);
         assertEquals("HTTPS", listener.getProtocol());
         assertEquals(List.of(HELD_CERTIFICATE), listener.getCertificates());
@@ -600,18 +599,18 @@ class ElbV2ServiceTest {
     }
 
     @ParameterizedTest
-    @NullSource
-    @ValueSource(strings = "ELBSecurityPolicy-TLS13-1-2-2021-06")
-    void initializeStorageRestoresHttpsListenerCertificateAndSslPolicy(String sslPolicy) {
+    @CsvSource({"HTTPS,", "HTTPS, ELBSecurityPolicy-TLS13-1-2-2021-06",
+            "TLS,", "TLS, ELBSecurityPolicy-TLS13-1-2-2021-06"})
+    void initializeStorageRestoresEncryptedListenerCertificateAndSslPolicy(String protocol, String sslPolicy) {
         SharedStorageFactory storageFactory = new SharedStorageFactory();
         ElbV2Service first = serviceWithStorage(
                 storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
         String lbArn = first.createLoadBalancer(
-                REGION, "persisted-https-lb", "internal", "application", "ipv4",
+                REGION, "persisted-https-lb", "internal", protocol.equals("TLS") ? "network" : "application", "ipv4",
                 ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
         String certificateArn = "arn:aws:acm:us-west-2:000000000000:certificate/persisted";
         String listenerArn = first.createListener(
-                REGION, lbArn, "HTTPS", 9443, sslPolicy,
+                REGION, lbArn, protocol, 9443, sslPolicy,
                 List.of(certificateArn), List.of(), List.of(), Map.of()).getListenerArn();
 
         ElbV2DataPlane reloadedDataPlane = mock(ElbV2DataPlane.class);
@@ -621,11 +620,41 @@ class ElbV2ServiceTest {
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
         verify(reloadedDataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
         assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
-        assertEquals("HTTPS", listenerCaptor.getValue().getProtocol());
+        assertEquals(protocol, listenerCaptor.getValue().getProtocol());
         assertEquals(List.of(certificateArn), listenerCaptor.getValue().getCertificates());
         Listener described = reloaded.describeListeners(REGION, lbArn, List.of(listenerArn)).getFirst();
         assertEquals(sslPolicy == null ? "ELBSecurityPolicy-2016-08" : sslPolicy,
                 described.getSslPolicy());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"HTTPS, HTTP, application", "TLS, TCP, network"})
+    void storageReloadPreservesRemovedAndReplacedListenerSecuritySettings(
+            String encrypted, String plain, String type) {
+        SharedStorageFactory storageFactory = new SharedStorageFactory();
+        ElbV2Service first = serviceWithStorage(
+                storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
+        String lb = first.createLoadBalancer(REGION, "protocol-reload", "internal", type, "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        String arn = first.createListener(REGION, lb, encrypted, 9443, null,
+                List.of(HELD_CERTIFICATE), List.of(), List.of(), Map.of()).getListenerArn();
+        first.modifyListener(REGION, arn, plain, null, null, null, null, null);
+
+        ElbV2Service plainReload = serviceWithStorage(
+                storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
+        Listener plainListener = plainReload.describeListeners(REGION, lb, List.of(arn)).getFirst();
+        assertEquals(plain, plainListener.getProtocol());
+        assertNull(plainListener.getSslPolicy());
+        assertTrue(plainListener.getCertificates().isEmpty());
+        plainReload.modifyListener(REGION, arn, encrypted, null, "ELBSecurityPolicy-2016-08",
+                List.of(OTHER_CERTIFICATE), null, null);
+
+        ElbV2Service encryptedReload = serviceWithStorage(
+                storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
+        Listener encryptedListener = encryptedReload.describeListeners(REGION, lb, List.of(arn)).getFirst();
+        assertEquals(encrypted, encryptedListener.getProtocol());
+        assertEquals("ELBSecurityPolicy-2016-08", encryptedListener.getSslPolicy());
+        assertEquals(List.of(OTHER_CERTIFICATE), encryptedListener.getCertificates());
     }
 
     @Test
