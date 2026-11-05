@@ -356,6 +356,11 @@ jobs:
             ' _ "$image" > /dev/null 2>&1 &
           done
 
+      # Keep the first Neptune request inside its existing test deadline on a cold runner.
+      - name: Pre-pull Neptune image for Node SDK
+        if: matrix.test == 'sdk-test-node'
+        run: docker pull tinkerpop/gremlin-server:3.7.3
+
       - name: Create Docker network
         run: docker network create compat-net
 
