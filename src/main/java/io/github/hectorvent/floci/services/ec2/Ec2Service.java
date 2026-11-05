@@ -133,6 +133,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -2226,12 +2227,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /** Synthesizes a locally-administered unicast MAC (AWS never discloses how it derives its own). */
     private String randomMac() {
-        Random rand = new Random();
-        StringBuilder sb = new StringBuilder("02");
-        for (int i = 0; i < 5; i++) {
-            sb.append(':').append(String.format("%02x", rand.nextInt(256)));
-        }
-        return sb.toString();
+        byte[] bytes = new byte[5];
+        new Random().nextBytes(bytes);
+        return "02:" + HexFormat.ofDelimiter(":").formatHex(bytes);
     }
 
     // ─── Transit Gateways ──────────────────────────────────────────────────────
@@ -4536,11 +4534,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 addresses.add(assignPrivateIp(region, subnetId, addresses));
             }
         } catch (AwsException e) {
-            if (vpcNetworkManager != null) {
-                for (String address : addresses) {
-                    vpcNetworkManager.releasePrivateIp(region, subnetId, address);
-                }
-            }
+            releasePrivateIps(region, subnetId, addresses);
             throw e;
         }
         return addresses;
@@ -4548,6 +4542,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private String assignPrivateIp(String region, String subnetId) {
         return assignPrivateIp(region, subnetId, List.of());
+    }
+
+    /**
+     * Gives back the VPC network's lease on each address, so automatic allocation can offer it
+     * again. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private void releasePrivateIps(String region, String subnetId, Collection<String> addresses) {
+        if (vpcNetworkManager == null) {
+            return;
+        }
+        for (String address : addresses) {
+            vpcNetworkManager.releasePrivateIp(region, subnetId, address);
+        }
     }
 
     /**
@@ -4577,11 +4584,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
             }
             // Given back only once the walk is over, or the network would offer them again. Their
-            // holders took no lease, and deleting an interface or NAT gateway returns none, so a
-            // lease kept here would outlive the holder.
-            for (String address : skipped) {
-                vpcNetworkManager.releasePrivateIp(region, subnetId, address);
-            }
+            // holders took no lease, and deleting an interface returns none, so a lease kept here
+            // would outlive the holder.
+            releasePrivateIps(region, subnetId, skipped);
             if (allocated.isPresent()) {
                 return allocated.get();
             }
@@ -4665,10 +4670,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * lease to show for it: an interface created with its own address never takes one, and a
      * restart re-leases only instances. Any other subnet id belongs to one account, so for it the
      * wider scan finds nothing more. A lease with nothing in any account behind it does not fail
-     * the launch: it is stale (DeleteNetworkInterface and DeleteNatGateway never return theirs),
-     * or it belongs to a launch that failed and has not given the address back yet, which it does
-     * once its container is detached. Either way the instance keeps the address without a lease of
-     * its own, and {@link #assignPrivateIp} still skips it, because the stored instance holds it.
+     * the launch: it is stale (DeleteNetworkInterface never returns its lease), or it belongs to
+     * a launch that failed and has not given the address back yet, which it does once its
+     * container is detached. Either way the instance keeps the address without a lease of its
+     * own, and {@link #assignPrivateIp} still skips it, because the stored instance holds it.
      * An address outside a substituted subnet's effective range is never leased at all, in which
      * case the instance keeps it the way it keeps a synthesised address.
      */
@@ -4681,10 +4686,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * The in-use half of {@link #claimRequestedPrivateIp}, without the lease. CreateNetworkInterface
      * and CreateNatGateway use it alone: neither an interface nor a NAT gateway has a container to
-     * hold the address on the VPC network, and DeleteNetworkInterface and DeleteNatGateway return
-     * no lease, so one taken here would keep the address from automatic allocation after its
-     * holder is gone. {@link #assignPrivateIp} already steps around addresses stored interfaces and
-     * NAT gateways hold. Callers must hold {@link #privateIpAllocationLock}.
+     * hold the address on the VPC network, and {@link #assignPrivateIp} already steps around
+     * addresses stored interfaces and NAT gateways hold. DeleteNetworkInterface returns no lease,
+     * so one taken here would keep the address from automatic allocation after the interface is
+     * gone. Callers must hold {@link #privateIpAllocationLock}.
      *
      * @return whether the address lies in a Docker-backed range, where a lease could be taken
      */
@@ -12601,9 +12606,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 slots[i].setPrimary(false);
             }
         } catch (AwsException e) {
-            if (vpcNetworkManager != null) {
-                assigned.forEach(ip -> vpcNetworkManager.releasePrivateIp(region, subnetId, ip));
-            }
+            releasePrivateIps(region, subnetId, assigned);
             throw e;
         }
     }
@@ -12919,9 +12922,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         InstanceConnectEndpoint endpoint = withTags(requireInstanceConnectEndpoint(region, id));
         synchronized (privateIpAllocationLock) {
             instanceConnectEndpoints.delete(key(region, id));
-            if (vpcNetworkManager != null) {
-                vpcNetworkManager.releasePrivateIp(region, endpoint.getSubnetId(), endpoint.getPrivateIpAddress());
-            }
+            releasePrivateIps(region, endpoint.getSubnetId(),
+                    Collections.singletonList(endpoint.getPrivateIpAddress()));
         }
         removeTags(region, id);
         endpoint.getNetworkInterfaceIds().forEach(eniId -> removeTags(region, eniId));
@@ -12981,27 +12983,38 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public NatGateway deleteNatGateway(String region, String natGatewayId) {
         ensureDefaultResources(region);
-        NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
-        // Hand the Elastic IP back, but only if the association is still the gateway's own. Under
-        // the lock createNatGateway takes, so a concurrent create cannot have its association wiped.
+        // Read under the lock createNatGateway and updateNatGatewaySecondaryAddresses take, so what
+        // is given back is what the gateway holds now. The Elastic IP is handed back only if the
+        // association is still the gateway's own, so a concurrent create cannot have it wiped.
         synchronized (privateIpAllocationLock) {
+            NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
+            // A CreateTags write that read the gateway before an earlier delete can store it back
+            // marked deleted. That delete gave its addresses back, and the network may have leased
+            // them to something else since. A requested address took no lease of its own. The one it
+            // can carry is either a stale lease DeleteNetworkInterface left behind, which should go,
+            // or a failed launch's, given back once its container is detached; giving that back
+            // sooner matters only if the allocator wraps around to it in between.
+            if (!"deleted".equals(natGateway.getState())) {
+                releasePrivateIps(region, natGateway.getSubnetId(), natGateway.getNatGatewayAddresses().stream()
+                        .map(NatGatewayAddress::getPrivateIp).toList());
+            }
             natGateway.setState("deleted");
             natGateway.getNatGatewayAddresses().forEach(a -> releaseNatGatewayEip(region, a));
             natGateways.delete(key(region, natGatewayId));
             removeTags(region, natGatewayId);
             natGateway.getNatGatewayAddresses().forEach(a -> removeTags(region, a.getNetworkInterfaceId()));
+            return natGateway;
         }
-        return natGateway;
     }
 
     /**
      * Sets a gateway's secondary addresses to the ones given, as AssociateNatGatewayAddress,
      * DisassociateNatGatewayAddress, AssignPrivateNatGatewayAddress and
      * UnassignPrivateNatGatewayAddress together would, keeping the gateway and its id: a secondary
-     * the request still names is kept, one it no longer names is dropped and its Elastic IP handed
-     * back, and a new one is checked as {@link #createNatGateway} checks it. Every check runs before
-     * anything changes, so a refused request leaves the gateway as it was. The arguments mean what
-     * they mean to {@link #createNatGateway}.
+     * the request still names is kept, one it no longer names is dropped and its Elastic IP and
+     * private address handed back, and a new one is checked as {@link #createNatGateway} checks it.
+     * Every check runs before anything changes, so a refused request leaves the gateway as it was.
+     * The arguments mean what they mean to {@link #createNatGateway}.
      */
     public NatGateway updateNatGatewaySecondaryAddresses(String region, String natGatewayId,
                                                          List<String> secondaryAllocationIds,
@@ -13086,6 +13099,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .filter(NatGatewayAddress::isPrimary).toList());
             addresses.addAll(List.of(result));
             addresses.forEach(a -> holdNatGatewayEip(region, a));
+            // A dropped address that a new slot names again is still the gateway's, so it keeps
+            // its lease.
+            Set<String> heldIps = addresses.stream().map(NatGatewayAddress::getPrivateIp)
+                    .collect(Collectors.toSet());
+            releasePrivateIps(region, subnetId, dropped.stream().map(NatGatewayAddress::getPrivateIp)
+                    .filter(ip -> !heldIps.contains(ip)).toList());
             natGateway.setNatGatewayAddresses(addresses);
             natGateways.put(key(region, natGatewayId), natGateway);
             return natGateway;
