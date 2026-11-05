@@ -105,9 +105,10 @@ jobs:
         with:
           python-version: "3.x"
 
-      # No dependency install: the generators are deliberately stdlib-only, and this job runs no
-      # tests. The pinned botocore the sibling workflow needs is for the partition generator.
-      #
+      # IAM role-tag coverage also depends on which operations name a role in pinned botocore.
+      - name: Install the pinned botocore
+        run: pip install -r tools/aws/requirements.txt
+
       # A pull request checks the files it changes; the weekly and manual runs check every file. A
       # diff that cannot be read leaves CHANGED empty, which checks every file too.
       - name: Check the vendored IAM files still match upstream
