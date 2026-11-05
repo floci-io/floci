@@ -53,6 +53,17 @@ public final class SqsTestQueue {
                 sqsService.getQueueAttributes(url, List.of("QueueArn"), region).get("QueueArn"));
     }
 
+    /** Sets the queue's {@code Policy} attribute. */
+    public void setPolicy(String policy) {
+        RequestScopes.runAs(account, () -> sqsService.setQueueAttributes(url, Map.of("Policy", policy), region));
+    }
+
+    /** Grants {@code action} to the root of {@code grantedAccount}, as AddPermission writes it into the policy. */
+    public void addPermission(String label, String grantedAccount, String action) {
+        RequestScopes.runAs(account, () ->
+                sqsService.addPermission(url, label, List.of(grantedAccount), List.of(action), region));
+    }
+
     /** At most one message, received without waiting. */
     public List<Message> receive() {
         return RequestScopes.callAs(account, () ->

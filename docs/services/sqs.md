@@ -212,6 +212,14 @@ The region is the one the request was signed for, and the host carries that regi
 
 Under either setting every form is accepted as input. That covers the AWS URL, the Floci URL, any other host whose path ends in `/<account>/<queue-name>`, and the bare queue name. A queue is stored by account and name, so a base URL with a path of its own, such as `http://localhost:4566/sqs`, keeps the same queues under either setting. Existing queues, persisted ones included, are reported in the form the current setting and base URL give.
 
+## Queue policies under IAM enforcement
+
+With `floci.services.iam.enforcement-enabled` on, a queue's `Policy` attribute, written by
+`SetQueueAttributes` or `AddPermission`, takes part in the decision as IAM's policy evaluation logic
+describes. Within one account either the policy or the caller's identity policies can allow a call,
+and an explicit `Deny` in either refuses it. A `QueueUrl` whose path names another account is a
+cross-account call: the queue's policy and the caller's identity policies both have to allow it.
+
 ## Storage write failures
 
 When the message backend reports a failed write, the queue retains its previously acknowledged

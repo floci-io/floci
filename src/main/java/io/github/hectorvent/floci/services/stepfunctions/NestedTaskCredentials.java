@@ -30,10 +30,7 @@ public class NestedTaskCredentials {
             throw new AslExecutor.FailStateException("States.Runtime",
                     "Task Credentials account routing is supported only for nested executions");
         }
-        if (!credentials.isObject() || credentials.size() != 1 || !credentials.path("RoleArn").isTextual()) {
-            throw new AslExecutor.FailStateException("States.Runtime",
-                    "Task Credentials must resolve to an object containing RoleArn");
-        }
+        validateShape(credentials);
         String roleArn = credentials.path("RoleArn").asText();
         AwsArnUtils.Arn role;
         try {
@@ -70,7 +67,14 @@ public class NestedTaskCredentials {
         return role.accountId();
     }
 
-    private static AslExecutor.FailStateException assumptionDenied(StateMachine machine, String roleArn) {
+    static void validateShape(JsonNode credentials) {
+        if (!credentials.isObject() || credentials.size() != 1 || !credentials.path("RoleArn").isTextual()) {
+            throw new AslExecutor.FailStateException("States.Runtime",
+                    "Task Credentials must resolve to an object containing RoleArn");
+        }
+    }
+
+    static AslExecutor.FailStateException assumptionDenied(StateMachine machine, String roleArn) {
         return new AslExecutor.FailStateException("States.TaskFailed",
                 "The role " + machine.getRoleArn() + " is not authorized to assume the task state's role, "
                         + roleArn + ".");

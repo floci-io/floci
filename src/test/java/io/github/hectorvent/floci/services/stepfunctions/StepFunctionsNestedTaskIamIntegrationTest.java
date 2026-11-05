@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.StepFunctionsTestClient;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -20,14 +21,10 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.net.URI;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
-import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
@@ -166,50 +163,23 @@ class StepFunctionsNestedTaskIamIntegrationTest {
     }
 
     private String machine(String account, String definition, String type, String role) {
-        String name = "nested-iam-" + UUID.randomUUID();
-        String arn = "arn:aws:states:us-east-1:" + account + ":stateMachine:" + name;
-        cleanup.register(() -> {
-            Response executions = request(account, "ListExecutions", Map.of("stateMachineArn", arn));
-            if (executions.statusCode() == 200) {
-                for (Map<String, String> execution : executions.jsonPath().<Map<String, String>>getList("executions")) {
-                    if ("RUNNING".equals(execution.get("status"))) {
-                        request(account, "StopExecution", Map.of("executionArn", execution.get("executionArn")))
-                                .then().statusCode(200);
-                    }
-                }
-            }
-            request(account, "DeleteStateMachine", Map.of("stateMachineArn", arn)).then().statusCode(200);
-        });
-        Response created = request(account, "CreateStateMachine", Map.of(
-                "name", name, "definition", definition, "type", type, "roleArn", role));
-        created.then().statusCode(200);
-        return created.jsonPath().getString("stateMachineArn");
+        return sfn().createMachine(account, "nested-iam-", definition, type, role);
     }
 
     private String start(String machine) {
-        Response started = request(SOURCE, "StartExecution", Map.of("stateMachineArn", machine, "input", "{}"));
-        started.then().statusCode(200);
-        return started.jsonPath().getString("executionArn");
+        return sfn().start(SOURCE, machine, "{}");
     }
 
     private Response terminal(String execution) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        do {
-            Response response = request(SOURCE, "DescribeExecution", Map.of("executionArn", execution));
-            response.then().statusCode(200);
-            if (!"RUNNING".equals(response.jsonPath().getString("status"))) {
-                return response;
-            }
-            Thread.sleep(25);
-        } while (System.nanoTime() < deadline);
-        fail("Execution did not terminate: " + execution);
-        return null;
+        return sfn().terminal(SOURCE, execution, 5);
     }
 
     private Response request(String account, String action, Map<String, ?> input) {
-        return given().port(baseUri.getPort()).header("Authorization", auth(account, "states"))
-                .header("X-Amz-Target", "AWSStepFunctions." + action)
-                .contentType("application/x-amz-json-1.0").body(MAPPER.valueToTree(input).toString()).post("/");
+        return sfn().request(account, action, input);
+    }
+
+    private StepFunctionsTestClient sfn() {
+        return new StepFunctionsTestClient(baseUri.getPort(), cleanup);
     }
 
     private record Fixture(String parent, String child, String executionRole, String taskRole) {
