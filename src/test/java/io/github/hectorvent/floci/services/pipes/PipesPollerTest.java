@@ -65,6 +65,8 @@ class PipesPollerTest {
             "arn:aws:dynamodb:us-east-1:000000000000:table/orders/stream/2026-09-01T00:00:00.000";
     private static final String SHARD_ID = "shardId-0000000001-00000000001";
     private static final String DLQ_ARN = "arn:aws:sqs:us-east-1:000000000000:pipe-dlq";
+    private static final String BUS_ARN = "arn:aws:events:us-east-1:000000000000:event-bus/orders-bus";
+    private static final String ENRICHMENT_ARN = "arn:aws:lambda:us-east-1:000000000000:function:enrich";
 
     @Mock private Vertx vertx;
     @Mock private SqsService sqsService;
@@ -233,6 +235,45 @@ class PipesPollerTest {
         assertTrue(delivered.isArray(), "Lambda target must receive the batch array shape");
         assertEquals(1, delivered.size());
         assertEquals("S1", delivered.get(0).path("systemId").asText());
+    }
+
+    @Test
+    void pollSqs_enrichmentArrayReachesAnEventBusOneElementAtATime() throws Exception {
+        Pipe pipe = enrichedSqsPipe("arn:aws:events:us-east-1:000000000000:event-bus/orders-bus");
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenReturn("[{\"n\":1},{\"n\":2},{\"n\":3}]");
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        assertEquals(List.of("{\"n\":1}", "{\"n\":2}", "{\"n\":3}"), targetPayloads(pipe));
+        verify(sqsService).deleteMessage(anyString(), eq("rh1"), eq("us-east-1"));
+    }
+
+    @Test
+    void pollSqs_enrichmentArrayReachesAQueueAndATopicOneElementAtATime() throws Exception {
+        for (String target : List.of("arn:aws:sqs:us-east-1:000000000000:tgt", "arn:aws:sns:us-east-1:000000000000:tgt")) {
+            Pipe pipe = enrichedSqsPipe(target);
+            when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                    .thenReturn("[{\"n\":1},{\"n\":2}]");
+
+            poller.pollSqs(pipe, "us-east-1");
+
+            assertEquals(List.of("{\"n\":1}", "{\"n\":2}"), targetPayloads(pipe), target);
+        }
+    }
+
+    @Test
+    void pollSqs_enrichmentArrayReachesALambdaOrAStateMachineWhole() throws Exception {
+        for (String target : List.of("arn:aws:lambda:us-east-1:000000000000:function:tgt",
+                "arn:aws:states:us-east-1:000000000000:stateMachine:tgt")) {
+            Pipe pipe = enrichedSqsPipe(target);
+            when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                    .thenReturn("[{\"n\":1},{\"n\":2}]");
+
+            poller.pollSqs(pipe, "us-east-1");
+
+            assertEquals(List.of("[{\"n\":1},{\"n\":2}]"), targetPayloads(pipe), target);
+        }
     }
 
     @Test
@@ -636,6 +677,137 @@ class PipesPollerTest {
         }
     }
 
+    @Test
+    void aStreamBatchIsEnrichedOnceWithItsFilteredRecords() throws Exception {
+        Pipe pipe = enrichedDynamoDbPipe(BUS_ARN);
+        pipe.setSourceParameters(MAPPER.readTree("""
+                {"DynamoDBStreamParameters":{"StartingPosition":"TRIM_HORIZON"},
+                 "FilterCriteria":{"Filters":[
+                   {"Pattern":"{\\"dynamodb\\":{\\"NewImage\\":{\\"status\\":{\\"S\\":[\\"active\\"]}}}}"}]}}"""));
+        streams.shard.add(ddbRecord("001", "active"));
+        streams.shard.add(ddbRecord("002", "inactive"));
+        streams.shard.add(ddbRecord("003", "active"));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1"))).thenReturn("{\"n\":1}");
+
+        poller.startPolling(pipe);
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        JsonNode events = MAPPER.readTree(enrichmentInputs(pipe).get(0));
+        assertEquals(1, enrichmentInputs(pipe).size());
+        assertTrue(events.isArray(), "the enrichment takes a bare array");
+        assertEquals(2, events.size());
+        for (JsonNode event : events) {
+            assertEquals("INSERT", event.path("eventName").asText());
+            assertEquals("order-1", event.at("/dynamodb/Keys/pk/S").asText());
+            assertEquals(STREAM_ARN, event.path("eventSourceARN").asText());
+        }
+        assertEquals("001", events.get(0).at("/dynamodb/SequenceNumber").asText());
+        assertEquals("003", events.get(1).at("/dynamodb/SequenceNumber").asText());
+        assertEquals(List.of("{\"n\":1}"), targetPayloads(pipe));
+    }
+
+    @Test
+    void anEnrichmentArrayOfThreeReachesAnEventBusAsThreeInvocations() throws Exception {
+        Pipe pipe = enrichedDynamoDbPipe(BUS_ARN);
+        streams.shard.add(ddbRecord("001", "active"));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenReturn("[{\"n\":1},{\"n\":2},{\"n\":3}]");
+
+        poller.startPolling(pipe);
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        assertEquals(List.of("{\"n\":1}", "{\"n\":2}", "{\"n\":3}"), targetPayloads(pipe));
+        assertEquals(1, enrichmentInputs(pipe).size(), "a delivered batch is committed");
+    }
+
+    @Test
+    void anEnrichmentArrayOnAStreamReachesALambdaOrAStateMachineWhole() throws Exception {
+        for (String target : List.of("arn:aws:lambda:us-east-1:000000000000:function:tgt",
+                "arn:aws:states:us-east-1:000000000000:stateMachine:tgt")) {
+            FakeStreamReader shard = new FakeStreamReader();
+            PipesPoller streamPoller = pollerOver(shard);
+            Pipe pipe = enrichedDynamoDbPipe(target);
+            shard.shard.add(ddbRecord("001", "active"));
+            when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                    .thenReturn("[{\"n\":1},{\"n\":2}]");
+
+            streamPoller.startPolling(pipe);
+            streamPoller.pollDynamoDbStreams(pipe, "us-east-1");
+
+            assertEquals(List.of("[{\"n\":1},{\"n\":2}]"), targetPayloads(pipe), target);
+        }
+    }
+
+    @Test
+    void anEmptyEnrichmentAnswerInvokesNoTargetAndCommitsTheBatch() throws Exception {
+        Pipe pipe = enrichedDynamoDbPipe(BUS_ARN);
+        streams.shard.add(ddbRecord("001", "active"));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1"))).thenReturn(null);
+
+        poller.startPolling(pipe);
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        verify(targetInvoker, never()).invoke(any(), anyString(), anyString());
+        assertEquals(1, enrichmentInputs(pipe).size(), "the stream's position moved past the batch");
+    }
+
+    @Test
+    void anEnrichmentFunctionErrorWithNoDeadLetterQueueRereadsTheBatch() throws Exception {
+        Pipe pipe = enrichedDynamoDbPipe(BUS_ARN);
+        streams.shard.add(ddbRecord("001", "active"));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenThrow(new RuntimeException("function error"))
+                .thenReturn(null);
+
+        poller.startPolling(pipe);
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+        verify(targetInvoker, never()).invoke(any(), anyString(), anyString());
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        List<String> inputs = enrichmentInputs(pipe);
+        assertEquals(2, inputs.size(), "read once more after the error, then committed");
+        assertEquals(inputs.get(0), inputs.get(1));
+    }
+
+    @Test
+    void anEnrichmentFunctionErrorSendsTheBatchToTheDeadLetterQueueAndCommits() throws Exception {
+        Pipe pipe = enrichedDynamoDbPipe(BUS_ARN);
+        pipe.setSourceParameters(MAPPER.readTree(
+                "{\"DynamoDBStreamParameters\":{\"DeadLetterConfig\":{\"Arn\":\"" + DLQ_ARN + "\"}}}"));
+        streams.shard.add(ddbRecord("001", "active"));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenThrow(new RuntimeException("function error"));
+
+        poller.startPolling(pipe);
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        List<String> inputs = enrichmentInputs(pipe);
+        assertEquals(1, inputs.size(), "a batch the queue took is committed");
+        verify(sqsService).sendMessage(contains("pipe-dlq"), eq(inputs.get(0)), eq(0), eq("us-east-1"));
+        verify(targetInvoker, never()).invoke(any(), anyString(), anyString());
+    }
+
+    @Test
+    void aFailedElementFailsTheBatchAndItsRetryRunsThroughTheEnrichmentAgain() throws Exception {
+        Pipe pipe = enrichedDynamoDbPipe(BUS_ARN);
+        streams.shard.add(ddbRecord("001", "active"));
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenReturn("[{\"n\":1},{\"n\":2}]");
+        doNothing().doThrow(new RuntimeException("target down")).doNothing()
+                .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
+
+        poller.startPolling(pipe);
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        assertEquals(2, enrichmentInputs(pipe).size());
+        assertEquals(List.of("{\"n\":1}", "{\"n\":2}", "{\"n\":1}", "{\"n\":2}"), targetPayloads(pipe));
+    }
+
     private Pipe dynamoDbPipe(String dynamoDbStreamParameters) throws Exception {
         Pipe pipe = new Pipe();
         pipe.setName("orders-stream-pipe");
@@ -662,6 +834,42 @@ class PipesPollerTest {
                 null, null, null, "us-east-1");
     }
 
+    private Pipe enrichedDynamoDbPipe(String target) throws Exception {
+        Pipe pipe = dynamoDbPipe("{\"StartingPosition\":\"TRIM_HORIZON\"}");
+        pipe.setEnrichment(ENRICHMENT_ARN);
+        pipe.setTarget(target);
+        return pipe;
+    }
+
+    private Pipe enrichedSqsPipe(String target) {
+        Pipe pipe = new Pipe();
+        pipe.setName("enrich-sqs");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setEnrichment(ENRICHMENT_ARN);
+        pipe.setTarget(target);
+
+        Message msg = new Message("{\"orderId\":\"o1\"}");
+        msg.setMessageId("m1");
+        msg.setReceiptHandle("rh1");
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(msg));
+        return pipe;
+    }
+
+    /** What the enrichment was invoked with, in invocation order. */
+    private List<String> enrichmentInputs(Pipe pipe) {
+        ArgumentCaptor<String> inputs = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker, atLeastOnce()).applyEnrichment(eq(pipe), inputs.capture(), eq("us-east-1"));
+        return inputs.getAllValues();
+    }
+
+    /** What the target was invoked with, in invocation order. */
+    private List<String> targetPayloads(Pipe pipe) {
+        ArgumentCaptor<String> payloads = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker, atLeastOnce()).invoke(eq(pipe), payloads.capture(), eq("us-east-1"));
+        return payloads.getAllValues();
+    }
+
     /** A GetRecords {@code Records[]} element as the native engine returns it. */
     private static DynamoDbStreamReader.Record ddbRecord(String sequenceNumber, String status) {
         ObjectNode awsRecord = MAPPER.createObjectNode()
@@ -671,6 +879,7 @@ class PipesPollerTest {
                 .put("eventSource", "aws:dynamodb")
                 .put("awsRegion", "us-east-1");
         ObjectNode dynamodb = awsRecord.putObject("dynamodb");
+        dynamodb.putObject("Keys").putObject("pk").put("S", "order-1");
         dynamodb.putObject("NewImage").putObject("status").put("S", status);
         dynamodb.put("SequenceNumber", sequenceNumber).put("SizeBytes", 50).put("StreamViewType", "NEW_IMAGE");
         return new DynamoDbStreamReader.Record(sequenceNumber, awsRecord);
