@@ -2268,6 +2268,18 @@ public class SqsService implements Resettable, ResourceProvider {
                 path.substring(path.lastIndexOf('/') + 1)).toString();
     }
 
+    /**
+     * The {@code Policy} attribute of the queue {@code queueArn} names, read from its account and
+     * Region whichever account the caller is in. Empty when the queue does not exist or has no policy.
+     */
+    public Optional<String> findQueuePolicy(String queueArn) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(queueArn);
+        String queueUrl = "sqs://queue/" + arn.accountId() + "/" + arn.resource();
+        return getQueueByUrl(regionKey(arn.region(), queueUrl), queueUrl)
+                .map(queue -> queue.getAttributes().get("Policy"))
+                .filter(policy -> !policy.isBlank());
+    }
+
     private String regionKey(String region, String queueUrl) {
         return region + "::" + extractQueuePath(normalizeQueueUrl(queueUrl));
     }

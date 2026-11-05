@@ -586,11 +586,12 @@ each attempt in turn, so `Retry` and `Catch` see a refusal like any other task f
    machine's Region. A request with no `QueueUrl` gets SQS's own error once the role has passed.
 
 The error names `States.Permissions` and `<prefix>.AccessDeniedException` are Floci's reading: they
-have not been verified against AWS. Only global condition keys are available to the policies, and
-queue policies do not take part, as they do not for a direct SQS request under enforcement. A role
-in another account, named by `Credentials`, is authorized as that role but the task still runs in the
-state machine's account. Nested executions are the only tasks that run in the role's account. With
-enforcement off nothing here is evaluated.
+have not been verified against AWS. Only global condition keys are available to the policies. The
+queue's own policy (`SetQueueAttributes` or `AddPermission`) takes part as it does for a direct SQS
+request: within one account it or the role's policies can allow the send, and across accounts both
+have to. A role in another account, named by `Credentials`, is authorized as that role but the task
+still runs in the state machine's account. Nested executions are the only tasks that run in the
+role's account. With enforcement off nothing here is evaluated.
 
 Integrations other than these, Lambda, API Gateway and nested executions are not evaluated yet: they
 run in the state machine's account whatever the execution role's policies say.

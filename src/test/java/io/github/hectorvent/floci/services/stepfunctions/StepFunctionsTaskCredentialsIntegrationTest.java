@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SqsTestQueue;
+import io.github.hectorvent.floci.testing.StepFunctionsTestClient;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -32,7 +33,6 @@ import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -252,15 +252,7 @@ class StepFunctionsTaskCredentialsIntegrationTest {
     }
 
     private JsonNode taskScheduled(String execution) throws Exception {
-        Response history = request(SOURCE, "GetExecutionHistory", Map.of("executionArn", execution));
-        history.then().statusCode(200);
-        for (JsonNode event : MAPPER.readTree(history.asString()).path("events")) {
-            if ("TaskScheduled".equals(event.path("type").asText())) {
-                return event.path("taskScheduledEventDetails");
-            }
-        }
-        fail("No TaskScheduled event in " + history.asString());
-        return null;
+        return sfn().eventsOfType(SOURCE, execution, "TaskScheduled").getFirst().path("taskScheduledEventDetails");
     }
 
     @Test
@@ -342,50 +334,23 @@ class StepFunctionsTaskCredentialsIntegrationTest {
     }
 
     private String machine(String account, String definition, String type) throws Exception {
-        String name = "credentials-" + UUID.randomUUID();
-        String arn = "arn:aws:states:us-east-1:" + account + ":stateMachine:" + name;
-        cleanup.register(() -> removeMachine(account, arn));
-        Response response = request(account, "CreateStateMachine", Map.of(
-                "name", name, "definition", definition,
-                "type", type, "roleArn", "arn:aws:iam::" + account + ":role/execution"));
-        response.then().statusCode(200);
-        return response.jsonPath().getString("stateMachineArn");
-    }
-
-    private void removeMachine(String account, String arn) {
-        Response executions = request(account, "ListExecutions", Map.of("stateMachineArn", arn));
-        executions.then().statusCode(200);
-        for (Map<String, String> execution : executions.jsonPath().<Map<String, String>>getList("executions")) {
-            if ("RUNNING".equals(execution.get("status"))) {
-                request(account, "StopExecution", Map.of("executionArn", execution.get("executionArn")))
-                        .then().statusCode(200);
-            }
-        }
-        request(account, "DeleteStateMachine", Map.of("stateMachineArn", arn)).then().statusCode(200);
+        return sfn().createMachine(account, "credentials-", definition, type,
+                "arn:aws:iam::" + account + ":role/execution");
     }
 
     private String start(String machine, String input) throws Exception {
-        Response response = request(SOURCE, "StartExecution", Map.of("stateMachineArn", machine, "input", input));
-        response.then().statusCode(200);
-        return response.jsonPath().getString("executionArn");
+        return sfn().start(SOURCE, machine, input);
     }
 
     private Response terminal(String account, String execution) throws Exception {
-        for (int i = 0; i < 100; i++) {
-            Response response = request(account, "DescribeExecution", Map.of("executionArn", execution));
-            response.then().statusCode(200);
-            if (!"RUNNING".equals(response.jsonPath().getString("status"))) {
-                return response;
-            }
-            Thread.sleep(50);
-        }
-        fail("Execution did not terminate: " + execution);
-        return null;
+        return sfn().terminal(account, execution, 5);
     }
 
     private Response request(String account, String action, Map<String, ?> input) {
-        return given().port(baseUri.getPort()).header("Authorization", auth(account, "states"))
-                .header("X-Amz-Target", "AWSStepFunctions." + action)
-                .contentType("application/x-amz-json-1.0").body(MAPPER.valueToTree(input).toString()).post("/");
+        return sfn().request(account, action, input);
+    }
+
+    private StepFunctionsTestClient sfn() {
+        return new StepFunctionsTestClient(baseUri.getPort(), cleanup);
     }
 }

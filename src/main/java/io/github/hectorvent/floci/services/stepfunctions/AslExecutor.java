@@ -1105,10 +1105,10 @@ public class AslExecutor {
     }
 
     /** A task's {@code Credentials} when only the history reads them, so a failure is not the task's. */
-    private JsonNode credentialsOrNull(String stateName, Callable<JsonNode> resolve) {
+    private JsonNode credentialsOrNull(String stateName, Callable<JsonNode> resolve) throws Exception {
         try {
             return resolve.call();
-        } catch (Exception e) {
+        } catch (FailStateException e) {
             LOG.debugv("Task state {0}: Credentials did not resolve, so its history omits them: {1}",
                     stateName, e.getMessage());
             return null;

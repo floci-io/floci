@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SqsTestQueue;
+import io.github.hectorvent.floci.testing.StepFunctionsTestClient;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -22,7 +23,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -184,19 +184,80 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     }
 
     @Test
-    void aForeignCredentialsRoleIsAuthorizedAsThatRole() throws Exception {
+    void aForeignCredentialsRoleNeedsTheQueueToGrantIt() throws Exception {
         SqsTestQueue queue = queue();
         String executionRole = role(STATES_TRUST, ASSUME);
         String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
                 "sfn-sqs-" + UUID.randomUUID(), trusting(executionRole), SEND);
         String machine = machine(jsonPathTask("sqs:sendMessage", queue, foreignRole), executionRole);
 
+        Response refused = terminal(start(machine, "{}"));
+
+        assertFailed(refused, "SQS.AccessDeniedException");
+        String cause = refused.jsonPath().getString("cause");
+        assertTrue(cause.contains("arn:aws:sts::" + OTHER_ACCOUNT + ":assumed-role/"), cause);
+        assertEquals(0, queue.receive().size());
+
+        queue.setPolicy(queuePolicy("Allow", foreignRole, queue.arn()));
         Response completed = terminal(start(machine, "{}"));
 
-        // No queue policy reaches IAM, so a role of another account has only its half of the grant.
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        assertEquals("hello", queue.receive().getFirst().getBody());
+    }
+
+    @Test
+    void aQueueInAnotherAccountNeedsItsOwnGrant() throws Exception {
+        SqsTestQueue queue = SqsTestQueue.create(sqsService, OTHER_ACCOUNT, REGION, "sfn-sqs-iam-");
+        cleanup.register(queue::delete);
+        String role = role(STATES_TRUST, SEND);
+        String machine = machine(jsonPathTask("sqs:sendMessage", queue, null), role);
+
+        Response refused = terminal(start(machine, "{}"));
+
+        assertFailed(refused, "SQS.AccessDeniedException");
+        assertEquals(0, queue.receive().size());
+
+        queue.addPermission("from-" + ACCOUNT, ACCOUNT, "SendMessage");
+        Response completed = terminal(start(machine, "{}"));
+
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        assertEquals("hello", queue.receive().getFirst().getBody());
+    }
+
+    @Test
+    void aQueueInAnotherAccountCannotGrantWhatTheRoleLacks() throws Exception {
+        SqsTestQueue queue = SqsTestQueue.create(sqsService, OTHER_ACCOUNT, REGION, "sfn-sqs-iam-");
+        cleanup.register(queue::delete);
+        String role = role(STATES_TRUST, READ_ONLY);
+        queue.setPolicy(queuePolicy("Allow", role, queue.arn()));
+
+        Response completed = terminal(start(machine(jsonPathTask("sqs:sendMessage", queue, null), role), "{}"));
+
         assertFailed(completed, "SQS.AccessDeniedException");
-        String cause = completed.jsonPath().getString("cause");
-        assertTrue(cause.contains("arn:aws:sts::" + OTHER_ACCOUNT + ":assumed-role/"), cause);
+        assertEquals(0, queue.receive().size());
+    }
+
+    @Test
+    void aQueuePolicyAloneAllowsARoleOfItsOwnAccount() throws Exception {
+        SqsTestQueue queue = queue();
+        String role = role(STATES_TRUST, READ_ONLY);
+        queue.setPolicy(queuePolicy("Allow", role, queue.arn()));
+
+        Response completed = terminal(start(machine(jsonPathTask("sqs:sendMessage", queue, null), role), "{}"));
+
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        assertEquals("hello", queue.receive().getFirst().getBody());
+    }
+
+    @Test
+    void aQueuePolicyDenyRefusesARoleAllowedTheAction() throws Exception {
+        SqsTestQueue queue = queue();
+        String role = role(STATES_TRUST, SEND);
+        queue.setPolicy(queuePolicy("Deny", role, queue.arn()));
+
+        Response completed = terminal(start(machine(jsonPathTask("sqs:sendMessage", queue, null), role), "{}"));
+
+        assertFailed(completed, "SQS.AccessDeniedException");
         assertEquals(0, queue.receive().size());
     }
 
@@ -306,6 +367,13 @@ class StepFunctionsSqsTaskIamIntegrationTest {
                 """.formatted(role);
     }
 
+    private static String queuePolicy(String effect, String principal, String queueArn) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"%s","Principal":{"AWS":"%s"},
+                 "Action":"sqs:SendMessage","Resource":"%s"}]}
+                """.formatted(effect, principal, queueArn);
+    }
+
     private static void assertFailed(Response completed, String error) {
         assertEquals("FAILED", completed.jsonPath().getString("status"), completed.asString());
         assertEquals(error, completed.jsonPath().getString("error"), completed.asString());
@@ -353,30 +421,11 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     }
 
     private String machineWithDefinition(String definition, String role) {
-        String name = "sfn-sqs-iam-" + UUID.randomUUID();
-        String arn = "arn:aws:states:" + REGION + ":" + ACCOUNT + ":stateMachine:" + name;
-        cleanup.register(() -> {
-            Response executions = request("ListExecutions", Map.of("stateMachineArn", arn));
-            if (executions.statusCode() == 200) {
-                for (Map<String, String> execution : executions.jsonPath().<Map<String, String>>getList("executions")) {
-                    if ("RUNNING".equals(execution.get("status"))) {
-                        request("StopExecution", Map.of("executionArn", execution.get("executionArn")))
-                                .then().statusCode(200);
-                    }
-                }
-            }
-            request("DeleteStateMachine", Map.of("stateMachineArn", arn)).then().statusCode(200);
-        });
-        Response created = request("CreateStateMachine", Map.of(
-                "name", name, "definition", definition, "type", "STANDARD", "roleArn", role));
-        created.then().statusCode(200);
-        return created.jsonPath().getString("stateMachineArn");
+        return sfn().createMachine(ACCOUNT, "sfn-sqs-iam-", definition, "STANDARD", role);
     }
 
     private String start(String machine, String input) {
-        Response started = request("StartExecution", Map.of("stateMachineArn", machine, "input", input));
-        started.then().statusCode(200);
-        return started.jsonPath().getString("executionArn");
+        return sfn().start(ACCOUNT, machine, input);
     }
 
     private Response terminal(String execution) throws Exception {
@@ -384,17 +433,7 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     }
 
     private Response terminal(String execution, int seconds) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
-        do {
-            Response response = request("DescribeExecution", Map.of("executionArn", execution));
-            response.then().statusCode(200);
-            if (!"RUNNING".equals(response.jsonPath().getString("status"))) {
-                return response;
-            }
-            Thread.sleep(25);
-        } while (System.nanoTime() < deadline);
-        fail("Execution did not terminate: " + execution);
-        return null;
+        return sfn().terminal(ACCOUNT, execution, seconds);
     }
 
     private void await(String execution, String eventType) throws Exception {
@@ -409,20 +448,14 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     }
 
     private List<JsonNode> eventsOfType(String execution, String type) throws Exception {
-        Response history = request("GetExecutionHistory", Map.of("executionArn", execution));
-        history.then().statusCode(200);
-        List<JsonNode> events = new ArrayList<>();
-        for (JsonNode event : MAPPER.readTree(history.asString()).path("events")) {
-            if (type.equals(event.path("type").asText())) {
-                events.add(event);
-            }
-        }
-        return events;
+        return sfn().eventsOfType(ACCOUNT, execution, type);
     }
 
     private Response request(String action, Map<String, ?> input) {
-        return given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "states"))
-                .header("X-Amz-Target", "AWSStepFunctions." + action)
-                .contentType("application/x-amz-json-1.0").body(MAPPER.valueToTree(input).toString()).post("/");
+        return sfn().request(ACCOUNT, action, input);
+    }
+
+    private StepFunctionsTestClient sfn() {
+        return new StepFunctionsTestClient(baseUri.getPort(), cleanup);
     }
 }
