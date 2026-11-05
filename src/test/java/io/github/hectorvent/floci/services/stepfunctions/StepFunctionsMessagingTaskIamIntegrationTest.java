@@ -486,6 +486,24 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     }
 
     @Test
+    void anEntryEventBridgeWouldRejectStillNeedsItsBus() throws Exception {
+        Target allowedBus = target("events:putEvents");
+        Target deniedBus = target("events:putEvents");
+        Map<String, Object> rejected = entry(busName(deniedBus.resourceArn()), deniedBus.source());
+        rejected.remove("Source");
+        Map<String, Object> task = Map.of("Type", "Task", "Resource", "arn:aws:states:::events:putEvents",
+                "Parameters", Map.of("Entries", List.of(entry(busName(allowedBus.resourceArn()), allowedBus.source()),
+                        rejected)), "End", true);
+        String role = role(STATES_TRUST, allow(allowedBus.resourceArn(), "events:PutEvents"));
+
+        Response completed = terminal(start(machine(task, role), "{}"));
+
+        assertFailed(completed, "EventBridge.AccessDeniedException");
+        assertTrue(completed.jsonPath().getString("cause").contains(deniedBus.resourceArn()), completed.asString());
+        assertEquals(0, allowedBus.sink().receive().size());
+    }
+
+    @Test
     void entriesForSeveralBusesEachNeedAndGetTheirPermission() throws Exception {
         Target first = target("events:putEvents");
         Target second = target("events:putEvents");

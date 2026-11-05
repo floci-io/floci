@@ -603,7 +603,10 @@ The resource is the one Floci's lookup reaches, which is what the task then acts
   `PutEvents` reaches from a task: a bus ARN naming another account or Region is evaluated, and sent
   to, as the bus of that name in the state machine's. A direct `PutEvents` request under enforcement
   evaluates the ARN as given. All the buses are evaluated before any entry is sent, so one refused
-  bus sends nothing.
+  bus sends nothing. An entry EventBridge would reject, such as one without `Source`, still counts,
+  as for a direct `PutEvents`. The EventBridge User Guide states the check on every entry, and the
+  refusal of the whole request, for the Custom Event Bus. It does not describe Classic buses, and
+  Floci applies the same reading to them.
 
 A request that names no resource has only the role checks in the list above, and its service then
 answers it with its own error: no `QueueUrl`, a `TopicArn` or `TargetArn` that is not an SNS ARN or
