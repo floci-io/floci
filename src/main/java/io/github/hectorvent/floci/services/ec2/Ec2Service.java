@@ -133,6 +133,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -2226,12 +2227,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /** Synthesizes a locally-administered unicast MAC (AWS never discloses how it derives its own). */
     private String randomMac() {
-        Random rand = new Random();
-        StringBuilder sb = new StringBuilder("02");
-        for (int i = 0; i < 5; i++) {
-            sb.append(':').append(String.format("%02x", rand.nextInt(256)));
-        }
-        return sb.toString();
+        byte[] bytes = new byte[5];
+        new Random().nextBytes(bytes);
+        return "02:" + HexFormat.ofDelimiter(":").formatHex(bytes);
     }
 
     // ─── Transit Gateways ──────────────────────────────────────────────────────

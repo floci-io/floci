@@ -872,12 +872,12 @@ public class PostgresProtocolHandler {
         MessageDigest md5 = Digests.md5Digest();
         md5.update(password.getBytes(StandardCharsets.UTF_8));
         md5.update(username.getBytes(StandardCharsets.UTF_8));
-        String hex1 = bytesToHex(md5.digest());
+        String hex1 = HexFormat.of().formatHex(md5.digest());
 
         md5.reset();
         md5.update(hex1.getBytes(StandardCharsets.UTF_8));
         md5.update(salt);
-        return "md5" + bytesToHex(md5.digest());
+        return "md5" + HexFormat.of().formatHex(md5.digest());
     }
 
     // ── Post-auth buffering ───────────────────────────────────────────────────
@@ -1684,14 +1684,6 @@ public class PostgresProtocolHandler {
     }
 
     // ── Wire helpers ──────────────────────────────────────────────────────────
-
-    private static String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
-    }
 
     static void closeQuietly(Socket s) {
         try { s.close(); } catch (IOException ignored) {}
