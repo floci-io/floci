@@ -295,7 +295,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                         "lambda", fn.getFunctionName(), lambdaAccountId, lambdaRegion));
         List<String> configuredExtraHosts = config.services().lambda().extraHosts().orElse(List.of());
         boolean hasExplicitHostAlias = Stream.concat(dockerFlags.extraHosts().stream(), configuredExtraHosts.stream())
-                .anyMatch(ContainerLauncher::isHostDockerInternalEntry);
+                .anyMatch(ContainerBuilder::isHostDockerInternalEntry);
         if (dockerHostResolver.isLinuxHost() && !hasExplicitHostAlias) {
             specBuilder.withHostDockerInternalOnLinux();
         }
@@ -565,12 +565,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
         return platform.map(value -> lifecycleManager.create(spec, value))
                 .orElseGet(() -> lifecycleManager.create(spec));
-    }
-
-    private static boolean isHostDockerInternalEntry(String entry) {
-        int separator = entry.indexOf(':');
-        return separator > 0 && separator < entry.length() - 1
-                && "host.docker.internal".equalsIgnoreCase(entry.substring(0, separator));
     }
 
     private LambdaDockerFlags configuredDockerFlags() {

@@ -63,6 +63,28 @@ class ContainerBuilderTest {
         verify(fixture.dockerClient, never()).versionCmd();
     }
 
+    @Test
+    void withHostDockerInternalOnLinux_emptyExplicitAliasDoesNotSuppressGateway() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion(fixture, "Docker Engine - Community", List.of());
+
+        ContainerSpec before = fixture.builder.newContainer("alpine")
+                .withExtraHost("host.docker.internal", "")
+                .withHostDockerInternalOnLinux()
+                .build();
+        ContainerSpec after = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .withExtraHost("host.docker.internal", "")
+                .build();
+
+        assertFalse(ContainerBuilder.isHostDockerInternalEntry("host.docker.internal:"));
+        assertTrue(ContainerBuilder.isHostDockerInternalEntry("HOST.DOCKER.INTERNAL:192.0.2.10"));
+        assertTrue(before.extraHosts().contains("host.docker.internal:host-gateway"));
+        assertTrue(after.extraHosts().contains("host.docker.internal:host-gateway"));
+        verify(fixture.dockerClient, times(1)).versionCmd();
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"Docker Engine - Community", "Moby Engine"})
     void withHostDockerInternalOnLinux_addsAliasOnceForDockerDaemon(String engineName) {

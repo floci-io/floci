@@ -39,6 +39,8 @@ import java.util.Optional;
 @ApplicationScoped
 public class ContainerBuilder {
 
+    private static final String HOST_DOCKER_INTERNAL = "host.docker.internal";
+
     private final EmulatorConfig config;
     private final DockerHostResolver dockerHostResolver;
     private final EmbeddedDnsServer embeddedDnsServer;
@@ -132,6 +134,13 @@ public class ContainerBuilder {
                 });
     }
 
+    /** Returns whether an extra-host entry explicitly maps host.docker.internal to an address. */
+    public static boolean isHostDockerInternalEntry(String entry) {
+        int separator = entry.indexOf(':');
+        return separator > 0 && separator < entry.length() - 1
+                && HOST_DOCKER_INTERNAL.equalsIgnoreCase(entry.substring(0, separator));
+    }
+
     /**
      * Fluent builder for constructing ContainerSpec instances.
      */
@@ -146,7 +155,6 @@ public class ContainerBuilder {
          * Docker's own NVIDIA path uses the count/id form instead.
          */
         private static final String CDI_DRIVER = "cdi";
-        private static final String HOST_DOCKER_INTERNAL = "host.docker.internal";
         private static final String HOST_DOCKER_INTERNAL_GATEWAY = HOST_DOCKER_INTERNAL + ":host-gateway";
 
         private final String image;
@@ -463,7 +471,7 @@ public class ContainerBuilder {
          */
         public Builder withHostDockerInternalOnLinux() {
             if (dockerHostResolver.isLinuxHost()
-                    && extraHosts.stream().noneMatch(Builder::isHostDockerInternalEntry)
+                    && extraHosts.stream().noneMatch(ContainerBuilder::isHostDockerInternalEntry)
                     && (containerEngineDetector == null || !containerEngineDetector.isPodmanDaemon())) {
                 this.extraHosts.add(HOST_DOCKER_INTERNAL_GATEWAY);
                 this.automaticHostGatewayAdded = true;
@@ -475,17 +483,13 @@ public class ContainerBuilder {
          * Adds a custom extra host entry.
          */
         public Builder withExtraHost(String hostname, String ip) {
-            if (HOST_DOCKER_INTERNAL.equalsIgnoreCase(hostname) && automaticHostGatewayAdded) {
+            String entry = hostname + ":" + ip;
+            if (automaticHostGatewayAdded && isHostDockerInternalEntry(entry)) {
                 this.extraHosts.remove(HOST_DOCKER_INTERNAL_GATEWAY);
                 this.automaticHostGatewayAdded = false;
             }
-            this.extraHosts.add(hostname + ":" + ip);
+            this.extraHosts.add(entry);
             return this;
-        }
-
-        private static boolean isHostDockerInternalEntry(String entry) {
-            int separator = entry.indexOf(':');
-            return separator > 0 && HOST_DOCKER_INTERNAL.equalsIgnoreCase(entry.substring(0, separator));
         }
 
         /**

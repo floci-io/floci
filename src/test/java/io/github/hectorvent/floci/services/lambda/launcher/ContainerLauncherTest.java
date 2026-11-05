@@ -725,6 +725,18 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_ignoresEmptyHostAliasFromExtraHosts() {
+        when(config.services().lambda().extraHosts()).thenReturn(Optional.of(List.of("host.docker.internal:")));
+        when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion("Docker Engine - Community", List.of());
+
+        launcher.launch(imageFunction());
+
+        assertEquals(List.of("host.docker.internal:host-gateway"), captureRealContainerSpec().extraHosts());
+        verify(dockerClient, times(1)).versionCmd();
+    }
+
+    @Test
     void launchFunction_keepsHostAliasWhenDaemonMetadataIsUnknown() {
         VersionCmd versionCmd = mock(VersionCmd.class);
         when(dockerClient.versionCmd()).thenReturn(versionCmd);
