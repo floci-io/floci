@@ -7,12 +7,14 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.AcmCertificateReferenceProvider.CertificateReference;
@@ -80,6 +82,12 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
     private Map<String, Map<String, Listener>> listeners = new ConcurrentHashMap<>();
     private Map<String, Map<String, Rule>> rules = new ConcurrentHashMap<>();
 
+    // The stores behind the maps above, which only see the current account; null without a StorageFactory
+    private AccountAwareStorageBackend<Map<String, LoadBalancer>> loadBalancerStore;
+    private AccountAwareStorageBackend<Map<String, TargetGroup>> targetGroupStore;
+    private AccountAwareStorageBackend<Map<String, Listener>> listenerStore;
+    private AccountAwareStorageBackend<Map<String, Rule>> ruleStore;
+
     // indexes
     private final Map<String, List<String>> lbToListeners   = new ConcurrentHashMap<>(); // LB-ARN → listener ARNs
     private final Map<String, List<String>> listenerToRules  = new ConcurrentHashMap<>(); // Listener-ARN → rule ARNs
@@ -94,14 +102,18 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         if (storageFactory == null) {
             return;
         }
-        this.loadBalancers = storageBacked("elbv2-load-balancers.json",
+        this.loadBalancerStore = storageFactory.create("elbv2", "elbv2-load-balancers.json",
                 new TypeReference<Map<String, Map<String, LoadBalancer>>>() {});
-        this.targetGroups = storageBacked("elbv2-target-groups.json",
+        this.targetGroupStore = storageFactory.create("elbv2", "elbv2-target-groups.json",
                 new TypeReference<Map<String, Map<String, TargetGroup>>>() {});
-        this.listeners = storageBacked("elbv2-listeners.json",
+        this.listenerStore = storageFactory.create("elbv2", "elbv2-listeners.json",
                 new TypeReference<Map<String, Map<String, Listener>>>() {});
-        this.rules = storageBacked("elbv2-rules.json",
+        this.ruleStore = storageFactory.create("elbv2", "elbv2-rules.json",
                 new TypeReference<Map<String, Map<String, Rule>>>() {});
+        this.loadBalancers = new StorageBackedMap<>(loadBalancerStore);
+        this.targetGroups = new StorageBackedMap<>(targetGroupStore);
+        this.listeners = new StorageBackedMap<>(listenerStore);
+        this.rules = new StorageBackedMap<>(ruleStore);
         this.tags = storageBacked("elbv2-tags.json",
                 new TypeReference<Map<String, Map<String, String>>>() {});
         normalizeRegionMaps(loadBalancers);
@@ -157,32 +169,54 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         listenerToRules.clear();
         tgToLbs.clear();
 
-        for (Map<String, Listener> regionListeners : listeners.values()) {
+        for (Map<String, Listener> regionListeners : allAccounts(listeners, listenerStore)) {
             for (Listener listener : regionListeners.values()) {
                 lbToListeners.computeIfAbsent(listener.getLoadBalancerArn(), k -> new CopyOnWriteArrayList<>())
                         .add(listener.getListenerArn());
             }
         }
-        for (Map<String, Rule> regionRules : rules.values()) {
+        for (Map<String, Rule> regionRules : allAccounts(rules, ruleStore)) {
             for (Rule rule : regionRules.values()) {
                 listenerToRules.computeIfAbsent(rule.getListenerArn(), k -> new CopyOnWriteArrayList<>())
                         .add(rule.getRuleArn());
             }
         }
-        for (Map.Entry<String, Map<String, TargetGroup>> regionEntry : targetGroups.entrySet()) {
-            for (TargetGroup targetGroup : regionEntry.getValue().values()) {
+        for (Map<String, TargetGroup> regionTargetGroups : allAccounts(targetGroups, targetGroupStore)) {
+            for (TargetGroup targetGroup : regionTargetGroups.values()) {
                 tgToLbs.computeIfAbsent(targetGroup.getTargetGroupArn(), k -> ConcurrentHashMap.newKeySet())
                         .addAll(targetGroup.getLoadBalancerArns());
             }
         }
     }
 
+    /** Every account's region maps; the indexes are keyed by ARN, which already names the account. */
+    private static <V> Collection<Map<String, V>> allAccounts(Map<String, Map<String, V>> resources,
+                                                              AccountAwareStorageBackend<Map<String, V>> store) {
+        return store == null ? resources.values() : store.scanAllAccounts();
+    }
+
     /**
      * Brings the data plane and health checks back up for state restored from disk. Invoked from
      * {@code EmulatorLifecycle} once the bean is fully constructed, alongside the other services that
-     * restore persisted runtime after {@code storageFactory.loadAll()}.
+     * restore persisted runtime after {@code storageFactory.loadAll()}. Startup has no request, so each
+     * account that stored anything is restored as itself rather than as the default account.
      */
     public void restorePersistedRuntime()
+    {
+        if (loadBalancerStore == null) {
+            restoreAccountRuntime();
+            return;
+        }
+        Set<String> accountIds = new TreeSet<>();
+        for (AccountAwareStorageBackend<?> store : List.of(loadBalancerStore, targetGroupStore, listenerStore, ruleStore)) {
+            store.scanAllAccountEntries(key -> true).forEach(entry -> accountIds.add(entry.accountId()));
+        }
+        for (String accountId : accountIds) {
+            RequestScopes.runAs(accountId, this::restoreAccountRuntime);
+        }
+    }
+
+    private void restoreAccountRuntime()
     {
         refreshCanonicalHostedZones();
         if (healthChecker != null) {
