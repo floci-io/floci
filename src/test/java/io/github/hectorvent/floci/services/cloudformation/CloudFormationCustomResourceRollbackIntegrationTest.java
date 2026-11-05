@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.physicalIdUnauthenticated;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -57,7 +58,7 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
         String stackName = "cr-rollback-" + Long.toString(System.nanoTime(), 36);
         String stackId = createStack(stackName, template("1", false));
         awaitStackStatus(stackId, "CREATE_COMPLETE");
-        String physicalId = probePhysicalId(stackName);
+        String physicalId = physicalIdUnauthenticated(stackName, "Probe");
 
         updateStack(stackName, template("2", true));
         awaitStackStatus(stackId, "UPDATE_ROLLBACK_COMPLETE");
@@ -67,7 +68,7 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
         assertProperties(probe.events().get(1), "2", "1");
         assertProperties(probe.events().get(2), "1", "2");
         assertEquals(physicalId, probe.events().get(2).get("PhysicalResourceId").asText());
-        assertEquals(physicalId, probePhysicalId(stackName));
+        assertEquals(physicalId, physicalIdUnauthenticated(stackName, "Probe"));
         assertFalse(describeStackEvents(stackId).contains("Rollback is not implemented"));
     }
 
@@ -98,7 +99,7 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
         String stackName = "cr-own-update-failed-" + Long.toString(System.nanoTime(), 36);
         String stackId = createStack(stackName, template("1", false));
         awaitStackStatus(stackId, "CREATE_COMPLETE");
-        String physicalId = probePhysicalId(stackName);
+        String physicalId = physicalIdUnauthenticated(stackName, "Probe");
 
         updateStack(stackName, template("3", false));
         awaitStackStatus(stackId, "UPDATE_ROLLBACK_COMPLETE");
@@ -108,7 +109,7 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
         assertProperties(probe.events().get(1), "3", "1");
         assertProperties(probe.events().get(2), "1", "3");
         assertEquals(physicalId, probe.events().get(2).get("PhysicalResourceId").asText());
-        assertEquals(physicalId, probePhysicalId(stackName));
+        assertEquals(physicalId, physicalIdUnauthenticated(stackName, "Probe"));
         List<String> probeStatuses = XmlParser.extractGroups(describeStackEvents(stackId), "member")
                 .reversed()
                 .stream()
@@ -125,7 +126,7 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
         String stackName = "cr-delete-after-failed-" + Long.toString(System.nanoTime(), 36);
         String stackId = createStack(stackName, template("1", false));
         awaitStackStatus(stackId, "CREATE_COMPLETE");
-        String physicalId = probePhysicalId(stackName);
+        String physicalId = physicalIdUnauthenticated(stackName, "Probe");
         updateStack(stackName, template("2", true));
         awaitStackStatus(stackId, "UPDATE_ROLLBACK_FAILED");
 
@@ -207,12 +208,6 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
 
     private static void deleteStack(String stackName) {
         cfn(Map.of("Action", "DeleteStack", "StackName", stackName));
-    }
-
-    private static String probePhysicalId(String stackName) {
-        String xml = cfn(Map.of("Action", "DescribeStackResource", "StackName", stackName,
-                "LogicalResourceId", "Probe"));
-        return XmlParser.extractFirst(xml, "PhysicalResourceId", null);
     }
 
     private static String describeStackEvents(String stackId) {

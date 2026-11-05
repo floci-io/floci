@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.physicalIdUnauthenticated;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -57,7 +58,7 @@ class CloudFormationCustomResourceUsesIntegrationTest {
 
         Map<String, String> kept = attributes(stack);
         assertEquals(stack + "-data", kept.get(USES + "Data"), kept::toString);
-        assertEquals(queueUrl(stack), kept.get(USES + "Queue"), kept::toString);
+        assertEquals(physicalIdUnauthenticated(stack, "Queue"), kept.get(USES + "Queue"), kept::toString);
         assertFalse(kept.containsValue(stack + ".example.com"), kept::toString);
 
         updateStack(stack, template(stack, "Archive", ""));
@@ -166,12 +167,6 @@ class CloudFormationCustomResourceUsesIntegrationTest {
     private Map<String, String> attributes(String stack) {
         return cloudFormationService.describeStacks(stack, "us-east-1").getFirst()
                 .getResources().get("Emptier").getAttributes();
-    }
-
-    private static String queueUrl(String stack) {
-        String xml = cfn(Map.of("Action", "DescribeStackResource", "StackName", stack,
-                "LogicalResourceId", "Queue"));
-        return XmlParser.extractFirst(xml, "PhysicalResourceId", null);
     }
 
     private static String createStack(String stackName, String template) {
