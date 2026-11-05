@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 
-import static io.github.hectorvent.floci.testing.CfnRequests.physicalId;
+import static io.github.hectorvent.floci.testing.CfnRequests.physicalIdUnauthenticated;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -114,7 +114,7 @@ class CloudFormationSamEventInvokeConfigIntegrationTest {
             .body("MaximumEventAgeInSeconds", equalTo(21600))
             .body("DestinationConfig.OnFailure.Destination", equalTo(queueArn));
 
-        getRolePolicy(physicalId(name, "FnRole"), "FnEventInvokeConfigOnFailureSQSPolicy")
+        getRolePolicy(physicalIdUnauthenticated(name, "FnRole"), "FnEventInvokeConfigOnFailureSQSPolicy")
             .body(containsString("sqs:SendMessage"))
             .body(containsString(queueArn))
             .body(not(containsString("Fn::GetAtt")));
@@ -178,13 +178,13 @@ class CloudFormationSamEventInvokeConfigIntegrationTest {
             """.formatted(name));
         CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
 
-        String topicArn = physicalId(name, "FnEventInvokeConfigOnSuccessTopic");
+        String topicArn = physicalIdUnauthenticated(name, "FnEventInvokeConfigOnSuccessTopic");
         given().queryParam("Qualifier", "$LATEST")
         .when().get("/2019-09-25/functions/" + name + "/event-invoke-config")
         .then()
             .statusCode(200)
             .body("DestinationConfig.OnSuccess.Destination", equalTo(topicArn));
-        getRolePolicy(physicalId(name, "FnRole"), "FnEventInvokeConfigOnSuccessSNSPolicy")
+        getRolePolicy(physicalIdUnauthenticated(name, "FnRole"), "FnEventInvokeConfigOnSuccessSNSPolicy")
             .body(containsString("sns:publish"))
             .body(containsString(topicArn));
     }
@@ -301,7 +301,7 @@ class CloudFormationSamEventInvokeConfigIntegrationTest {
             .statusCode(200);
         CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
 
-        String topicArn = physicalId(name, "FnEventInvokeConfigOnFailureTopic");
+        String topicArn = physicalIdUnauthenticated(name, "FnEventInvokeConfigOnFailureTopic");
         given().queryParam("Qualifier", "$LATEST")
         .when().get("/2019-09-25/functions/" + name + "/event-invoke-config")
         .then()
@@ -346,7 +346,7 @@ class CloudFormationSamEventInvokeConfigIntegrationTest {
             """.formatted(name, parameterName));
         CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
 
-        String topicArn = physicalId(name, "FnEventInvokeConfigOnFailureTopic");
+        String topicArn = physicalIdUnauthenticated(name, "FnEventInvokeConfigOnFailureTopic");
         given().queryParam("Qualifier", "$LATEST")
         .when().get("/2019-09-25/functions/" + name + "/event-invoke-config")
         .then()

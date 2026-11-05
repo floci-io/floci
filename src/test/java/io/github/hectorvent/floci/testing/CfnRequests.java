@@ -17,7 +17,7 @@ public final class CfnRequests {
         return stackName == null ? request : request.formParam("StackName", stackName);
     }
 
-    public static String physicalId(String stackName, String logicalId) {
+    public static String physicalIdUnauthenticated(String stackName, String logicalId) {
         return physicalId(stackName, logicalId, null);
     }
 
