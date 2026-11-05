@@ -1,19 +1,14 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
-import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,7 +28,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -65,22 +59,9 @@ class CloudFormationStackPolicyServiceTest {
                     resource.setStatus("CREATE_COMPLETE");
                     return resource;
                 });
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.defaultAccountId()).thenReturn(ACCOUNT);
         templateStore = mock(S3Service.class);
-        RegionResolver resolver = mock(RegionResolver.class);
-        when(resolver.getAccountId()).thenReturn(ACCOUNT);
         stackStore = new RecordingStackStore();
-        service = new CloudFormationService(
-                provisioner,
-                templateStore,
-                mock(SsmService.class),
-                mock(GetStackOutputRoleAuthorizer.class),
-                mock(CfnDynamicReferences.class),
-                new ObjectMapper(),
-                config,
-                resolver,
-                Clock.systemUTC(),
+        service = CloudFormationServiceFixture.create(provisioner, templateStore, Clock.systemUTC(),
                 new InMemoryStorageFactory(ACCOUNT).withStore("cloudformation-stacks.json", stackStore));
     }
 
