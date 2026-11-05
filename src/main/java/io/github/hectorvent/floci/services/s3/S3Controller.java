@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -4895,20 +4896,13 @@ public class S3Controller {
      * {@code StartAfter}, {@code Marker}/{@code NextMarker} and {@code KeyMarker}/{@code NextKeyMarker}).
      * Opaque tokens such as {@code ContinuationToken} and version ids are returned verbatim so clients can
      * feed them straight back as query parameters.
-     *
-     * <p>{@code URLEncoder} emits {@code application/x-www-form-urlencoded} output, so the result is
-     * post-processed into the RFC 3986 form S3 uses: {@code '+'} back to {@code %20}, {@code '*'} to
-     * {@code %2A} and {@code %7E} back to a literal {@code '~'}.
      */
     private String maybeEncode(String val, String encodingType) {
         if (val == null) {
             return null;
         }
         if ("url".equalsIgnoreCase(encodingType)) {
-            return java.net.URLEncoder.encode(val, StandardCharsets.UTF_8)
-                    .replace("+", "%20")
-                    .replace("*", "%2A")
-                    .replace("%7E", "~");
+            return SigV4Canonicalization.uriEncode(val);
         }
         return val;
     }

@@ -2,13 +2,13 @@ package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -98,8 +98,10 @@ class EksTokenValidator {
                     + parameters.get("X-Amz-Date") + "\n"
                     + scope.value() + "\n"
                     + Digests.sha256Hex(canonicalRequest);
-            String expectedSignature = HexFormat.of().formatHex(hmacSha256(
-                    deriveSigningKey(secretKey, scope.date(), scope.region(), scope.service()), stringToSign));
+            byte[] signingKey = SigV4RequestValidator.deriveSigningKey(
+                    secretKey, scope.date(), scope.region(), scope.service());
+            String expectedSignature = HexFormat.of().formatHex(
+                    SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
             boolean valid = MessageDigest.isEqual(
                     expectedSignature.getBytes(StandardCharsets.UTF_8),
                     parameters.get("X-Amz-Signature").getBytes(StandardCharsets.UTF_8));
@@ -187,7 +189,8 @@ class EksTokenValidator {
     private static String canonicalRequest(URI request, Map<String, String> parameters, String clusterName) {
         String canonicalQuery = parameters.entrySet().stream()
                 .filter(parameter -> !"X-Amz-Signature".equals(parameter.getKey()))
-                .map(parameter -> awsEncode(parameter.getKey()) + "=" + awsEncode(parameter.getValue()))
+                .map(parameter -> SigV4Canonicalization.uriEncode(parameter.getKey()) + "="
+                        + SigV4Canonicalization.uriEncode(parameter.getValue()))
                 .sorted(Comparator.naturalOrder())
                 .reduce((left, right) -> left + "&" + right)
                 .orElse("");
@@ -202,35 +205,6 @@ class EksTokenValidator {
 
     private static String decode(String value) {
         return URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8);
-    }
-
-    private static String awsEncode(String value) {
-        StringBuilder encoded = new StringBuilder();
-        for (byte valueByte : value.getBytes(StandardCharsets.UTF_8)) {
-            int unsigned = Byte.toUnsignedInt(valueByte);
-            if ((unsigned >= 'A' && unsigned <= 'Z') || (unsigned >= 'a' && unsigned <= 'z')
-                    || (unsigned >= '0' && unsigned <= '9') || unsigned == '-' || unsigned == '_'
-                    || unsigned == '.' || unsigned == '~') {
-                encoded.append((char) unsigned);
-            } else {
-                encoded.append('%').append(String.format("%02X", unsigned));
-            }
-        }
-        return encoded.toString();
-    }
-
-    private static byte[] deriveSigningKey(String secretKey, String date, String region, String service)
-            throws Exception {
-        byte[] dateKey = hmacSha256(("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8), date);
-        byte[] regionKey = hmacSha256(dateKey, region);
-        byte[] serviceKey = hmacSha256(regionKey, service);
-        return hmacSha256(serviceKey, "aws4_request");
-    }
-
-    private static byte[] hmacSha256(byte[] key, String data) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key, "HmacSHA256"));
-        return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
     }
 
     private record CredentialScope(String accessKeyId, String date, String region, String service) {

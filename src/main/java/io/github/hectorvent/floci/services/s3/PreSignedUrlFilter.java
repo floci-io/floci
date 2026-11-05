@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.core.common.auth.SigV4aSignature;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -351,9 +352,9 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             if ("X-Amz-Signature".equals(entry.getKey())) {
                 continue;
             }
-            String encodedName = awsUriEncode(entry.getKey());
+            String encodedName = SigV4Canonicalization.uriEncode(entry.getKey());
             for (String value : entry.getValue()) {
-                encodedParams.add(new String[]{encodedName, awsUriEncode(value)});
+                encodedParams.add(new String[]{encodedName, SigV4Canonicalization.uriEncode(value)});
             }
         }
         encodedParams.sort(Comparator.comparing((String[] p) -> p[0]).thenComparing(p -> p[1]));
@@ -385,21 +386,6 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
                 .distinct()
                 .sorted()
                 .toList();
-    }
-
-    static String awsUriEncode(String value) {
-        StringBuilder encoded = new StringBuilder();
-        for (byte b : value.getBytes(StandardCharsets.UTF_8)) {
-            int c = b & 0xFF;
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
-                    || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '.' || c == '~') {
-                encoded.append((char) c);
-            } else {
-                encoded.append('%').append(String.format("%02X", c));
-            }
-        }
-        return encoded.toString();
     }
 
     /** S3's XML error document; also the shape the ingress filter uses to refuse an S3-signed request. */
