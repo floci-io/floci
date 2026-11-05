@@ -84,6 +84,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private final TargetDispatcher dispatcher;
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
     private final ReplayDispatcher replayDispatcher;
+    private final AppSyncTargetValidator appSyncTargetValidator;
 
     @Inject
     public EventBridgeService(StorageFactory storageFactory,
@@ -93,7 +94,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                               RuleScheduler ruleScheduler,
                               TargetDispatcher dispatcher,
                               ReplayDispatcher replayDispatcher,
-                              ResourceGroupsTaggingService resourceGroupsTaggingService) {
+                              ResourceGroupsTaggingService resourceGroupsTaggingService,
+                              AppSyncTargetValidator appSyncTargetValidator) {
         this(
                 storageFactory.create("eventbridge", "eventbridge-buses.json",
                         new TypeReference<Map<String, EventBus>>() {}),
@@ -112,7 +114,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 storageFactory.create("eventbridge", "eventbridge-api-destinations.json",
                         new TypeReference<Map<String, ApiDestination>>() {}),
                 regionResolver, objectMapper, ruleScheduler, dispatcher, replayDispatcher,
-                resourceGroupsTaggingService
+                resourceGroupsTaggingService, appSyncTargetValidator
         );
     }
 
@@ -129,7 +131,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                        RuleScheduler ruleScheduler,
                        TargetDispatcher dispatcher,
                        ReplayDispatcher replayDispatcher,
-                       ResourceGroupsTaggingService resourceGroupsTaggingService) {
+                       ResourceGroupsTaggingService resourceGroupsTaggingService,
+                       AppSyncTargetValidator appSyncTargetValidator) {
         this.busStore = busStore;
         this.ruleStore = ruleStore;
         this.targetStore = targetStore;
@@ -144,6 +147,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         this.dispatcher = dispatcher;
         this.replayDispatcher = replayDispatcher;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
+        this.appSyncTargetValidator = appSyncTargetValidator;
     }
 
     @PostConstruct
@@ -488,6 +492,20 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public int putTargets(String ruleName, String busName, List<Target> newTargets, String region) {
         validateTargetSettings(newTargets);
+        newTargets.forEach(appSyncTargetValidator::validate);
+        return upsertTargets(ruleName, busName, newTargets, region);
+    }
+
+    /**
+     * Internal rollback path for previously accepted targets. Local shape checks still apply,
+     * but restoring a snapshot must not depend on the GraphQL sidecar being available.
+     */
+    public int restoreAcceptedTargets(String ruleName, String busName, List<Target> targets, String region) {
+        validateTargetSettings(targets);
+        return upsertTargets(ruleName, busName, targets, region);
+    }
+
+    private int upsertTargets(String ruleName, String busName, List<Target> newTargets, String region) {
         String effectiveBus = resolvedBusName(busName);
         String key = ruleKey(region, effectiveBus, ruleName);
         Rule rule = ruleStore.get(key)
@@ -527,6 +545,15 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private static void validateTargetSettings(List<Target> targets) {
         for (int i = 0; i < targets.size(); i++) {
             Target target = targets.get(i);
+            String operation = target.getAppSyncParameters() == null
+                    ? null : target.getAppSyncParameters().graphQLOperation();
+            if (operation != null) {
+                String violation = SmithyValidationErrors.Violations.WITHOUT_VALUES.lengthOutOfRange(
+                        "targets." + (i + 1) + ".member.appSyncParameters.graphQLOperation", operation, 1, 1048576);
+                if (violation != null) {
+                    throw SmithyValidationErrors.validationException(violation);
+                }
+            }
             Integer attempts = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumRetryAttempts() : null;
             Integer age = target.getRetryPolicy() != null ? target.getRetryPolicy().maximumEventAgeInSeconds() : null;
             String arn = target.getDeadLetterConfig() != null ? target.getDeadLetterConfig().arn() : null;
