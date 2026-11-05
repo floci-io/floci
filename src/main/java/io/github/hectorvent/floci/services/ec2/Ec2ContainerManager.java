@@ -165,6 +165,8 @@ public class Ec2ContainerManager {
     private final Map<String, CompletableFuture<Void>> lifecycleOperations = new ConcurrentHashMap<>();
     /** Instances whose service-network lookup failed and is retried on the next address read. */
     private final Set<String> serviceNetworkRetries = ConcurrentHashMap.newKeySet();
+    /** The latest service-network lookup started per instance; only that one may publish. */
+    private final Map<String, Long> serviceNetworkLookups = new ConcurrentHashMap<>();
     private final Set<String> serviceNetworkRetriesRunning = ConcurrentHashMap.newKeySet();
     /** Runs service-network lookup retries; see {@link #createServiceNetworkRetryExecutor}. */
     private final ExecutorService serviceNetworkRetryExecutor;
@@ -797,6 +799,7 @@ public class Ec2ContainerManager {
             instance.setContainerBridgeIp(null);
             instance.setServiceNetworkIp(null);
             serviceNetworkRetries.remove(instance.getInstanceId());
+            serviceNetworkLookups.remove(instance.getInstanceId());
         }
         if (alreadyCleaned) {
             return;
@@ -1372,19 +1375,22 @@ public class Ec2ContainerManager {
      */
     void refreshServiceNetworkIp(Instance instance) {
         String instanceId = instance.getInstanceId();
-        // The container is the lookup's generation: a result is published only while the instance
-        // still runs that container, so a lookup that outlives a replacement or a teardown cannot
-        // overwrite what came after it. Docker is asked outside the instance lock.
+        // A result is published only while the instance still runs the container the lookup read
+        // and no later lookup has started, so a lookup that outlives a replacement, a teardown or a
+        // stop and start of the same container cannot overwrite what came after it. Docker is asked
+        // outside the instance lock.
         String containerId;
+        long lookup;
         synchronized (instance) {
             containerId = instance.getDockerContainerId();
+            lookup = serviceNetworkLookups.merge(instanceId, 1L, Long::sum);
         }
         String address;
         try {
             address = resolveServiceNetworkIp(instanceId, containerId);
         } catch (RuntimeException e) {
             synchronized (instance) {
-                if (containerId != null && containerId.equals(instance.getDockerContainerId())) {
+                if (containerId != null && isLatestServiceNetworkLookup(instance, containerId, lookup)) {
                     // A Docker hiccup is not an answer: keep what was recorded and let the next
                     // address read retry the lookup in the background.
                     serviceNetworkRetries.add(instanceId);
@@ -1395,12 +1401,18 @@ public class Ec2ContainerManager {
             return;
         }
         synchronized (instance) {
-            if (!Objects.equals(containerId, instance.getDockerContainerId())) {
+            if (!isLatestServiceNetworkLookup(instance, containerId, lookup)) {
                 return;
             }
             instance.setServiceNetworkIp(address);
             serviceNetworkRetries.remove(instanceId);
         }
+    }
+
+    /** Called under the instance lock. */
+    private boolean isLatestServiceNetworkLookup(Instance instance, String containerId, long lookup) {
+        return Objects.equals(containerId, instance.getDockerContainerId())
+                && Objects.equals(lookup, serviceNetworkLookups.get(instance.getInstanceId()));
     }
 
     /**

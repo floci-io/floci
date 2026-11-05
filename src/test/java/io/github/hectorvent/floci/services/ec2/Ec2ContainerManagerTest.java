@@ -1191,6 +1191,39 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void aLookupThatOutlivesAStopAndStartDoesNotOverwriteTheNewAddress() throws Exception {
+        CountDownLatch staleInspectStarted = new CountDownLatch(1);
+        CountDownLatch releaseStaleInspect = new CountDownLatch(1);
+        AtomicBoolean firstInspect = new AtomicBoolean(true);
+        DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
+        InspectContainerResponse beforeStop = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.9")));
+        InspectContainerResponse afterStart = inspectWithNetworks(
+                Map.of("floci-net", new ContainerNetwork().withIpv4Address("172.20.0.33")));
+        // A start keeps the container, so both lookups inspect the same id.
+        when(docker.inspectContainerCmd(TEST_CONTAINER_ID).exec()).thenAnswer(invocation -> {
+            if (firstInspect.getAndSet(false)) {
+                staleInspectStarted.countDown();
+                releaseStaleInspect.await(5, TimeUnit.SECONDS);
+                return beforeStop;
+            }
+            return afterStart;
+        });
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+
+        Thread staleLookup = Thread.ofVirtual().start(() -> manager.refreshServiceNetworkIp(instance));
+        assertTrue(staleInspectStarted.await(5, TimeUnit.SECONDS));
+        manager.refreshServiceNetworkIp(instance);
+        releaseStaleInspect.countDown();
+        staleLookup.join(Duration.ofSeconds(5));
+
+        assertFalse(staleLookup.isAlive());
+        assertEquals("172.20.0.33", instance.getServiceNetworkIp());
+        assertEquals("172.20.0.33", manager.reachablePublicAddress(instance));
+    }
+
+    @Test
     void aLookupInFlightDuringTeardownCannotRestoreTheAddress() throws Exception {
         CountDownLatch staleInspectStarted = new CountDownLatch(1);
         CountDownLatch releaseStaleInspect = new CountDownLatch(1);
