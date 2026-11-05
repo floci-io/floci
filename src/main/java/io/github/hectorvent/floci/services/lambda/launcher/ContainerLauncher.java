@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Version;
+import com.github.dockerjava.api.model.VersionComponent;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.Digests;
@@ -47,6 +49,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -60,6 +63,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
@@ -76,6 +80,8 @@ import java.util.stream.Stream;
 @ApplicationScoped
 @Typed(ContainerLauncher.class)
 public class ContainerLauncher implements LambdaRuntimeLauncher {
+
+    private enum ContainerEngine { PODMAN, DOCKER, UNKNOWN }
 
     private static final Logger LOG = Logger.getLogger(ContainerLauncher.class);
     private static final String TASK_DIR = "/var/task";
@@ -124,6 +130,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private final LambdaLayerService layerService;
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
+    private final AtomicBoolean engineWarningLogged = new AtomicBoolean();
+    private volatile ContainerEngine containerEngine;
 
     @Inject
     public ContainerLauncher(ContainerBuilder containerBuilder,
@@ -293,7 +301,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "lambda", fn.getFunctionName(), lambdaAccountId, lambdaRegion));
-        if ("host.docker.internal".equals(hostAddress)) {
+        List<String> configuredExtraHosts = config.services().lambda().extraHosts().orElse(List.of());
+        boolean hasExplicitHostAlias = Stream.concat(dockerFlags.extraHosts().stream(), configuredExtraHosts.stream())
+                .anyMatch(ContainerLauncher::isHostDockerInternalEntry);
+        if (dockerHostResolver.isLinuxHost() && !hasExplicitHostAlias && !isPodmanDaemon()) {
             specBuilder.withHostDockerInternalOnLinux();
         }
 
@@ -308,14 +319,14 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         // Inject extra hosts entries into the container if present. Split on the FIRST
         // colon, mirroring docker --add-host: hostnames cannot contain colons, but IPv6
         // addresses do (e.g. "db.internal:2001:db8::1").
-        config.services().lambda().extraHosts().ifPresent(hosts -> hosts.forEach(entry -> {
+        configuredExtraHosts.forEach(entry -> {
             int sep = entry.indexOf(':');
             if (sep <= 0 || sep == entry.length() - 1) {
                 LOG.warnv("Ignoring malformed lambda extra-hosts entry (expected hostname:ip): {0}", entry);
                 return;
             }
             specBuilder.withExtraHost(entry.substring(0, sep), entry.substring(sep + 1));
-        }));
+        });
 
         // Whether /var/task is served from a shared read-only volume (large code) or copied
         // directly into this container (small code). Decided once here so both the spec (below)
@@ -562,6 +573,61 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
         return platform.map(value -> lifecycleManager.create(spec, value))
                 .orElseGet(() -> lifecycleManager.create(spec));
+    }
+
+    private boolean isPodmanDaemon() {
+        ContainerEngine cached = containerEngine;
+        if (cached != null) {
+            return cached == ContainerEngine.PODMAN;
+        }
+        return detectContainerEngine() == ContainerEngine.PODMAN;
+    }
+
+    private synchronized ContainerEngine detectContainerEngine() {
+        if (containerEngine != null) {
+            return containerEngine;
+        }
+        try {
+            // The socket's daemon can differ from the JVM's OS or container runtime.
+            Version version = lifecycleManager.getDockerClient().versionCmd().exec();
+            if (version != null) {
+                List<VersionComponent> components = version.getComponents();
+                List<String> engineNames = Stream.concat(
+                                Stream.of(version.getPlatform() == null ? null : version.getPlatform().getName()),
+                                components == null ? Stream.empty()
+                                        : components.stream().filter(Objects::nonNull).map(VersionComponent::getName))
+                        .filter(Objects::nonNull)
+                        .map(name -> name.toLowerCase(Locale.ROOT))
+                        .toList();
+                if (engineNames.stream().anyMatch(name -> name.contains("podman"))) {
+                    containerEngine = ContainerEngine.PODMAN;
+                    return containerEngine;
+                }
+                if (engineNames.stream().anyMatch(name -> name.contains("docker") || name.contains("moby"))) {
+                    containerEngine = ContainerEngine.DOCKER;
+                    return containerEngine;
+                }
+            }
+            warnUnknownEngine("no Docker or Podman identity in /version");
+            containerEngine = ContainerEngine.UNKNOWN;
+        } catch (RuntimeException e) {
+            warnUnknownEngine(e.toString());
+            return ContainerEngine.UNKNOWN;
+        }
+        return containerEngine;
+    }
+
+    private void warnUnknownEngine(String reason) {
+        if (engineWarningLogged.compareAndSet(false, true)) {
+            LOG.warnv("Could not identify the container engine ({0}); retaining the Docker host-gateway mapping",
+                    reason);
+        }
+    }
+
+    private static boolean isHostDockerInternalEntry(String entry) {
+        int separator = entry.indexOf(':');
+        return separator > 0 && separator < entry.length() - 1
+                && "host.docker.internal".equalsIgnoreCase(entry.substring(0, separator));
     }
 
     private LambdaDockerFlags configuredDockerFlags() {

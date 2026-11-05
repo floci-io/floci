@@ -7,12 +7,16 @@ import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.VersionCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.StreamType;
+import com.github.dockerjava.api.model.Version;
+import com.github.dockerjava.api.model.VersionComponent;
+import com.github.dockerjava.api.model.VersionPlatform;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -463,6 +467,15 @@ class ContainerLauncherTest {
                 executionRoleCredentials);
     }
 
+    private void stubDaemonVersion(String platformName, List<VersionComponent> components) {
+        VersionCmd versionCmd = mock(VersionCmd.class);
+        Version version = mock(Version.class);
+        when(dockerClient.versionCmd()).thenReturn(versionCmd);
+        when(versionCmd.exec()).thenReturn(version);
+        when(version.getPlatform()).thenReturn(new VersionPlatform().withName(platformName));
+        when(version.getComponents()).thenReturn(components);
+    }
+
     @ParameterizedTest
     @CsvSource({
             "arm64, true, , linux/arm64, arm64",
@@ -641,6 +654,7 @@ class ContainerLauncherTest {
         when(dockerHostResolver.resolve()).thenReturn("10.89.0.5");
         lenient().when(dockerHostResolver.isLinuxHost()).thenReturn(true);
         when(config.services().lambda().extraHosts()).thenReturn(Optional.of(List.of("db.internal:10.0.0.5")));
+        stubDaemonVersion("linux/amd64/fedora-42", List.of(new VersionComponent().withName("Podman Engine")));
 
         newLauncher(imageResolver, networkResolver).launch(imageFunction());
 
@@ -652,9 +666,29 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchFunction_inNativeLinuxDockerBridgeKeepsHostAliasWithFlociIpCallback() {
+        CurrentContainerNetworkResolver networkResolver = mock(CurrentContainerNetworkResolver.class);
+        when(networkResolver.resolveNetworkName()).thenReturn(Optional.of("docker_compose_default"));
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.5");
+        lenient().when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion("Docker Engine - Community", List.of());
+        LambdaFunction fn = imageFunction();
+        fn.setEnvironment(Map.of("HOST_SERVICE_URL", "http://host.docker.internal:8080"));
+
+        newLauncher(imageResolver, networkResolver).launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals("docker_compose_default", spec.networkMode());
+        assertTrue(spec.env().contains("AWS_LAMBDA_RUNTIME_API=172.18.0.5:9000"));
+        assertTrue(spec.env().contains("HOST_SERVICE_URL=http://host.docker.internal:8080"));
+        assertTrue(spec.extraHosts().contains("host.docker.internal:host-gateway"));
+    }
+
+    @Test
     void launchFunction_onNativeLinuxDockerAddsHostGatewayForCallback() {
         when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
         when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion("Docker Engine - Community", List.of());
 
         launcher.launch(imageFunction());
 
@@ -662,6 +696,71 @@ class ContainerLauncherTest {
         assertTrue(spec.env().contains("AWS_LAMBDA_RUNTIME_API=host.docker.internal:9000"));
         assertTrue(spec.env().contains("AWS_ENDPOINT_URL=http://host.docker.internal:4566"));
         assertEquals(List.of("host.docker.internal:host-gateway"), spec.extraHosts());
+    }
+
+    @Test
+    void launchFunction_prefersHostAliasFromDockerFlags() {
+        when(config.services().lambda().dockerFlags()).thenReturn(Optional.of(
+                "--add-host host.docker.internal:192.0.2.10"));
+        when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+
+        launcher.launch(imageFunction());
+
+        assertEquals(List.of("host.docker.internal:192.0.2.10"), captureRealContainerSpec().extraHosts());
+        verify(dockerClient, never()).versionCmd();
+    }
+
+    @Test
+    void launchFunction_prefersHostAliasFromExtraHosts() {
+        when(config.services().lambda().extraHosts()).thenReturn(Optional.of(List.of(
+                "host.docker.internal:192.0.2.11", "db.internal:192.0.2.12")));
+        when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+
+        launcher.launch(imageFunction());
+
+        assertEquals(List.of("host.docker.internal:192.0.2.11", "db.internal:192.0.2.12"),
+                captureRealContainerSpec().extraHosts());
+        verify(dockerClient, never()).versionCmd();
+    }
+
+    @Test
+    void launchFunction_keepsHostAliasWhenDaemonMetadataIsUnknown() {
+        VersionCmd versionCmd = mock(VersionCmd.class);
+        when(dockerClient.versionCmd()).thenReturn(versionCmd);
+        when(versionCmd.exec()).thenReturn(new Version());
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.5");
+        when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+
+        launcher.launch(imageFunction());
+        launcher.launch(imageFunction());
+
+        assertEquals(List.of("host.docker.internal:host-gateway"), captureRealContainerSpec().extraHosts());
+        verify(dockerClient, times(1)).versionCmd();
+    }
+
+    @Test
+    void launchFunction_keepsHostAliasWhenVersionProbeFails() {
+        VersionCmd versionCmd = mock(VersionCmd.class);
+        when(dockerClient.versionCmd()).thenReturn(versionCmd);
+        when(versionCmd.exec()).thenThrow(new IllegalStateException("/version unavailable"));
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.5");
+        when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+
+        launcher.launch(imageFunction());
+
+        assertEquals(List.of("host.docker.internal:host-gateway"), captureRealContainerSpec().extraHosts());
+    }
+
+    @Test
+    void launchFunction_reusesDetectedEngineAcrossInvocations() {
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.5");
+        when(dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion("Docker Engine - Community", List.of());
+
+        launcher.launch(imageFunction());
+        launcher.launch(imageFunction());
+
+        verify(dockerClient, times(1)).versionCmd();
     }
 
     @Test
