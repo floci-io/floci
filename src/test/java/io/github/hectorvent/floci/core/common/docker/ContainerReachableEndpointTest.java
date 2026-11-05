@@ -25,16 +25,10 @@ class ContainerReachableEndpointTest {
     private final DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
     private final EmbeddedDnsServer embeddedDnsServer = mock(EmbeddedDnsServer.class);
     private final EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
+    private final TlsCertificateManager tlsCertificates = mock(TlsCertificateManager.class);
     private final ContainerReachableEndpoint endpoint = endpoint(4566);
 
-    private final TlsCertificateManager tlsCertificates = mock(TlsCertificateManager.class);
-
     private ContainerReachableEndpoint endpoint(int httpPort) {
-        when(config.tls()).thenReturn(tls);
-        return new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, httpPort);
-    }
-
-    private ContainerReachableEndpoint withCertificate(int httpPort) {
         when(config.tls()).thenReturn(tls);
         return new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, tlsCertificates, httpPort);
     }
@@ -120,7 +114,7 @@ class ContainerReachableEndpointTest {
         when(tlsCertificates.serves(EmbeddedDnsServer.DEFAULT_SUFFIX)).thenReturn(true);
 
         assertEquals("https://" + EmbeddedDnsServer.DEFAULT_SUFFIX + ":4566",
-                withCertificate(4510).customResourceResponseBaseUrl());
+                endpoint(4510).customResourceResponseBaseUrl());
     }
 
     @Test
@@ -134,7 +128,7 @@ class ContainerReachableEndpointTest {
         when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
         when(tlsCertificates.serves("172.18.0.2")).thenReturn(false);
 
-        assertEquals("http://172.18.0.2:4566", withCertificate(4510).customResourceResponseBaseUrl());
+        assertEquals("http://172.18.0.2:4566", endpoint(4510).customResourceResponseBaseUrl());
     }
 
     @Test
@@ -143,6 +137,6 @@ class ContainerReachableEndpointTest {
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
         when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
 
-        assertEquals("http://172.18.0.2:4566", withCertificate(4566).customResourceResponseBaseUrl());
+        assertEquals("http://172.18.0.2:4566", endpoint(4566).customResourceResponseBaseUrl());
     }
 }

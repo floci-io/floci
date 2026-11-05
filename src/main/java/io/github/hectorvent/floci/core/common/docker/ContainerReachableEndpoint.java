@@ -50,14 +50,6 @@ public class ContainerReachableEndpoint {
         this.httpPort = httpPort;
     }
 
-    /** Without the server certificate to consult, so {@link #customResourceResponseBaseUrl()} stays http. */
-    public ContainerReachableEndpoint(EmulatorConfig config,
-                                      DockerHostResolver dockerHostResolver,
-                                      EmbeddedDnsServer embeddedDnsServer,
-                                      int httpPort) {
-        this(config, dockerHostResolver, embeddedDnsServer, null, httpPort);
-    }
-
     /**
      * The Floci {@code http://host:port} base URL reachable from inside a launched Docker container.
      *
@@ -105,7 +97,7 @@ public class ContainerReachableEndpoint {
      */
     public String customResourceResponseBaseUrl() {
         String host = host(true);
-        boolean https = tlsCertificates != null && tlsCertificates.serves(host);
+        boolean https = tlsCertificates.serves(host);
         return (https ? "https://" : "http://") + host + ":" + port();
     }
 }

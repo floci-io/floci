@@ -250,7 +250,7 @@ class LambdaImageConfigTest {
 
             ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
             ContainerReachableEndpoint reachableEndpoint =
-                    new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
+                    new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
             LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
             launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                     runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,

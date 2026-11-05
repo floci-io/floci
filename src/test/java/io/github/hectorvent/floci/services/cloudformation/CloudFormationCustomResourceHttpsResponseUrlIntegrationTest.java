@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -25,9 +26,8 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -103,16 +103,20 @@ class CloudFormationCustomResourceHttpsResponseUrlIntegrationTest {
                 }
                 """.formatted(SERVICE_TOKEN);
 
-        String stackId = XmlParser.extractFirst(cfn(Map.of("Action", "CreateStack", "StackName", stackName,
-                "TemplateBody", template)), "StackId", null);
+        cfn("CreateStack", stackName).formParam("TemplateBody", template)
+                .when().post("/")
+                .then().statusCode(200);
         try {
-            String created = awaitTerminal(stackId);
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
             assertEquals(List.of(), handlerErrors);
-            assertTrue(created.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"), created);
+            String created = cfn("DescribeStacks", stackName)
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .extract().asString();
             assertEquals("https:", XmlParser.extractPairs(created, "Outputs", "OutputKey", "OutputValue")
                     .get("Scheme"));
         } finally {
-            cfn(Map.of("Action", "DeleteStack", "StackName", stackName));
+            cfn("DeleteStack", stackName).when().post("/");
         }
     }
 
@@ -151,30 +155,6 @@ class CloudFormationCustomResourceHttpsResponseUrlIntegrationTest {
             Files.deleteIfExists(script);
             Files.deleteIfExists(output);
         }
-    }
-
-    private static String awaitTerminal(String stackId) throws InterruptedException {
-        String xml = "";
-        long deadline = System.currentTimeMillis() + 30_000;
-        while (System.currentTimeMillis() < deadline) {
-            xml = cfn(Map.of("Action", "DescribeStacks", "StackName", stackId));
-            if (xml.contains("_COMPLETE</StackStatus>") && !xml.contains("IN_PROGRESS")) {
-                return xml;
-            }
-            Thread.sleep(50);
-        }
-        return xml;
-    }
-
-    private static String cfn(Map<String, String> params) {
-        return given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParams(params)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().asString();
     }
 
     private static boolean nodeAvailable() {

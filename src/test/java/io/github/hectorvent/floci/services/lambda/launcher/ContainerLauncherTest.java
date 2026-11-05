@@ -233,7 +233,7 @@ class ContainerLauncherTest {
         LambdaLayerService layers = LambdaLayerFixtures.accountScopedService(
                 defaultAccount, region, Map.of(defaultAccount, defaultLayer, owner, ownerLayer));
         ContainerReachableEndpoint endpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
         ContainerLauncher backgroundLauncher = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager, logStreamer, imageResolver, runtimeApiServerFactory,
@@ -449,7 +449,7 @@ class ContainerLauncherTest {
     private ContainerLauncher newLauncher(ImageResolver selectedResolver) {
         ContainerBuilder builder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         ContainerReachableEndpoint endpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
         return new ContainerLauncher(builder, lifecycleManager, logStreamer, selectedResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
                 layerService, new LaunchedContainerAwsEnv(endpoint),
@@ -2151,7 +2151,7 @@ class ContainerLauncherTest {
     void launchFunction_forwardsExtensionOutputToCloudWatchLogs() throws Exception {
         CloudWatchLogsService cloudWatchLogs = mock(CloudWatchLogsService.class);
         ContainerReachableEndpoint reachableEndpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
         ContainerLauncher launcherWithRealStreamer = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager,
