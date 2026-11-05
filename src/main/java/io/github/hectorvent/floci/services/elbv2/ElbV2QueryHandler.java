@@ -877,7 +877,7 @@ public class ElbV2QueryHandler {
         xml.elem("LoadBalancerArn", l.getLoadBalancerArn());
         if (l.getPort() != null) xml.elem("Port", String.valueOf(l.getPort()));
         xml.elem("Protocol", safe(l.getProtocol()));
-        xml.elem("SslPolicy", safe(l.getSslPolicy()));
+        xml.elem("SslPolicy", l.getSslPolicy());
         appendCertificates(xml, l.getCertificates());
         xml.start("DefaultActions");
         for (Action a : l.getDefaultActions()) {
