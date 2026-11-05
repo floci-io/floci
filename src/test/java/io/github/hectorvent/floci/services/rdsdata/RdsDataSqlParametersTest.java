@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.rdsdata;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import org.junit.jupiter.api.Test;
+import org.postgresql.core.Parser;
 
+import java.sql.SQLException;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -64,6 +66,31 @@ class RdsDataSqlParametersTest {
         assertEquals("select data ?? ?, data ??| array[?, ?], data ??& array[?] from t where id = ?",
                 parsed.sql());
         assertEquals(List.of("key", "first", "second", "third", "id"), parsed.parameterOrder());
+    }
+
+    @Test
+    void postgresPreservesPreescapedJsonbOperatorsAlongsideNamedBindings() {
+        ParsedSql parsed = RdsDataSqlParameters.parse(
+                "select data ?? :key, data ??| array[:keys], data ??& array[:all] from t where id = :id",
+                false);
+
+        assertEquals("select data ?? ?, data ??| array[?], data ??& array[?] from t where id = ?",
+                parsed.sql());
+        assertEquals(List.of("key", "keys", "all", "id"), parsed.parameterOrder());
+    }
+
+    @Test
+    void postgresKeepsAdjacentNamedBindingBeforeQuestionOperatorInJdbc() throws SQLException {
+        for (String operator : List.of("?'key'", "??'key'", "?|array['a']", "??|array['a']",
+                "?&array['a']", "??&array['a']")) {
+            ParsedSql parsed = RdsDataSqlParameters.parse("select :data" + operator, false);
+            String serverOperator = operator.startsWith("??") ? operator.substring(1) : operator;
+
+            assertEquals(List.of("data"), parsed.parameterOrder(), operator);
+            assertEquals("select $1 " + serverOperator,
+                    Parser.parseJdbcSql(parsed.sql(), true, true, false, false, false).getFirst().nativeSql,
+                    operator);
+        }
     }
 
     @Test

@@ -166,6 +166,9 @@ public final class SqlParameterParser {
                         }
                         order.add(sql.substring(i + 1, j));
                         out.append('?');
+                        if (options.escapeQuestionMarks() && j < len && sql.charAt(j) == '?') {
+                            out.append(' ');
+                        }
                         i = j;
                         afterOperand = true;
                         subscriptStart = false;
@@ -178,10 +181,15 @@ public final class SqlParameterParser {
                 afterOperand = false;
                 subscriptStart = false;
             }
-            out.append(c);
             if (c == '?' && options.escapeQuestionMarks()) {
-                out.append('?');
+                out.append("??");
+                if (i + 1 < len && sql.charAt(i + 1) == '?') {
+                    i++;
+                }
+                i++;
+                continue;
             }
+            out.append(c);
             i++;
         }
         return new ParsedSql(out.toString(), order);

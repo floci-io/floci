@@ -63,6 +63,27 @@ class SqlParameterParserTest {
     }
 
     @Test
+    void rdsPostgresPreservesExistingJdbcQuestionEscapes() {
+        ParsedSql parsed = SqlParameterParser.parse(
+                "select data ?? :key, data ??| array[:keys], data ??& array[:all] "
+                        + "from t where id = :id and note = '??' /* ?? */ and marker = $tag$??$tag$",
+                Options.RDS_POSTGRESQL);
+
+        assertEquals("select data ?? ?, data ??| array[?], data ??& array[?] "
+                + "from t where id = ? and note = '??' /* ?? */ and marker = $tag$??$tag$", parsed.sql());
+        assertEquals(List.of("key", "keys", "all", "id"), parsed.parameterOrder());
+    }
+
+    @Test
+    void rdsPostgresEscapesOnlyUnpairedQuestionMarksInRuns() {
+        ParsedSql parsed = SqlParameterParser.parse(
+                "select ? :one, ?? :two, ??? :three, ???? :four, :id??", Options.RDS_POSTGRESQL);
+
+        assertEquals("select ?? ?, ?? ?, ???? ?, ???? ?, ? ??", parsed.sql());
+        assertEquals(List.of("one", "two", "three", "four", "id"), parsed.parameterOrder());
+    }
+
+    @Test
     void rdsPostgresPreservesQuestionMarksAndColonsInsideEscapeStrings() {
         ParsedSql parsed = SqlParameterParser.parse(
                 "select E'it\\'s ? :ignored' as note, data ? :key from t", Options.RDS_POSTGRESQL);
