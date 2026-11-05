@@ -147,6 +147,29 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
     }
 
     @Test
+    void httpsListenerDefaultsOmittedSslPolicyAndRetainsItOnModify() {
+        Listener created = createListener("HTTPS", 443, null);
+        Listener described = elb.describeListeners(request -> request.listenerArns(created.listenerArn()))
+                .listeners().getFirst();
+        Listener modified = elb.modifyListener(request -> request.listenerArn(created.listenerArn()).port(8443))
+                .listeners().getFirst();
+        String xml = rawDescribe("DescribeListeners", Map.of("ListenerArns.member.1", created.listenerArn()));
+
+        assertAll("HTTPS creation defaults the omitted SSL policy",
+                () -> assertEquals("ELBSecurityPolicy-2016-08", created.sslPolicy()),
+                () -> assertEquals("ELBSecurityPolicy-2016-08", described.sslPolicy()),
+                () -> assertEquals("ELBSecurityPolicy-2016-08", modified.sslPolicy()),
+                () -> assertTrue(xml.contains("<SslPolicy>ELBSecurityPolicy-2016-08</SslPolicy>"), xml));
+
+        Listener replaced = elb.modifyListener(request -> request.listenerArn(created.listenerArn())
+                .sslPolicy(SSL_POLICY)).listeners().getFirst();
+        Listener retained = elb.modifyListener(request -> request.listenerArn(created.listenerArn()).port(9443))
+                .listeners().getFirst();
+        assertEquals(SSL_POLICY, replaced.sslPolicy());
+        assertEquals(SSL_POLICY, retained.sslPolicy());
+    }
+
+    @Test
     void everyDescribeResponseOmitsTerminalMarker() {
         assertTrue(elb.describeListeners(request -> request.loadBalancerArn(loadBalancer)).listeners().isEmpty());
         assertNull(elb.describeListeners(request -> request.loadBalancerArn(loadBalancer)).nextMarker());
@@ -171,12 +194,16 @@ class ElbV2OptionalResponseFieldsIntegrationTest {
     }
 
     private Listener createListener(String protocol, int port) {
+        return createListener(protocol, port, SSL_POLICY);
+    }
+
+    private Listener createListener(String protocol, int port, String sslPolicy) {
         return elb.createListener(request -> {
             request.loadBalancerArn(loadBalancer).protocol(protocol).port(port)
                     .defaultActions(action -> action.type("fixed-response").fixedResponseConfig(response ->
                             response.statusCode("200").contentType("text/plain").messageBody("ok")));
             if (protocol.equals("HTTPS")) {
-                request.sslPolicy(SSL_POLICY)
+                request.sslPolicy(sslPolicy)
                         .certificates(Certificate.builder().certificateArn(certificate).build());
             }
         }).listeners().getFirst();

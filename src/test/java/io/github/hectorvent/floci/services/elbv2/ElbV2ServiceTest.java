@@ -30,6 +30,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -598,8 +599,10 @@ class ElbV2ServiceTest {
         verify(dataPlane).publishListener(any(Listener.class), eq(REGION), any(), any(), any(), any());
     }
 
-    @Test
-    void initializeStorageRestoresHttpsListenerCertificate() {
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = "ELBSecurityPolicy-TLS13-1-2-2021-06")
+    void initializeStorageRestoresHttpsListenerCertificateAndSslPolicy(String sslPolicy) {
         SharedStorageFactory storageFactory = new SharedStorageFactory();
         ElbV2Service first = serviceWithStorage(
                 storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
@@ -608,7 +611,7 @@ class ElbV2ServiceTest {
                 ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
         String certificateArn = "arn:aws:acm:us-west-2:000000000000:certificate/persisted";
         String listenerArn = first.createListener(
-                REGION, lbArn, "HTTPS", 9443, "ELBSecurityPolicy-TLS13-1-2-2021-06",
+                REGION, lbArn, "HTTPS", 9443, sslPolicy,
                 List.of(certificateArn), List.of(), List.of(), Map.of()).getListenerArn();
 
         ElbV2DataPlane reloadedDataPlane = mock(ElbV2DataPlane.class);
@@ -620,6 +623,9 @@ class ElbV2ServiceTest {
         assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
         assertEquals("HTTPS", listenerCaptor.getValue().getProtocol());
         assertEquals(List.of(certificateArn), listenerCaptor.getValue().getCertificates());
+        Listener described = reloaded.describeListeners(REGION, lbArn, List.of(listenerArn)).getFirst();
+        assertEquals(sslPolicy == null ? "ELBSecurityPolicy-2016-08" : sslPolicy,
+                described.getSslPolicy());
     }
 
     @Test
