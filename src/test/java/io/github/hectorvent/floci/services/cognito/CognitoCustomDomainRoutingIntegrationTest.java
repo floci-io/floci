@@ -109,7 +109,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"x%25y", "trailing%25", "a%252Fb", "a%2Fb", "a%20b"})
-    @Order(2)
+    @Order(4)
     void unknownEncodedOauthPathsKeepTheJsonNotFoundResponse(String suffix) {
         given().urlEncodingEnabled(false).header("Host", DOMAIN)
         .when()
@@ -121,7 +121,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(5)
     void managedLoginPreservesEncodedQueryValues() throws Exception {
         String clientId = cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId":"%s","ClientName":"encoded-query-client",
@@ -143,7 +143,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(6)
     void clientOfAnotherPoolIsRefusedOnThisDomain() {
         given()
                 .header("Host", DOMAIN)
@@ -157,13 +157,13 @@ class CognitoCustomDomainRoutingIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(7)
     void sameClientStillWorksOnTheGenericPath() {
         assertNull(expect(200, null, clientB, secretB, "/cognito-idp/oauth2/token"));
     }
 
     @Test
-    @Order(6)
+    @Order(8)
     void emptyPostOnTheCustomDomainAnswersInvalidRequest() {
         given()
                 .header("Host", DOMAIN)
@@ -177,7 +177,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
 
     /** Without a matching Host nothing is rewritten: /oauth2/token is S3's /{bucket}/{key}. */
     @Test
-    @Order(7)
+    @Order(9)
     void unknownHostIsLeftUntouched() {
         given()
                 .header("Host", "nobody-" + System.nanoTime() + ".example.com")
@@ -190,7 +190,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(10)
     void userInfoWithoutBearerTokenIsRoutedToo() {
         given()
                 .header("Host", DOMAIN)
@@ -202,7 +202,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(11)
     void userInfoOnTheCustomDomainServesThePoolsOwnUsers() {
         given()
                 .header("Host", DOMAIN)
@@ -218,7 +218,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(12)
     void userInfoOnTheCustomDomainRefusesATokenOfAnotherPool() {
         given()
                 .header("Host", DOMAIN)
@@ -238,7 +238,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(13)
     void openIdConfigurationAdvertisesTheCustomDomain() {
         given()
         .when()
@@ -261,7 +261,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
 
     /** Domain names are one global namespace on AWS, whichever account asks. */
     @Test
-    @Order(12)
+    @Order(14)
     void anotherAccountCannotReuseTheDomainName() throws Exception {
         String poolInB = awsJsonAs(ACCOUNT_B, COGNITO, "CreateUserPool", "{\"PoolName\": \"RoutingPoolB2\"}")
                 .path("UserPool").path("Id").asText();
@@ -275,7 +275,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
 
     /** The domain's account, not the default one, serves a request on that domain. */
     @Test
-    @Order(13)
+    @Order(15)
     void tokenOnAnotherAccountsDomainRunsInThatAccount() throws Exception {
         String poolInB = awsJsonAs(ACCOUNT_B, COGNITO, "CreateUserPool", "{\"PoolName\": \"RoutingPoolB3\"}")
                 .path("UserPool").path("Id").asText();
@@ -299,7 +299,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(16)
     void replacingTheCertificateKeepsTheDomainRouted() throws Exception {
         cognitoJson("UpdateUserPoolDomain", customDomain(DOMAIN, poolA, requestCertificate(DOMAIN)));
 
@@ -307,7 +307,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(17)
     void deletedDomainIsNoLongerRouted() throws Exception {
         cognitoJson("DeleteUserPoolDomain", """
                 {"Domain": "%s", "UserPoolId": "%s"}
@@ -333,7 +333,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
 
     /** After a delete the name is free again, and it follows its new pool. */
     @Test
-    @Order(16)
+    @Order(18)
     void domainNameFollowsItsNewPoolAfterReassignment() throws Exception {
         cognitoJson("CreateUserPoolDomain", customDomain(DOMAIN, poolB, requestCertificate(DOMAIN)));
 
@@ -350,7 +350,7 @@ class CognitoCustomDomainRoutingIntegrationTest {
 
     /** Two accounts racing for one name: exactly one create succeeds, so the name never turns ambiguous. */
     @Test
-    @Order(17)
+    @Order(19)
     void concurrentCreatesAcrossAccountsLeaveOneOwner() throws Exception {
         String contested = "auth-race-" + System.nanoTime() + ".teos.localhost.floci.io";
         String defaultAccount = "000000000000";
