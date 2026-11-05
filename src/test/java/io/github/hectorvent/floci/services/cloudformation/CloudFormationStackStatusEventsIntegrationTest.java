@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -450,43 +451,50 @@ class CloudFormationStackStatusEventsIntegrationTest {
      * from the stack operation, so the status DescribeStacks answers can be ahead of the queue. Every
      * event the queue has held by then is returned, whichever stack it names.
      */
+    /** Every event the queue has delivered once one naming {@code stackId} carries {@code lastStatus}. */
     private static List<JsonNode> awaitEvents(EventRuleQueue queue, String stackId, String lastStatus)
             throws Exception {
         List<JsonNode> events = new ArrayList<>();
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
-            events.addAll(queue.drain());
-            if (naming(events, stackId).stream().anyMatch(event -> lastStatus.equals(status(event)))) {
-                return events;
-            }
-            Thread.sleep(50);
-        }
-        fail("No " + DETAIL_TYPE + " event with status " + lastStatus + " for " + stackId + " within ten seconds; "
-                + "the queue held: " + events);
+        awaitEvents(queue, events, event -> stackId.equals(stackId(event)), stackId, lastStatus);
         return events;
     }
 
     /** The nested stack's events, waiting for {@code lastStatus} since delivery runs in order behind the root's. */
     private static List<JsonNode> awaitNested(EventRuleQueue queue, List<JsonNode> events, String root,
                                               String lastStatus) throws Exception {
+        return awaitEvents(queue, events, event -> isNested(event, root), "the nested stack of " + root, lastStatus);
+    }
+
+    /**
+     * Drains the queue into {@code events} until one of {@code those} carries {@code lastStatus}, and
+     * returns the events that are {@code those}.
+     */
+    private static List<JsonNode> awaitEvents(EventRuleQueue queue, List<JsonNode> events, Predicate<JsonNode> those,
+                                              String whose, String lastStatus) throws Exception {
         long deadline = System.currentTimeMillis() + 10_000;
         while (System.currentTimeMillis() < deadline) {
-            List<JsonNode> nested = nestedEvents(events, root);
-            if (nested.stream().anyMatch(event -> lastStatus.equals(status(event)))) {
-                return nested;
-            }
             events.addAll(queue.drain());
+            List<JsonNode> matching = events.stream().filter(those).toList();
+            if (matching.stream().anyMatch(event -> lastStatus.equals(status(event)))) {
+                return matching;
+            }
             Thread.sleep(50);
         }
-        fail("No " + lastStatus + " event for the nested stack of " + root + " within ten seconds; "
+        fail("No " + DETAIL_TYPE + " event with status " + lastStatus + " for " + whose + " within ten seconds; "
                 + "the queue held: " + events);
         return List.of();
     }
 
     private static List<JsonNode> nestedEvents(List<JsonNode> events, String root) {
-        return events.stream()
-                .filter(event -> event.path("detail").path("stack-id").asText().contains("/" + root + "-Nested/"))
-                .toList();
+        return events.stream().filter(event -> isNested(event, root)).toList();
+    }
+
+    private static boolean isNested(JsonNode event, String root) {
+        return stackId(event).contains("/" + root + "-Nested/");
+    }
+
+    private static String stackId(JsonNode event) {
+        return event.path("detail").path("stack-id").asText();
     }
 
     private static void assertNoTokenOn(List<JsonNode> nested) {

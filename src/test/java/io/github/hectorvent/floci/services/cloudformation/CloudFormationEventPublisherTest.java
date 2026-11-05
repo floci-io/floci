@@ -8,13 +8,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.util.concurrent.TimeUnit;
+
+import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 
@@ -49,13 +52,18 @@ class CloudFormationEventPublisherTest {
         return contains("\"status\":\"" + status + "\"");
     }
 
+    private void awaitWorker(Thread.State state) {
+        await().atMost(DELIVERY_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS).until(() -> publisher.workerState() == state);
+    }
+
     @Test
     void anEventRecordedBeforeItsStatusWriteWaitsForThatWrite() {
         Stack stack = stackInStatus("UPDATE_IN_PROGRESS");
 
         publisher.stackStatusChanged(stack, "000000000000", "UPDATE_COMPLETE", null);
 
-        verify(eventBridge, after(200).never()).publishServiceEvent(anyString(), anyString(), anyString(),
+        awaitWorker(Thread.State.TIMED_WAITING); // sleeping in awaitStatusWrite
+        verify(eventBridge, never()).publishServiceEvent(anyString(), anyString(), anyString(),
                 anyString(), anyString());
         stack.setStatus("UPDATE_COMPLETE");
         verify(eventBridge, timeout(DELIVERY_TIMEOUT_MILLIS)).publishServiceEvent(
@@ -71,7 +79,8 @@ class CloudFormationEventPublisherTest {
         publisher.stop();
         stack.setStatus("UPDATE_COMPLETE");
 
-        verify(eventBridge, after(200).never()).publishServiceEvent(anyString(), anyString(), anyString(),
+        awaitWorker(Thread.State.TERMINATED);
+        verify(eventBridge, never()).publishServiceEvent(anyString(), anyString(), anyString(),
                 anyString(), anyString());
     }
 

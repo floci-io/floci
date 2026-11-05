@@ -1074,8 +1074,9 @@ a nested stack's events, on the `REVIEW_IN_PROGRESS` of a new stack, and on the 
 given no token.
 
 Events are delivered in order by one background worker, apart from the stack operation and outside any
-lock on the stack. A delivery that fails is logged and changes nothing about the operation, and a slow
-target delays later events, never a stack. The worker's queue is in memory: an event still in it when
+lock on the stack. The status an operation starts with is sent as the operation begins to run, so one
+the operation limit refuses sends nothing. A delivery that fails is logged and changes nothing about
+the operation, and a slow target delays later events, never a stack. The worker's queue is in memory: an event still in it when
 Floci stops is dropped and counted in the log, and is not sent on the next start, even where the stack
 is persisted.
 

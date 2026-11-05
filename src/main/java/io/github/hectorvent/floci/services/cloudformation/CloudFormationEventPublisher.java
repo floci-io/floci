@@ -63,6 +63,11 @@ public class CloudFormationEventPublisher {
         worker.interrupt();
     }
 
+    /** The worker's state: sleeping in {@link #awaitStatusWrite} is TIMED_WAITING, stopped is TERMINATED. */
+    Thread.State workerState() {
+        return worker.getState();
+    }
+
     /**
      * Queues one event for {@code status} and returns at once, so it is safe under the stack's lock.
      * The token is the one on the stack now, the operation that caused this status.
