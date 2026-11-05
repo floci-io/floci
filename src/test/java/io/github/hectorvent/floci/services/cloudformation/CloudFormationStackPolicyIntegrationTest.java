@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnRequests;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -300,11 +301,7 @@ class CloudFormationStackPolicyIntegrationTest {
     }
 
     private static Response cfn(String action, String stackName, String... params) {
-        RequestSpecification request = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", CFN_AUTH)
-                .formParam("Action", action)
-                .formParam("StackName", stackName);
+        RequestSpecification request = CfnRequests.cfn(action, stackName).header("Authorization", CFN_AUTH);
         for (int i = 0; i < params.length; i += 2) {
             request = request.formParam(params[i], params[i + 1]);
         }
