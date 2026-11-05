@@ -69,14 +69,16 @@ class RdsDataSqlParametersTest {
     }
 
     @Test
-    void postgresPreservesPreescapedJsonbOperatorsAlongsideNamedBindings() {
+    void postgresKeepsEachQuestionMarkFromInputSqlAlongsideNamedBindings() throws SQLException {
         ParsedSql parsed = RdsDataSqlParameters.parse(
                 "select data ?? :key, data ??| array[:keys], data ??& array[:all] from t where id = :id",
                 false);
 
-        assertEquals("select data ?? ?, data ??| array[?], data ??& array[?] from t where id = ?",
+        assertEquals("select data ???? ?, data ????| array[?], data ????& array[?] from t where id = ?",
                 parsed.sql());
         assertEquals(List.of("key", "keys", "all", "id"), parsed.parameterOrder());
+        assertEquals("select data ?? $1, data ??| array[$2], data ??& array[$3] from t where id = $4",
+                Parser.parseJdbcSql(parsed.sql(), true, true, false, false, false).getFirst().nativeSql);
     }
 
     @Test
@@ -84,10 +86,8 @@ class RdsDataSqlParametersTest {
         for (String operator : List.of("?'key'", "??'key'", "?|array['a']", "??|array['a']",
                 "?&array['a']", "??&array['a']")) {
             ParsedSql parsed = RdsDataSqlParameters.parse("select :data" + operator, false);
-            String serverOperator = operator.startsWith("??") ? operator.substring(1) : operator;
-
             assertEquals(List.of("data"), parsed.parameterOrder(), operator);
-            assertEquals("select $1 " + serverOperator,
+            assertEquals("select $1 " + operator,
                     Parser.parseJdbcSql(parsed.sql(), true, true, false, false, false).getFirst().nativeSql,
                     operator);
         }

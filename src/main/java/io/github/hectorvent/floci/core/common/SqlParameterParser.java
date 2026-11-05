@@ -183,9 +183,6 @@ public final class SqlParameterParser {
             }
             if (c == '?' && options.escapeQuestionMarks()) {
                 out.append("??");
-                if (i + 1 < len && sql.charAt(i + 1) == '?') {
-                    i++;
-                }
                 i++;
                 continue;
             }
