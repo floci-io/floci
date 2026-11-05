@@ -128,8 +128,7 @@ public class EventBridgeInvoker {
                               EmulatorConfig config) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config,
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+                serviceRegistry, regionResolver, objectMapper, config, (AppSyncTargetInvoker) null);
     }
 
     EventBridgeInvoker(LambdaService lambdaService,

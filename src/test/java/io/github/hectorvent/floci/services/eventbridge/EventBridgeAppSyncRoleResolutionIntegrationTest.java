@@ -4,12 +4,10 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient;
-import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.PlanResult;
 import io.github.hectorvent.floci.services.appsync.GraphqlSidecarClient.PlannedField;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
 import io.github.hectorvent.floci.services.appsync.graphql.resolver.AppSyncResolverExecutor;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
-import io.github.hectorvent.floci.services.appsync.model.Resolver;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.quarkus.test.InjectMock;
@@ -56,14 +54,10 @@ class EventBridgeAppSyncRoleResolutionIntegrationTest {
     @BeforeEach
     void createApi() {
         reset(sidecar, resolvers);
-        RequestScopes.runAs(ACCOUNT, REGION, () -> {
-            api = appSync.createGraphqlApi(Map.of("name", "iam-toggle-" + UUID.randomUUID(),
-                    "authenticationType", "AWS_IAM"), REGION);
-            schemas.register(api.getApiId(), "type Query { unused: String } type Mutation { publish: String }");
-        });
-        when(sidecar.plan(any(), any(), any(), any())).thenReturn(new PlanResult("MUTATION",
-                List.of(new PlannedField("Mutation", "publish", List.of(), List.of()))));
-        when(resolvers.findResolver(any(), any(), any())).thenReturn(new Resolver());
+        api = EventBridgeAppSyncFixtures.createApi(appSync, schemas, ACCOUNT, REGION,
+                "type Query { unused: String } type Mutation { publish: String }");
+        EventBridgeAppSyncFixtures.stubMutation(sidecar, resolvers,
+                new PlannedField("Mutation", "publish", List.of(), List.of()));
         when(sidecar.execute(any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(Map.of("data", Map.of("publish", "delivered")));
     }
@@ -97,10 +91,7 @@ class EventBridgeAppSyncRoleResolutionIntegrationTest {
     }
 
     private void assertDelivered(String roleArn) {
-        Target target = new Target("appsync", "arn:aws:appsync:" + REGION + ":" + ACCOUNT
-                + ":endpoints/graphql-api/" + api.getApiId(), null, null);
-        target.setRoleArn(roleArn);
-        target.setAppSyncParameters(new Target.AppSyncParameters("mutation { publish }"));
+        Target target = EventBridgeAppSyncFixtures.target(api, ACCOUNT, REGION, roleArn, "mutation { publish }");
         invoker.invoke(target, "{}", RULE, ACCOUNT);
         verify(sidecar).execute(any(), any(), any(), any(), any(), any(), any());
     }

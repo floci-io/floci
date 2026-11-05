@@ -32,6 +32,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.services.eventbridge.EventBridgeAppSyncFixtures.policy;
+import static io.github.hectorvent.floci.services.eventbridge.EventBridgeAppSyncFixtures.trust;
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -94,10 +96,10 @@ class EventBridgeAppSyncSidecarIntegrationTest {
         dynamo = AwsTestClients.create(DynamoDbClient.builder(), "test", Region.of(REGION));
         sqs = AwsTestClients.create(SqsClient.builder(), "test", Region.of(REGION));
         RequestScopes.runAs(ACCOUNT, REGION, () -> {
-            iam.createRole(targetRoleName, "/", trust("events", "arn:aws:events:" + REGION + ":" + ACCOUNT + ":rule/" + rule),
+            iam.createRole(targetRoleName, "/", trust("events", "arn:aws:events:" + REGION + ":" + ACCOUNT + ":rule/" + rule, ACCOUNT),
                     null, 3600, Map.of());
-            iam.putRolePolicy(targetRoleName, "invoke", targetPolicy("Allow"));
-            iam.createRole(dataRoleName, "/", trust("appsync", null), null, 3600, Map.of());
+            iam.putRolePolicy(targetRoleName, "invoke", policy("Allow", "arn:aws:appsync:" + REGION + ":" + ACCOUNT + ":apis/*"));
+            iam.createRole(dataRoleName, "/", trust("appsync", null, ACCOUNT), null, 3600, Map.of());
             iam.putRolePolicy(dataRoleName, "invoke", """
                     {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"dynamodb:PutItem",
                     "Resource":"arn:aws:dynamodb:%s:%s:table/%s"}]}""".formatted(REGION, ACCOUNT, table));
@@ -160,7 +162,8 @@ class EventBridgeAppSyncSidecarIntegrationTest {
 
     @Test
     void aDeniedTargetRoleDeadLettersTheEventWithoutWriting() {
-        RequestScopes.runAs(ACCOUNT, REGION, () -> iam.putRolePolicy(targetRoleName, "invoke", targetPolicy("Deny")));
+        RequestScopes.runAs(ACCOUNT, REGION, () -> iam.putRolePolicy(targetRoleName, "invoke",
+                policy("Deny", "arn:aws:appsync:" + REGION + ":" + ACCOUNT + ":apis/*")));
         send("denied");
         assertTrue(item("denied").isEmpty());
         assertEquals("NO_PERMISSIONS", deadLetter().messageAttributes().get("ERROR_CODE").stringValue());
@@ -227,23 +230,6 @@ class EventBridgeAppSyncSidecarIntegrationTest {
 
     private static String roleArn(String name) {
         return "arn:aws:iam::" + ACCOUNT + ":role/" + name;
-    }
-
-    private static String targetPolicy(String effect) {
-        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"" + effect
-                + "\",\"Action\":\"appsync:GraphQL\",\"Resource\":\"arn:aws:appsync:" + REGION + ":" + ACCOUNT + ":apis/*\"}]}";
-    }
-
-    private static String trust(String service, String sourceArn) {
-        ObjectNode statement = MAPPER.createObjectNode().put("Effect", "Allow").put("Action", "sts:AssumeRole");
-        statement.putObject("Principal").put("Service", service + ".amazonaws.com");
-        statement.putObject("Condition").putObject("StringEquals").put("aws:SourceAccount", ACCOUNT);
-        if (sourceArn != null) {
-            ((ObjectNode) statement.path("Condition")).putObject("ArnEquals").put("aws:SourceArn", sourceArn);
-        }
-        ObjectNode document = MAPPER.createObjectNode().put("Version", "2012-10-17");
-        document.putArray("Statement").add(statement);
-        return document.toString();
     }
 
     private static final String TEMPLATE = """

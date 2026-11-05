@@ -11,7 +11,6 @@ import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
 import io.github.hectorvent.floci.services.appsync.graphql.resolver.AppSyncResolverExecutor;
 import io.github.hectorvent.floci.services.appsync.graphql.resolver.ResolverCallbackSessions;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
-import io.github.hectorvent.floci.services.appsync.model.Resolver;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
@@ -29,6 +28,8 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.services.eventbridge.EventBridgeAppSyncFixtures.policy;
+import static io.github.hectorvent.floci.services.eventbridge.EventBridgeAppSyncFixtures.trust;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -48,11 +49,6 @@ class EventBridgeAppSyncTargetIntegrationTest {
     private static final String REGION = "us-east-1";
     private static final String RULE = "arn:aws:events:" + REGION + ":" + ACCOUNT + ":rule/publish";
     private static final String OPERATION = "mutation Publish($id: ID!) { publish(id: $id) { id } }";
-    private static final String TRUST = """
-            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-            "Principal":{"Service":"events.amazonaws.com"},
-            "Condition":{"ArnEquals":{"aws:SourceArn":"%s"},"StringEquals":{"aws:SourceAccount":"%s"}}}]}"""
-            .formatted(RULE, ACCOUNT);
 
     @Inject
     EventBridgeInvoker invoker;
@@ -81,23 +77,17 @@ class EventBridgeAppSyncTargetIntegrationTest {
         reset(sidecar, resolvers);
         variables.set(null);
         identity.set(null);
+        api = EventBridgeAppSyncFixtures.createApi(appSync, schemas, ACCOUNT, REGION,
+                "type Query { unused: String } type Mutation { publish(id: ID!): Result } type Result { id: ID }");
         RequestScopes.runAs(ACCOUNT, REGION, () -> {
-            api = appSync.createGraphqlApi(Map.of("name", "target-" + UUID.randomUUID(),
-                    "authenticationType", "AWS_IAM"), REGION);
-            schemas.register(api.getApiId(), "type Query { unused: String } type Mutation { publish(id: ID!): Result } "
-                    + "type Result { id: ID }");
             roleName = "appsync-target-" + UUID.randomUUID();
-            roleArn = iam.createRole(roleName, "/", TRUST, null, 3600, Map.of()).getArn();
+            roleArn = iam.createRole(roleName, "/", trust("events", RULE, ACCOUNT), null, 3600, Map.of()).getArn();
             iam.putRolePolicy(roleName, "invoke", policy("Allow", api.getArn() + "/*"));
         });
-        target = new Target("appsync", "arn:aws:appsync:" + REGION + ":" + ACCOUNT
-                + ":endpoints/graphql-api/" + api.getApiId(), null, null);
-        target.setRoleArn(roleArn);
-        target.setAppSyncParameters(new Target.AppSyncParameters(OPERATION));
-        lenient().when(sidecar.plan(any(), any(), any(), any())).thenReturn(new PlanResult("MUTATION", List.of(
+        target = EventBridgeAppSyncFixtures.target(api, ACCOUNT, REGION, roleArn, OPERATION);
+        EventBridgeAppSyncFixtures.stubMutation(sidecar, resolvers,
                 new PlannedField("Mutation", "publish", List.of(), List.of()),
-                new PlannedField("Result", "id", List.of(), List.of()))));
-        lenient().when(resolvers.findResolver(any(), any(), any())).thenReturn(new Resolver());
+                new PlannedField("Result", "id", List.of(), List.of()));
         lenient().when(sidecar.execute(any(), any(), any(), any(), any(), any(), any())).thenAnswer(call -> {
             variables.set(call.getArgument(3));
             GraphqlSidecarClient.ResolveSpec spec = call.getArgument(6);
@@ -268,8 +258,4 @@ class EventBridgeAppSyncTargetIntegrationTest {
         assertEquals(null, variables.get());
     }
 
-    private static String policy(String effect, String resource) {
-        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"" + effect
-                + "\",\"Action\":\"appsync:GraphQL\",\"Resource\":\"" + resource + "\"}]}";
-    }
 }
