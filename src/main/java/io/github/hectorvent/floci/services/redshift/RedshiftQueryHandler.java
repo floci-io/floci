@@ -246,9 +246,10 @@ public class RedshiftQueryHandler {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String snapshotArn = params.getFirst("SnapshotArn");
             String nodeType = params.getFirst("NodeType");
-            String resolvedSnapshot = resolveSnapshotIdentifier(snapshotIdentifier, snapshotArn, authorizationHeader);
-            Cluster cluster = service.restoreFromClusterSnapshot(clusterIdentifier, resolvedSnapshot,
-                    snapshotCluster(params.getFirst("SnapshotClusterIdentifier"), snapshotArn), nodeType);
+            RestoredSnapshot snapshot = resolveSnapshot(snapshotIdentifier,
+                    params.getFirst("SnapshotClusterIdentifier"), snapshotArn, authorizationHeader);
+            Cluster cluster = service.restoreFromClusterSnapshot(clusterIdentifier, snapshot.name(),
+                    snapshot.cluster(), nodeType);
             String xml = new XmlBuilder()
                     .start("RestoreFromClusterSnapshotResponse")
                       .start("RestoreFromClusterSnapshotResult")
@@ -1218,26 +1219,16 @@ public class RedshiftQueryHandler {
         };
     }
 
-    /**
-     * The cluster a restore names its snapshot's by, which the request is authorized on: {@code SnapshotClusterIdentifier}
-     * and the cluster in a {@code SnapshotArn}, which {@link #resolveSnapshotIdentifier} has checked. Naming two
-     * different clusters, or none in its ARN, it names no snapshot.
-     */
-    private static String snapshotCluster(String snapshotClusterIdentifier, String snapshotArn) {
-        if (snapshotArn == null || snapshotArn.isBlank()) {
-            return snapshotClusterIdentifier;
-        }
-        String resource = AwsArnUtils.parse(snapshotArn).resource();
-        String arnCluster = resource.substring("snapshot:".length(), resource.lastIndexOf('/'));
-        if (arnCluster.isBlank() || snapshotClusterIdentifier != null && !snapshotClusterIdentifier.isBlank()
-                && !snapshotClusterIdentifier.equals(arnCluster)) {
-            throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
-        }
-        return arnCluster;
+    /** The snapshot a restore names: its name, and the cluster it was taken from, which the request is checked on. */
+    private record RestoredSnapshot(String cluster, String name) {
     }
 
-    // RestoreFromClusterSnapshot accepts SnapshotIdentifier or SnapshotArn.
-    private String resolveSnapshotIdentifier(String snapshotIdentifier, String snapshotArn, String authorizationHeader) {
+    /**
+     * RestoreFromClusterSnapshot accepts SnapshotIdentifier, with SnapshotClusterIdentifier, or SnapshotArn. An ARN
+     * naming no cluster, or another cluster than SnapshotClusterIdentifier, names no snapshot.
+     */
+    private RestoredSnapshot resolveSnapshot(String snapshotIdentifier, String snapshotClusterIdentifier,
+            String snapshotArn, String authorizationHeader) {
         boolean hasIdentifier = snapshotIdentifier != null && !snapshotIdentifier.isBlank();
         boolean hasArn = snapshotArn != null && !snapshotArn.isBlank();
         if (hasIdentifier && hasArn) {
@@ -1245,7 +1236,7 @@ public class RedshiftQueryHandler {
                     "You must specify either SnapshotIdentifier or SnapshotArn, but not both.", 400);
         }
         if (hasIdentifier) {
-            return snapshotIdentifier;
+            return new RestoredSnapshot(snapshotClusterIdentifier, snapshotIdentifier);
         }
         if (!hasArn) {
             throw new AwsException("InvalidParameterValue", "SnapshotIdentifier or SnapshotArn is required", 400);
@@ -1268,7 +1259,12 @@ public class RedshiftQueryHandler {
                 || !arn.region().equals(regionResolver.resolveRegionFromAuth(authorizationHeader))) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
         }
-        return resource.substring(slash + 1);
+        String cluster = resource.substring("snapshot:".length(), slash);
+        if (cluster.isBlank() || snapshotClusterIdentifier != null && !snapshotClusterIdentifier.isBlank()
+                && !snapshotClusterIdentifier.equals(cluster)) {
+            throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
+        }
+        return new RestoredSnapshot(cluster, resource.substring(slash + 1));
     }
 
     private String buildSnapshotXml(Snapshot snapshot) {
