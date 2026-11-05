@@ -9,6 +9,7 @@ import java.security.MessageDigest;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
+import java.util.HexFormat;
 import java.util.Optional;
 
 /**
@@ -94,7 +95,7 @@ final class S3PostPolicySigner {
             String region = parts[2];
             String service = parts[3];
             byte[] signingKey = deriveSigningKey(secretKey, date, region, service);
-            String expected = hexEncode(hmacSha256(signingKey, policyBase64));
+            String expected = HexFormat.of().formatHex(hmacSha256(signingKey, policyBase64));
             return MessageDigest.isEqual(
                     expected.getBytes(StandardCharsets.UTF_8),
                     signatureHex.getBytes(StandardCharsets.UTF_8));
@@ -116,13 +117,5 @@ final class S3PostPolicySigner {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String hexEncode(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 }

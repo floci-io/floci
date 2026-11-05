@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
 
 class EventBridgeSchedulerIntegrationTest {
 
@@ -53,7 +54,7 @@ class EventBridgeSchedulerIntegrationTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT),
                 new ObjectMapper(), scheduler, dispatcher, replayDispatcher,
-                new ResourceGroupsTaggingService(null));
+                new ResourceGroupsTaggingService(null), mock(AppSyncTargetValidator.class));
     }
 
     @AfterEach

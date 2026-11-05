@@ -45,6 +45,7 @@ import java.util.stream.Collectors;
 public class ElbV2Service implements ResourceProvider, ServerCertificateReferenceProvider, VpcDependencyProvider {
 
     private static final Logger LOG = Logger.getLogger(ElbV2Service.class);
+    private static final String DEFAULT_SSL_POLICY = "ELBSecurityPolicy-2016-08";
     /** {@code LoadBalancerTypeEnum}, in the model's order. */
     private static final List<String> LOAD_BALANCER_TYPES = List.of("application", "network", "gateway");
 
@@ -664,7 +665,8 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         listener.setLoadBalancerArn(lbArn);
         listener.setPort(port);
         listener.setProtocol(protocol != null ? protocol : ("gateway".equals(lbType) ? "GENEVE" : "HTTP"));
-        listener.setSslPolicy(sslPolicy);
+        listener.setSslPolicy(sslPolicy == null && servesCertificates(listener.getProtocol())
+                ? DEFAULT_SSL_POLICY : sslPolicy);
         listener.setCertificates(certificates != null ? new ArrayList<>(certificates) : new ArrayList<>());
         listener.setDefaultActions(defaultActions != null ? new ArrayList<>(defaultActions) : new ArrayList<>());
         listener.setAlpnPolicy(alpnPolicy != null ? new ArrayList<>(alpnPolicy) : new ArrayList<>());
@@ -809,9 +811,11 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             ListenerState initialState = listenerState(initial, initialLb);
             requireAvailableListenerPort(listeners.getOrDefault(region, Map.of()), initial.getLoadBalancerArn(),
                     listenerArn, port != null ? port : initialState.port());
-            if (validateExistingListener(region, initialState, initialLb, () ->
-                    requireListenerCertificates(region, protocol != null ? protocol : initialState.protocol(),
-                            certificates != null ? certificates : initialState.certificates()))) {
+            if (validateExistingListener(region, initialState, initialLb, () -> {
+                requireListenerProtocolTransition(initialState.protocol(), protocol, sslPolicy, certificates);
+                requireListenerCertificates(region, protocol != null ? protocol : initialState.protocol(),
+                        certificates != null ? certificates : initialState.certificates());
+            })) {
                 break;
             }
         }
@@ -820,9 +824,11 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
             LoadBalancer lb = requireLoadBalancer(region, listener.getLoadBalancerArn());
             ListenerState expected = listenerState(listener, lb);
             Listener prospective = prospectiveListener(expected, protocol, port, certificates);
+            boolean clearSecuritySettings = clearsSecuritySettings(expected.protocol(), protocol);
             requireAvailableListenerPort(listeners.getOrDefault(region, Map.of()), listener.getLoadBalancerArn(),
                     listenerArn, prospective.getPort());
             if (!validateExistingListener(region, expected, lb, () -> {
+                requireListenerProtocolTransition(expected.protocol(), protocol, sslPolicy, certificates);
                 requireListenerCertificates(region, prospective.getProtocol(), prospective.getCertificates());
                 requireCompatibleListenerProtocol(listenerArn, prospective.getPort(), prospective.getProtocol());
             })) {
@@ -842,11 +848,13 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
                     if (protocol != null) {
                         listener.setProtocol(protocol);
                     }
-                    if (sslPolicy != null) {
+                    if (clearSecuritySettings) {
+                        listener.setSslPolicy(null);
+                    } else if (sslPolicy != null) {
                         listener.setSslPolicy(sslPolicy);
                     }
-                    if (certificates != null) {
-                        listener.setCertificates(new ArrayList<>(certificates));
+                    if (certificates != null || clearSecuritySettings) {
+                        listener.setCertificates(new ArrayList<>(prospective.getCertificates()));
                     }
                     if (alpnPolicy != null) {
                         listener.setAlpnPolicy(new ArrayList<>(alpnPolicy));
@@ -1268,8 +1276,32 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         prospective.setLoadBalancerArn(expected.listener().getLoadBalancerArn());
         prospective.setPort(port != null ? port : expected.port());
         prospective.setProtocol(protocol != null ? protocol : expected.protocol());
-        prospective.setCertificates(new ArrayList<>(certificates != null ? certificates : expected.certificates()));
+        prospective.setCertificates(clearsSecuritySettings(expected.protocol(), protocol) ? new ArrayList<>()
+                : new ArrayList<>(certificates != null ? certificates : expected.certificates()));
         return prospective;
+    }
+
+    private static boolean clearsSecuritySettings(String currentProtocol, String newProtocol) {
+        return ("HTTPS".equalsIgnoreCase(currentProtocol) && "HTTP".equalsIgnoreCase(newProtocol))
+                || ("TLS".equalsIgnoreCase(currentProtocol) && "TCP".equalsIgnoreCase(newProtocol));
+    }
+
+    private static void requireListenerProtocolTransition(String currentProtocol, String newProtocol,
+                                                          String sslPolicy, List<String> certificates) {
+        boolean requiresSecuritySettings =
+                ("HTTP".equalsIgnoreCase(currentProtocol) && "HTTPS".equalsIgnoreCase(newProtocol))
+                || ("TCP".equalsIgnoreCase(currentProtocol) && "TLS".equalsIgnoreCase(newProtocol));
+        if (!requiresSecuritySettings) {
+            return;
+        }
+        if (certificates == null || certificates.isEmpty()) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "A default certificate is required when changing the listener protocol to " + newProtocol + ".", 400);
+        }
+        if (sslPolicy == null) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "An SSL policy is required when changing the listener protocol to " + newProtocol + ".", 400);
+        }
     }
 
     private void requireCanonicalLoadBalancer(String region, LoadBalancer lb) {

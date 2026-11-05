@@ -407,7 +407,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
                     () -> assertEquals(400, rejected.statusCode()),
                     () -> assertEquals("HTTP", described.path(result + "Protocol")),
                     () -> assertEquals(String.valueOf(HTTPS_PORT), described.path(result + "Port")),
-                    () -> assertEquals("", described.path(result + "SslPolicy")),
+                    () -> assertTrue(described.xmlPath().getList(result + "SslPolicy").isEmpty()),
                     () -> assertTrue(described.xmlPath().getList(result + "Certificates.member").isEmpty()),
                     () -> assertEquals("original", described.path(result
                             + "DefaultActions.member.FixedResponseConfig.MessageBody")),
@@ -418,6 +418,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
                     () -> assertPlainResponse(loadBalancer.dnsName(), HTTPS_PORT, "original"));
             given().header("Authorization", AUTH).formParam("Action", "ModifyListener")
                     .formParam("ListenerArn", listener).formParam("Protocol", "HTTPS")
+                    .formParam("SslPolicy", "ELBSecurityPolicy-2016-08")
                     .formParam("Certificates.member.1.CertificateArn", certificate.getArn())
                     .when().post("/").then().statusCode(200);
             HttpsResult retried = awaitHttps(loadBalancer.dnsName(), certificate);
@@ -529,7 +530,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
                     () -> assertEquals(400, rejected.statusCode()),
                     () -> assertEquals("HTTP", described.path(result + "Protocol")),
                     () -> assertEquals(String.valueOf(HTTP_PORT), described.path(result + "Port")),
-                    () -> assertEquals("", described.path(result + "SslPolicy")),
+                    () -> assertTrue(described.xmlPath().getList(result + "SslPolicy").isEmpty()),
                     () -> assertTrue(described.xmlPath().getList(result + "Certificates.member").isEmpty()),
                     () -> assertEquals("original", described.path(result
                             + "DefaultActions.member.FixedResponseConfig.MessageBody")),
@@ -539,6 +540,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
             awaitListenerPortClosed();
             given().header("Authorization", AUTH).formParam("Action", "ModifyListener")
                     .formParam("ListenerArn", firstArn).formParam("Protocol", "HTTPS").formParam("Port", HTTPS_PORT)
+                    .formParam("SslPolicy", "ELBSecurityPolicy-2016-08")
                     .formParam("Certificates.member.1.CertificateArn", certificate.getArn())
                     .when().post("/").then().statusCode(200);
             assertEquals("original", awaitHttps(first.dnsName(), certificate).body());
@@ -742,7 +744,8 @@ class ElbV2HttpsDataPlaneIntegrationTest {
     }
 
     private static void awaitPlainResponse(String host, int port, String body) {
-        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100)).untilAsserted(() ->
+        await().ignoreException(ConnectException.class)
+                .atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100)).untilAsserted(() ->
                 assertPlainResponse(host, port, body));
     }
 
@@ -854,6 +857,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
             Response rejected = given().header("Authorization", AUTH)
                     .formParam("Action", "ModifyListener").formParam("ListenerArn", firstListener)
                     .formParam("Protocol", "HTTPS")
+                    .formParam("SslPolicy", "ELBSecurityPolicy-2016-08")
                     .formParam("Certificates.member.1.CertificateArn", certificate.getArn())
                     .when().post("/");
             assertTrue(rejected.statusCode() >= 400);
@@ -863,6 +867,54 @@ class ElbV2HttpsDataPlaneIntegrationTest {
                     .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.Protocol", equalTo("HTTP"));
             assertPlainResponse(first.dnsName(), HTTP_PORT, "first");
             assertPlainResponse(second.dnsName(), HTTP_PORT, "second");
+        } finally {
+            deleteListener(firstListener);
+            deleteListener(secondListener);
+            deleteLoadBalancer(first.arn());
+            deleteLoadBalancer(second.arn());
+            acmService.deleteCertificate(certificate.getArn(), REGION);
+        }
+    }
+
+    @Test
+    @Order(11)
+    void protocolChangesPublishSecuritySettingsTogetherWithTheRuntime() throws Exception {
+        LoadBalancerRef first = createLoadBalancer("protocol-first");
+        LoadBalancerRef second = createLoadBalancer("protocol-second");
+        Certificate certificate = requestCertificate(first.dnsName());
+        String firstListener = null;
+        String secondListener = null;
+        try {
+            firstListener = createFixedResponseListener(first.arn(), "HTTPS", HTTPS_PORT, certificate.getArn(), "first");
+            secondListener = createFixedResponseListener(second.arn(), "HTTPS", HTTPS_PORT, certificate.getArn(), "second");
+            given().header("Authorization", AUTH).formParam("Action", "ModifyListener")
+                    .formParam("ListenerArn", firstListener).formParam("Protocol", "HTTP")
+                    .when().post("/").then().statusCode(400);
+            describeHttpsListener(firstListener, certificate.getArn());
+            assertEquals("first", awaitHttps(first.dnsName(), certificate).body());
+
+            deleteListener(secondListener);
+            secondListener = null;
+            given().header("Authorization", AUTH).formParam("Action", "ModifyListener")
+                    .formParam("ListenerArn", firstListener).formParam("Protocol", "HTTP")
+                    .when().post("/").then().statusCode(200);
+            awaitPlainResponse(first.dnsName(), HTTPS_PORT, "first");
+            assertAcmConsumers(certificate.getArn(), List.of());
+
+            given().header("Authorization", AUTH).formParam("Action", "ModifyListener")
+                    .formParam("ListenerArn", firstListener).formParam("Protocol", "HTTPS")
+                    .formParam("Certificates.member.1.CertificateArn", certificate.getArn())
+                    .when().post("/").then().statusCode(400);
+            assertPlainResponse(first.dnsName(), HTTPS_PORT, "first");
+            given().header("Authorization", AUTH).formParam("Action", "ModifyListener")
+                    .formParam("ListenerArn", firstListener).formParam("Protocol", "HTTPS")
+                    .formParam("SslPolicy", "ELBSecurityPolicy-TLS13-1-2-2021-06")
+                    .formParam("Certificates.member.1.CertificateArn", certificate.getArn())
+                    .when().post("/").then().statusCode(200);
+            describeHttpsListener(firstListener, certificate.getArn());
+            HttpsResult restored = awaitHttps(first.dnsName(), certificate);
+            assertEquals("first", restored.body());
+            assertPeerCertificate(restored.session(), certificate, first.dnsName());
         } finally {
             deleteListener(firstListener);
             deleteListener(secondListener);

@@ -90,6 +90,14 @@ public interface SparkJobRunner {
                Map<String, String> sparkLog4j2, Map<String, String> mapredSite, Map<String, String> hadoopLog4j,
                Map<String, String> hadoopEnvironment) {
 
+        /** This job, on {@code storage}. */
+        public Job onStorage(Storage storage) {
+            return new Job(service, runId, accountId, region, releaseLabel, engine, imageTemplate, customImage,
+                    dockerNetwork, executionRole, sparkDefaults, application, command, timeout, logFolder,
+                    cloudWatchLogs, environment, archives, storage, coreSite, sparkLog4j2, mapredSite, hadoopLog4j,
+                    hadoopEnvironment);
+        }
+
         /** This job, run in {@code image}. */
         public Job inImage(String image) {
             return new Job(service, runId, accountId, region, releaseLabel, engine, image, customImage, dockerNetwork,
@@ -99,10 +107,29 @@ public interface SparkJobRunner {
     }
 
     /**
-     * The Docker volumes holding an EMR cluster's storage, which every one of its steps' containers mounts:
-     * {@code home} at {@code /home/hadoop}, and {@code mnt} at {@code /mnt}, where its HDFS is.
+     * An EMR cluster's storage: the Docker volumes every one of its steps' containers mounts, {@code home} at
+     * {@code /home/hadoop} and {@code mnt} at {@code /mnt}; and its HDFS, whose NameNode is on the cluster's
+     * primary node, named {@code hdfsHost}, which a step's container reaches at {@code hdfsAddress} on the Docker
+     * network {@code hdfsNetwork}, the cluster's own, which the container joins (all three null until it runs, the
+     * network also on the host's own network, which steps share with it).
      */
-    record Storage(String home, String mnt) {
+    record Storage(String home, String mnt, String hdfsHost, String hdfsAddress, String hdfsNetwork) {
+
+        /**
+         * The component label of an EMR cluster's HDFS container, which carries its service's labels as a driver
+         * does but is the cluster's storage's to keep or remove, not a driver.
+         */
+        public static final String HDFS_COMPONENT = "emr-hdfs";
+
+        /** A cluster's volumes, before its HDFS runs. */
+        public Storage(String home, String mnt) {
+            this(home, mnt, null, null, null);
+        }
+
+        /** This storage, its HDFS's NameNode on {@code host}, at {@code address} on {@code network}. */
+        public Storage withHdfs(String host, String address, String network) {
+            return new Storage(home, mnt, host, address, network);
+        }
     }
 
     /**

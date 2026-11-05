@@ -265,8 +265,8 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void controlTowerTaggingIsChecked() {
-        // Control Tower requests name their resources in the path, which RequestResources does not read yet,
-        // so its tagging is checked on *.
+        // Control Tower requests name their resources in the path, and its routes are not vendored, so the request
+        // resources read none of them and its tagging is checked on *.
         String user = user("route-controltower-tags");
         String landingZone = "arn:aws:controltower:us-east-1:" + ACCOUNT + ":landingzone/ROUTE" + suffix();
 
@@ -494,8 +494,7 @@ class IamRestRouteEnforcementIntegrationTest {
 
     /**
      * A route no rule maps is checked as the operation of its vendored route when AWS authorizes that operation's
-     * action on no resource type, in both OpenSearch API versions and for Access Analyzer; one AWS checks on an
-     * analyzer stays unchecked, so a grant scoped to the analyzer is not refused for want of reading it.
+     * action on no resource type, in both OpenSearch API versions and for Access Analyzer.
      */
     @Test
     void aVendoredRouteIsCheckedWhenAwsAuthorizesItsActionOnNoResourceType() {
@@ -506,8 +505,6 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "es").get("/2015-01-01/domain").then(), "es:ListDomainNames");
         refused(as(user, "es").get("/2021-01-01/opensearch/versions").then(), "es:ListVersions");
         refused(as(user, "access-analyzer").get("/analyzer").then(), "access-analyzer:ListAnalyzers");
-        as(user, "access-analyzer").get("/analyzer/route-missing-" + suffix()).then().statusCode(404)
-                .body(containsString("ResourceNotFoundException"));
 
         policy(user, allow("es:ListDomainNames", "*"));
         as(user, "es").get("/2021-01-01/domain").then().statusCode(200);
@@ -545,6 +542,41 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * An Access Analyzer request naming its analyzer, in its path or its body, is checked on that analyzer, the ARN
+     * Access Analyzer gives it: a caller with no grant is refused, a grant scoped to the analyzer lets
+     * {@code GetAnalyzer} read it and {@code CreateAnalyzer} reach its validation of the type, a request naming
+     * another analyzer is refused, a deny on the analyzer holds under an allow on everything, and that allow lets
+     * {@code DeleteAnalyzer} delete it.
+     */
+    @Test
+    void anAccessAnalyzerRequestIsCheckedOnTheAnalyzerItsPathOrBodyNames() {
+        String user = user("route-analyzer");
+        String analyzer = "route-analyzer-" + suffix();
+        String arn = "arn:aws:access-analyzer:us-east-1:" + ACCOUNT + ":analyzer/" + analyzer;
+        refused(as(user, "access-analyzer").get("/analyzer/" + analyzer).then(), "access-analyzer:GetAnalyzer");
+        accessAnalyzer().body("{\"analyzerName\":\"" + analyzer + "\",\"type\":\"ORGANIZATION\"}").put("/analyzer")
+                .then().statusCode(200).body("arn", equalTo(arn));
+        cleanup.register(() -> accessAnalyzer().delete("/analyzer/" + analyzer));
+
+        policy(user, allow("access-analyzer:GetAnalyzer", arn) + "," + allow("access-analyzer:DeleteAnalyzer", arn)
+                + "," + allow("access-analyzer:CreateAnalyzer", arn));
+        as(user, "access-analyzer").get("/analyzer/" + analyzer).then().statusCode(200)
+                .body("analyzer.arn", equalTo(arn));
+        as(user, "access-analyzer").body(createAnalyzer(analyzer)).put("/analyzer").then().statusCode(400)
+                .body(containsString("ValidationException"));
+        refused(as(user, "access-analyzer").get("/analyzer/other-" + analyzer).then(), "access-analyzer:GetAnalyzer");
+        refused(as(user, "access-analyzer").delete("/analyzer/other-" + analyzer).then(),
+                "access-analyzer:DeleteAnalyzer");
+        refused(as(user, "access-analyzer").body(createAnalyzer("other-" + analyzer)).put("/analyzer").then(),
+                "access-analyzer:CreateAnalyzer");
+
+        policy(user, allow("access-analyzer:*", "*") + "," + deny("access-analyzer:GetAnalyzer", arn));
+        refused(as(user, "access-analyzer").get("/analyzer/" + analyzer).then(), "access-analyzer:GetAnalyzer");
+        as(user, "access-analyzer").get("/analyzer/other-" + analyzer).then().statusCode(404);
+        as(user, "access-analyzer").delete("/analyzer/" + analyzer).then().statusCode(200);
+    }
+
+    /**
      * A segment ending in a matrix parameter, which the router ignores, is checked as the route it reaches, on the
      * resource its path names: the routed path carries no matrix parameter, so the rule matches and the ARN is the
      * named resource's, and a grant scoped to it lets the request through while a caller with none is refused.
@@ -576,6 +608,16 @@ class IamRestRouteEnforcementIntegrationTest {
                 .formatted(name, ACCOUNT)).post("/2025-09-09/microvm-images").then().statusCode(201);
         cleanup.register(() -> admin().delete("/2025-09-09/microvm-images/" + name));
         return "arn:aws:lambda:us-east-1:" + ACCOUNT + ":microvm-image:" + name;
+    }
+
+    /** A {@code CreateAnalyzer} body of a type Access Analyzer refuses, so a request let through creates nothing. */
+    private static String createAnalyzer(String analyzer) {
+        return "{\"analyzerName\":\"" + analyzer + "\",\"type\":\"NONE\"}";
+    }
+
+    /** An Access Analyzer request as the account's admin. */
+    private static RequestSpecification accessAnalyzer() {
+        return given().header("Authorization", auth(ADMIN, "access-analyzer")).contentType("application/json");
     }
 
     private static RequestSpecification admin() {

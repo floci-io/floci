@@ -77,6 +77,21 @@ class ApiGatewayCustomDomainFilterTest {
         assertEquals(Boolean.TRUE, request.property(ApiGatewayCustomDomainFilter.ROUTED_PROPERTY));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"a%25b", "a%2Fb", "a%252Fb"})
+    void recordsTheIntendedPathBeforeAddingTheRoutingEscape(String suffix) {
+        ApiGatewayService service = serviceWithMapping("v1", "prod");
+        RecordingRequest request = new RecordingRequest(DOMAIN, URI.create("http://" + DOMAIN + "/v1/" + suffix));
+        ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
+
+        new ApiGatewayCustomDomainFilter(service, mock(ApiGatewayV2Service.class), routeContext)
+                .filter(request.context());
+
+        assertEquals("/execute-api/" + API_ID + "/prod/" + suffix, routeContext.rewrittenRequestPath());
+        assertEquals(routeContext.rewrittenRequestPath(), request.routedUri().getPath());
+        assertEquals("/v1/" + suffix, routeContext.signedRequestPath());
+    }
+
     @Test
     void leavesSignedPathUnsetWhenHostIsNotACustomDomain() {
         ApiGatewayService service = mock(ApiGatewayService.class);

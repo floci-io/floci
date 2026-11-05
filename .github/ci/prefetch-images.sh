@@ -100,8 +100,9 @@ starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/py
 starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsDockerIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 # EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsDockerIntegrationTest EMR
-# Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB.
-starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest \
+# Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its
+# HDFS in it, EmrDockerRunnerDockerIntegrationTest's included.
+starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest EmrDockerRunnerDockerIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
 
 # package token in shard.txt -> images its tests are known to launch
@@ -134,6 +135,44 @@ grep -q 'RdsAwsIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_IMAGE" ] && pu
 REDSHIFT_PG_IMAGE="$(grep -oE 'image-version: *postgres:[^ ]+' src/main/resources/application.yml | awk '{print $2}')"
 grep -qE '/redshift/|/cloudformation/' "$SHARD_FILE" && [ -n "$REDSHIFT_PG_IMAGE" ] && pull "$REDSHIFT_PG_IMAGE"
 grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine
+# These DSQL fixtures start the configured PostgreSQL sidecar; unit-only shards do not.
+DSQL_IMAGE="$(awk '/^    dsql:/ { in_dsql=1; next } in_dsql && /^    [a-z]/ { exit } in_dsql && /^      image:/ { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
+starts DsqlDataPlaneIntegrationTest DsqlClusterPolicyIntegrationTest DsqlTransactionAgeIntegrationTest \
+    && [ -n "$DSQL_IMAGE" ] && pull "$DSQL_IMAGE"
+# This regression deliberately overrides Redshift's default image to PostgreSQL 18.
+# Read that test's pin so updating its override also updates the prefetch.
+REDSHIFT_PG18_TEST="$(find src/test/java -name RedshiftMaxErrorPostgres18IntegrationTest.java -print -quit)"
+REDSHIFT_PG18_IMAGE="$(grep -oE '"postgres:[^"]+"' "${REDSHIFT_PG18_TEST:-/dev/null}" | tr -d '"')"
+starts RedshiftMaxErrorPostgres18IntegrationTest \
+    && [ -n "$REDSHIFT_PG18_IMAGE" ] && pull "$REDSHIFT_PG18_IMAGE"
+# CodeArtifact's real registry fixtures each use one configured sidecar image.
+# Keep unrelated unit-test shards from pulling all four registries.
+codeartifact_image() {
+    image="$(awk -v key="$1" '/^    codeartifact:/ { in_service=1; next } in_service && /^    [a-z]/ { exit } in_service && $1 == key ":" { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
+    if [ -n "$image" ]; then
+        pull "$image"
+    else
+        echo "$(date -u +%H:%M:%S) prefetch skipped: codeartifact.$1 not readable" >> "$PREFETCH_LOG"
+    fi
+}
+starts CodeArtifactMavenDockerIntegrationTest CodeArtifactMavenExternalConnectionDockerIntegrationTest \
+    && codeartifact_image maven-image
+starts CodeArtifactNpmDockerIntegrationTest CodeArtifactNpmExternalConnectionDockerIntegrationTest \
+    && codeartifact_image npm-image
+starts CodeArtifactNuGetDockerIntegrationTest CodeArtifactNuGetExternalConnectionDockerIntegrationTest \
+    && codeartifact_image nuget-image
+starts CodeArtifactPypiDockerIntegrationTest && codeartifact_image pypi-image
+# RDS's engine fixture starts MySQL at the default and explicitly requested versions.
+# Read both sources rather than duplicating their version pins here.
+if starts RdsParameterGroupEngineIntegrationTest; then
+    MYSQL_DEFAULT="$(grep -oE 'DEFAULT_MYSQL_IMAGE *= *"[^"]+"' src/main/java/io/github/hectorvent/floci/config/EmulatorConfig.java | grep -oE '"[^"]+"' | tr -d '"')"
+    [ -n "$MYSQL_DEFAULT" ] && pull "$MYSQL_DEFAULT"
+    MYSQL_TEST="$(find src/test/java -name RdsParameterGroupEngineIntegrationTest.java -print -quit)"
+    MYSQL_VERSIONS="$(awk -F'"' '$2 == "EngineVersion" { print $4 }' "${MYSQL_TEST:-/dev/null}" | sort -u)"
+    for version in $MYSQL_VERSIONS; do
+        [ -n "$MYSQL_DEFAULT" ] && pull "${MYSQL_DEFAULT%:*}:$version"
+    done
+fi
 # The InfluxDB and k3s pins live in application.yml like the sidecars above.
 INFLUX_IMAGE="$(grep -oE 'default-image: *"influxdb:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 grep -q '/timestreaminfluxdb/' "$SHARD_FILE" && [ -n "$INFLUX_IMAGE" ] && pull "$INFLUX_IMAGE"

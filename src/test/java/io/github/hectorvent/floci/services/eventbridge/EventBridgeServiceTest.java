@@ -77,7 +77,8 @@ class EventBridgeServiceTest {
                 null,
                 dispatcherMock,
                 replayDispatcherMock,
-                new ResourceGroupsTaggingService(null)
+                new ResourceGroupsTaggingService(null),
+                mock(AppSyncTargetValidator.class)
         );
     }
 

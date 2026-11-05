@@ -2,10 +2,12 @@ package io.github.hectorvent.floci.services.lambdamicrovms;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +63,32 @@ class LambdaMicrovmsServiceTest {
         assertEquals(updates, versions.size());
         assertEquals(updates + 1, service.getConnector(REGION, created.id).latestVersion);
         assertEquals(updates + 1, service.listConnectorVersions(REGION, created.id).size());
+    }
+
+    @Test
+    void listsTaggedImagesAndConnectorsAsResources() {
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
+        LambdaMicrovmsService service = new LambdaMicrovmsService(regionResolver, mock(StorageFactory.class));
+        LambdaMicrovmsService.MicrovmImage image = service.createImage(REGION, ACCOUNT_ID, "tagged-image",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1", "arn:aws:iam::000000000000:role/build",
+                "s3://artifacts/app.zip", null);
+        LambdaMicrovmsService.NetworkConnector connector = service.createConnector(REGION, ACCOUNT_ID, "egress",
+                List.of("subnet-00000000000000001"), List.of("sg-00000000000000001"),
+                "arn:aws:iam::000000000000:role/operator", "token", List.of("MicroVm"), "IPv4");
+        service.tagResource(REGION, image.imageArn, Map.of("team", "sandbox"));
+        service.tagResource(REGION, connector.arn, Map.of("team", "net"));
+
+        Map<String, ExplorerResource> byType = new HashMap<>();
+        service.getResources().forEach(resource -> byType.put(resource.resourceType(), resource));
+
+        assertEquals(image.imageArn, byType.get("lambda:microvm-image").arn());
+        assertEquals(Map.of("team", "sandbox"), byType.get("lambda:microvm-image").tags());
+        assertEquals(REGION, byType.get("lambda:microvm-image").region());
+        assertEquals(ACCOUNT_ID, byType.get("lambda:microvm-image").owningAccountId());
+        assertEquals(connector.arn, byType.get("lambda:network-connector").arn());
+        assertEquals(Map.of("team", "net"), byType.get("lambda:network-connector").tags());
+        assertEquals(0, service.getSupportedResourceTypes().size());
     }
 
     @Test

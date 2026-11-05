@@ -49,7 +49,7 @@ class CloudFormationCreateStackIdentityIntegrationTest {
                             "000000000000");
                     deleted.get(5, TimeUnit.SECONDS);
                     replacement.set(original.createChangeSetForCreateStack(stackName, "initial-create",
-                            TEMPLATE, null, null, List.of(), null, "us-east-1", false));
+                            TEMPLATE, null, null, List.of(), null, "us-east-1", false, invocation.getArgument(9)));
                     assertNotEquals(initial.getStackId(), replacement.get().getStackId());
                     return initial;
                 }));

@@ -940,6 +940,98 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
             .body("ResourceTagMappingList", empty());
     }
 
+    @Test
+    void microvmImageIsDiscoveredAndTaggingApiWritesReachIt() {
+        String marker = unique();
+        String name = "discovery-image-" + marker;
+        String arn = createMicrovmImage(name);
+
+        tagAddedThroughTaggingApi(arn, marker);
+
+        getResources(markerFilter("lambda:microvm-image", "added", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn));
+        addedTagIsListedOnce(arn, marker);
+        lambdaTags(arn)
+            .body("Tags.added", equalTo(marker));
+
+        untagAddedThroughTaggingApi(arn);
+        lambdaTags(arn)
+            .body("Tags", not(hasKey("added")));
+
+        given().when().delete("/2025-09-09/microvm-images/" + name).then().statusCode(200);
+        getResources(arnFilter(arn))
+            .body("ResourceTagMappingList", empty());
+    }
+
+    @Test
+    void networkConnectorIsDiscoveredAndTaggingApiWritesReachIt() {
+        String marker = unique();
+        String id = createNetworkConnector("discovery-connector-" + marker);
+        String arn = given()
+        .when()
+            .get("/2026-04-04/network-connectors/" + id)
+        .then()
+            .statusCode(200)
+            .extract().path("Arn");
+
+        tagAddedThroughTaggingApi(arn, marker);
+
+        getResources(markerFilter("lambda:network-connector", "added", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn));
+        addedTagIsListedOnce(arn, marker);
+        lambdaTags(arn)
+            .body("Tags.added", equalTo(marker));
+
+        untagAddedThroughTaggingApi(arn);
+        lambdaTags(arn)
+            .body("Tags", not(hasKey("added")));
+
+        given().when().delete("/2026-04-04/network-connectors/" + id).then().statusCode(202);
+        getResources(arnFilter(arn))
+            .body("ResourceTagMappingList", empty());
+    }
+
+    private static String createMicrovmImage(String name) {
+        return given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "%s",
+                  "baseImageArn": "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                  "buildRoleArn": "arn:aws:iam::000000000000:role/microvm-build",
+                  "codeArtifact": { "uri": "s3://bucket/code.zip" }
+                }
+                """.formatted(name))
+        .when()
+            .post("/2025-09-09/microvm-images")
+        .then()
+            .statusCode(201)
+            .extract().path("imageArn");
+    }
+
+    private static String createNetworkConnector(String name) {
+        return given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "Name": "%s",
+                  "ClientToken": "%s",
+                  "OperatorRole": "arn:aws:iam::000000000000:role/microvm-connector-operator",
+                  "Configuration": { "VpcEgressConfiguration": {
+                    "AssociatedComputeResourceTypes": ["MicroVm"],
+                    "NetworkProtocol": "IPv4",
+                    "SubnetIds": ["subnet-0000000000000it01"],
+                    "SecurityGroupIds": ["sg-0000000000000it01"]
+                  } }
+                }
+                """.formatted(name, UUID.randomUUID()))
+        .when()
+            .post("/2026-04-04/network-connectors")
+        .then()
+            .statusCode(202)
+            .extract().path("Id");
+    }
+
     private static String createApiKey(String marker) {
         return given()
             .contentType("application/json")
@@ -1128,9 +1220,13 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     private static String markerFilter(String resourceType, String marker) {
+        return markerFilter(resourceType, "fd", marker);
+    }
+
+    private static String markerFilter(String resourceType, String key, String marker) {
         return """
                 {"ResourceTypeFilters": ["%s"], "TagFilters": [%s]}
-                """.formatted(resourceType, tagFilter("fd", marker));
+                """.formatted(resourceType, tagFilter(key, marker));
     }
 
     private static String markerAndAddedFilter(String resourceType, String marker) {

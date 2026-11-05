@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -142,7 +143,8 @@ class ElbV2CertificatePublicationServiceTest {
                 null, 9090, null, null, null, null));
         assertEquals("HTTP", moved.getProtocol());
         assertEquals(9090, moved.getPort());
-        assertEquals(List.of(HELD_CERTIFICATE), moved.getCertificates());
+        assertTrue(moved.getCertificates().isEmpty());
+        assertNull(moved.getSslPolicy());
         assertFalse(first.get());
     }
 
@@ -239,19 +241,20 @@ class ElbV2CertificatePublicationServiceTest {
     }
 
     @Test
-    void modifyListenerProtocolAloneTakesTheGuardForTheCertificatesItPutsIntoService() {
+    void modifyListenerProtocolTakesTheGuardForTheCertificatesItPutsIntoService() {
         String lbArn = service.createLoadBalancer(
                 REGION, "sample-lb", "internal", "application", "ipv4",
                 ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
         String tgArn = createTargetGroup("sample-tg");
         String listenerArn = service.createListener(
-                REGION, lbArn, "HTTP", 80, null, List.of(HELD_CERTIFICATE),
+                REGION, lbArn, "HTTP", 80, null, List.of(),
                 List.of(forwardAction(tgArn)), List.of(), Map.of()).getListenerArn();
         clearInvocations(dataPlane);
         service.certificateResolver = deletedOnTheSecondLook();
 
         AwsException e = assertThrows(AwsException.class, () -> service.modifyListener(
-                REGION, listenerArn, "HTTPS", null, null, null, null, null));
+                REGION, listenerArn, "HTTPS", null, "ELBSecurityPolicy-2016-08",
+                List.of(HELD_CERTIFICATE), null, null));
 
         assertEquals("CertificateNotFound", e.getErrorCode());
         assertEquals("HTTP", service.describeListeners(REGION, lbArn, List.of(listenerArn))
