@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.eventbridge.AppSyncTargetValidator;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.TargetDispatcher;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
@@ -68,7 +69,8 @@ class EcsEventBridgeIntegrationTest {
                 null,
                 dispatcher,
                 null,
-                null
+                null,
+                mock(AppSyncTargetValidator.class)
         );
 
         EcsEventPublisher eventPublisher = new EcsEventPublisher(eventBridgeService, regionResolver, objectMapper);

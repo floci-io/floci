@@ -4956,9 +4956,13 @@ class CodeArtifactServiceTest {
 
     /**
      * Raised by Greptile's review of npm's own external-connection work: Verdaccio always points
-     * {@code dist-tags.latest} at whichever version was retained most recently, with no way for a
-     * retention write to suppress that default, so {@code preferredDisplayVersion} can name a
-     * version that was never a deliberate local choice at all. Unlike {@link
+     * {@code dist-tags.latest} at whichever version happens to be a package's very first-ever
+     * stored version, with no way for a write to suppress that one-time default (confirmed live
+     * against the pinned image; a later write that omits {@code dist-tags} leaves an existing
+     * {@code latest} alone instead, see {@code VerdaccioSidecarClient#storeVersion}'s own
+     * javadoc). So {@code preferredDisplayVersion} can still name a version that was never a
+     * deliberate local choice at all, specifically when a package's first version ever retained
+     * happens not to be the real registry's own latest. Unlike {@link
      * #listPackageVersionsDefaultDisplayVersionPrefersNpmDistTagLatestOverMostRecentlyPublished},
      * where the preferred version has no retained-origin claim and so is correctly honored even
      * though it is not the most recently published, this version's claim (confirmed real via
@@ -4980,9 +4984,10 @@ class CodeArtifactServiceTest {
                 eq("my-pkg"))).thenReturn(List.of(
                         new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000)),
                         new RepositorySidecarManager.PackageVersionTimestamp("2.0.0", Instant.ofEpochSecond(2000))));
-        // Simulates Verdaccio's own forced default: real retention writes can never suppress it,
-        // confirmed live against the pinned image, so this is exactly what a genuine retention of
-        // 1.0.0 would have left behind regardless of 2.0.0 being the real, more recent version.
+        // Simulates Verdaccio's own one-time forced default on a package's very first-ever
+        // version: 1.0.0 was retained before any other version of this package ever existed, so
+        // this is exactly what that genuine retention would have left behind regardless of 2.0.0
+        // being the real, more recent version.
         when(verdaccioClient.preferredDisplayVersion(eq(repoId), eq("dom"), eq("repo"), isNull(),
                 eq("my-pkg"))).thenReturn(Optional.of("1.0.0"));
 

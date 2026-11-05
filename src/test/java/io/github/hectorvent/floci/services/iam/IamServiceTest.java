@@ -2615,16 +2615,40 @@ class IamServiceTest {
                 accountId, accessKeyId, "secret", "token",
                 "arn:aws:iam::222233334444:role/R", Instant.now().plusSeconds(900), null);
 
-        assertTrue(service.spectrumScratchResourceArn(accessKeyId).isEmpty());
+        assertTrue(service.scratchResourceArn(accessKeyId).isEmpty());
 
         String scratchArn = "arn:aws:s3:::floci-internal-redshift-spectrum-scratch/spectrum-1234.csv";
-        service.registerSpectrumScratchResource(accessKeyId, scratchArn);
+        service.registerScratchResource(accessKeyId, scratchArn);
 
-        assertEquals(Optional.of(scratchArn), service.spectrumScratchResourceArn(accessKeyId));
+        assertEquals(Optional.of(scratchArn), service.scratchResourceArn(accessKeyId));
 
-        service.clearSpectrumScratchResource(accessKeyId);
+        service.clearScratchResource(accessKeyId);
 
-        assertTrue(service.spectrumScratchResourceArn(accessKeyId).isEmpty());
+        assertTrue(service.scratchResourceArn(accessKeyId).isEmpty());
+    }
+
+    @Test
+    void unloadScratchPrefixRegistrationAndClear() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIAUNLOAD";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerSessionForAccount(
+                accountId, accessKeyId, "secret", "token",
+                "arn:aws:iam::222233334444:role/R", Instant.now().plusSeconds(900), null);
+
+        assertTrue(service.scratchResourceArn(accessKeyId).isEmpty());
+
+        String scratchArn = "arn:aws:s3:::floci-internal-redshift-unload-staging/unload/123e4567-e89b-12d3-a456-426614174000/";
+        service.registerScratchResource(accessKeyId, scratchArn);
+
+        assertEquals(Optional.of(scratchArn), service.scratchResourceArn(accessKeyId));
+
+        service.registerScratchResource(accessKeyId, null);
+
+        assertTrue(service.scratchResourceArn(accessKeyId).isEmpty());
     }
 
     // =========================================================================

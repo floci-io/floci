@@ -26,6 +26,7 @@ public class Cluster {
     private String arn;
     private Instant createdAt;
     private int proxyPort;
+    private String volumeId;
     private Map<String, String> tags = new LinkedHashMap<>();
 
     // Transient fields — not persisted, restored on container restart
@@ -79,6 +80,9 @@ public class Cluster {
 
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
+
+    public String getVolumeId() { return volumeId; }
+    public void setVolumeId(String volumeId) { this.volumeId = volumeId; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) {

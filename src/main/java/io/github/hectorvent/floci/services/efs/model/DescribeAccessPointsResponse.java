@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.efs.model;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -10,6 +11,7 @@ import java.util.List;
 @RegisterForReflection
 public class DescribeAccessPointsResponse {
     private List<AccessPointDescription> accessPoints;
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     private String nextToken;
     public List<AccessPointDescription> getAccessPoints() { return accessPoints; }
     public void setAccessPoints(List<AccessPointDescription> accessPoints) { this.accessPoints = accessPoints; }

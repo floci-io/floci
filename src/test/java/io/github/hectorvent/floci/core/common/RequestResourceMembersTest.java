@@ -7,6 +7,9 @@ import io.github.hectorvent.floci.core.common.RequestResourceMembers.Member;
 import io.github.hectorvent.floci.core.common.RequestResourceMembers.Resource;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestFactory;
@@ -279,7 +282,8 @@ class RequestResourceMembersTest {
      * account member names when it has one, with those sharing its explicit member selector, those the operation
      * always names, such as a create's new resource (Cloud Map's {@code CreateService}), and those filled from the ARN
      * it is read from (a permission set made in an instance); one named through another resource of its service's
-     * own, the ARN its service gives for that.
+     * own, the ARN its service gives for that. A member the table locates in a REST request's path or query is given
+     * there, and a body or a form giving it another value names nothing.
      */
     @TestFactory
     Stream<DynamicTest> everyResourceOfTheTableIsReadFromAJsonBodyAndAForm() {
@@ -308,9 +312,21 @@ class RequestResourceMembersTest {
                             given.put(new Member(member, false), allowed.getFirst());
                         }
                     });
+                    // A member the table locates in a REST request's path or query goes there, where the reader takes it
+                    // from, and the body and the form give it another value, which names nothing.
+                    Map<String, String> located = table.located().getOrDefault(operation.getKey(), Map.of());
+                    Map<String, String> labels = new LinkedHashMap<>();
+                    MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
                     given.forEach((member, value) -> {
-                        put(body, member, value);
-                        form.append('&').append(parameter(member)).append('=').append(encoded(value));
+                        String where = member.field() == null && !member.list() ? located.get(member.name()) : null;
+                        if (where != null && where.startsWith("{")) {
+                            labels.put(where.substring(1, where.length() - 1), value);
+                        } else if (where != null) {
+                            query.add(where.substring(1), value);
+                        }
+                        String sent = where == null ? value : "other";
+                        put(body, member, sent);
+                        form.append('&').append(parameter(member)).append('=').append(encoded(sent));
                     });
                     List<String> named = operation.getValue().stream()
                             .filter(other -> (other == resource || named(other) || fillsFromTheArn(other, resource)
@@ -324,11 +340,11 @@ class RequestResourceMembersTest {
                             .distinct().toList();
                     StoredResourceArns stored = runningOn(namespace, arn);
                     assertEquals(named, RequestResources.of(operation.getKey(),
-                            servedBy(json(body.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000",
-                            stored), body.toString());
+                            sentWith(servedBy(json(body.toString()), resource.endpoint()), query), "aws", "us-east-1",
+                            "000000000000", stored, labels), body + " " + labels + " " + query);
                     assertEquals(named, RequestResources.of(operation.getKey(),
-                            servedBy(form(form.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000",
-                            stored), form.toString());
+                            sentWith(servedBy(form(form.toString()), resource.endpoint()), query), "aws", "us-east-1",
+                            "000000000000", stored, labels), form + " " + labels + " " + query);
                 })));
     }
 
@@ -466,6 +482,15 @@ class RequestResourceMembersTest {
             when(request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
                     .thenReturn(new ProtocolClaim(WireProtocol.AWS_JSON_1_1, service, null, null));
         }
+        return request;
+    }
+
+    /** The request with the query it is sent with. */
+    private static ContainerRequestContext sentWith(ContainerRequestContext request,
+                                                    MultivaluedMap<String, String> query) {
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getQueryParameters()).thenReturn(query);
+        when(request.getUriInfo()).thenReturn(uriInfo);
         return request;
     }
 

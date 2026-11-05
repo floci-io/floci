@@ -822,6 +822,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
     }
 
     private static String describeStacks(String stack, String expectedStatus) {
+        CfnStackWaits.awaitStatus(stack, expectedStatus);
         return cfn("DescribeStacks", stack)
             .header("Authorization", CFN_AUTH)
         .when().post("/").then().statusCode(200)

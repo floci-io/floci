@@ -78,6 +78,7 @@ public class ApiGatewayExecuteRouteContext {
     private String httpApiRegion;
     private boolean restApiRoute;
     private String signedRequestPath;
+    private String rewrittenRequestPath;
     private ApiGatewayService.CustomDomainRoute mappedDomain;
 
     void routeToMappedApi(ApiGatewayService.CustomDomainRoute domain, boolean restApi) {
@@ -121,5 +122,14 @@ public class ApiGatewayExecuteRouteContext {
 
     String signedRequestPath() {
         return signedRequestPath;
+    }
+
+    /** Retains the intended execute-api path before the routing workaround adds an escape layer. */
+    void recordRewrittenRequestPath(String rawPath) {
+        this.rewrittenRequestPath = rawPath;
+    }
+
+    String rewrittenRequestPath() {
+        return rewrittenRequestPath;
     }
 }

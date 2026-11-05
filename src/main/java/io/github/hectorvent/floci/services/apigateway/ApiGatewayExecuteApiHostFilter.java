@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestHost;
+import io.github.hectorvent.floci.core.common.RequestUriRewrite;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import jakarta.annotation.Priority;
@@ -261,7 +262,8 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         // AWS_IAM dispatch rebuilds the caller's canonical request, which covers the path they
         // signed: the virtual-host path, not the /execute-api/... form this rewrite produces.
         routeContext.recordSignedRequestPath(originalPath);
-        requestContext.setRequestUri(newUri);
+        routeContext.recordRewrittenRequestPath(newUri.getRawPath());
+        RequestUriRewrite.apply(requestContext, newUri);
     }
 
     private void routeToRestApi(ContainerRequestContext requestContext, URI originalUri,
@@ -273,7 +275,8 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         LOG.debugv("REST execute-api host routing: {0} -> {1}", originalPath, newUri.getRawPath());
         routeContext.routeToRestApi();
         routeContext.recordSignedRequestPath(originalPath);
-        requestContext.setRequestUri(newUri);
+        routeContext.recordRewrittenRequestPath(newUri.getRawPath());
+        RequestUriRewrite.apply(requestContext, newUri);
     }
 
     private boolean stageExists(String region, String apiId, String stageName) {

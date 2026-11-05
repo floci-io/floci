@@ -4,6 +4,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
@@ -46,8 +49,10 @@ import java.util.stream.Stream;
  * observes the resting state.</p>
  */
 @ApplicationScoped
-public class LambdaMicrovmsService {
+public class LambdaMicrovmsService implements ResourceProvider {
 
+    private static final String IMAGE_TYPE = "lambda:microvm-image";
+    private static final String CONNECTOR_TYPE = "lambda:network-connector";
     private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z0-9-_]{1,64}");
     private static final int MAX_CONNECTOR_SUBNETS = 16;
     private static final Pattern CONNECTOR_VERSION = Pattern.compile("[1-9][0-9]{0,17}");
@@ -60,6 +65,8 @@ public class LambdaMicrovmsService {
 
     private final RegionResolver regionResolver;
     private final StorageFactory storageFactory;
+    /** Guards every read and write of an image's or connector's tag map. */
+    private final Object tagLock = new Object();
 
     /**
      * Keyed {@code region/id}. The account is not part of the key here: the backend prefixes every
@@ -710,6 +717,44 @@ public class LambdaMicrovmsService {
 
     // ------------------------------------------------------------------ tags
 
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (MicrovmImage image : images.values()) {
+            addResource(resources, image.imageArn, IMAGE_TYPE, image.updatedAt, image.tags);
+        }
+        for (NetworkConnector connector : connectors.values()) {
+            addResource(resources, connector.arn, CONNECTOR_TYPE, connector.lastModified, connector.tags);
+        }
+        return resources;
+    }
+
+    private void addResource(List<ExplorerResource> resources, String arn, String type,
+                             Instant lastModified, Map<String, String> tags) {
+        if (arn == null) {
+            return;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        resources.add(new ExplorerResource(arn, type, "lambda", parsed.region(), parsed.accountId(),
+                lastModified != null ? lastModified : Instant.now(), snapshotTags(tags)));
+    }
+
+    /** A copy taken under the tag lock, so a concurrent tag change cannot break the iteration. */
+    Map<String, String> snapshotTags(Map<String, String> tags) {
+        synchronized (tagLock) {
+            return new LinkedHashMap<>(tags);
+        }
+    }
+
+    /**
+     * Empty on purpose: AWS ListSupportedResourceTypes advertises neither type, so the images and
+     * connectors stay discoverable through {@link #getResources()} without widening that list.
+     */
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of();
+    }
+
     /** True when the ARN names a MicroVM-family resource this service owns. */
     public static boolean ownsArn(String arn) {
         String resource = AwsArnUtils.resourceIfArnFor(arn, "lambda").orElse("");
@@ -745,7 +790,7 @@ public class LambdaMicrovmsService {
     }
 
     public Map<String, String> listTags(String region, String arn) {
-        return taggable(region, arn);
+        return snapshotTags(taggable(region, arn));
     }
 
     public void tagResource(String region, String arn, Map<String, String> tags) {
@@ -768,13 +813,17 @@ public class LambdaMicrovmsService {
         String resource = tagTargetResource(arn);
         if (resource.startsWith(IMAGE_RESOURCE)) {
             MicrovmImage image = getImage(region, resource.substring(IMAGE_RESOURCE.length()));
-            mutation.accept(image.tags);
+            synchronized (tagLock) {
+                mutation.accept(image.tags);
+            }
             persist(images, region, image.name, image);
             return;
         }
         if (resource.startsWith(CONNECTOR_RESOURCE)) {
             NetworkConnector connector = getConnector(region, resource.substring(CONNECTOR_RESOURCE.length()));
-            mutation.accept(connector.tags);
+            synchronized (tagLock) {
+                mutation.accept(connector.tags);
+            }
             persist(connectors, region, connector.id, connector);
             return;
         }

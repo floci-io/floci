@@ -280,10 +280,12 @@ class AutoScalingDescribeTagsIntegrationTest {
                 .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
                 .formParam("Tags.member.1.Key", "k2")
                 .formParam("Tags.member.1.Value", "v")
+                .formParam("Tags.member.1.PropagateAtLaunch", "false")
                 .formParam("Tags.member.2.ResourceId", group)
                 .formParam("Tags.member.2.ResourceType", "auto-scaling-group")
                 .formParam("Tags.member.2.Key", "k3")
                 .formParam("Tags.member.2.Value", "v")
+                .formParam("Tags.member.2.PropagateAtLaunch", "false")
                 .header("Authorization", AUTH)
             .when().post("/")
             .then().statusCode(200);

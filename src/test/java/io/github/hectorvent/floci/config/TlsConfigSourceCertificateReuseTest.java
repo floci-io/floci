@@ -75,10 +75,7 @@ class TlsConfigSourceCertificateReuseTest {
 
         // Read initial metadata
         String initialMetadata = Files.readString(metadataFile);
-        long initialModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
-
-        // Wait a bit to ensure timestamp difference
-        Thread.sleep(100);
+        String initialCert = Files.readString(certFile);
 
         // Change hostname configuration
         System.setProperty("floci.hostname", "host2");
@@ -91,12 +88,11 @@ class TlsConfigSourceCertificateReuseTest {
         assertTrue(Files.exists(metadataFile), "Metadata should still exist");
 
         String newMetadata = Files.readString(metadataFile);
-        long newModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
 
         assertNotEquals(initialMetadata, newMetadata, 
             "Metadata should be updated with new hostname");
-        assertTrue(newModifiedTime > initialModifiedTime, 
-            "Certificate should be regenerated (newer timestamp)");
+        assertNotEquals(initialCert, Files.readString(certFile),
+            "Certificate should be regenerated (content changed)");
         assertTrue(newMetadata.contains("host2"), 
             "New metadata should contain 'host2'");
     }
@@ -123,14 +119,11 @@ class TlsConfigSourceCertificateReuseTest {
         assertTrue(Files.exists(certFile), "Initial certificate should be generated");
         assertTrue(Files.exists(metadataFile), "Initial metadata should be generated");
 
-        long initialModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
+        String initialCert = Files.readString(certFile);
 
         // Delete metadata file to simulate old version
         Files.delete(metadataFile);
         assertFalse(Files.exists(metadataFile), "Metadata should be deleted");
-
-        // Wait a bit to ensure timestamp difference
-        Thread.sleep(100);
 
         // Act: Create new TlsConfigSource - should regenerate certificate
         new TlsConfigSource();
@@ -139,8 +132,7 @@ class TlsConfigSourceCertificateReuseTest {
         assertTrue(Files.exists(certFile), "Certificate should still exist");
         assertTrue(Files.exists(metadataFile), "Metadata should be regenerated");
 
-        long newModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
-        assertTrue(newModifiedTime > initialModifiedTime, 
+        assertNotEquals(initialCert, Files.readString(certFile),
             "Certificate should be regenerated when metadata is missing");
     }
 
@@ -166,11 +158,8 @@ class TlsConfigSourceCertificateReuseTest {
         assertTrue(Files.exists(certFile), "Initial certificate should be generated");
         assertTrue(Files.exists(metadataFile), "Initial metadata should be generated");
 
-        long initialModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
+        String initialCert = Files.readString(certFile);
         String initialMetadata = Files.readString(metadataFile);
-
-        // Wait a bit to ensure timestamp difference would be visible if regenerated
-        Thread.sleep(100);
 
         // Act: Create new TlsConfigSource with same configuration - should reuse certificate
         new TlsConfigSource();
@@ -179,11 +168,10 @@ class TlsConfigSourceCertificateReuseTest {
         assertTrue(Files.exists(certFile), "Certificate should still exist");
         assertTrue(Files.exists(metadataFile), "Metadata should still exist");
 
-        long newModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
         String newMetadata = Files.readString(metadataFile);
 
-        assertEquals(initialModifiedTime, newModifiedTime, 
-            "Certificate should be reused (same timestamp)");
+        assertEquals(initialCert, Files.readString(certFile),
+            "Certificate should be reused (content unchanged)");
         assertEquals(initialMetadata, newMetadata,
             "Metadata should be unchanged");
     }
@@ -235,11 +223,7 @@ class TlsConfigSourceCertificateReuseTest {
         new TlsConfigSource();
         Path certFile = tempDir.resolve("tls").resolve("floci-server.crt");
         assertTrue(Files.exists(certFile), "Initial certificate should be generated");
-        long initialModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
         String initialCert = Files.readString(certFile);
-
-        // Ensure a regeneration would be detectable via timestamp.
-        Thread.sleep(100);
 
         // Second boot with BouncyCastle NOT registered — mirrors the real ConfigSource-before-CDI
         // ordering. The constructor must register it and REUSE the existing cert (not regenerate).
@@ -253,10 +237,8 @@ class TlsConfigSourceCertificateReuseTest {
             }
         }
 
-        assertEquals(initialModifiedTime, Files.getLastModifiedTime(certFile).toMillis(),
-            "Certificate should be reused (same timestamp) even when BouncyCastle was not pre-registered");
         assertEquals(initialCert, Files.readString(certFile),
-            "Certificate content should be unchanged (reused, not regenerated)");
+            "Certificate should be reused even when BouncyCastle was not pre-registered");
     }
 
     /**
@@ -321,10 +303,7 @@ class TlsConfigSourceCertificateReuseTest {
         assertTrue(Files.exists(metadataFile), "Initial metadata should be generated");
 
         String initialMetadata = Files.readString(metadataFile);
-        long initialModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
-
-        // Wait a bit to ensure timestamp difference
-        Thread.sleep(100);
+        String initialCert = Files.readString(certFile);
 
         // Change base URL hostname
         System.setProperty("floci.base-url", "https://host2:4566");
@@ -337,12 +316,11 @@ class TlsConfigSourceCertificateReuseTest {
         assertTrue(Files.exists(metadataFile), "Metadata should still exist");
 
         String newMetadata = Files.readString(metadataFile);
-        long newModifiedTime = Files.getLastModifiedTime(certFile).toMillis();
 
         assertNotEquals(initialMetadata, newMetadata, 
             "Metadata should be updated with new hostname");
-        assertTrue(newModifiedTime > initialModifiedTime, 
-            "Certificate should be regenerated (newer timestamp)");
+        assertNotEquals(initialCert, Files.readString(certFile),
+            "Certificate should be regenerated (content changed)");
         assertTrue(newMetadata.contains("host2"), 
             "New metadata should contain 'host2'");
     }

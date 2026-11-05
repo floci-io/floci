@@ -23,6 +23,8 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -87,6 +89,25 @@ class CloudFrontCustomOriginServingTest {
 
     private HttpServer originServer;
     private CountDownLatch originRelease;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"plain", "x%25y", "trailing%25", "a%252Fb", "a%2Fb", "a%20b", "a%3Fb%23c", "caf%C3%A9"})
+    void routedHostsPreserveTheRawOriginPath(String suffix) throws IOException {
+        AtomicReference<ReceivedRequest> received = new AtomicReference<>();
+        startRecordingOrigin(received, new AtomicInteger());
+        Distribution distribution = customOriginDistribution(defaultBehavior("custom-origin"));
+        String alias = "encoded-path.example.test";
+        distribution.getConfig().setAliases(List.of(alias));
+        Distribution created = createDistribution(distribution);
+
+        for (String host : List.of(alias, created.getDomainName())) {
+            given().urlEncodingEnabled(false).header("Host", host)
+                    .when().get("/" + suffix)
+                    .then().statusCode(200).body(equalTo("ok"));
+
+            assertEquals("/" + suffix, received.get().path());
+        }
+    }
 
     @AfterEach
     void stopOrigin() {

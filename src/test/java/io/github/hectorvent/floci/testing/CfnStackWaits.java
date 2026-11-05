@@ -4,11 +4,16 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.path.xml.element.Node;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudformation.model.DescribeStacksRequest;
+import software.amazon.awssdk.services.cloudformation.model.Stack;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -83,14 +88,21 @@ public final class CfnStackWaits {
      * seconds without the expected status.
      */
     public static StackState awaitStatus(String stackName, String expectedStatus) {
+        return awaitStatus(stackName, expectedStatus, null);
+    }
+
+    public static StackState awaitStatus(String stackName, String expectedStatus, String authorization) {
         long deadline = System.currentTimeMillis() + 10_000;
         StackState last = new StackState(null, "");
         while (System.currentTimeMillis() < deadline) {
-            Response response = given()
+            RequestSpecification request = given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-                .when().post("/");
+                .formParam("StackName", stackName);
+            if (authorization != null) {
+                request.header("Authorization", authorization);
+            }
+            Response response = request.when().post("/");
             if (response.statusCode() != 200) {
                 fail("DescribeStacks " + stackName + " answered " + response.statusCode() + ": " + response.asString());
             }
@@ -98,12 +110,8 @@ public final class CfnStackWaits {
             String status = xml.getString("**.find { it.name() == 'StackStatus' }");
             String reason = xml.getString("**.find { it.name() == 'StackStatusReason' }");
             last = new StackState(status == null || status.isEmpty() ? null : status, reason == null ? "" : reason);
-            if (expectedStatus.equals(last.status())) {
+            if (hasExpectedStatus(stackName, expectedStatus, last)) {
                 return last;
-            }
-            if (last.status() != null && TERMINAL.contains(last.status())) {
-                fail("Stack " + stackName + " reached " + last.status() + " instead of " + expectedStatus
-                        + ": " + last.reason());
             }
             try {
                 Thread.sleep(50);
@@ -114,6 +122,32 @@ public final class CfnStackWaits {
         }
         fail("Stack " + stackName + " did not reach " + expectedStatus + " within ten seconds, last: " + last);
         return last;
+    }
+
+    /** SDK counterpart of {@link #awaitStatus(String, String)}, retaining the complete stack response. */
+    public static Stack awaitStatus(CloudFormationClient client, String stackName, String expectedStatus) {
+        DescribeStacksRequest request = DescribeStacksRequest.builder().stackName(stackName).build();
+        return await("Stack " + stackName + " to reach " + expectedStatus)
+                .atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(50)).until(() -> {
+                    List<Stack> stacks = client.describeStacks(request).stacks();
+                    if (stacks.isEmpty()) {
+                        fail("DescribeStacks " + stackName + " returned no stacks");
+                    }
+                    return stacks.getFirst();
+                }, stack -> hasExpectedStatus(stackName, expectedStatus,
+                        new StackState(stack.stackStatusAsString(),
+                                stack.stackStatusReason() == null ? "" : stack.stackStatusReason())));
+    }
+
+    private static boolean hasExpectedStatus(String stackName, String expectedStatus, StackState state) {
+        if (expectedStatus.equals(state.status())) {
+            return true;
+        }
+        if (state.status() != null && TERMINAL.contains(state.status())) {
+            fail("Stack " + stackName + " reached " + state.status() + " instead of " + expectedStatus
+                    + ": " + state.reason());
+        }
+        return false;
     }
 
     /**

@@ -45,6 +45,9 @@ final class RequestResourceMembers {
             "^arn:\\$\\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][A-Za-z0-9-]*)(.*)$");
     /** A format's resource that is a literal and one variable. */
     private static final Pattern ONE_VARIABLE = Pattern.compile("[^$]*\\$\\{\\w+}");
+    /** A member a REST request carries outside its body, by its name, and where: a path label or a query parameter. */
+    private static final Pattern LOCATED_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*");
+    private static final Pattern LOCATION = Pattern.compile("\\{[A-Za-z0-9_]+}|\\?[A-Za-z0-9_.-]+");
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
     /** The keys a resource found by members does not take: it is read no other way, in the caller's account. */
@@ -169,12 +172,14 @@ final class RequestResourceMembers {
 
     /**
      * The file: each operation's resources and the resources it creates under a parent, as
-     * {@code <namespace>:<Operation>}, each namespace's ARN formats, and the namespaces it reads, those built by
-     * hand, those not read yet, and the others with resource types.
+     * {@code <namespace>:<Operation>}, the members a REST operation's request carries outside its body, each
+     * namespace's ARN formats, and the namespaces it reads, those built by hand, those not read yet, and the others
+     * with resource types. A located member is a label of the request's path, {@code {Label}}, or a parameter of its
+     * query, {@code ?name}, by the member's name.
      */
     record Table(Map<String, List<Resource>> operations, Map<String, List<Created>> creates,
-                 Map<String, Map<String, ArnFormat>> formats, Set<String> namespaces, Set<String> handBuilt,
-                 Set<String> notCovered, Set<String> otherNamespaces) {
+                 Map<String, Map<String, String>> located, Map<String, Map<String, ArnFormat>> formats,
+                 Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces) {
     }
 
     private static final class Holder {
@@ -229,6 +234,7 @@ final class RequestResourceMembers {
         });
         Map<String, List<Resource>> entries = new LinkedHashMap<>();
         Map<String, List<Created>> creates = new LinkedHashMap<>();
+        Map<String, Map<String, String>> located = new LinkedHashMap<>();
         operations.properties().forEach(operation -> {
             String namespace = operation.getKey().substring(0, Math.max(0, operation.getKey().indexOf(':')));
             if (!namespaces.contains(namespace)) {
@@ -247,8 +253,20 @@ final class RequestResourceMembers {
             if (!made.isEmpty()) {
                 creates.put(operation.getKey(), List.copyOf(made));
             }
+            Map<String, String> where = new LinkedHashMap<>();
+            operation.getValue().path("located").properties().forEach(member -> {
+                if (!LOCATED_MEMBER.matcher(member.getKey()).matches()
+                        || !LOCATION.matcher(member.getValue().asText("")).matches()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " locates " + operation.getKey() + "'s "
+                            + member.getKey() + " at " + member.getValue() + ", no label of a path or query parameter");
+                }
+                where.put(member.getKey(), member.getValue().asText());
+            });
+            if (!where.isEmpty()) {
+                located.put(operation.getKey(), Map.copyOf(where));
+            }
         });
-        return new Table(Map.copyOf(entries), Map.copyOf(creates), Map.copyOf(formats), namespaces,
+        return new Table(Map.copyOf(entries), Map.copyOf(creates), Map.copyOf(located), Map.copyOf(formats), namespaces,
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
                 names(document.path("otherNamespaces")));

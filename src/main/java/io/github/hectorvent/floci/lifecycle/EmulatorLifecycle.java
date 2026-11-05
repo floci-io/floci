@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoll
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
+import io.github.hectorvent.floci.services.memorydb.MemoryDbService;
 import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
 import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
@@ -92,6 +93,7 @@ public class EmulatorLifecycle {
     private final RdsProxyManager rdsProxyManager;
     private final MemoryDbContainerManager memoryDbContainerManager;
     private final MemoryDbProxyManager memoryDbProxyManager;
+    private final MemoryDbService memoryDbService;
     private final DocDbContainerManager docDbContainerManager;
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
@@ -136,6 +138,7 @@ public class EmulatorLifecycle {
                              RdsProxyManager rdsProxyManager,
                              MemoryDbContainerManager memoryDbContainerManager,
                              MemoryDbProxyManager memoryDbProxyManager,
+                             MemoryDbService memoryDbService,
                              DocDbContainerManager docDbContainerManager,
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
@@ -177,6 +180,7 @@ public class EmulatorLifecycle {
         this.rdsProxyManager = rdsProxyManager;
         this.memoryDbContainerManager = memoryDbContainerManager;
         this.memoryDbProxyManager = memoryDbProxyManager;
+        this.memoryDbService = memoryDbService;
         this.docDbContainerManager = docDbContainerManager;
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
@@ -261,6 +265,12 @@ public class EmulatorLifecycle {
         pipesService.startPersistedPollers();
         redshiftZeroEtlConsumer.startPersistedIntegrations();
         rdsService.restorePersistedRuntime();
+        if (config.services().memorydb().enabled()) {
+            memoryDbService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.warnv(ex, "MemoryDB runtime restoration failed");
+                return null;
+            });
+        }
         if (config.services().timestreamInfluxdb().enabled()) {
             timestreamInfluxDbService.restorePersistedRuntime();
         }

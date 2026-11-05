@@ -152,6 +152,65 @@ the state machine from the account and region in its ARN.
 
 State machine aliases and versions are not supported as EventBridge targets.
 
+## AppSync Targets
+
+A rule can invoke a mutation on a public AppSync GraphQL API configured for `AWS_IAM`,
+either as its default or an additional authorization mode. Schema authorization directives
+still apply. Set the target `Arn` to the GraphQL **endpoint ARN**,
+`arn:aws:appsync:us-east-1:000000000000:endpoints/graphql-api/<api-id>`.
+CloudFormation exposes this through `Fn::GetAtt: [Api, GraphQLEndpointArn]`.
+
+```bash
+aws events put-targets \
+  --rule order-placed-rule \
+  --targets '[{
+    "Id": "publish-order",
+    "Arn": "arn:aws:appsync:us-east-1:000000000000:endpoints/graphql-api/example",
+    "RoleArn": "arn:aws:iam::000000000000:role/EventBridgeAppSyncRole",
+    "AppSyncParameters": {
+      "GraphQLOperation": "mutation Publish($id: ID!) { publish(id: $id) { id } }"
+    },
+    "InputTransformer": {
+      "InputPathsMap": {"id": "$.detail.orderId"},
+      "InputTemplate": "{\"id\": <id>}"
+    }
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+The delivered input must be a JSON object containing the mutation's variables. `Input`,
+`InputPath`, and `InputTransformer` work as for other targets; with none, the full event is
+the variables object. `PutTargets`, `ListTargetsByRule`, persisted target settings, and
+`AWS::Events::Rule` preserve `AppSyncParameters.GraphQLOperation`. Endpoint targets require
+these settings and a parsed document containing exactly one mutation operation, with 1 to
+1,048,576 characters. `PutTargets` validates the whole batch before storage, so a rejected
+replacement preserves the previous targets. Validation errors omit the operation's sensitive
+contents. Parsing uses the GraphQL sidecar and requires Docker; it does not require the target
+API to exist or validate its schema fields during `PutTargets`.
+CloudFormation rollback restores previously accepted targets without requiring the GraphQL
+sidecar to be available.
+
+With IAM enforcement enabled, the target role must exist and trust `events.amazonaws.com`,
+including any trust conditions on the rule's `aws:SourceArn` and `aws:SourceAccount`. Its
+policies, permissions boundary, and SCPs must allow `appsync:GraphQL` on the selected API
+fields. The permission resources use `apis/<api-id>/...`, rather than the endpoint ARN;
+`arn:aws:appsync:us-east-1:000000000000:apis/<api-id>/*` covers all fields of one API.
+Resolvers receive the target role's identity, and their data sources retain their own
+service-role authorization.
+With IAM enforcement off, target role existence, trust and permission checks are skipped,
+matching the other service-role integrations.
+
+Only mutations are delivered. Private APIs and cross-account or cross-partition targets
+are refused. The target ARN selects the API's region; an API with the same ID in another
+region is not used. AppSync must be enabled. This target does not add realtime subscription
+support to Floci's AppSync endpoint.
+
+Pre-execution validation and authorization failures use the target's dead-letter handling;
+retryable transport failures use its retry policy. Floci treats a returned GraphQL execution
+result, including field errors and partial data, as delivered so it does not retry a mutation
+that may have already written data. A GraphQL request error with no `data` member is a failed
+delivery. This error mapping has integration coverage but has not been compared with live AWS.
+
 ## Redshift Data API Targets
 
 A matching rule can submit one SQL statement to the Redshift Data API for a provisioned cluster, or
@@ -215,11 +274,12 @@ role update replaces the stored value. Omitting the role on an existing
 cross-account event-bus target with the same ID and ARN retains its previous
 role, as documented by AWS.
 
-The value must be between 1 and 1600 characters when supplied. Floci stores
-the role as configuration; target delivery does not assume it. Only Redshift
-Data API targets check the role's trust and permissions (see
-[Redshift Data API Targets](#redshift-data-api-targets)); no other target
-enforces its role's IAM policies.
+The value must be between 1 and 1600 characters when supplied.
+With IAM enforcement on, [AppSync targets](#appsync-targets) and
+[Redshift Data API targets](#redshift-data-api-targets) check the role's existence,
+trust and permissions, including source-rule conditions. With enforcement off,
+these checks are skipped. Other target types store the role as
+configuration without assuming it or enforcing its IAM policies.
 
 ## API Destination Targets
 
@@ -300,7 +360,7 @@ aws events put-targets \
 - A retry uses the target's current definition, so `PutTargets` changes apply to pending retries, and a target removed with `RemoveTargets` stops being retried.
 - An accepted asynchronous Lambda invocation counts as delivered. A later function error is handled by Lambda's own retry and destination settings, not by the rule.
 - Pending retries are kept in memory and are dropped by an emulator reset or restart.
-- An `AWS::Events::Rule` target in a CloudFormation template keeps its `RetryPolicy`, `DeadLetterConfig`, `RoleArn` and `EcsParameters`, which reach the rule as `PutTargets` would set them. A value of another type than the resource schema declares for them fails the rule before it is created, with the message CloudFormation gives.
+- An `AWS::Events::Rule` target in a CloudFormation template keeps its `RetryPolicy`, `DeadLetterConfig`, `RoleArn`, `EcsParameters` and `AppSyncParameters`, which reach the rule as `PutTargets` would set them. A value of another type than the resource schema declares for them fails the rule before it is created, with the message CloudFormation gives.
 
 ## Current Behavior
 

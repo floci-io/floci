@@ -90,7 +90,7 @@ for SQS or `ValidationException` for CloudWatch Logs.
 The resource type in `service:resourceType` matches the ARN's type, which is
 the ARN resource part with one leading `/` dropped, cut at the first `/` or
 `:`, or the type the owning service declares for the resource. So
-`lambda:function`, `logs:log-group`, `ec2:instance`, `apigateway:apikeys` and
+`lambda:function`, `lambda:microvm-image`, `lambda:network-connector`, `logs:log-group`, `ec2:instance`, `apigateway:apikeys` and
 `apigateway:restapis/stages` all match. SQS queue ARNs have no type segment, so
 `sqs:queue` matches through the type SQS declares for its queues. As in AWS,
 `apigateway:restapis` lists REST APIs together with their stages, and a filter

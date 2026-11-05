@@ -98,6 +98,28 @@ class PaginationTest {
     }
 
     @Test
+    void scopedSignedSliceBoundsLongCursorsAndRejectsOtherScopes() {
+        SignedMarkers markers = new SignedMarkers(128);
+        String longCursor = "a".repeat(128);
+        List<String> items = List.of("z", longCursor);
+        String scope = "account:region:resource";
+        PaginatedResult<String> first = Pagination.slice(items, Function.identity(), 1,
+                null, markers, scope, INVALID_TOKEN);
+
+        assertEquals(List.of(longCursor), first.items());
+        assertTrue(first.nextToken().length() <= 128);
+        assertEquals(longCursor, markers.cursorOf(scope, first.nextToken()));
+        assertNull(markers.cursorOf(first.nextToken()));
+
+        PaginatedResult<String> second = Pagination.slice(List.of("z"), Function.identity(), 1,
+                first.nextToken(), markers, scope, INVALID_TOKEN);
+        assertEquals(List.of("z"), second.items());
+        assertNull(second.nextToken());
+        assertSame(INVALID, assertThrows(AwsException.class, () -> Pagination.slice(items,
+                Function.identity(), 1, first.nextToken(), markers, "other:region:resource", INVALID_TOKEN)));
+    }
+
+    @Test
     void expiringPaging_validatesTheTokenBeforeLoadingItems() {
         SignedMarkers markers = new SignedMarkers();
         Clock clock = Clock.systemUTC();

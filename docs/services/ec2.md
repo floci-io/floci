@@ -30,6 +30,15 @@ EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addre
 interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
 `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
 
+### Processor manufacturer metadata
+
+`DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
+instance types. The values were captured from AWS in `us-east-1` on 2026-11-04:
+`AWS` for Graviton, `Intel` for the catalog's T2, T3, M5 and R5 types, and `AMD`
+for `t3a.nano`. The catalog stores these values explicitly; architecture alone
+cannot distinguish Intel from AMD. See the AWS
+[ProcessorInfo API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ProcessorInfo.html).
+
 ### Graviton instance-type metadata
 
 The full catalog includes the virtual sizes of `c6g`, `c6gn`, `c7g`, `c8g`,
@@ -310,6 +319,7 @@ naming different VPCs find nothing.
 | StopInstances | Stops running instances and updates their stored lifecycle state. |
 | RebootInstances | Reboots instances through the local EC2 service model. |
 | DescribeInstanceStatus | Returns status records for stored instances. |
+| GetConsoleOutput | Returns a console log carrying the guest's SSH host keys between the `-----BEGIN SSH HOST KEY KEYS-----` and `-----END SSH HOST KEY KEYS-----` markers cloud-init prints, read from the running instance container. An instance that is not running, or whose container cannot be read, returns an empty log, as a just-launched one does on AWS. An instance in another region is `InvalidInstanceID.NotFound`. `DryRun=true` returns `DryRunOperation` before the instance is looked up, as on AWS. |
 | DescribeInstanceCreditSpecifications | Returns the CPU credit option of burstable performance instances. A named instance id reports the option the instance acquired at launch, either the explicit `CreditSpecification.CpuCredits` or the family default, `standard` for t2 and `unlimited` for t3, t3a and t4g. An id that is not a burstable performance instance reports `standard`, and only an unknown id is an error. Naming no id returns the instances on the unlimited option, including one that kept `unlimited` after a resize onto a non-burstable type. `Filter.N` supports the modeled `instance-id` and narrows whichever set the request selected. `MaxResults` accepts 5 through 1000 and cannot be combined with instance ids. `DryRun=true` returns `DryRunOperation`. |
 | DescribeInstanceAttribute | Returns a supported attribute for an instance. `ebsOptimized` reports what `RunInstances` (or its launch template) set; instances launched by CloudFormation, Auto Scaling or Fleet report `false`. |
 | ModifyInstanceAttribute | Updates supported mutable attributes for an instance. `UserData.Value` (base64) needs the instance stopped, as on AWS, and answers `IncorrectInstanceState` otherwise. |

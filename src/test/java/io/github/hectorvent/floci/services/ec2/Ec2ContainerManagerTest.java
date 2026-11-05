@@ -28,6 +28,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
@@ -1347,6 +1348,30 @@ class Ec2ContainerManagerTest {
                 executor,
                 retryExecutor,
                 Duration.ofSeconds(5));
+    }
+
+    @Test
+    void readSshHostKeysReturnsTheGuestsHostKeys() {
+        DockerClient docker = mock(DockerClient.class);
+        String keys = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAII0fBPBUZHaEOBc2mySfmI5btu4mkvFfNRujmF7RH2fj root@guest\n";
+        ContainerExecStubs.completeEveryExec(docker, TEST_CONTAINER_ID, 0L, keys, "");
+
+        Ec2ContainerManager manager = managerWith(mock(ContainerLifecycleManager.class), docker,
+                mock(Ec2MetadataServer.class));
+
+        assertEquals(keys, manager.readSshHostKeys(TEST_CONTAINER_ID));
+    }
+
+    @Test
+    void readSshHostKeysIgnoresOutputBeyondWhatHostKeysCanTake() {
+        DockerClient docker = mock(DockerClient.class);
+        String planted = "x".repeat(Ec2ContainerManager.SSH_HOST_KEYS_MAX_BYTES + 1);
+        ContainerExecStubs.completeEveryExec(docker, TEST_CONTAINER_ID, 0L, planted, "");
+
+        Ec2ContainerManager manager = managerWith(mock(ContainerLifecycleManager.class), docker,
+                mock(Ec2MetadataServer.class));
+
+        assertEquals("", manager.readSshHostKeys(TEST_CONTAINER_ID));
     }
 
     private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {

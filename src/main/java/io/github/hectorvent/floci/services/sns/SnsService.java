@@ -55,6 +55,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -81,6 +82,8 @@ public class SnsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
+    private static final DateTimeFormatter MESSAGE_TIMESTAMP =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
     private static final Set<String> SMS_ATTRIBUTE_NAMES = Set.of("MonthlySpendLimit",
             "DeliveryStatusIAMRole", "DeliveryStatusSuccessSamplingRate", "DefaultSenderID",
             "DefaultSMSType", "UsageReportS3Bucket");
@@ -1127,7 +1130,7 @@ public class SnsService implements Resettable, ResourceProvider {
 
         String messageId = UUID.randomUUID().toString();
         Notification notification = new Notification(messageId,
-                DateTimeFormatter.ISO_INSTANT.format(Instant.now()), signatureVersion(topic), new HashMap<>());
+                MESSAGE_TIMESTAMP.format(Instant.now()), signatureVersion(topic), new HashMap<>());
         JsonNode parsedBody = null;
         boolean bodyParseAttempted = false;
         for (Subscription sub : subscriptionsByTopic(effectiveArn, region)) {
@@ -1145,7 +1148,7 @@ public class SnsService implements Resettable, ResourceProvider {
             deliverMessage(sub, message, subject, messageAttributes, notification, effectiveArn, messageGroupId, dedupId,
                     messageStructure);
         }
-        LOG.infov("Published message {0} to topic {1}", messageId, effectiveArn);
+        LOG.debugv("Published message {0} to topic {1}", messageId, effectiveArn);
         return messageId;
     }
 
@@ -1353,7 +1356,7 @@ public class SnsService implements Resettable, ResourceProvider {
         recordPushNotification(new PushNotification(
                 endpoint.getArn(), app.getArn(), app.getPlatform(), endpoint.getToken(),
                 payload, subject, messageAttributes, messageId, Instant.now()));
-        LOG.infov("Captured push notification {0} -> {1} ({2})", messageId, endpoint.getArn(), app.getPlatform());
+        LOG.debugv("Captured push notification {0} -> {1} ({2})", messageId, endpoint.getArn(), app.getPlatform());
         return messageId;
     }
 
@@ -1564,7 +1567,7 @@ public class SnsService implements Resettable, ResourceProvider {
         boolean groupScopedDedup = isGroupScopedDeduplication(topic);
         List<String[]> successful = new ArrayList<>();
         List<String[]> failed = new ArrayList<>();
-        String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+        String timestamp = MESSAGE_TIMESTAMP.format(Instant.now());
         String version = signatureVersion(topic);
         for (Map<String, Object> entry : entries) {
             String id = (String) entry.get("Id");
@@ -2868,7 +2871,7 @@ public class SnsService implements Resettable, ResourceProvider {
         try {
             String token = subscription.getAttributes().get("ConfirmationToken");
             String subscribeUrl = baseUrl + "/?Action=ConfirmSubscription&TopicArn=" + topicArn + "&Token=" + token;
-            String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+            String timestamp = MESSAGE_TIMESTAMP.format(Instant.now());
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Type", "SubscriptionConfirmation");
             node.put("MessageId", UUID.randomUUID().toString());
@@ -3028,7 +3031,7 @@ public class SnsService implements Resettable, ResourceProvider {
         String effectiveRegion = region != null ? region : regionResolver.getDefaultRegion();
         SentSms sms = new SentSms(messageId, effectiveRegion, phoneNumber, message, subject, Instant.now());
         smsStore.put("sms::" + effectiveRegion + "::" + messageId, sms);
-        LOG.infov("SNS SMS published: messageId={0} phone={1}", messageId, phoneNumber);
+        LOG.debugv("SNS SMS published: messageId={0} phone={1}", messageId, phoneNumber);
         return messageId;
     }
 

@@ -245,9 +245,9 @@ class ExternalTableMaterializerTest {
         verify(duck).execute(argThat(sql -> sql.contains("LIMIT 1001")), isNull(), anyString(),
                 startsWith("ASIA"), anyString(), notNull());
         verify(duck, never()).execute(anyString(), any(), anyString(), eq(ACCOUNT));
-        verify(iam).registerSpectrumScratchResource(startsWith("ASIA"),
+        verify(iam).registerScratchResource(startsWith("ASIA"),
                 startsWith("arn:aws:s3:::floci-internal-redshift-spectrum-scratch/spectrum-"));
-        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
+        verify(iam).clearScratchResource(startsWith("ASIA"));
     }
 
     @Test
@@ -265,7 +265,7 @@ class ExternalTableMaterializerTest {
                 () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
 
         assertThat(exception.sqlState(), equalTo("42501"));
-        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
+        verify(iam).clearScratchResource(startsWith("ASIA"));
     }
 
     @Test
@@ -301,7 +301,7 @@ class ExternalTableMaterializerTest {
                 () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
 
         assertThat(exception.sqlState(), equalTo("58030"));
-        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
+        verify(iam).clearScratchResource(startsWith("ASIA"));
     }
 
     @Test
@@ -321,7 +321,7 @@ class ExternalTableMaterializerTest {
                 () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
 
         assertThat(exception.sqlState(), equalTo("58030"));
-        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
+        verify(iam).clearScratchResource(startsWith("ASIA"));
     }
 
     @Test
@@ -340,7 +340,7 @@ class ExternalTableMaterializerTest {
                 () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
 
         assertThat(exception.sqlState(), equalTo("58030"));
-        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
+        verify(iam).clearScratchResource(startsWith("ASIA"));
     }
 
     @Test
@@ -742,7 +742,7 @@ class ExternalTableMaterializerTest {
         SpectrumReadException exception = assertThrows(SpectrumReadException.class,
                 () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
 
-        assertThat(exception.getMessage(), containsString("not the Spectrum scratch bucket"));
+        assertThat(exception.getMessage(), containsString("not Floci scratch space"));
         verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
         verify(s3, never()).putBucketTagging(eq(ExternalTableMaterializer.SCRATCH_BUCKET), any());
         verify(s3, never()).deleteObject(eq(ExternalTableMaterializer.SCRATCH_BUCKET), anyString());

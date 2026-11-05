@@ -425,15 +425,16 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
     /**
      * Publishes {@code version} straight to this sidecar's own packument, the real npm registry
      * wire shape confirmed against a live Verdaccio container: a {@code PUT} to the package path
-     * carrying just the new version's metadata, its tarball as a base64 {@code _attachments}
-     * entry, and {@code dist-tags.latest} pointed at it. Verdaccio merges this into whatever
-     * {@code versions} the package already has rather than requiring the caller to resend them
-     * (also confirmed live), so this never needs to read the existing packument first the way
-     * {@link #deletePackageVersionAsset} does. Rejected outright (a real {@code 409}, "this
-     * package is already present") if {@code version} already exists, even if its content is
-     * identical: the caller ({@code CodeArtifactService#copyContainerBackedPackageVersions}) is
-     * expected to have already deleted a conflicting existing version first for an overwrite, the
-     * same reason {@code ReposiliteSidecarClient#storePackageVersionAsset} documents for Maven.
+     * carrying just the new version's metadata and its tarball as a base64 {@code _attachments}
+     * entry, deliberately with no {@code dist-tags} of its own (see {@link #storeVersion}'s own
+     * javadoc for why). Verdaccio merges this into whatever {@code versions} the package already
+     * has rather than requiring the caller to resend them (also confirmed live), so this never
+     * needs to read the existing packument first the way {@link #deletePackageVersionAsset} does.
+     * Rejected outright (a real {@code 409}, "this package is already present") if {@code
+     * version} already exists, even if its content is identical: the caller ({@code
+     * CodeArtifactService#copyContainerBackedPackageVersions}) is expected to have already
+     * deleted a conflicting existing version first for an overwrite, the same reason {@code
+     * ReposiliteSidecarClient#storePackageVersionAsset} documents for Maven.
      */
     @Override
     public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
@@ -488,6 +489,18 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
                 externalVersionDoc);
     }
 
+    /**
+     * The one real write every {@code storePackageVersionAsset}/{@code copyPackageVersionAsset}/
+     * {@code storeRetainedVersionAsset} call goes through. Sends no {@code dist-tags} of its own
+     * (found by hectorvent's review of the npm external-connection work: the unconditional {@code
+     * dist-tags.latest} this used to always send clobbered a real local {@code latest} the moment
+     * any other version was copied or retained). Confirmed live against the pinned image: a PUT
+     * that omits {@code dist-tags} entirely leaves an existing package's own {@code dist-tags.
+     * latest} untouched, while a package's genuinely first-ever version still gets it set to that
+     * version by Verdaccio's own default (there is nothing yet to preserve), so omitting it here
+     * is always correct, and this method never needs its own "is this the right version to call
+     * latest" decision.
+     */
     private void storeVersion(String repositoryContainerId, String domain, String repository, String namespace,
             String packageName, String version, String assetName, byte[] content, JsonNode sourceVersionDoc) {
         String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
@@ -506,11 +519,11 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         dist.put("integrity", "sha512-" + Base64.getEncoder().encodeToString(sha512().digest(content)));
         dist.put("tarball", tarballUrl);
 
+        // No dist-tags sent: see this method's own javadoc for why.
         ObjectNode body = mapper.createObjectNode();
         body.put("_id", npmName);
         body.put("name", npmName);
         body.put("description", "");
-        body.putObject("dist-tags").put("latest", version);
         body.putObject("versions").set(version, versionDoc);
         ObjectNode attachment = body.putObject("_attachments").putObject(assetName);
         attachment.put("content_type", "application/octet-stream");

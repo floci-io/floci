@@ -97,6 +97,7 @@ class CloudFormationFirehoseIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         // Stack completes and Fn::GetAtt(Stream, Arn) resolves to the real delivery stream ARN.
         given()
             .contentType("application/x-www-form-urlencoded")

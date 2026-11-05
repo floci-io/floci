@@ -2,9 +2,14 @@ package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter;
 import org.junit.jupiter.api.Test;
 
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.cert.X509Certificate;
 import java.util.List;
 
@@ -64,6 +69,40 @@ class PemTest {
                 "ec.pem.test.local", List.of(), KeyAlgorithm.EC_prime256v1);
         assertTrue(Pem.isPair(Pem.parsePrivateKey(material.privateKeyPem()),
                 Pem.parseCertificate(material.certificatePem()).getPublicKey()));
+    }
+
+    @Test
+    void recognisesAnEcPrivateKeyWithAProviderAlgorithmAlias() throws Exception {
+        CertificateGenerator.GeneratedCertificate material = GENERATOR.generateSelfSignedCertificate(
+                "provider.pem.test.local", List.of(), KeyAlgorithm.EC_prime256v1);
+        PrivateKey original = Pem.parsePrivateKey(material.privateKeyPem());
+        PrivateKey providerKey = new JcaPEMKeyConverter().setProvider(new BouncyCastleProvider())
+                .getPrivateKey(PrivateKeyInfo.getInstance(original.getEncoded()));
+        assertEquals("ECDSA", providerKey.getAlgorithm());
+        assertTrue(Pem.isPair(providerKey, Pem.parseCertificate(material.certificatePem()).getPublicKey()));
+    }
+
+    @Test
+    void recognisesAnEcPublicKeyWithAProviderAlgorithmAlias() throws Exception {
+        CertificateGenerator.GeneratedCertificate material = GENERATOR.generateSelfSignedCertificate(
+                "provider.pem.test.local", List.of(), KeyAlgorithm.EC_prime256v1);
+        PublicKey original = Pem.parseCertificate(material.certificatePem()).getPublicKey();
+        PublicKey providerKey = new JcaPEMKeyConverter().setProvider(new BouncyCastleProvider())
+                .getPublicKey(SubjectPublicKeyInfo.getInstance(original.getEncoded()));
+        assertEquals("ECDSA", providerKey.getAlgorithm());
+        assertTrue(Pem.isPair(Pem.parsePrivateKey(material.privateKeyPem()), providerKey));
+    }
+
+    @Test
+    void rejectsAnUnrelatedEcKeyWithAProviderAlgorithmAlias() throws Exception {
+        CertificateGenerator.GeneratedCertificate one = GENERATOR.generateSelfSignedCertificate(
+                "one.pem.test.local", List.of(), KeyAlgorithm.EC_prime256v1);
+        CertificateGenerator.GeneratedCertificate other = GENERATOR.generateSelfSignedCertificate(
+                "other.pem.test.local", List.of(), KeyAlgorithm.EC_prime256v1);
+        PrivateKey original = Pem.parsePrivateKey(one.privateKeyPem());
+        PrivateKey providerKey = new JcaPEMKeyConverter().setProvider(new BouncyCastleProvider())
+                .getPrivateKey(PrivateKeyInfo.getInstance(original.getEncoded()));
+        assertFalse(Pem.isPair(providerKey, Pem.parseCertificate(other.certificatePem()).getPublicKey()));
     }
 
     @Test

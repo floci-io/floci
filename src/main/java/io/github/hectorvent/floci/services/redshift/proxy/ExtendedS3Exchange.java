@@ -20,6 +20,16 @@ final class ExtendedS3Exchange {
             CopyStatementParser.S3Statement statement, S3Service s3Service, IamService iamService,
             String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator,
             BackendResponseCoordinator.Ticket ticket, CopyBackendSession copyBackend) throws IOException {
+        execute(client, backend, executeFrame, statement, s3Service, iamService, clusterAccountId, iamRoleArns,
+                coordinator, ticket, copyBackend, null);
+    }
+
+    static void execute(Socket client, Socket backend,
+            PostgresWireDecoder.FrontendMessage executeFrame,
+            CopyStatementParser.S3Statement statement, S3Service s3Service, IamService iamService,
+            String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator,
+            BackendResponseCoordinator.Ticket ticket, CopyBackendSession copyBackend,
+            RedshiftParquetWriter parquetWriter) throws IOException {
         BackendResponseCoordinator.GateResult gate;
         try {
             gate = coordinator.awaitExtendedExecuteTurn(ticket);
@@ -37,7 +47,7 @@ final class ExtendedS3Exchange {
                 case CopyStatementParser.S3CopyFrom copy -> runEtlCopy(client, backend, executeFrame, copy,
                         s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, copyBackend);
                 case CopyStatementParser.S3Unload unload -> runOwnedUnload(client, backend, executeFrame, unload,
-                        s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, copyBackend);
+                        s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, ticket, copyBackend, parquetWriter);
             };
         } catch (IOException | RuntimeException e) {
             closeQuietly(client);
@@ -51,8 +61,34 @@ final class ExtendedS3Exchange {
     private static boolean runOwnedUnload(Socket client, Socket backend,
             PostgresWireDecoder.FrontendMessage executeFrame, CopyStatementParser.S3Unload spec,
             S3Service s3, IamService iam, String account, List<String> roles,
-            BackendResponseCoordinator coordinator, CopyBackendSession copyBackend) throws IOException {
+            BackendResponseCoordinator coordinator, BackendResponseCoordinator.Ticket ticket,
+            CopyBackendSession copyBackend, RedshiftParquetWriter parquetWriter) throws IOException {
         OutputStream output = backend.getOutputStream();
+        List<RedshiftParquetWriter.Column> columns = List.of();
+        if (spec.parquet()) {
+            output.write(new byte[]{'H', 0, 0, 0, 4});
+            output.flush();
+            PostgresWireDecoder preamble = new PostgresWireDecoder(backend.getInputStream());
+            while (!coordinator.isFirstPending(ticket)) {
+                PostgresWireDecoder.FrontendMessage message = preamble.nextMessage();
+                if (message == null) {
+                    throw new IOException("Backend closed before Parquet UNLOAD description");
+                }
+                coordinator.onBackendFrame(message.type(), message.body());
+                forward(client, message);
+                if (message.type() == 'E') {
+                    copyBackend.onBackendError();
+                    return false;
+                }
+            }
+            RedshiftParquetWriter.Description description = RedshiftParquetWriter.describe(client, backend, spec.selectQuery());
+            if (description.error() != null) {
+                copyBackend.onBackendError();
+                forward(client, description.error());
+                return false;
+            }
+            columns = description.columns();
+        }
         output.write(executeFrame.toPacketBytes());
         output.write(new byte[]{'H', 0, 0, 0, 4});
         output.flush();
@@ -70,7 +106,8 @@ final class ExtendedS3Exchange {
         S3CopySimulator.S3TransferException failure = null;
         try {
             try {
-                collector = S3CopySimulator.prepareUnload(spec, s3, iam, account, roles);
+                collector = S3CopySimulator.prepareUnload(spec, s3, iam, account, roles, parquetWriter);
+                collector.columns(columns);
             } catch (S3CopySimulator.S3TransferException exception) {
                 failure = exception;
             }

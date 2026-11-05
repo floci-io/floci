@@ -744,6 +744,21 @@ public class IamActionRegistry {
     }
 
     /**
+     * The value a REST request's path gives each label of the vendored route it matches, decoded, by the label's
+     * name; empty when it matches none. {@link RequestResources} reads a member the table of request resources
+     * locates in the path from them, as {@link #resolveRoute} matches the route.
+     */
+    public static Map<String, String> pathLabels(String credentialScope, ContainerRequestContext ctx) {
+        IamRestRoutes routes = IamRestRoutes.vendored();
+        if (credentialScope == null || !routes.routes(credentialScope)) {
+            return Map.of();
+        }
+        return routes.match(credentialScope, ctx.getMethod().toUpperCase(), routedPath(ctx),
+                        ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters())
+                .map(IamRestRoutes.Match::labels).orElse(Map.of());
+    }
+
+    /**
      * Whether a request of the operation is checked on the resources AWS checks its action on: those its request
      * names, which the vendored request resources read for the operation ({@link RequestResources#reads}) or
      * {@code ResourceArnBuilder} builds for its namespace ({@link RequestResources#builtByHand}), or {@code *}

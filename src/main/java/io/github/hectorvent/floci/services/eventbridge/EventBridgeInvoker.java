@@ -89,6 +89,7 @@ public class EventBridgeInvoker {
     private final RedshiftDataService redshiftDataService;
     private final RedshiftTargetAuthorizer redshiftTargetAuthorizer;
     private final RedshiftDataTargetSubmitter redshiftSubmitter;
+    private final AppSyncTargetInvoker appSyncTargetInvoker;
     private final ServiceRegistry serviceRegistry;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -97,6 +98,19 @@ public class EventBridgeInvoker {
     private final Map<String, RateWindow> rateWindows = new ConcurrentHashMap<>();
 
     @Inject
+    public EventBridgeInvoker(LambdaService lambdaService, SqsService sqsService, SnsService snsService,
+                              BatchService batchService, FirehoseService firehoseService,
+                              EventBridgeService eventBridgeService, EcsService ecsService,
+                              EcsJsonHandler ecsJsonHandler, StepFunctionsService stepFunctionsService,
+                              RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                              ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
+                              EmulatorConfig config, AppSyncTargetInvoker appSyncTargetInvoker) {
+        this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
+                ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
+                serviceRegistry, regionResolver, objectMapper, config,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), appSyncTargetInvoker);
+    }
+
     public EventBridgeInvoker(LambdaService lambdaService,
                               SqsService sqsService,
                               SnsService snsService,
@@ -114,8 +128,7 @@ public class EventBridgeInvoker {
                               EmulatorConfig config) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config,
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+                serviceRegistry, regionResolver, objectMapper, config, (AppSyncTargetInvoker) null);
     }
 
     EventBridgeInvoker(LambdaService lambdaService,
@@ -134,6 +147,18 @@ public class EventBridgeInvoker {
                        ObjectMapper objectMapper,
                        EmulatorConfig config,
                        HttpClient httpClient) {
+        this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
+                ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
+                serviceRegistry, regionResolver, objectMapper, config, httpClient, null);
+    }
+
+    private EventBridgeInvoker(LambdaService lambdaService, SqsService sqsService, SnsService snsService,
+                               BatchService batchService, FirehoseService firehoseService,
+                               EventBridgeService eventBridgeService, EcsService ecsService,
+                               EcsJsonHandler ecsJsonHandler, StepFunctionsService stepFunctionsService,
+                               RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                               ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
+                               EmulatorConfig config, HttpClient httpClient, AppSyncTargetInvoker appSyncTargetInvoker) {
         this.lambdaService = lambdaService;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -146,6 +171,7 @@ public class EventBridgeInvoker {
         this.redshiftDataService = redshiftDataService;
         this.redshiftTargetAuthorizer = redshiftTargetAuthorizer;
         this.redshiftSubmitter = new RedshiftDataTargetSubmitter(redshiftDataService, objectMapper);
+        this.appSyncTargetInvoker = appSyncTargetInvoker;
         this.serviceRegistry = serviceRegistry;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
@@ -344,6 +370,11 @@ public class EventBridgeInvoker {
                 }
             } else if (arn.contains(":events:") && arn.contains(":api-destination/")) {
                 deliverToApiDestination(target, payload, region);
+            } else if (arn.contains(":appsync:")) {
+                if (appSyncTargetInvoker == null) {
+                    throw new AwsException("ServiceNotAvailableException", "AppSync delivery is not available.", 400);
+                }
+                appSyncTargetInvoker.invoke(target, payload, ruleArn, regionResolver.getAccountId());
             } else {
                 LOG.warnv("EventBridge: unsupported target ARN type: {0}", arn);
             }

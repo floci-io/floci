@@ -65,7 +65,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -118,6 +117,8 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String INTERNAL_BUCKET_PREFIX = "floci-internal-";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_BUCKET =
             INTERNAL_BUCKET_PREFIX + "redshift-spectrum-scratch";
+    public static final String REDSHIFT_UNLOAD_STAGING_BUCKET = INTERNAL_BUCKET_PREFIX + "redshift-unload-staging";
+    public static final String REDSHIFT_UNLOAD_STAGING_TAG_VALUE = "redshift-unload-staging";
     public static final String INTERNAL_BUCKET_TAG_KEY = "floci:internal";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
@@ -615,26 +616,16 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public List<Bucket> listBuckets() {
         return bucketStore.scan(key -> true).stream()
-                .filter(bucket -> !isSpectrumScratchBucket(bucket))
+                .filter(bucket -> !isScratchBucket(bucket))
                 .toList();
     }
 
-    /**
-     * The Spectrum scratch bucket is told apart from a user bucket of the same name by the tag the
-     * materializer puts on it, so a user's own bucket is never hidden or treated as scratch space.
-     */
-    private static boolean isSpectrumScratchBucket(Bucket bucket) {
-        return REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(bucket.getName())
-                && bucket.getTags() != null
-                && REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE.equals(bucket.getTags().get(INTERNAL_BUCKET_TAG_KEY));
+    private static boolean isScratchBucket(Bucket bucket) {
+        return Arrays.stream(S3ScratchSpace.values()).anyMatch(space -> space.matchesBucket(bucket));
     }
 
-    /**
-     * Returns true if the named bucket is Floci's internal Redshift Spectrum scratch bucket,
-     * verified by its name and internal tag.
-     */
-    public boolean isSpectrumScratchBucket(String bucketName) {
-        return resolveBucket(bucketName).filter(S3Service::isSpectrumScratchBucket).isPresent();
+    public boolean isScratchBucket(String bucketName) {
+        return resolveBucket(bucketName).filter(S3Service::isScratchBucket).isPresent();
     }
 
     public String getBucketOwnerAccountId(String bucketName) {
@@ -3001,7 +2992,7 @@ public class S3Service implements Resettable, ResourceProvider {
     /** Reads {@code file} once, feeding {@code checksum} if given; returns its MD5 ETag when {@code md5}. */
     private static String hashFile(Path file, boolean md5, S3Checksum.Calculator checksum) {
         try {
-            MessageDigest digest = md5 ? MessageDigest.getInstance("MD5") : null;
+            MessageDigest digest = md5 ? Digests.md5Digest() : null;
             byte[] buffer = new byte[1 << 20];
             try (InputStream in = Files.newInputStream(file)) {
                 for (int read = in.read(buffer); read >= 0; read = in.read(buffer)) {
@@ -3016,8 +3007,6 @@ public class S3Service implements Resettable, ResourceProvider {
             return digest == null ? null : "\"" + bytesToHex(digest.digest()) + "\"";
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read the copy source", e);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("MD5 algorithm not available", e);
         }
     }
 
@@ -5219,7 +5208,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
             // Concatenate parts in order
             try {
-                MessageDigest md = MessageDigest.getInstance("MD5");
+                MessageDigest md = Digests.md5Digest();
                 for (Part part : parts) {
                     // A part ETag is the MD5 of that part, so the composite hashes it without rehashing the data
                     String partETag = stripSurroundingQuotes(part.getETag());
@@ -5300,8 +5289,6 @@ public class S3Service implements Resettable, ResourceProvider {
                 return object;
             } catch (IOException e) {
                 throw new UncheckedIOException("Failed to read multipart parts", e);
-            } catch (NoSuchAlgorithmException e) {
-                throw new RuntimeException("MD5 algorithm not available", e);
             }
         });
         fireNotifications(bucket, key, "ObjectCreated:CompleteMultipartUpload", completed);
@@ -7048,15 +7035,11 @@ public class S3Service implements Resettable, ResourceProvider {
                 throw new AwsException("InvalidArgument",
                         "The x-amz-server-side-encryption-customer-key must be a 256-bit key.", 400);
             }
-            byte[] md5 = MessageDigest.getInstance("MD5").digest(decodedKey);
-            return Base64.getEncoder().encodeToString(md5);
+            return Base64.getEncoder().encodeToString(Digests.md5(decodedKey));
         }
         catch (IllegalArgumentException e) {
             throw new AwsException("InvalidArgument",
                     "The x-amz-server-side-encryption-customer-key value is not valid base64.", 400);
-        }
-        catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("MD5 is not available", e);
         }
     }
 

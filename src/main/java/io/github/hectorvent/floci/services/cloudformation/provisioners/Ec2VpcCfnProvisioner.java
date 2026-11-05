@@ -14,7 +14,6 @@ import io.github.hectorvent.floci.services.ec2.model.VpcIpv6CidrBlockAssociation
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -33,16 +32,17 @@ import java.util.stream.Collectors;
  * Ipv6CidrBlocks. List-valued attributes are comma-joined like the other provisioners' lists.
  *
  * <p>Tags are reconciled to the template's {@code Tags} the way {@link Ec2Tags} does for the
- * instance and security-group provisioners: a key the template dropped is deleted. Stack-level
+ * instance and security-group provisioners: a key the last deployment wrote that the template
+ * dropped is deleted, and a tag added outside the stack is kept, as on AWS. Stack-level
  * tags and the {@code aws:cloudformation:*} system tags are not applied here, matching every other
  * EC2 provisioner in this package.
  *
  * <p>A replacement leaves the displaced VPC to the {@link ReplacementCleanup} record: it is deleted
  * once the update commits, or the resource is pointed back at it when a later resource fails the
  * update and it rolls back. An in-place change to a reused VPC is snapshotted before it is written
- * (tenancy, the DNS attributes and the tag set), so the same rollback puts them back; a provision
- * that fails mid-way restores its own snapshot before the failure propagates. The stack delete
- * removes the VPC; it tolerates only {@code InvalidVpcID.NotFound}, so a VPC that still has
+ * (tenancy, the DNS attributes and the tag keys it touches), so the same rollback puts them back; a
+ * provision that fails mid-way restores its own snapshot before the failure propagates. The stack
+ * delete removes the VPC; it tolerates only {@code InvalidVpcID.NotFound}, so a VPC that still has
  * dependents outside the stack fails the delete with {@code DependencyViolation}, as on AWS.
  */
 @ApplicationScoped
@@ -53,9 +53,12 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /**
      * What an in-place update changed on a reused VPC, recorded before the change so a stack
-     * rollback can put it back. Internal, like the other {@code __Floci} attributes.
+     * rollback can put it back, or, for a replacement, the tag-key record it replaced. Internal,
+     * like the other {@code __Floci} attributes.
      */
     static final String IN_PLACE_PRIOR_ATTR = "__FlociEc2VpcPrior";
+    /** The tag keys the last deployment wrote, as {@link Ec2Tags#recordKeys} records them. */
+    static final String TAG_KEYS_ATTR = "__FlociEc2VpcTagKeys";
 
     private final Ec2Service ec2Service;
 
@@ -85,6 +88,9 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> desiredTags = ctx.resolveTags(props, "Tags");
         Vpc reconciled = existingVpcToReconcile(ctx.isUpdate() ? ctx.priorPhysicalId() : null, cidr, desiredTenancy, region);
         boolean reused = reconciled != null;
+        // Only the keys the last deployment wrote are the stack's to remove; a new VPC has no tags.
+        String priorTagKeys = r.getAttributes().get(TAG_KEYS_ATTR);
+        Set<String> ownedTags = reused ? Ec2Tags.ownedKeys(r, TAG_KEYS_ATTR, ctx) : Set.of();
         Vpc vpc = reused ? reconciled : ec2Service.createVpc(region, cidr, false, false, desiredTenancy);
         String vpcId = vpc.getVpcId();
         r.setPhysicalId(vpcId);
@@ -92,15 +98,25 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
 
         CfnRollback.guarded(r, ctx, !reused, () -> ec2Service.deleteVpc(region, vpcId), () -> undoInPlace(r), () -> {
             if (reused) {
-                snapshotInPlace(r, vpc, desiredTenancy, dnsSupport, dnsHostnames, desiredTags, region);
+                snapshotInPlace(r, vpc, desiredTenancy, dnsSupport, dnsHostnames, ownedTags, desiredTags,
+                        priorTagKeys, region);
             }
             if (reused && isDedicatedToDefault(vpc, desiredTenancy)) {
                 ec2Service.modifyVpcTenancy(region, vpcId, desiredTenancy);
             }
             ec2Service.modifyVpcAttribute(region, vpcId, "enableDnsSupport", String.valueOf(dnsSupport));
             ec2Service.modifyVpcAttribute(region, vpcId, "enableDnsHostnames", String.valueOf(dnsHostnames));
-            Ec2Tags.reconcile(ec2Service, region, vpcId, desiredTags);
+            Ec2Tags.reconcileOwned(ec2Service, region, vpcId, ownedTags, desiredTags);
         });
+        Ec2Tags.recordKeys(r, TAG_KEYS_ATTR, desiredTags);
+        if (!reused && ctx.isUpdate()) {
+            // A replacement's rollback names the prior VPC again with its public attributes; the
+            // tag-key record it owns goes back from here.
+            ObjectNode replaced = MAPPER.createObjectNode();
+            replaced.put("replaced", true);
+            replaced.put("tagKeys", priorTagKeys);
+            r.getAttributes().put(IN_PLACE_PRIOR_ATTR, replaced.toString());
+        }
 
         if (vpc.getCidrBlock() != null) {
             r.getAttributes().put("CidrBlock", vpc.getCidrBlock());
@@ -158,6 +174,12 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
+        JsonNode prior = CfnRollback.updateSnapshot(resource, IN_PLACE_PRIOR_ATTR);
+        if (prior != null && prior.path("replaced").asBoolean(false)) {
+            // Put back before the replacement's delete, which can throw after the prior VPC is named
+            // again.
+            Ec2Tags.restoreRecord(resource, TAG_KEYS_ATTR, prior);
+        }
         if (ReplacementCleanup.rollback(resource, this::delete)) {
             resource.getAttributes().remove(IN_PLACE_PRIOR_ATTR);
             return true;
@@ -176,17 +198,18 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Records what the update is about to change on a reused VPC, only when something differs: an
-     * unchanged reuse leaves no snapshot and rolls back as complete. The tag set comes from
-     * DescribeTags, the same source {@link Ec2Tags#reconcile} compares against.
+     * unchanged reuse leaves no snapshot and rolls back as complete. The tags come from
+     * DescribeTags, the same source {@link Ec2Tags#reconcileOwned} compares against.
      */
     private void snapshotInPlace(StackResource r, Vpc vpc, String desiredTenancy, boolean dnsSupport,
-                                 boolean dnsHostnames, Map<String, String> desiredTags, String region) {
+                                 boolean dnsHostnames, Set<String> ownedTags, Map<String, String> desiredTags,
+                                 String priorTagKeys, String region) {
         Map<String, String> currentTags = Ec2Tags.current(ec2Service, region, vpc.getVpcId());
         boolean tenancyChanges = isDedicatedToDefault(vpc, desiredTenancy);
         boolean changed = tenancyChanges
                 || vpc.isEnableDnsSupport() != dnsSupport
                 || vpc.isEnableDnsHostnames() != dnsHostnames
-                || !currentTags.equals(desiredTags);
+                || Ec2Tags.changesOwned(ownedTags, desiredTags, currentTags);
         if (!changed) {
             return;
         }
@@ -198,16 +221,16 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
         }
         prior.put("enableDnsSupport", vpc.isEnableDnsSupport());
         prior.put("enableDnsHostnames", vpc.isEnableDnsHostnames());
-        ObjectNode tags = prior.putObject("tags");
-        currentTags.forEach(tags::put);
+        Ec2Tags.snapshotOwned(prior, ownedTags, desiredTags, currentTags, priorTagKeys);
         r.getAttributes().put(IN_PLACE_PRIOR_ATTR, prior.toString());
     }
 
     /**
-     * Puts the DNS attributes and the tag set back, then the tenancy last. The only tenancy change
-     * applied in place is {@code dedicated} to {@code default}, and EC2 refuses the reverse, so a
-     * rollback of that change fails on the ModifyVpcTenancy call after everything else is restored
-     * and the stack reports UPDATE_ROLLBACK_FAILED for the VPC rather than claiming it is back.
+     * Puts the DNS attributes, the touched tag keys and their record back, then the tenancy last.
+     * The only tenancy change applied in place is {@code dedicated} to {@code default}, and EC2
+     * refuses the reverse, so a rollback of that change fails on the ModifyVpcTenancy call after
+     * everything else is restored and the stack reports UPDATE_ROLLBACK_FAILED for the VPC rather
+     * than claiming it is back.
      */
     private void restoreInPlace(StackResource resource, String snapshot) {
         ObjectNode prior;
@@ -216,13 +239,15 @@ public class Ec2VpcCfnProvisioner implements CfnResourceProvisioner {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("Unreadable in-place snapshot on " + resource.getLogicalId(), e);
         }
+        if (prior.path("replaced").asBoolean(false)) {
+            Ec2Tags.restoreRecord(resource, TAG_KEYS_ATTR, prior);
+            return;
+        }
         String region = prior.path("region").asText();
         String vpcId = prior.path("vpcId").asText();
         ec2Service.modifyVpcAttribute(region, vpcId, "enableDnsSupport", prior.path("enableDnsSupport").asText());
         ec2Service.modifyVpcAttribute(region, vpcId, "enableDnsHostnames", prior.path("enableDnsHostnames").asText());
-        Map<String, String> priorTags = new LinkedHashMap<>();
-        prior.path("tags").fields().forEachRemaining(f -> priorTags.put(f.getKey(), f.getValue().asText()));
-        Ec2Tags.reconcile(ec2Service, region, vpcId, priorTags);
+        Ec2Tags.restoreOwned(ec2Service, region, vpcId, resource, TAG_KEYS_ATTR, prior);
         if (prior.hasNonNull("instanceTenancy")) {
             ec2Service.modifyVpcTenancy(region, vpcId, prior.get("instanceTenancy").asText());
         }

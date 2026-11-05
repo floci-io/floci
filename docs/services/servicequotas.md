@@ -41,6 +41,7 @@ Limitations.
 | `RequestServiceQuotaIncrease` | Validates and stores an increase request as `PENDING`; a second open request for the same quota is refused with `ResourceAlreadyExistsException` |
 | `GetRequestedServiceQuotaChange` | Returns a stored request by id, else `NoSuchResourceException` |
 | `ListRequestedServiceQuotaChangeHistoryByQuota` | Lists the stored requests for a service/quota pair, newest first |
+| `ListServices` | Lists the available services with their codes and names, supports pagination via MaxResults and NextToken |
 <!-- floci:actions:end -->
 
 ## Limitations
