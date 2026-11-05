@@ -8,6 +8,7 @@ import software.amazon.awssdk.services.sfn.model.*;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
 
+import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
@@ -80,7 +81,8 @@ class StepFunctionsExecutionHistoryTest {
                     .stateMachineArn(smArn)
                     .input("{}")).executionArn();
 
-            DescribeExecutionResponse execution = pollUntilDone(execArn);
+            DescribeExecutionResponse execution =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60));
             assertThat(execution.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
 
             GetExecutionHistoryResponse history = sfn.getExecutionHistory(b -> b
@@ -171,7 +173,8 @@ class StepFunctionsExecutionHistoryTest {
                     .stateMachineArn(smArn)
                     .input("{\"items\": [1, 2]}")).executionArn();
 
-            DescribeExecutionResponse execution = pollUntilDone(execArn);
+            DescribeExecutionResponse execution =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60));
             assertThat(execution.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
 
             List<HistoryEvent> events = sfn.getExecutionHistory(b -> b
@@ -249,7 +252,8 @@ class StepFunctionsExecutionHistoryTest {
                     .stateMachineArn(smArn)
                     .input("{\"x\":\"a\"}")).executionArn();
 
-            DescribeExecutionResponse execution = pollUntilDone(execArn);
+            DescribeExecutionResponse execution =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60));
             assertThat(execution.status()).isEqualTo(ExecutionStatus.FAILED);
             assertThat(execution.error()).isEqualTo("States.Runtime");
             assertThat(execution.cause()).isEqualTo(
@@ -289,7 +293,8 @@ class StepFunctionsExecutionHistoryTest {
 
         try {
             String execArn = sfn.startExecution(b -> b.stateMachineArn(smArn).input("{}")).executionArn();
-            assertThat(pollUntilDone(execArn).status()).isEqualTo(ExecutionStatus.SUCCEEDED);
+            assertThat(TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60)).status())
+                    .isEqualTo(ExecutionStatus.SUCCEEDED);
 
             GetExecutionHistoryResponse firstPage = sfn.getExecutionHistory(b -> b.executionArn(execArn));
             assertThat(firstPage.events()).hasSize(100);
@@ -321,16 +326,5 @@ class StepFunctionsExecutionHistoryTest {
                 // affect another test, and a failure here must not hide the test's own result.
             }
         }
-    }
-
-    private DescribeExecutionResponse pollUntilDone(String execArn) throws InterruptedException {
-        for (int i = 0; i < 120; i++) {
-            DescribeExecutionResponse resp = sfn.describeExecution(b -> b.executionArn(execArn));
-            if (resp.status() != ExecutionStatus.RUNNING) {
-                return resp;
-            }
-            Thread.sleep(500);
-        }
-        throw new AssertionError("Execution did not complete within 60s: " + execArn);
     }
 }
