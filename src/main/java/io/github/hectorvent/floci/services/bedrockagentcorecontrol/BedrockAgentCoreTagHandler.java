@@ -14,7 +14,7 @@ import java.util.Map;
  * Tagging for AgentCore resources, dispatched from the shared {@code /tags/{resourceArn}}
  * route. All AgentCore resources share the ARN service segment {@code bedrock-agentcore},
  * so this handler further dispatches by the resource type in the ARN. AWS supports tagging
- * for runtimes, gateways, memories and harnesses.
+ * for runtimes, runtime endpoints, gateways, memories and harnesses.
  */
 @ApplicationScoped
 public class BedrockAgentCoreTagHandler implements TagHandler {
@@ -49,6 +49,7 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
             case GATEWAY -> gatewayService.getTagsByArn(region, arn);
             case MEMORY -> memoryService.getTagsByArn(region, arn);
             case RUNTIME -> runtimeService.getTagsByArn(region, arn);
+            case ENDPOINT -> runtimeService.getEndpointTagsByArn(region, arn);
             case HARNESS -> harnessRegistry.getTagsByArn(region, arn);
         };
     }
@@ -59,6 +60,7 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
             case GATEWAY -> gatewayService.tagByArn(region, arn, tags);
             case MEMORY -> memoryService.tagByArn(region, arn, tags);
             case RUNTIME -> runtimeService.tagByArn(region, arn, tags);
+            case ENDPOINT -> runtimeService.tagEndpointByArn(region, arn, tags);
             case HARNESS -> harnessRegistry.tagByArn(region, arn, tags);
         }
     }
@@ -69,11 +71,12 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
             case GATEWAY -> gatewayService.untagByArn(region, arn, tagKeys);
             case MEMORY -> memoryService.untagByArn(region, arn, tagKeys);
             case RUNTIME -> runtimeService.untagByArn(region, arn, tagKeys);
+            case ENDPOINT -> runtimeService.untagEndpointByArn(region, arn, tagKeys);
             case HARNESS -> harnessRegistry.untagByArn(region, arn, tagKeys);
         }
     }
 
-    private enum ResourceKind { RUNTIME, GATEWAY, MEMORY, HARNESS }
+    private enum ResourceKind { RUNTIME, ENDPOINT, GATEWAY, MEMORY, HARNESS }
 
     private ResourceKind kind(String region, String arn) {
         String resource = BedrockAgentCoreArns.resource(arn);
@@ -87,6 +90,9 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
         }
         if (resource.startsWith("agent/")) {
             return ResourceKind.RUNTIME;
+        }
+        if (resource.startsWith("agentEndpoint/")) {
+            return ResourceKind.ENDPOINT;
         }
         if (resource.startsWith("memory/")) {
             return ResourceKind.MEMORY;

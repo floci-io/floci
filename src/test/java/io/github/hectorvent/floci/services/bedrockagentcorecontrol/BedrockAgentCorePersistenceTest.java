@@ -54,7 +54,7 @@ class BedrockAgentCorePersistenceTest {
         String id = created.getAgentRuntimeId();
         svc.updateAgentRuntime(id, artifact, network,
                 "arn:aws:iam::000000000000:role/agent", "v2", Map.of("K", "V"), authorizer, null, REGION);
-        svc.createEndpoint(id, "prod", "1", "prod ep", null, REGION);
+        svc.createEndpoint(id, "prod", "1", "prod ep", Map.of("stage", "live"), null, REGION);
         AgentRuntime before = svc.getAgentRuntime(id, REGION);
         svc.tagByArn(REGION, svc.arn(before, "1", REGION), Map.of("env", "prod"));
         before = svc.getAgentRuntime(id, REGION);
@@ -86,6 +86,8 @@ class BedrockAgentCorePersistenceTest {
         assertEquals("prod", loaded.getTags().get("env"));
         assertEquals(2, loaded.getEndpoints().size());
         assertTrue(loaded.getEndpoints().stream().anyMatch(e -> "prod".equals(e.getName())));
+        assertEquals(Map.of("stage", "live"), loaded.getEndpoints().stream()
+                .filter(e -> "prod".equals(e.getName())).findFirst().orElseThrow().getTags());
         assertTrue(loaded.getEndpoints().stream().anyMatch(e -> "DEFAULT".equals(e.getName())));
     }
 

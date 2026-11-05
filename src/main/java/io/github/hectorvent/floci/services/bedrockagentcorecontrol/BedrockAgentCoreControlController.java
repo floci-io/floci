@@ -247,8 +247,10 @@ public class BedrockAgentCoreControlController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode req = objectMapper.readTree(body != null && !body.isBlank() ? body : "{}");
+            BedrockAgentCoreTagValidation.validateTags(req.get("tags"));
             AgentRuntimeEndpoint endpoint = service.createEndpoint(id, text(req, "name"),
-                    text(req, "agentRuntimeVersion"), text(req, "description"), text(req, "clientToken"), region);
+                    text(req, "agentRuntimeVersion"), text(req, "description"), stringMap(req.get("tags")),
+                    text(req, "clientToken"), region);
             AgentRuntime runtime = service.getAgentRuntime(id, region);
             return Response.status(202).entity(endpointResponse(runtime, endpoint, region, false)).build();
         } catch (Exception e) {
