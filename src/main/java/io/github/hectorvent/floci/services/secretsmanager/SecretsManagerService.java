@@ -1692,7 +1692,17 @@ public class SecretsManagerService implements ResourceProvider {
 
     private void executeRotationLifecycle(String secretArn, String clientRequestToken, String lambdaArn, boolean rotateImmediately, boolean isExistingVersion, String region) {
         if (!rotateImmediately) {
-            invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "testSecret", region);
+            // AWS tests the configuration against an AWSPENDING version it creates and then removes.
+            // Without a Lambda there is no test step, so there is nothing to stage.
+            boolean staged = lambdaService != null && !isExistingVersion
+                    && stagePendingVersion(secretArn, clientRequestToken, region);
+            try {
+                invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "testSecret", region);
+            } finally {
+                if (staged) {
+                    removeVersion(secretArn, clientRequestToken, region);
+                }
+            }
 
             synchronized (lockFor(secretArn)) {
                 Secret refreshed = resolveSecret(secretArn, region);
@@ -1709,22 +1719,7 @@ public class SecretsManagerService implements ResourceProvider {
 
         try {
             if (!isExistingVersion) {
-                synchronized (lockFor(secretArn)) {
-                    Secret secret = resolveSecret(secretArn, region);
-                    if (secret.getVersions() != null && secret.getVersions().containsKey(clientRequestToken)) {
-                        isExistingVersion = true;
-                    } else {
-                        SecretVersion pendingVersion = new SecretVersion();
-                        pendingVersion.setVersionId(clientRequestToken);
-                        pendingVersion.setVersionStages(List.of("AWSPENDING"));
-                        pendingVersion.setCreatedDate(Instant.now());
-                        if (secret.getVersions() == null) {
-                            secret.setVersions(new HashMap<>());
-                        }
-                        secret.getVersions().put(clientRequestToken, pendingVersion);
-                        persist(secret, region);
-                    }
-                }
+                isExistingVersion = !stagePendingVersion(secretArn, clientRequestToken, region);
             }
             if (!isExistingVersion) {
                 invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "createSecret", region);
@@ -1741,6 +1736,38 @@ public class SecretsManagerService implements ResourceProvider {
         } catch (Exception e) {
             LOG.errorv(e, "Error during rotation steps for secret {0}", secretArn);
             throw e;
+        }
+    }
+
+    /**
+     * Adds an empty AWSPENDING version under the rotation token, unless a version with that id
+     * already exists. Returns whether it added one.
+     */
+    private boolean stagePendingVersion(String secretArn, String clientRequestToken, String region) {
+        synchronized (lockFor(secretArn)) {
+            Secret secret = resolveSecret(secretArn, region);
+            if (secret.getVersions() != null && secret.getVersions().containsKey(clientRequestToken)) {
+                return false;
+            }
+            SecretVersion pendingVersion = new SecretVersion();
+            pendingVersion.setVersionId(clientRequestToken);
+            pendingVersion.setVersionStages(List.of("AWSPENDING"));
+            pendingVersion.setCreatedDate(Instant.now());
+            if (secret.getVersions() == null) {
+                secret.setVersions(new HashMap<>());
+            }
+            secret.getVersions().put(clientRequestToken, pendingVersion);
+            persist(secret, region);
+            return true;
+        }
+    }
+
+    private void removeVersion(String secretArn, String versionId, String region) {
+        synchronized (lockFor(secretArn)) {
+            Secret secret = resolveSecret(secretArn, region);
+            if (secret.getVersions() != null && secret.getVersions().remove(versionId) != null) {
+                persist(secret, region);
+            }
         }
     }
 
