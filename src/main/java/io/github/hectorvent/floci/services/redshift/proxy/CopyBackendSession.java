@@ -4,7 +4,6 @@ import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
 import io.github.hectorvent.floci.services.redshift.proxy.S3CopySimulator.S3TransferException;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.Socket;
@@ -88,7 +87,7 @@ final class CopyBackendSession {
         }
         synchronize();
         if (parsed && activeStatement != null) {
-            write('C', concat(new byte[]{'S'}, PostgresWire.cStringBytes(activeStatement)));
+            write('C', new byte[]{'S'}, PostgresWire.cStringBytes(activeStatement));
             flush();
             while (read().type() != '3') {
                 // A failed command's prepared statement survives transaction rollback.
@@ -175,16 +174,16 @@ final class CopyBackendSession {
         String name = prefix + "_" + sequence++;
         activeStatement = name;
         parsed = false;
-        write('P', concat(PostgresWire.cStringBytes(name), PostgresWire.cStringBytes(sql), new byte[2]));
-        write('B', concat(PostgresWire.cStringBytes(name), PostgresWire.cStringBytes(name), new byte[6]));
-        write('E', concat(PostgresWire.cStringBytes(name), new byte[4]));
+        write('P', PostgresWire.cStringBytes(name), PostgresWire.cStringBytes(sql), new byte[2]);
+        write('B', PostgresWire.cStringBytes(name), PostgresWire.cStringBytes(name), new byte[6]);
+        write('E', PostgresWire.cStringBytes(name), new byte[4]);
         flush();
         return name;
     }
 
     private void close(String name) throws IOException {
-        write('C', concat(new byte[]{'P'}, PostgresWire.cStringBytes(name)));
-        write('C', concat(new byte[]{'S'}, PostgresWire.cStringBytes(name)));
+        write('C', new byte[]{'P'}, PostgresWire.cStringBytes(name));
+        write('C', new byte[]{'S'}, PostgresWire.cStringBytes(name));
         flush();
         for (int closed = 0; closed < 2;) {
             if (read().type() == '3') {
@@ -224,16 +223,8 @@ final class CopyBackendSession {
         backend.getOutputStream().flush();
     }
 
-    private void write(char type, byte[] body) throws IOException {
-        backend.getOutputStream().write(PostgresWire.frame(type, body));
-    }
-
-    private static byte[] concat(byte[]... parts) {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        for (byte[] part : parts) {
-            output.writeBytes(part);
-        }
-        return output.toByteArray();
+    private void write(char type, byte[]... parts) throws IOException {
+        PostgresWire.write(backend.getOutputStream(), type, parts);
     }
 
     @FunctionalInterface

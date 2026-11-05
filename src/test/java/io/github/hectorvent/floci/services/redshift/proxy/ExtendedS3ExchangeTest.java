@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -14,6 +16,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,6 +31,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@Timeout(10)
 class ExtendedS3ExchangeTest {
 
     private Socket simClient;
@@ -49,6 +53,9 @@ class ExtendedS3ExchangeTest {
         simBackend = new Socket("localhost", backendListener.getLocalPort());
         testBackend = backendListener.accept();
         backendListener.close();
+        simBackend.setSoTimeout(3_000);
+        testBackend.setSoTimeout(3_000);
+        testClient.setSoTimeout(3_000);
         s3 = mock(S3Service.class);
         iamService = mock(IamService.class);
     }
@@ -73,15 +80,18 @@ class ExtendedS3ExchangeTest {
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
         ByteArrayOutputStream copied = new ByteArrayOutputStream();
-        writeSync();
-        Thread backend = backendThread(() -> playCopyIn(copied));
+        Thread backend = backendThread(() -> playEtlCopy(copied, false));
 
-        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, iamService, coordinator, ticket);
+        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, iamService,
+                null, List.of(), coordinator, ticket,
+                new CopyBackendSession(simBackend, response -> writeFrame(simClient.getOutputStream(),
+                        response.type(), response.body())));
         joinBackend(backend);
 
         PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClient.getInputStream());
         assertEquals('C', clientDecoder.nextMessage().type());
         assertEquals("1|a\n", copied.toString(StandardCharsets.US_ASCII));
+        coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
         coordinator.onBackendFrame('Z', new byte[]{'I'});
         assertTrue(coordinator.awaitIdle(1, TimeUnit.SECONDS));
         testClient.setSoTimeout(200);
@@ -101,15 +111,18 @@ class ExtendedS3ExchangeTest {
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
-        writeSync();
         Thread backend = backendThread(this::playCopyOut);
 
-        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), unload, s3, iamService, coordinator, ticket);
+        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), unload, s3, iamService,
+                null, List.of(), coordinator, ticket,
+                new CopyBackendSession(simBackend, response -> writeFrame(simClient.getOutputStream(),
+                        response.type(), response.body())));
         joinBackend(backend);
 
         assertEquals("1\n2\n", new String(written.get("out/000"), StandardCharsets.US_ASCII));
         PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClient.getInputStream());
         assertEquals('C', clientDecoder.nextMessage().type());
+        coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
         coordinator.onBackendFrame('Z', new byte[]{'I'});
         assertTrue(coordinator.awaitIdle(1, TimeUnit.SECONDS));
         testClient.setSoTimeout(200);
@@ -117,27 +130,18 @@ class ExtendedS3ExchangeTest {
     }
 
     @Test
-    void missingCopyInputSendsCopyFailAndWaitsForSyncRecovery() throws Exception {
+    void missingCopyInputReportsErrorBeforeClientSync() throws Exception {
         CopyStatementParser.S3CopyFrom copy = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "b", "missing", "|", 0, false, false, null, null);
         BackendResponseCoordinator coordinator = new BackendResponseCoordinator(new ExtendedQuerySession());
         BackendResponseCoordinator.Ticket ticket = coordinator.register(
                 BackendResponseCoordinator.Operation.EXECUTE, null);
-        writeSync();
-        Thread backend = backendThread(() -> {
-            PostgresWireDecoder decoder = new PostgresWireDecoder(testBackend.getInputStream());
-            assertEquals('E', decoder.nextMessage().type());
-            testBackend.getOutputStream().write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
-            testBackend.getOutputStream().flush();
-            assertEquals('f', decoder.nextMessage().type());
-            assertEquals('S', decoder.nextMessage().type());
-            writeFrame(testBackend.getOutputStream(), 'E',
-                    "SERROR\0C57014\0MCOPY aborted\0\0".getBytes(StandardCharsets.US_ASCII));
-            writeFrame(testBackend.getOutputStream(), 'Z', new byte[]{'E'});
-            testBackend.getOutputStream().flush();
-        });
+        Thread backend = backendThread(() -> playEtlCopy(new ByteArrayOutputStream(), true));
 
-        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, iamService, coordinator, ticket);
+        ExtendedS3Exchange.execute(simClient, simBackend, executeFrame(), copy, s3, iamService,
+                null, List.of(), coordinator, ticket, new CopyBackendSession(simBackend, response -> {
+                    throw new AssertionError("Unexpected asynchronous frame");
+                }));
         joinBackend(backend);
 
         testClient.setSoTimeout(1_000);
@@ -146,8 +150,10 @@ class ExtendedS3ExchangeTest {
         assertEquals('E', error.type());
         assertTrue(new String(error.body(), StandardCharsets.US_ASCII).contains("XX000"));
         assertTrue(new String(error.body(), StandardCharsets.US_ASCII).contains("s3://b/missing"));
-        assertEquals('Z', clientDecoder.nextMessage().type());
-        assertEquals('E', coordinator.lastReadyStatus());
+        testClient.setSoTimeout(200);
+        assertThrows(SocketTimeoutException.class, () -> testClient.getInputStream().read());
+        coordinator.register(BackendResponseCoordinator.Operation.SYNC, null);
+        coordinator.onBackendFrame('Z', new byte[]{'I'});
         assertTrue(coordinator.awaitIdle(1, TimeUnit.SECONDS));
     }
 
@@ -155,33 +161,76 @@ class ExtendedS3ExchangeTest {
         return new PostgresWireDecoder.FrontendMessage('E', new byte[]{0, 0, 0, 0, 0});
     }
 
-    private void playCopyIn(ByteArrayOutputStream copied) throws IOException {
+    private void playEtlCopy(ByteArrayOutputStream copied, boolean missingInput) throws IOException {
         PostgresWireDecoder decoder = new PostgresWireDecoder(testBackend.getInputStream());
         assertEquals('E', decoder.nextMessage().type());
-        testBackend.getOutputStream().write(new byte[]{'G', 0, 0, 0, 7, 0, 0, 0});
-        testBackend.getOutputStream().flush();
+        assertEquals('H', decoder.nextMessage().type());
+        writeCommandComplete();
+        Map<String, String> statements = new HashMap<>();
+        Map<String, String> portals = new HashMap<>();
+        boolean finishing = false;
+        int closed = 0;
         while (true) {
             PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
-            if (message.type() == 'd') {
-                copied.write(message.body());
-            } else if (message.type() == 'c') {
-                break;
+            OutputStream out = testBackend.getOutputStream();
+            switch (message.type()) {
+                case 'P' -> {
+                    PostgresWireDecoder.ParseMessage parsed = decoder.decodeParse(message);
+                    statements.put(parsed.statementName(), parsed.sql());
+                    writeFrame(out, '1', new byte[0]);
+                }
+                case 'B' -> {
+                    PostgresWireDecoder.BindMessage bound = decoder.decodeBind(message);
+                    portals.put(bound.portalName(), statements.get(bound.statementName()));
+                    writeFrame(out, '2', new byte[0]);
+                }
+                case 'E' -> {
+                    String sql = portals.get(decoder.decodeExecute(message).portalName());
+                    if (sql.startsWith("COPY ")) {
+                        writeFrame(out, 'G', new byte[]{0, 0, 0});
+                    } else if (sql.equals("SELECT 1 / 0")) {
+                        assertTrue(missingInput);
+                        writeFrame(out, 'E', S3CopySimulator.errorBody("22012", "division by zero"));
+                        out.flush();
+                        return;
+                    } else {
+                        if (sql.startsWith("SELECT a.attname")) {
+                            writeFrame(out, 'D', new byte[]{0, 3, 0, 0, 0, 2, 'i', 'd',
+                                    -1, -1, -1, -1, 0, 0, 0, 2, '2', '3'});
+                        }
+                        finishing = !missingInput && sql.startsWith("RELEASE SAVEPOINT floci_load_");
+                        writeFrame(out, 'C', PostgresWire.cStringBytes("SELECT 0"));
+                    }
+                }
+                case 'd' -> copied.write(message.body());
+                case 'c' -> writeFrame(out, 'C', PostgresWire.cStringBytes("COPY 1"));
+                case 'C' -> {
+                    writeFrame(out, '3', new byte[0]);
+                    if (finishing) {
+                        closed++;
+                    }
+                }
+                case 'H' -> {
+                    out.flush();
+                    if (finishing && closed == 2) {
+                        return;
+                    }
+                }
+                default -> throw new AssertionError("Unexpected wire message " + message.type());
             }
         }
-        assertEquals('S', decoder.nextMessage().type());
-        writeCommandComplete();
     }
 
     private void playCopyOut() throws IOException {
         PostgresWireDecoder decoder = new PostgresWireDecoder(testBackend.getInputStream());
         assertEquals('E', decoder.nextMessage().type());
+        assertEquals('H', decoder.nextMessage().type());
         OutputStream out = testBackend.getOutputStream();
         out.write(new byte[]{'H', 0, 0, 0, 7, 0, 0, 0});
         writeFrame(out, 'd', "1\n".getBytes(StandardCharsets.US_ASCII));
         writeFrame(out, 'd', "2\n".getBytes(StandardCharsets.US_ASCII));
         out.write(new byte[]{'c', 0, 0, 0, 4});
         writeCommandComplete();
-        assertEquals('S', decoder.nextMessage().type());
     }
 
     private void writeCommandComplete() throws IOException {
@@ -189,15 +238,8 @@ class ExtendedS3ExchangeTest {
         testBackend.getOutputStream().flush();
     }
 
-    private void writeSync() throws IOException {
-        testClient.getOutputStream().write(new byte[]{'S', 0, 0, 0, 4});
-        testClient.getOutputStream().flush();
-    }
-
     private static void writeFrame(OutputStream out, char type, byte[] body) throws IOException {
-        out.write(type);
-        out.write(new byte[]{0, 0, 0, (byte) (4 + body.length)});
-        out.write(body);
+        PostgresWire.write(out, type, body);
     }
 
     private Thread backendThread(BackendScript script) {
@@ -211,7 +253,8 @@ class ExtendedS3ExchangeTest {
     }
 
     private void joinBackend(Thread backend) throws InterruptedException {
-        backend.join();
+        backend.join(5_000);
+        assertTrue(!backend.isAlive(), "Fake backend must finish");
         Throwable failure = backendFailure.get();
         if (failure != null) {
             throw new AssertionError("fake backend failed", failure);

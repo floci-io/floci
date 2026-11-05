@@ -8,21 +8,27 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 @Timeout(15)
@@ -97,14 +103,16 @@ class RedshiftCopyTransactionTest {
             when(s3.objectExists("bucket", "data")).thenReturn(true);
             when(s3.getObject("bucket", "data")).thenReturn(new S3Object("bucket", "data",
                     "1\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+            CountDownLatch midFrameTimeout = new CountDownLatch(1);
+            Socket observedBackend = observePumpTimeout(bridgeBackend, midFrameTimeout);
             CompletableFuture<Void> server = CompletableFuture.runAsync(() -> {
                 try {
-                    serve(backend, fragmentNotice);
+                    serve(backend, fragmentNotice, false, midFrameTimeout);
                 } catch (Exception exception) {
                     throw new AssertionError(exception);
                 }
             });
-            Thread.ofVirtual().start(new RedshiftInterceptingBridge(bridgeClient, bridgeBackend, s3,
+            Thread.ofVirtual().start(new RedshiftInterceptingBridge(bridgeClient, observedBackend, s3,
                     mock(IamService.class))::run);
             ByteArrayOutputStream pipeline = new ByteArrayOutputStream();
             int index = 0;
@@ -143,11 +151,40 @@ class RedshiftCopyTransactionTest {
         output.writeBytes(PostgresWire.frame('E', join(PostgresWire.cStringBytes(name), new byte[4])));
     }
 
-    private static void serve(Socket socket, boolean fragmentNotice) throws Exception {
-        serve(socket, fragmentNotice, false);
+    private static Socket observePumpTimeout(Socket backend, CountDownLatch midFrameTimeout) throws IOException {
+        InputStream input = new FilterInputStream(backend.getInputStream()) {
+            private final RedshiftInterceptingBridge.WireFrameTracker tracker =
+                    new RedshiftInterceptingBridge.WireFrameTracker((type, body) -> {
+                        // Only frame boundaries matter to the timeout observation.
+                    });
+
+            @Override
+            public int read(byte[] bytes) throws IOException {
+                try {
+                    int count = in.read(bytes);
+                    if (count > 0) {
+                        tracker.consume(bytes, 0, count);
+                    }
+                    return count;
+                } catch (SocketTimeoutException exception) {
+                    if (!tracker.betweenMessages()) {
+                        midFrameTimeout.countDown();
+                    }
+                    throw exception;
+                }
+            }
+        };
+        Socket observed = spy(backend);
+        doReturn(input).when(observed).getInputStream();
+        return observed;
     }
 
     private static void serve(Socket socket, boolean fragmentNotice, boolean failCommit) throws Exception {
+        serve(socket, fragmentNotice, failCommit, null);
+    }
+
+    private static void serve(Socket socket, boolean fragmentNotice, boolean failCommit,
+                              CountDownLatch midFrameTimeout) throws Exception {
         PostgresWireDecoder decoder = new PostgresWireDecoder(socket.getInputStream());
         Map<String, String> statements = new HashMap<>();
         Map<String, String> portals = new HashMap<>();
@@ -198,7 +235,8 @@ class RedshiftCopyTransactionTest {
                             byte[] notice = PostgresWire.frame('N', S3CopySimulator.errorBody("00000", "async notice"));
                             socket.getOutputStream().write(notice, 0, 3);
                             socket.getOutputStream().flush();
-                            Thread.sleep(300);
+                            assertTrue(midFrameTimeout.await(5, TimeUnit.SECONDS),
+                                    "Pump must time out while the notice frame is incomplete");
                             socket.getOutputStream().write(notice, 3, notice.length - 3);
                             socket.getOutputStream().flush();
                         }

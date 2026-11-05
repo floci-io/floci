@@ -752,15 +752,26 @@ public final class S3CopySimulator {
         return values;
     }
 
+    static String columnInfoQuery(CopyStatementParser.S3CopyFrom spec) {
+        // 1042 = bpchar, 1043 = varchar; atttypmod carries the declared length plus a 4-byte header.
+        return "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
+                + "THEN a.atttypmod - 4 END, a.atttypid FROM pg_catalog.pg_attribute a "
+                + "WHERE a.attrelid = to_regclass(E'" + quoteLiteral(spec.targetTable().replace("\\", "\\\\")) + "') "
+                + "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' "
+                + "ORDER BY a.attnum";
+    }
+
+    static ColumnInfo columnInfo(List<String> values) {
+        Integer maxBytes = values.size() >= 2 && values.get(1) != null
+                ? Integer.valueOf(values.get(1)) : null;
+        String typeOid = values.size() >= 3 ? values.get(2) : null;
+        return new ColumnInfo(values.get(0), maxBytes, kindOf(typeOid));
+    }
+
     private static List<ColumnInfo> discoverColumnInfo(Socket client, Socket backend,
                                                        CopyStatementParser.S3CopyFrom spec,
                                                        char txStatus, IntConsumer onStatusChange) throws IOException {
-        // 1042 = bpchar, 1043 = varchar; atttypmod carries the declared length plus a 4-byte header.
-        String query = "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
-                + "THEN a.atttypmod - 4 END, a.atttypid FROM pg_catalog.pg_attribute a "
-                + "WHERE a.attrelid = to_regclass('" + quoteLiteral(spec.targetTable()) + "') "
-                + "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' "
-                + "ORDER BY a.attnum";
+        String query = columnInfoQuery(spec);
 
         OutputStream backendOut = backend.getOutputStream();
         backendOut.write(PostgresWireDecoder.encodeQuery(query));
@@ -774,11 +785,7 @@ public final class S3CopySimulator {
             if (type == 'D') {
                 List<String> values = parseDataRow(msg.body());
                 if (!values.isEmpty() && values.get(0) != null) {
-                    Integer maxBytes = values.size() >= 2 && values.get(1) != null
-                            ? Integer.valueOf(values.get(1))
-                            : null;
-                    String typeOid = values.size() >= 3 ? values.get(2) : null;
-                    cols.add(new ColumnInfo(values.get(0), maxBytes, kindOf(typeOid)));
+                    cols.add(columnInfo(values));
                 }
             } else if (type == 'E') {
                 forward(client, msg);

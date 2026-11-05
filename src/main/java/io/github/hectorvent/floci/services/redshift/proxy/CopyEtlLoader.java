@@ -128,15 +128,9 @@ final class CopyEtlLoader {
 
     private static List<ColumnInfo> columns(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec)
             throws IOException {
-        String table = "E'" + spec.targetTable().replace("\\", "\\\\").replace("'", "''") + "'";
-        String query = "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
-                + "THEN a.atttypmod - 4 END, a.atttypid FROM pg_catalog.pg_attribute a "
-                + "WHERE a.attrelid = to_regclass(" + table + ") AND a.attnum > 0 "
-                + "AND NOT a.attisdropped AND a.attgenerated = '' ORDER BY a.attnum";
         List<ColumnInfo> catalog = new ArrayList<>();
-        for (List<String> row : backend.query(query)) {
-            catalog.add(new ColumnInfo(row.get(0), row.get(1) == null ? null : Integer.valueOf(row.get(1)),
-                    S3CopySimulator.kindOf(row.get(2))));
+        for (List<String> row : backend.query(S3CopySimulator.columnInfoQuery(spec))) {
+            catalog.add(S3CopySimulator.columnInfo(row));
         }
         if (catalog.isEmpty()) {
             throw new S3TransferException("42P01", "COPY target has no loadable columns", null);
