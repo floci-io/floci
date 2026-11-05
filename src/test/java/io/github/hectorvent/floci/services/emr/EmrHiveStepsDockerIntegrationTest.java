@@ -83,6 +83,8 @@ class EmrHiveStepsDockerIntegrationTest {
                 create external table kv (k string, v int)
                   row format delimited fields terminated by ',' location '${INPUT}';
                 create table scaled as select k, v * 10 as v from kv;
+                create table pinned (k string) location 'hdfs:///floci/pinned';
+                insert into pinned select k from kv;
                 """);
         put("queries/report.q", """
                 insert overwrite directory '${OUTPUT}' row format delimited fields terminated by ','
@@ -101,6 +103,10 @@ class EmrHiveStepsDockerIntegrationTest {
         String cat = addStep("command-runner.jar", "hadoop", "fs", "-cat", "hdfs:///user/hive/warehouse/scaled/*");
         assertEquals("COMPLETED", state(cat));
         assertEquals("a\u000110\nb\u000120\nc\u000130\n", stepLog(cat, "stdout.gz"));
+        // An hdfs:// location is the cluster's HDFS too, whose NameNode answers Hive's encryption zone lookups.
+        String pinned = addStep("command-runner.jar", "hadoop", "fs", "-cat", "hdfs:///floci/pinned/*");
+        assertEquals("COMPLETED", state(pinned));
+        assertEquals("a\nb\nc\n", stepLog(pinned, "stdout.gz"));
         // The metastore is the cluster's own, a database in its /mnt.
         assertEquals("COMPLETED", state(addStep("command-runner.jar", "test", "-d", "/mnt/var/lib/hive/metastore_db")));
     }
@@ -136,17 +142,19 @@ class EmrHiveStepsDockerIntegrationTest {
     @Test
     void whatABootstrapInstalledIsThereForTheClustersHiveAndOtherSteps() {
         // One action, as the Management Guide's "Run custom bootstrap actions" has them: a file in the hadoop user's
-        // home, and a command installed with sudo.
+        // home, one in /mnt, and a command installed with sudo.
         put("bootstrap/install.sh", String.join("\n", "#!/bin/bash",
                 "echo bootstrapped > /home/hadoop/marker.txt",
+                "echo mounted > /mnt/marker.txt",
                 "printf '%s\\n' '#!/bin/bash' 'echo installed' | sudo tee /usr/local/bin/floci-probe > /dev/null",
                 "sudo chmod +x /usr/local/bin/floci-probe", ""));
         startCluster(HIVE_AND_SPARK, "[]", s3Uri("bootstrap/install.sh"));
 
         String query = addStep("command-runner.jar", "hive-script", "--run-hive-script", "--args",
-                "-e", "!cat /home/hadoop/marker.txt; !/usr/local/bin/floci-probe;");
+                "-e", "!cat /home/hadoop/marker.txt /mnt/marker.txt; !/usr/local/bin/floci-probe;");
         assertEquals("COMPLETED", state(query));
-        assertTrue(stepLog(query, "stdout.gz").contains("bootstrapped\ninstalled\n"));
+        // The cluster's HDFS, started before the step, keeps its data in a volume of its own, not in /mnt's.
+        assertTrue(stepLog(query, "stdout.gz").contains("bootstrapped\nmounted\ninstalled\n"));
         String probe = addStep("command-runner.jar", "floci-probe");
         assertEquals("COMPLETED", state(probe));
         assertEquals("installed\n", stepLog(probe, "stdout.gz"));

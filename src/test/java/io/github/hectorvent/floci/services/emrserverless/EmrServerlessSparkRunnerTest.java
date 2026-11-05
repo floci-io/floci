@@ -80,8 +80,10 @@ import static org.mockito.Mockito.when;
 class EmrServerlessSparkRunnerTest {
 
     private static final String ENDPOINT = "http://floci:4566";
+    // A cluster's storage, its HDFS running on its primary node.
     private static final SparkJobRunner.Storage STORAGE = new SparkJobRunner.Storage(
-            "floci-aws-emr-j-2AXXXXXXGAPLF-home", "floci-aws-emr-j-2AXXXXXXGAPLF-mnt");
+            "floci-aws-emr-j-2AXXXXXXGAPLF-home", "floci-aws-emr-j-2AXXXXXXGAPLF-mnt", "ip-10-0-0-1.ec2.internal",
+            "172.18.0.5", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs");
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
@@ -247,17 +249,14 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
-    void anEmrHiveStepsHiveReachesItsClustersHdfsAsViewfsAndKeepsItsMetastoreInItsMnt() {
+    void anEmrHiveStepsHiveReachesItsClustersHdfsAndKeepsItsMetastoreInItsMnt() {
         List<String> arguments = EmrServerlessSparkRunner.hiveArguments(
                 hiveStep(List.of("--hiveconf", "hive.exec.reducers.max=8", "-f", "s3://bucket/queries/report.q")),
                 ENDPOINT);
 
         int tez = arguments.indexOf("tez.am.client.am.port-range=40000-40100");
         assertEquals(List.of(
-                "--hiveconf", "fs.defaultFS=hdfs:///",
-                "--hiveconf", "fs.hdfs.impl=org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme",
-                "--hiveconf", "fs.viewfs.mounttable.default.linkFallback=file:///mnt/hdfs",
-                "--hiveconf", "fs.defaultFS=viewfs:///",
+                "--hiveconf", "fs.defaultFS=hdfs://ip-10-0-0-1.ec2.internal:8020",
                 "--hiveconf", "hive.metastore.client.factory.class="
                         + "org.apache.hadoop.hive.ql.metadata.SessionHiveMetaStoreClientFactory",
                 "--hiveconf", "javax.jdo.option.ConnectionURL="
@@ -331,8 +330,9 @@ class EmrServerlessSparkRunnerTest {
         verify(lifecycle, never()).copyJavaTrustStore(anyString());
         // The release's image is not in an ECR repository, so it is pulled once, as the container is created.
         verify(lifecycle, never()).resolveImageForLaunch(anyString(), any(), any());
-        // An EMR Serverless run has no cluster, nor its storage.
+        // An EMR Serverless run has no cluster, nor its storage or network.
         verify(spec, never()).withNamedVolume(anyString(), anyString());
+        verify(lifecycle, never()).connectToNetwork(anyString(), anyString());
     }
 
     @Test
@@ -562,7 +562,7 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
-    void aStepMountsItsClustersStorageWhoseHdfsIsWherePathsWithoutASchemeLead() {
+    void aStepMountsItsClustersStorageWhoseHdfsOnItsPrimaryNodeIsWherePathsWithoutASchemeLead() {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(builder.newContainer(anyString())).thenReturn(spec);
@@ -573,12 +573,19 @@ class EmrServerlessSparkRunnerTest {
 
         verify(spec).withNamedVolume(STORAGE.home(), "/home/hadoop");
         verify(spec).withNamedVolume(STORAGE.mnt(), "/mnt");
+        // The primary node's name leads to its HDFS, as the cluster's DNS resolves it, on the cluster's own network,
+        // which the driver joins before it starts.
+        verify(spec).withExtraHost("ip-10-0-0-1.ec2.internal", "172.18.0.5");
+        InOrder order = inOrder(lifecycle);
+        order.verify(lifecycle).create(any());
+        order.verify(lifecycle).connectToNetwork("driver", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs");
+        order.verify(lifecycle).startCreated(eq("driver"), any());
         // After Floci's S3 settings, before the cluster's spark-defaults, which win.
         assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(19));
+        // HDFS's own client, in place of the core-site.xml's view, which Hive in Spark could not write a table with.
         assertEquals(List.of(
-                "--conf", "spark.hadoop.fs.defaultFS=hdfs:///",
-                "--conf", "spark.hadoop.fs.hdfs.impl=org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme",
-                "--conf", "spark.hadoop.fs.viewfs.mounttable.default.linkFallback=file:///mnt/hdfs",
+                "--conf", "spark.hadoop.fs.defaultFS=hdfs://ip-10-0-0-1.ec2.internal:8020",
+                "--conf", "spark.hadoop.fs.hdfs.impl=org.apache.hadoop.hdfs.DistributedFileSystem",
                 "--conf", "spark.sql.streaming.checkpointFileManagerClass="
                         + "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager",
                 "--conf", "spark.hadoop.fs.defaultFS=file:///",
@@ -596,14 +603,13 @@ class EmrServerlessSparkRunnerTest {
 
         verify(spec).withNamedVolume(STORAGE.home(), "/home/hadoop");
         verify(spec).withNamedVolume(STORAGE.mnt(), "/mnt");
-        verify(spec).withEnv(eq("FLOCI_HADOOP_SITE"), argThat(site -> site.endsWith(String.join("\n",
-                "<property><name>fs.defaultFS</name><value>hdfs:///</value></property>",
-                "<property><name>fs.hdfs.impl</name><value>org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme"
-                        + "</value></property>",
-                "<property><name>fs.viewfs.mounttable.default.linkFallback</name><value>file:///mnt/hdfs</value>"
-                        + "</property>"))));
+        verify(spec).withEnv(eq("FLOCI_HADOOP_SITE"), argThat(site -> site.contains(
+                "<property><name>fs.defaultFS</name><value>hdfs://ip-10-0-0-1.ec2.internal:8020</value></property>")
+                && site.endsWith("<property><name>fs.viewfs.mounttable.ip-10-0-0-1.ec2.internal.linkFallback</name>"
+                        + "<value>hdfs://ip-10-0-0-1.ec2.internal:8020</value></property>")));
         verify(spec).withEnv(eq("FLOCI_SPARK_DEFAULTS"), argThat(file -> file.contains(
-                "\nspark.hadoop.fs.defaultFS hdfs:///\n")));
+                "\nspark.hadoop.fs.defaultFS hdfs://ip-10-0-0-1.ec2.internal:8020\n")));
+        verify(spec).withExtraHost("ip-10-0-0-1.ec2.internal", "172.18.0.5");
         // A copy of the Hadoop configuration a spark-env export of HADOOP_CONF_DIR names, else of the image's, links
         // followed, its core-site.xml taking in the original's whole, whatever its XML, then the cluster's HDFS.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
@@ -640,11 +646,8 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withEnv("FLOCI_MAPRED_SITE", "<property><name>mapreduce.framework.name</name><value>local"
                 + "</value></property><property><name>mapreduce.jobtracker.staging.root.dir</name>"
                 + "<value>/tmp/hadoop/mapred/staging</value></property>");
-        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join("\n",
-                "  site mapred-site.xml \"$FLOCI_MAPRED_SITE\"",
-                // The local job runner names a job's files by their path alone, which leads to the cluster's HDFS.
-                "  mkdir -p \"/mnt/hdfs/tmp/hadoop/mapred/staging\" \"$(dirname /tmp/hadoop/mapred/staging)\"",
-                "  ln -sfn \"/mnt/hdfs/tmp/hadoop/mapred/staging\" /tmp/hadoop/mapred/staging\n"))
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "\n  site mapred-site.xml \"$FLOCI_MAPRED_SITE\"\n")
                 // MapReduce from Spark's shaded Hadoop client, and S3A's AWS SDK, in a MapReduce home of Floci's,
                 // which a command's own HADOOP_CLASSPATH does not take off the hadoop command's class path.
                 && entrypoint.get(2).contains("\n  mkdir -p \"$hadoop_conf\" /tmp/floci-bin /tmp/floci-mapreduce\n")
@@ -734,11 +737,15 @@ class EmrServerlessSparkRunnerTest {
                 "<property><name>aws.glue.endpoint</name><value>http://floci:4566</value></property>",
                 "<property><name>hive.metastore.glue.catalogid</name><value>123456789012</value></property>",
                 "<property><name>aws.region</name><value>eu-west-1</value></property>",
-                "<property><name>fs.defaultFS</name><value>hdfs:///</value></property>",
+                "<property><name>fs.defaultFS</name><value>hdfs://ip-10-0-0-1.ec2.internal:8020</value></property>",
                 "<property><name>fs.hdfs.impl</name><value>org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme"
                         + "</value></property>",
-                "<property><name>fs.viewfs.mounttable.default.linkFallback</name><value>file:///mnt/hdfs</value>"
-                        + "</property>",
+                "<property><name>fs.viewfs.overload.scheme.target.hdfs.impl</name>"
+                        + "<value>org.apache.hadoop.hdfs.DistributedFileSystem</value></property>",
+                "<property><name>fs.viewfs.mounttable.ip-10-0-0-1.ec2.internal.link./tmp/hadoop/mapred/staging</name>"
+                        + "<value>file:///tmp/hadoop/mapred/staging</value></property>",
+                "<property><name>fs.viewfs.mounttable.ip-10-0-0-1.ec2.internal.linkFallback</name>"
+                        + "<value>hdfs://ip-10-0-0-1.ec2.internal:8020</value></property>",
                 "<property><name>fs.permissions.umask-mode</name><value>077</value></property>",
                 "<property><name>floci.note</name><value>a&lt;b &amp; &quot;c&quot; &apos;d&apos;</value></property>"),
                 EmrServerlessSparkRunner.hadoopSite(
@@ -1286,6 +1293,27 @@ class EmrServerlessSparkRunnerTest {
         verify(lifecycle, never()).removeIfExists("another-deployments");
     }
 
+    @Test
+    void theHdfsOfALiveClusterIsNoDriverTheSweepRemoves() {
+        EmrServerlessSparkRunner runner = runner();
+        when(config.port()).thenReturn(4566);
+        Container hdfs = mock(Container.class);
+        when(hdfs.getId()).thenReturn("hdfs");
+        when(hdfs.getLabels()).thenReturn(Map.of(ContainerStorageHelper.SERVICE_LABEL, "emr",
+                ContainerStorageHelper.OWNER_LABEL, "4566", ContainerStorageHelper.COMPONENT_LABEL, "emr-hdfs"));
+        Container driver = mock(Container.class);
+        when(driver.getId()).thenReturn("left-behind");
+        when(driver.getLabels()).thenReturn(Map.of(ContainerStorageHelper.SERVICE_LABEL, "emr",
+                ContainerStorageHelper.OWNER_LABEL, "4566"));
+        when(docker.listContainersCmd().withShowAll(true).withLabelFilter(anyMap()).exec())
+                .thenReturn(List.of(hdfs, driver));
+
+        runner.removeLeftoverDrivers("emr");
+
+        verify(lifecycle).removeIfExists("left-behind");
+        verify(lifecycle, never()).removeIfExists("hdfs");
+    }
+
     // A runner whose driver container, "driver", starts at once and exits with code 0 unless a test says otherwise.
     private EmrServerlessSparkRunner runner() {
         return runner(mock(ContainerBuilder.class, RETURNS_DEEP_STUBS));
@@ -1410,7 +1438,8 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr", "s-1", "123456789012", "eu-west-1", "emr-7.5.0", HIVE, null, null,
                 "floci-network", "arn:aws:iam::123456789012:role/emr-ec2", Map.of(), application,
                 List.of("hive-script", "--run-hive-script", "--args"), Duration.ZERO, null, null, Map.of(), List.of(),
-                new SparkJobRunner.Storage("j-1-home", "j-1-mnt"), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                new SparkJobRunner.Storage("j-1-home", "j-1-mnt", "ip-10-0-0-1.ec2.internal", "172.18.0.5",
+                        "j-1-hdfs"), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
 
     private static SparkJobRunner.Job customImageJob(String customImage) {

@@ -100,8 +100,9 @@ starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/py
 starts EmrDockerRunnerDockerIntegrationTest EmrHiveStepsDockerIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 # EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsDockerIntegrationTest EMR
-# Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB.
-starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest \
+# Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its
+# HDFS in it, EmrDockerRunnerDockerIntegrationTest's included.
+starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest EmrDockerRunnerDockerIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
 
 # package token in shard.txt -> images its tests are known to launch

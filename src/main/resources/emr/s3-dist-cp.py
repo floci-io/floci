@@ -386,8 +386,8 @@ class Copier:
     def write(self, dest_fs, target, sources, output_codec, recompress):
         """Writes sources, one after the other, to target, decompressed and compressed again when --outputCodec
         is given, and returns the bytes read. With --appendToLastFile they follow what target holds, through a
-        copy that takes its place (see replace), as neither S3 nor the cluster's HDFS, a local folder, can append
-        in place; the copy has a name no other file has, and goes unless it took target's place."""
+        copy that takes its place (see replace), on every file system, as S3 cannot append in place; the copy has
+        a name no other file has, and goes unless it took target's place."""
         new_path = self.jvm.org.apache.hadoop.fs.Path
         staged = None
         if self.options.get("appendToLastFile") and dest_fs.exists(target):

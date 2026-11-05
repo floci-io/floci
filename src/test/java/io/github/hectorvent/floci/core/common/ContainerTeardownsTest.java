@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.core.common;
 
+import jakarta.enterprise.inject.Instance;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,10 +18,36 @@ import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ContainerTeardownsTest {
 
     private static final Logger LOG = Logger.getLogger(ContainerTeardownsTest.class);
+
+    @Test
+    void stopAllRunsATeardownWhoseContainersOthersUseAfterTheirs() {
+        List<String> stopped = new ArrayList<>();
+        ContainerTeardown storage = new ContainerTeardown() {
+            @Override
+            public void stopManagedContainers() {
+                stopped.add("storage");
+            }
+
+            @Override
+            public int teardownOrder() {
+                return 1;
+            }
+        };
+        ContainerTeardown drivers = () -> stopped.add("drivers");
+        @SuppressWarnings("unchecked")
+        Instance<ContainerTeardown> teardowns = mock(Instance.class);
+        when(teardowns.iterator()).thenAnswer(invocation -> List.of(storage, drivers).iterator());
+
+        ContainerTeardowns.stopAll(teardowns, LOG);
+
+        assertEquals(List.of("drivers", "storage"), stopped);
+    }
 
     @Test
     void admitsEveryOwnedStopBeforeWaitingForOtherContainers() throws Exception {

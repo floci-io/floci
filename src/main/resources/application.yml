@@ -623,7 +623,7 @@ floci:
       runner-mode: immediate                # docker = run bootstrap actions and steps in containers
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
-      # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # Hive for clusters with Hive
+      # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
       # Remove the step drivers a previous run of this deployment left on the daemon, and the images
       # bootstrap actions left for clusters that are gone or have ended, when the EMR service starts.
       # Scoped to this deployment's own containers and images.
