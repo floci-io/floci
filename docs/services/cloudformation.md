@@ -729,24 +729,27 @@ writable property is neither read nor listed, and when a listed property has sta
 closing a gap deletes its row. A new type needs a row in that file: `make cfn-schema-surface-sync`
 regenerates it from AWS's published schemas, and `cfn-schema-drift.yml` compares it weekly.
 
-On AppSync resources, a property the previous template declared and the new template drops is cleared
-on `UpdateStack`; one the stack never declared keeps the value set outside it. A few members go back to
-their create default (`XrayEnabled`, `AdditionalAuthenticationProviders`, a function's `FunctionVersion`,
-a resolver's `Kind`). Not cleared: the identifiers, `Tags` and `EnvironmentVariables`, which the
-provisioner already drives to the template, required members (`AuthenticationType`, `Type`, a function's
-`DataSourceName`), create-only members, an API key's `Expires`, a GraphQL API's `ApiType` and
-`Visibility`, and a UNIT resolver's `DataSourceName`. When a later resource fails the update, the
-rollback puts each AppSync API, data source, function, resolver and API key that the update changed in
+A property the previous template declared and the new template drops is cleared on `UpdateStack`,
+goes back to its create default, or is kept, on the AppSync resources and the EC2 networking types
+(`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`). Kept: required members
+(`AuthenticationType`, `Type`, a function's `DataSourceName`), a data source's and a function's `Name`,
+an API key's `Expires`, a GraphQL API's `ApiType` and `Visibility`, a UNIT resolver's `DataSourceName`,
+a `NatGateway`'s `PrivateIpAddress` and a `PrefixList`'s `MaxEntries`. An update that drops a
+`PrefixList`'s `AddressFamily` or `PrefixListName` fails. Create-only members are not cleared either.
+A property the stack never declared keeps the value set outside it, with two exceptions that an update
+clears even then: a GraphQL API's `Tags` and `EnvironmentVariables`, which every update drives to the
+template, and the `NatGateway` secondary address properties. The table says so on each of those rows.
+
+`src/test/resources/cloudformation/drop-policy.tsv` lists what a drop does to each property, and
+`CfnSchemaCoverageTest` keeps the list complete. Other services follow
+[#6606](https://github.com/floci-io/floci/issues/6606).
+
+When a later resource fails the update, the rollback puts each AppSync API, data source, function, resolver and API key that the update changed in
 place back to the members it had, including the ones the update cleared. An API that had no
 `AdditionalAuthenticationProviders` gets an empty list back, and an API key's `Expires` is sent again
 only when the update changed it, so one now less than a day away fails the rollback and the key stays as the update left it. A `GraphQLSchema`
 and a replaced AppSync resource (a changed `ApiId`, name, `TypeName` or `FieldName`) are not rolled back
 and end the stack in `UPDATE_ROLLBACK_FAILED`.
-
-On the EC2 networking types (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`),
-a `Tags` property the previous template declared and the new one drops is cleared on `UpdateStack`, and
-`Subnet`'s `MapPublicIpOnLaunch` goes back to `false`. A resource whose templates never declared `Tags` keeps the ones set outside the stack. Other services follow
-[#6606](https://github.com/floci-io/floci/issues/6606).
 
 ## Template URLs
 
