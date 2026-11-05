@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -133,7 +134,7 @@ class InstanceConnectJsonHandlerTest {
         handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBKhKXIBq6uSFm4w/wDQuFN9HzZFxgqLbSpaTJB+J6aAHWXBU7rpF1xa7s4dpFzLTSb+xn8JbKWbLozKoeIWV8hw= test"), REGION);
         handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", "ecdsa-sha2-nistp384 AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABhBJFY0hkoTsJID0TIS1BgpJVWTDguQ7sTojV4dfGqMEKjMSAoOnXUdGV1Y+AIhF4rZE9IKsHsjtxg4JYesYz7FR+9CTxHjog7BGzYmVcsVSnRL3t68fT7S3cXhoVkV/3WZA== test"), REGION);
         handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBABCp6D79VfVN1Td7nP/lhUWST6qIkN28rgBp1FhyKO2UCTwxObXTOEL7WvfyQ+/J60K21J1ovjtlcC61YhWx0F7eAC/glgVeIBd0leLmmv3YGJkmE7POLgg4nfVXNLJayW3Q8rgyNAROCIC++3Avdn9GZIPrrFnyo1M0aNeW03/dLE2Xg== test"), REGION);
-        verify(keys, org.mockito.Mockito.times(4)).add(any());
+        verify(keys, times(4)).add(any());
     }
 
     /** An ssh-ed25519 line carrying {@code material} as its key. */
