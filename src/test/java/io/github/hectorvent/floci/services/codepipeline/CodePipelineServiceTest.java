@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.codebuild.model.Build;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployService;
 import io.github.hectorvent.floci.services.codedeploy.model.Deployment;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution;
+import io.github.hectorvent.floci.services.codepipeline.model.CodePipelineExecution.ActionExecution;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeline;
 import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeline.TransitionState;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -31,6 +32,9 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -1122,6 +1126,49 @@ class CodePipelineServiceTest {
             stopExecution(service, pipeline, second, true);
             waitForExecutionStatus(service, pipeline, first, "Stopped");
             waitForExecutionStatus(service, pipeline, second, "Stopped");
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void abandonIncludesAnActionRegisteredWhileTheStopWaits() throws Exception {
+        String pipeline = "abandon-during-action-registration";
+        String executionId = "registering-execution";
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            createExternalActionPipeline(service, pipeline, """
+                    {"name":"Approve","actionTypeId":{
+                      "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
+                    """);
+            CodePipelineExecution execution = waitingExecution(storage, pipeline, executionId, 1, "External");
+            ActionExecution completed = new ActionExecution();
+            completed.setStatus("Succeeded");
+            execution.getActionExecutions().add(completed);
+            ActionExecution registering = new ActionExecution();
+            registering.setStatus("InProgress");
+            AtomicReference<Thread> stoppingThread = new AtomicReference<>();
+            Future<JsonNode> stopped;
+            synchronized (execution) {
+                stopped = requests.submit(() -> {
+                    stoppingThread.set(Thread.currentThread());
+                    return handle("StopPipelineExecution", """
+                            {
+                              "pipelineName": "%s",
+                              "pipelineExecutionId": "%s",
+                              "abandon": true
+                            }
+                            """.formatted(pipeline, executionId));
+                });
+                await().atMost(Duration.ofSeconds(5)).until(() -> stoppingThread.get() != null
+                        && stoppingThread.get().getState() == Thread.State.BLOCKED);
+                // The worker registers actions under this monitor before the stop can traverse them.
+                execution.getActionExecutions().add(registering);
+            }
+            assertEquals(executionId, stopped.get(5, TimeUnit.SECONDS).path("pipelineExecutionId").asText());
+            assertEquals("Abandoned", registering.getStatus());
+            assertEquals("Succeeded", completed.getStatus());
+            assertEquals("Stopping", execution.getStatus());
+            assertTrue(execution.isStopRequested());
         } finally {
             service.shutdown();
         }
