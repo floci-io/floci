@@ -20,6 +20,7 @@ import com.github.dockerjava.api.model.VersionPlatform;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerEngineDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
@@ -458,7 +459,7 @@ class ContainerLauncherTest {
     private ContainerLauncher newLauncher(ImageResolver selectedResolver,
                                           CurrentContainerNetworkResolver networkResolver) {
         ContainerBuilder builder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer,
-                networkResolver);
+                networkResolver, new ContainerEngineDetector(dockerClient));
         ContainerReachableEndpoint endpoint =
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
         return new ContainerLauncher(builder, lifecycleManager, logStreamer, selectedResolver,

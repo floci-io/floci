@@ -1,9 +1,16 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.VersionCmd;
 import com.github.dockerjava.api.model.DeviceRequest;
+import com.github.dockerjava.api.model.Version;
+import com.github.dockerjava.api.model.VersionComponent;
+import com.github.dockerjava.api.model.VersionPlatform;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Optional;
@@ -14,9 +21,140 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ContainerBuilderTest {
+
+    @Test
+    void withHostDockerInternalOnLinux_omitsAutomaticAliasForPodmanDaemon() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion(fixture, "linux/amd64/fedora-42",
+                List.of(new VersionComponent().withName("Podman Engine")));
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .build();
+        ContainerSpec explicitSpec = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .withExtraHost("host.docker.internal", "192.0.2.10")
+                .build();
+
+        assertEquals(List.of(), spec.extraHosts());
+        assertEquals(List.of("host.docker.internal:192.0.2.10"), explicitSpec.extraHosts());
+        verify(fixture.dockerClient, times(1)).versionCmd();
+    }
+
+    @Test
+    void withHostDockerInternalOnLinux_explicitAliasSkipsPodmanProbe() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion(fixture, "Podman Engine", List.of());
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withExtraHost("host.docker.internal", "192.0.2.10")
+                .withHostDockerInternalOnLinux()
+                .build();
+
+        assertEquals(List.of("host.docker.internal:192.0.2.10"), spec.extraHosts());
+        verify(fixture.dockerClient, never()).versionCmd();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Docker Engine - Community", "Moby Engine"})
+    void withHostDockerInternalOnLinux_addsAliasOnceForDockerDaemon(String engineName) {
+        TestFixture fixture = new TestFixture();
+        when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion(fixture, engineName, List.of());
+
+        ContainerSpec first = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .withHostDockerInternalOnLinux()
+                .build();
+        ContainerSpec second = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .build();
+
+        assertEquals(List.of("host.docker.internal:host-gateway"), first.extraHosts());
+        assertEquals(first.extraHosts(), second.extraHosts());
+        verify(fixture.dockerClient, times(1)).versionCmd();
+    }
+
+    @Test
+    void withHostDockerInternalOnLinux_skipsNonLinuxHostWithoutProbingDaemon() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .build();
+
+        assertEquals(List.of(), spec.extraHosts());
+        verify(fixture.dockerClient, never()).versionCmd();
+    }
+
+    @Test
+    void withHostDockerInternalOnLinux_prefersExplicitAliasInEitherOrder() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion(fixture, "Docker Engine - Community", List.of());
+
+        ContainerSpec before = fixture.builder.newContainer("alpine")
+                .withExtraHost("HOST.DOCKER.INTERNAL", "192.0.2.10")
+                .withHostDockerInternalOnLinux()
+                .build();
+        ContainerSpec after = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .withExtraHost("host.docker.internal", "192.0.2.11")
+                .build();
+
+        assertEquals(List.of("HOST.DOCKER.INTERNAL:192.0.2.10"), before.extraHosts());
+        assertEquals(List.of("host.docker.internal:192.0.2.11"), after.extraHosts());
+        verify(fixture.dockerClient, times(1)).versionCmd();
+    }
+
+    @Test
+    void withHostDockerInternalOnLinux_keepsAliasForUnknownDaemonAndCachesResult() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
+        stubDaemonVersion(fixture, "unidentified engine", List.of());
+
+        ContainerSpec first = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .build();
+        ContainerSpec second = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .build();
+
+        assertEquals(List.of("host.docker.internal:host-gateway"), first.extraHosts());
+        assertEquals(first.extraHosts(), second.extraHosts());
+        verify(fixture.dockerClient, times(1)).versionCmd();
+    }
+
+    @Test
+    void withHostDockerInternalOnLinux_retriesFailedProbeOnNextSpec() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
+        VersionCmd versionCmd = mock(VersionCmd.class);
+        Version podmanVersion = mock(Version.class);
+        when(fixture.dockerClient.versionCmd()).thenReturn(versionCmd);
+        when(versionCmd.exec()).thenThrow(new IllegalStateException("/version unavailable"))
+                .thenReturn(podmanVersion);
+        when(podmanVersion.getPlatform()).thenReturn(new VersionPlatform().withName("Podman Engine"));
+
+        ContainerSpec first = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .build();
+        ContainerSpec second = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .build();
+
+        assertEquals(List.of("host.docker.internal:host-gateway"), first.extraHosts());
+        assertEquals(List.of(), second.extraHosts());
+        verify(fixture.dockerClient, times(2)).versionCmd();
+    }
 
     @Test
     void withDockerNetwork_usesExplicitServiceNetworkFirst() {
@@ -347,17 +485,29 @@ class ContainerBuilderTest {
         assertEquals(imageId, fixture.builder.newContainer(imageId).build().image());
     }
 
+    private static void stubDaemonVersion(TestFixture fixture, String platformName,
+                                          List<VersionComponent> components) {
+        VersionCmd versionCmd = mock(VersionCmd.class);
+        Version version = mock(Version.class);
+        when(fixture.dockerClient.versionCmd()).thenReturn(versionCmd);
+        when(versionCmd.exec()).thenReturn(version);
+        when(version.getPlatform()).thenReturn(new VersionPlatform().withName(platformName));
+        when(version.getComponents()).thenReturn(components);
+    }
+
     private static class TestFixture {
         final EmulatorConfig config = mock(EmulatorConfig.class);
         final EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         final EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
         final EmulatorConfig.DnsConfig dns = mock(EmulatorConfig.DnsConfig.class);
+        final DockerClient dockerClient = mock(DockerClient.class);
         final DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
         final EmbeddedDnsServer embeddedDnsServer = mock(EmbeddedDnsServer.class);
         final CurrentContainerNetworkResolver currentContainerNetworkResolver =
                 mock(CurrentContainerNetworkResolver.class);
         final ContainerBuilder builder =
-                new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer, currentContainerNetworkResolver);
+                new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer,
+                        currentContainerNetworkResolver, new ContainerEngineDetector(dockerClient));
 
         TestFixture() {
             when(config.services()).thenReturn(services);
