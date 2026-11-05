@@ -637,9 +637,9 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
 
-Callback tokens are owned by the execution account. Foreign callbacks return
-`AccessDeniedException`; unknown tokens return `InvalidToken`. Recently closed tokens return
-`TaskTimedOut`. Closed-token classification retains at most 1,024 tokens for five minutes; older
+Callback tokens are owned by the execution account and region. Foreign-account callbacks return
+`AccessDeniedException`; callbacks sent to another region and unknown tokens return `InvalidToken`.
+Recently closed tokens return `TaskTimedOut`. Closed-token classification retains at most 1,024 tokens for five minutes; older
 or evicted tokens return `InvalidToken`. Invalid JSON output leaves a pending token available
 for a corrected callback. Token state remains in memory.
 

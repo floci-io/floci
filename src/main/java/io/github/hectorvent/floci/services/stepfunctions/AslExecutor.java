@@ -580,8 +580,8 @@ public class AslExecutor {
     }
 
     /**
-     * Runs {@code body} on this worker thread under a CDI request scope whose account is
-     * the one encoded in the state machine ARN, so service integrations (Lambda, DynamoDB,
+     * Runs {@code body} on this worker thread under a CDI request scope whose account and region
+     * are encoded in the state machine ARN, so service integrations (Lambda, DynamoDB,
      * SQS, ECS, …) and the execution-store writes resolve to the execution's account rather
      * than the configured default. Without this, an execution started under account B would
      * have its integrations run against account A's resources.
@@ -610,14 +610,15 @@ public class AslExecutor {
      * run Parallel branches on their own worker threads under the execution's account: the request
      * scope (and thus {@link RequestContext}) is thread-bound, so a branch submitted to the executor
      * pool would otherwise run with no active scope and resolve its Task integrations against the
-     * default account instead of the execution's. Each branch thread therefore activates its own
+     * default account and region instead of the execution's. Each branch thread therefore activates its own
      * scope here, mirroring how {@link #executeAsync}/{@link #executeSync} wrap {@code doExecute}.
      * Delegates to {@link RequestScopes#callAsChecked}, which restores a previously active scope's
-     * account so a reused thread does not keep the execution's account.
+     * account and region so a reused thread does not keep the execution's scope.
      */
     private <T> T callUnderExecutionAccount(StateMachine sm, Callable<T> body) throws Exception {
         String accountId = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
-        return RequestScopes.callAsChecked(accountId == null || accountId.isBlank() ? null : accountId, body);
+        String region = AwsArnUtils.regionOrDefault(sm.getStateMachineArn(), null);
+        return RequestScopes.callAsChecked(accountId == null || accountId.isBlank() ? null : accountId, region, body);
     }
 
     private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,
