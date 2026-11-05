@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -124,7 +125,7 @@ final class Ec2Tags {
     private static boolean changesOwnedTags(Set<String> owned, Map<String, String> desired,
                                             Map<String, String> current) {
         return touched(owned, desired).stream().anyMatch(key -> desired.containsKey(key)
-                ? !desired.get(key).equals(current.get(key))
+                ? !current.containsKey(key) || !Objects.equals(desired.get(key), current.get(key))
                 : current.containsKey(key));
     }
 
@@ -151,7 +152,9 @@ final class Ec2Tags {
         Set<String> touched = new LinkedHashSet<>();
         snapshot.path("touched").forEach(key -> touched.add(key.asText()));
         Map<String, String> priorTags = new LinkedHashMap<>();
-        snapshot.path("tags").properties().forEach(f -> priorTags.put(f.getKey(), f.getValue().asText()));
+        // EC2 accepts a tag with no value; asText() would turn the saved null into the text "null".
+        snapshot.path("tags").properties().forEach(f -> priorTags.put(f.getKey(),
+                f.getValue().isNull() ? null : f.getValue().asText()));
         reconcileOwned(ec2Service, region, resourceId, touched, priorTags);
         restoreRecord(r, recordAttr, snapshot);
     }
