@@ -609,16 +609,9 @@ public class SnsService implements Resettable, ResourceProvider {
         if (topicStore.get(key).isEmpty()) {
             throw new AwsException("NotFound", "Topic does not exist.", 404);
         }
-        List<String> toDelete = new ArrayList<>();
-        String subPrefix = "sub::" + region + "::";
-        for (String subKey : subscriptionStore.keys()) {
-            if (subKey.startsWith(subPrefix)) {
-                subscriptionStore.get(subKey).ifPresent(sub -> {
-                    if (topicArn.equals(sub.getTopicArn())) toDelete.add(subKey);
-                });
-            }
+        for (Subscription sub : subscriptionsByTopic(topicArn, region)) {
+            subscriptionStore.delete(subKey(region, sub.getSubscriptionArn()));
         }
-        toDelete.forEach(subscriptionStore::delete);
         topicStore.delete(key);
         LOG.infov("Deleted SNS topic: {0}", topicArn);
     }
@@ -1015,15 +1008,11 @@ public class SnsService implements Resettable, ResourceProvider {
         if (topicStore.get(topicKey(region, topicArn)).isEmpty()) {
             throw new AwsException("NotFound", "Topic does not exist.", 404);
         }
-        String subPrefix = "sub::" + region + "::";
-        for (String subKey : subscriptionStore.keys()) {
-            if (!subKey.startsWith(subPrefix)) continue;
-            Subscription sub = subscriptionStore.get(subKey).orElse(null);
-            if (sub == null || !topicArn.equals(sub.getTopicArn())) continue;
+        for (Subscription sub : subscriptionsByTopic(topicArn, region)) {
             if (token.equals(sub.getAttributes().get("ConfirmationToken"))) {
                 sub.getAttributes().put("PendingConfirmation", "false");
                 sub.getAttributes().remove("ConfirmationToken");
-                subscriptionStore.put(subKey, sub);
+                subscriptionStore.put(subKey(region, sub.getSubscriptionArn()), sub);
                 LOG.infov("Confirmed subscription {0} for topic {1}", sub.getSubscriptionArn(), topicArn);
                 return sub.getSubscriptionArn();
             }
@@ -1569,6 +1558,7 @@ public class SnsService implements Resettable, ResourceProvider {
         List<String[]> failed = new ArrayList<>();
         String timestamp = MESSAGE_TIMESTAMP.format(Instant.now());
         String version = signatureVersion(topic);
+        List<Subscription> subscriptions = subscriptionsByTopic(topicArn, region);
         for (Map<String, Object> entry : entries) {
             String id = (String) entry.get("Id");
             String message = (String) entry.get("Message");
@@ -1610,7 +1600,7 @@ public class SnsService implements Resettable, ResourceProvider {
             Map<String, MessageAttributeValue> attrs = (Map<String, MessageAttributeValue>) entry.get("MessageAttributes");
             JsonNode parsedBody = null;
             boolean bodyParseAttempted = false;
-            for (Subscription sub : subscriptionsByTopic(topicArn, region)) {
+            for (Subscription sub : subscriptions) {
                 if ("true".equals(sub.getAttributes().get("PendingConfirmation"))) continue;
                 if (!bodyParseAttempted && isMessageBodyScope(sub)) {
                     parsedBody = tryParseBody(message);
@@ -2488,11 +2478,9 @@ public class SnsService implements Resettable, ResourceProvider {
     private List<Subscription> subscriptionsByTopic(String topicArn, String region) {
         List<Subscription> result = new ArrayList<>();
         String prefix = "sub::" + region + "::";
-        for (String k : subscriptionStore.keys()) {
-            if (k.startsWith(prefix)) {
-                subscriptionStore.get(k).ifPresent(sub -> {
-                    if (topicArn.equals(sub.getTopicArn())) result.add(sub);
-                });
+        for (Subscription sub : subscriptionStore.scan(k -> k.startsWith(prefix))) {
+            if (topicArn.equals(sub.getTopicArn())) {
+                result.add(sub);
             }
         }
         return result;
