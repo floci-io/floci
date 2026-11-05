@@ -37,7 +37,7 @@ class HttpDataSourceBatchSidecarIntegrationTest {
     @InjectMock
     HttpDataSourceTransport transport;
 
-    private final CountDownLatch release = new CountDownLatch(1);
+    private final CountDownLatch started = new CountDownLatch(2);
     private AppSyncClient client;
     private String apiId;
     private String apiKey;
@@ -73,7 +73,8 @@ class HttpDataSourceBatchSidecarIntegrationTest {
 
     @AfterEach
     void cleanUp() {
-        release.countDown();
+        started.countDown();
+        started.countDown();
         try {
             if (apiId != null) {
                 client.deleteGraphqlApi(r -> r.apiId(apiId));
@@ -88,9 +89,10 @@ class HttpDataSourceBatchSidecarIntegrationTest {
     @Test
     void independentHttpFieldsDoNotShareASequentialCallbackDeadline() {
         when(transport.send(any())).thenAnswer(call -> {
-            // Each request is below the 30-second transport limit; serializing both exceeds
-            // the pinned sidecar's callback limit even though each individual request succeeds.
-            release.await(18, TimeUnit.SECONDS);
+            started.countDown();
+            if (!started.await(5, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Independent HTTP fields did not start concurrently");
+            }
             HttpDataSourceRequest request = call.getArgument(0);
             return Map.of("statusCode", 200, "headers", Map.of(), "body", request.uri().getPath());
         });
