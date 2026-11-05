@@ -317,7 +317,7 @@ public class RedshiftInterceptingBridge {
 
         byte[] packet = message.toPacketBytes();
         try {
-            String rewritten = RedshiftSqlInterceptor.rewrite(sql);
+            String rewritten = rewriteSql(sql);
             if (!rewritten.equals(sql)) {
                 packet = PostgresWireDecoder.encodeQuery(rewritten);
             }
@@ -386,7 +386,7 @@ public class RedshiftInterceptingBridge {
             rewritten = S3CopySimulator.unloadBackendSql(unload);
         } else {
             try {
-                rewritten = RedshiftSqlInterceptor.rewrite(parse.sql());
+                rewritten = rewriteSql(parse.sql());
             } catch (RuntimeException e) {
                 LOG.warnv("RedshiftSqlInterceptor failed, forwarding original Parse: {0}", e.getMessage());
             }
@@ -637,7 +637,16 @@ public class RedshiftInterceptingBridge {
         }
     }
 
+    /** A COPY JOB statement becomes a call on the cluster catalog, then Redshift DDL is made PostgreSQL's. */
+    private String rewriteSql(String sql) {
+        String statement = CopyJobSql.rewrite(sql, false);
+        return RedshiftSqlInterceptor.rewrite(statement);
+    }
+
     private CopyStatementParser.S3Statement parseS3Statement(String sql) {
+        if (CopyJobSql.matches(sql)) {
+            return null;
+        }
         try {
             return CopyStatementParser.parse(sql, defaultIamRoleArn);
         } catch (RuntimeException e) {

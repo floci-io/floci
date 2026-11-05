@@ -47,7 +47,7 @@ class ExternalMetadataWriterTest {
 
         String sql = writer.refreshSql(BINDING, List.of(table), Map.of("events", List.of(partition)));
 
-        assertThat(sql, containsString("SELECT floci_internal.refresh_external_catalog('analytics'"));
+        assertThat(sql, containsString("SELECT floci_internal.refresh_external_catalog(E'analytics'"));
         assertThat(sql, containsString("IAM_ROLE"));
         assertThat(sql, containsString("\"location\":\"s3://bucket/o''brien/\""));
         assertThat(sql, containsString("\"columnname\":\"id\",\"external_type\":\"int\""));
@@ -124,9 +124,33 @@ class ExternalMetadataWriterTest {
     }
 
     @Test
+    void refreshPreservesBackslashesAndApostrophesInJsonPayload() throws Exception {
+        StorageDescriptor descriptor = new StorageDescriptor();
+        descriptor.setLocation("s3://bucket/o'brien\\new/");
+        Table table = new Table();
+        table.setName("events");
+        table.setStorageDescriptor(descriptor);
+
+        String sql = writer.refreshSql(BINDING, List.of(table), Map.of());
+
+        assertEquals(descriptor.getLocation(), refreshPayload(sql).path("tables").get(0).path("location").asText());
+    }
+
+    @Test
+    void purgeEscapesApostrophesAndBackslashes() {
+        assertEquals("SELECT floci_internal.purge_external_schema(E'o''brien\\\\lake')",
+                writer.purgeSql("o'brien\\lake"));
+    }
+
+    @Test
+    void purgePreservesNullAsAnEmptySchemaName() {
+        assertEquals("SELECT floci_internal.purge_external_schema(E'')", writer.purgeSql(null));
+    }
+
+    @Test
     void purgeCallsPrivilegedWriterForOneSchema() {
         String sql = writer.purgeSql("analytics");
-        assertThat(sql, containsString("SELECT floci_internal.purge_external_schema('analytics')"));
+        assertThat(sql, containsString("SELECT floci_internal.purge_external_schema(E'analytics')"));
         assertThat(sql.contains("DELETE FROM floci_internal."), equalTo(false));
     }
 
@@ -174,9 +198,9 @@ class ExternalMetadataWriterTest {
     }
 
     private JsonNode refreshPayload(String sql) throws Exception {
-        String prefix = "SELECT floci_internal.refresh_external_catalog('analytics', '";
+        String prefix = "SELECT floci_internal.refresh_external_catalog(E'analytics', E'";
         String payloadEnd = "'::jsonb)";
         String escapedJson = sql.substring(prefix.length(), sql.lastIndexOf(payloadEnd));
-        return new ObjectMapper().readTree(escapedJson.replace("''", "'"));
+        return new ObjectMapper().readTree(escapedJson.replace("''", "'").replace("\\\\", "\\"));
     }
 }

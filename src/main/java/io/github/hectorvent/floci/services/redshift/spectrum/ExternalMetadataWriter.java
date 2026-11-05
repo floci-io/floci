@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift.spectrum;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Column;
@@ -176,7 +177,7 @@ public class ExternalMetadataWriter {
     }
 
     private static String literal(String value) {
-        return "'" + (value == null ? "" : value.replace("'", "''")) + "'";
+        return PostgresWire.quoteLiteral(value == null ? "" : value);
     }
 
     private static Map<String, Object> row(Object... values) {
