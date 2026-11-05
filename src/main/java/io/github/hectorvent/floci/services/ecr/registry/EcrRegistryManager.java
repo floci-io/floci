@@ -99,6 +99,9 @@ public class EcrRegistryManager {
 
     private volatile boolean started;
     private volatile boolean reconciled;
+    /** Epoch ms of the most recent resolve-triggered reconcile attempt that did not succeed, 0 until one. */
+    private volatile long reconcileAttemptFailedAt;
+    private static final long RECONCILE_RECHECK_MS = 30_000;
     /** host:port Docker reports for the running registry; null until one is started or adopted. */
     private volatile String registryAddress;
     private volatile boolean unavailableLogged;
@@ -303,12 +306,23 @@ public class EcrRegistryManager {
      * succeeded, when no hook is registered, or when the registry is not yet started.
      * Data-plane lookups call this so a transient catalog failure does not leave legacy
      * namespaces permanently unreachable.
+     *
+     * <p>The retry takes the same monitor {@code ensureStarted()} and the storage deletes
+     * hold, so a write-back from the hook cannot land while a concurrent force-delete is
+     * running. A retry that fails again backs off for {@link #RECONCILE_RECHECK_MS} so the
+     * unreconciled window (which answers unavailable) does not pay the registry ping delay
+     * on every lookup.
      */
-    public void ensureCatalogReconciled() {
+    public synchronized void ensureCatalogReconciled() {
         if (reconciled || reconcileHook == null || !started) {
             return;
         }
+        long now = System.currentTimeMillis();
+        if (reconcileAttemptFailedAt != 0 && now - reconcileAttemptFailedAt < RECONCILE_RECHECK_MS) {
+            return;
+        }
         runReconcileOnce();
+        reconcileAttemptFailedAt = reconciled ? 0 : now;
     }
 
     /** Returns whether catalog reconciliation has completed successfully. */

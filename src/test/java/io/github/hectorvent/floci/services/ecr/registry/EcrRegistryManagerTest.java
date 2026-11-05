@@ -849,4 +849,52 @@ class EcrRegistryManagerTest {
             registry.stop(0);
         }
     }
+
+    @Test
+    void catalogReconcileRetriesBackOffAfterAFailedRetry() throws Exception {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        AtomicInteger catalogCalls = new AtomicInteger();
+        AtomicReference<List<String>> reconciled = new AtomicReference<>();
+        HttpServer registry = HttpServer.create(new InetSocketAddress("127.0.0.1", BASE_PORT), 0);
+        registry.createContext("/v2/", exchange -> {
+            String path = exchange.getRequestURI().getPath();
+            if ("/v2/".equals(path) || "/v2".equals(path)) {
+                exchange.sendResponseHeaders(200, -1);
+                exchange.close();
+                return;
+            }
+            if (path.startsWith("/v2/_catalog")) {
+                catalogCalls.incrementAndGet();
+                byte[] body = "{\"errors\":[{\"code\":\"UNAVAILABLE\"}]}".getBytes();
+                exchange.sendResponseHeaders(500, body.length);
+                exchange.getResponseBody().write(body);
+                exchange.close();
+                return;
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        });
+        registry.start();
+        try {
+            manager.setReconcileHook(repos -> reconciled.set(List.copyOf(repos)));
+
+            // The failed startup attempt leaves the retry window open: the first
+            // data-plane-triggered rerun still goes through at once.
+            manager.ensureStarted();
+            assertFalse(manager.isCatalogReconciled());
+            manager.ensureCatalogReconciled();
+            assertFalse(manager.isCatalogReconciled());
+
+            // A retry that failed backs off, so unresolved lookups stop paying the
+            // registry ping delay on every request.
+            manager.ensureCatalogReconciled();
+            assertEquals(2, catalogCalls.get(), "a backed-off reconcile must not hit the catalog again");
+            assertFalse(manager.isCatalogReconciled());
+            assertNull(reconciled.get());
+        } finally {
+            registry.stop(0);
+        }
+    }
 }

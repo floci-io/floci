@@ -378,6 +378,7 @@ class EcrServiceTest {
 
     @Test
     void registryRepositoryNameRefusesARepositoryNobodyCreated() {
+        when(registryManager.isCatalogReconciled()).thenReturn(true);
         AwsException ex = assertThrows(AwsException.class,
                 () -> service.registryRepositoryName("never-created", ACCOUNT, REGION));
         assertEquals("RepositoryNotFoundException", ex.getErrorCode());
@@ -388,9 +389,16 @@ class EcrServiceTest {
     }
 
     @Test
+    void registryRepositoryNameAnswersUnavailableWhileTheCatalogIsUnread() {
+        assertThrows(IllegalStateException.class,
+                () -> service.registryRepositoryName("may-exist", ACCOUNT, REGION));
+    }
+
+    @Test
     void registryRepositoryNameUsesMetadataAfterReconcileWithoutInternalFallback() {
         String legacy = "legacy/service";
         service.reconcileFromCatalog(List.of(legacy));
+        when(registryManager.isCatalogReconciled()).thenReturn(true);
 
         assertEquals(legacy, service.registryRepositoryName(legacy, ACCOUNT, REGION));
         verify(registryManager).ensureCatalogReconciled();
