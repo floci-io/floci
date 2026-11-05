@@ -135,6 +135,12 @@ grep -q 'RdsAwsIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_IMAGE" ] && pu
 REDSHIFT_PG_IMAGE="$(grep -oE 'image-version: *postgres:[^ ]+' src/main/resources/application.yml | awk '{print $2}')"
 grep -qE '/redshift/|/cloudformation/' "$SHARD_FILE" && [ -n "$REDSHIFT_PG_IMAGE" ] && pull "$REDSHIFT_PG_IMAGE"
 grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine
+# The template-database restore fixture selects its own PostgreSQL image.
+# Read that override so its first CreateDBInstance does not also have to pull PostGIS.
+POSTGIS_TEST="$(find src/test/java -name RdsTemplateDatabaseRestoreIntegrationTest.java -print -quit)"
+POSTGIS_IMAGE="$(awk -F'"' '$2 == "floci.services.rds.default-postgres-image" { print $4 }' "${POSTGIS_TEST:-/dev/null}")"
+starts RdsTemplateDatabaseRestoreIntegrationTest \
+    && [ -n "$POSTGIS_IMAGE" ] && pull "$POSTGIS_IMAGE"
 # These DSQL fixtures start the configured PostgreSQL sidecar; unit-only shards do not.
 DSQL_IMAGE="$(awk '/^    dsql:/ { in_dsql=1; next } in_dsql && /^    [a-z]/ { exit } in_dsql && /^      image:/ { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
 starts DsqlDataPlaneIntegrationTest DsqlClusterPolicyIntegrationTest DsqlTransactionAgeIntegrationTest \
