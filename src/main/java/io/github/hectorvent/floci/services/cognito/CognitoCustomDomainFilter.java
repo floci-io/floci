@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cognito;
 
 import io.github.hectorvent.floci.core.common.AccountContextFilter;
 import io.github.hectorvent.floci.core.common.RequestHost;
+import io.github.hectorvent.floci.core.common.RequestUriRewrite;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolDomain;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
@@ -112,7 +113,7 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
         LOG.debugv("Cognito custom domain routing: {0}{1} -> {2}", host, path, newUri.getPath());
         requestContext.setProperty(POOL_PROPERTY, domain.get().getUserPoolId());
         requestContext.setProperty(AccountContextFilter.PINNED_ACCOUNT_PROPERTY, domain.get().getAwsAccountId());
-        requestContext.setRequestUri(newUri);
+        RequestUriRewrite.apply(requestContext, newUri);
     }
 
     private static String stripPort(String host) {
