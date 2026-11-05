@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -81,6 +82,11 @@ class CloudFormationStackPolicyServiceTest {
                 resolver,
                 Clock.systemUTC(),
                 new InMemoryStorageFactory(ACCOUNT).withStore("cloudformation-stacks.json", stackStore));
+    }
+
+    @AfterEach
+    void stopService() {
+        service.stop();
     }
 
     @Test
