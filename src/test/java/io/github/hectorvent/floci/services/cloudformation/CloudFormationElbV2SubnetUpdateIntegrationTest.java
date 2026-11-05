@@ -264,7 +264,7 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
 
             failUpdateOntoAnAddedSubnet(stack);
 
-            continueUpdateRollback(stack);
+            CfnStackWaits.continueUpdateRollback(stack, CFN_AUTH);
             CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
             assertEquals(before, Set.copyOf(loadBalancerSubnets(created.get("Alb"))));
             assertEquals(before, Set.copyOf(vpcSubnets(created.get("Vpc"))));
@@ -292,11 +292,11 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
             addedSubnet.removeAll(Set.of(created.get("SubnetA"), created.get("SubnetB")));
             assertEquals(1, addedSubnet.size());
 
-            continueUpdateRollback(stack, "Alb");
+            CfnStackWaits.continueUpdateRollback(stack, CFN_AUTH, "Alb");
             CfnStackWaits.StackState stillFailed = CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_FAILED");
             assertTrue(stillFailed.reason().contains("SubnetC"), stillFailed.reason());
 
-            continueUpdateRollback(stack, "SubnetC");
+            CfnStackWaits.continueUpdateRollback(stack, CFN_AUTH, "SubnetC");
             CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
             assertEquals(Set.of(created.get("SubnetA"), addedSubnet.iterator().next()),
                     Set.copyOf(loadBalancerSubnets(created.get("Alb"))));
@@ -324,17 +324,6 @@ class CloudFormationElbV2SubnetUpdateIntegrationTest {
                 "UPDATE_ROLLBACK_FAILED");
         String reason = CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_FAILED").reason();
         assertTrue(reason.contains("Alb") && reason.contains("SubnetC"), reason);
-    }
-
-    private static void continueUpdateRollback(String stack, String... resourcesToSkip) {
-        String[] values = new String[2 + resourcesToSkip.length * 2];
-        values[0] = "StackName";
-        values[1] = stack;
-        for (int i = 0; i < resourcesToSkip.length; i++) {
-            values[2 + i * 2] = "ResourcesToSkip.member." + (i + 1);
-            values[3 + i * 2] = resourcesToSkip[i];
-        }
-        request(CFN_AUTH, "ContinueUpdateRollback", values).statusCode(200);
     }
 
     /**

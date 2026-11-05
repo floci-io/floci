@@ -185,14 +185,16 @@ class Ec2VpcCfnProvisionerTest {
     }
 
     @Test
-    void anUnchangedVpcIsReusedAndItsTagSetReplaced() {
+    void anUnchangedVpcIsReusedAndOnlyTheTagKeysItOwnsAreReconciled() {
         when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of()))
                 .thenReturn(List.of(vpc("vpc-existing", "10.0.0.0/16")));
+        // external was added through EC2, outside the stack, so AWS keeps it.
         when(ec2.describeTags(REGION, Map.of("resource-id", List.of("vpc-existing")))).thenReturn(List.of(
                 Map.of("key", "Name", "value", "old"),
-                Map.of("key", "stale", "value", "x")));
+                Map.of("key", "stale", "value", "x"),
+                Map.of("key", "external", "value", "keep")));
 
-        StackResource r = provision("vpc-existing", """
+        StackResource r = provision("vpc-existing", Map.of(Ec2VpcCfnProvisioner.TAG_KEYS_ATTR, "[\"Name\",\"stale\"]"), """
                 {"CidrBlock": "10.0.0.0/16", "Tags": [{"Key": "Name", "Value": "new"}]}""");
 
         verify(ec2, never()).createVpc(anyString(), anyString(), anyBoolean(), anyBoolean(), any());
@@ -201,6 +203,7 @@ class Ec2VpcCfnProvisionerTest {
                 "reusing must keep the id every subnet and route table already references");
         verify(ec2).deleteTags(eq(REGION), eq(List.of("vpc-existing")), argThat(tags("stale=x")));
         verify(ec2).createTags(eq(REGION), eq(List.of("vpc-existing")), argThat(tags("Name=new")));
+        assertEquals("[\"Name\"]", r.getAttributes().get(Ec2VpcCfnProvisioner.TAG_KEYS_ATTR));
     }
 
     @Test
@@ -292,6 +295,43 @@ class Ec2VpcCfnProvisionerTest {
     }
 
     @Test
+    void aRolledBackReplacementPutsBackTheTagKeysThePriorVpcOwns() {
+        when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of()))
+                .thenReturn(List.of(vpc("vpc-existing", "10.0.0.0/16")));
+        stubCreate(vpc("vpc-replaced", "10.1.0.0/16"));
+        StackResource r = provision("vpc-existing", Map.of("VpcId", "vpc-existing", Ec2VpcCfnProvisioner.TAG_KEYS_ATTR, "[\"team\"]"), """
+                {"CidrBlock": "10.1.0.0/16", "Tags": [{"Key": "owner", "Value": "platform"}]}""");
+        assertEquals("[\"owner\"]", r.getAttributes().get(Ec2VpcCfnProvisioner.TAG_KEYS_ATTR));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals("vpc-existing", r.getPhysicalId());
+        assertEquals("[\"team\"]", r.getAttributes().get(Ec2VpcCfnProvisioner.TAG_KEYS_ATTR),
+                "the prior VPC's next update must remove only the keys its own deployment wrote");
+        assertFalse(r.getAttributes().containsKey(Ec2VpcCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+    }
+
+    @Test
+    void anOwnershipChangeAloneIsSnapshottedAndRolledBack() {
+        Vpc existing = vpc("vpc-existing", "10.0.0.0/16");
+        existing.setEnableDnsSupport(true);
+        when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of())).thenReturn(List.of(existing));
+        // team already holds the value the template now declares, so only the ownership changes.
+        when(ec2.describeTags(REGION, Map.of("resource-id", List.of("vpc-existing"))))
+                .thenReturn(List.of(Map.of("key", "team", "value", "core")));
+
+        StackResource r = provision("vpc-existing", """
+                {"CidrBlock": "10.0.0.0/16", "Tags": [{"Key": "team", "Value": "core"}]}""");
+        assertEquals("[\"team\"]", r.getAttributes().get(Ec2VpcCfnProvisioner.TAG_KEYS_ATTR));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertFalse(r.getAttributes().containsKey(Ec2VpcCfnProvisioner.TAG_KEYS_ATTR),
+                "a rollback hands team back to whoever tagged it, so a later drop keeps it");
+        verify(ec2, never()).deleteTags(any(), any(), any());
+    }
+
+    @Test
     void anInPlaceChangeIsRolledBackToThePriorDnsAttributesTagsAndTenancy() {
         Vpc existing = vpc("vpc-existing", "10.0.0.0/16");
         existing.setInstanceTenancy("dedicated");
@@ -299,11 +339,13 @@ class Ec2VpcCfnProvisionerTest {
         existing.setEnableDnsHostnames(false);
         when(ec2.describeVpcs(REGION, List.of("vpc-existing"), Map.of())).thenReturn(List.of(existing));
         when(ec2.describeTags(REGION, Map.of("resource-id", List.of("vpc-existing"))))
-                .thenReturn(List.of(Map.of("key", "Name", "value", "old"), Map.of("key", "team", "value", "net")))
+                .thenReturn(List.of(Map.of("key", "Name", "value", "old"), Map.of("key", "team", "value", "net"),
+                        Map.of("key", "external", "value", "keep")))
                 // The snapshot reads the prior set once; every later read sees what the update wrote.
-                .thenReturn(List.of(Map.of("key", "Name", "value", "new"), Map.of("key", "env", "value", "test")));
+                .thenReturn(List.of(Map.of("key", "Name", "value", "new"), Map.of("key", "env", "value", "test"),
+                        Map.of("key", "external", "value", "keep")));
 
-        StackResource r = provision("vpc-existing", """
+        StackResource r = provision("vpc-existing", Map.of(Ec2VpcCfnProvisioner.TAG_KEYS_ATTR, "[\"Name\",\"team\"]"), """
                 {"CidrBlock": "10.0.0.0/16", "InstanceTenancy": "default", "EnableDnsHostnames": true,
                  "Tags": [{"Key": "Name", "Value": "new"}, {"Key": "env", "Value": "test"}]}""");
         assertTrue(r.getAttributes().containsKey(Ec2VpcCfnProvisioner.IN_PLACE_PRIOR_ATTR), "the prior state is snapshotted");
@@ -317,6 +359,9 @@ class Ec2VpcCfnProvisionerTest {
         verify(ec2).deleteTags(eq(REGION), eq(List.of("vpc-existing")), argThat(tags("env=test")));
         verify(ec2).createTags(eq(REGION), eq(List.of("vpc-existing")), argThat(tags("Name=old", "team=net")));
         verify(ec2).modifyVpcTenancy(REGION, "vpc-existing", "dedicated");
+        verify(ec2, never()).deleteTags(any(), any(),
+                argThat(actual -> actual.stream().anyMatch(tag -> "external".equals(tag.getKey()))));
+        assertEquals("[\"Name\",\"team\"]", r.getAttributes().get(Ec2VpcCfnProvisioner.TAG_KEYS_ATTR), "the ownership record goes back too");
         assertFalse(r.getAttributes().containsKey(Ec2VpcCfnProvisioner.IN_PLACE_PRIOR_ATTR));
     }
 
@@ -349,7 +394,7 @@ class Ec2VpcCfnProvisionerTest {
         when(ec2.describeTags(REGION, Map.of("resource-id", List.of("vpc-existing"))))
                 .thenReturn(List.of(Map.of("key", "Name", "value", "same")));
 
-        StackResource r = provision("vpc-existing", """
+        StackResource r = provision("vpc-existing", Map.of(Ec2VpcCfnProvisioner.TAG_KEYS_ATTR, "[\"Name\"]"), """
                 {"CidrBlock": "10.0.0.0/16", "Tags": [{"Key": "Name", "Value": "same"}]}""");
 
         assertFalse(r.getAttributes().containsKey(Ec2VpcCfnProvisioner.IN_PLACE_PRIOR_ATTR));

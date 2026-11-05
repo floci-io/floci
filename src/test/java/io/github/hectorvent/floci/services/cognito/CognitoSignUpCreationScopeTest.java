@@ -58,7 +58,13 @@ class CognitoSignUpCreationScopeTest {
     void overlappingSignUpReservesOnlyTheSameAccountAndUsername(
             boolean firstRequestIsAdmin, boolean differentAccount) throws Exception {
         Instance<RequestContext> contexts = mock(Instance.class);
-        when(contexts.get()).thenAnswer(invocation -> requestContext.get());
+        // One context that forwards to the calling thread's, as the request scoped client proxy does.
+        when(contexts.get()).thenReturn(new RequestContext() {
+            @Override
+            public String getAccountId() {
+                return requestContext.get().getAccountId();
+            }
+        });
         RegionResolver regionResolver = new RegionResolver("us-east-1", FIRST_ACCOUNT) {
             @Override
             public String getAccountId() {

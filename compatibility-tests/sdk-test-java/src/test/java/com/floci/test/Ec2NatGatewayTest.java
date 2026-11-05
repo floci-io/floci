@@ -11,7 +11,6 @@ import software.amazon.awssdk.services.ec2.model.CreateNatGatewayRequest;
 import software.amazon.awssdk.services.ec2.model.DeleteNatGatewayRequest;
 import software.amazon.awssdk.services.ec2.model.DescribeNatGatewaysRequest;
 import software.amazon.awssdk.services.ec2.model.DomainType;
-import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.NatGateway;
 import software.amazon.awssdk.services.ec2.model.NatGatewayAddress;
 import software.amazon.awssdk.services.ec2.model.ReleaseAddressRequest;
@@ -19,7 +18,6 @@ import software.amazon.awssdk.services.ec2.model.ReleaseAddressRequest;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class Ec2NatGatewayTest {
 
@@ -64,30 +62,57 @@ class Ec2NatGatewayTest {
     }
 
     @Test
-    @DisplayName("CreateNatGateway refuses secondary addresses rather than creating a gateway without them")
-    void secondaryAddressesAreRefused() {
+    @DisplayName("CreateNatGateway gives a gateway its secondary addresses, reported after the primary one")
+    void secondaryAddressesAreReported() {
         // SecondaryAllocationId.N and SecondaryPrivateIpAddress.N are the list names the SDK sends.
         try (Ec2Client ec2 = TestFixtures.ec2Client()) {
             String subnetId = TestFixtures.defaultVpcSubnets().get(0);
-            for (CreateNatGatewayRequest request : List.of(
-                    CreateNatGatewayRequest.builder()
-                            .subnetId(subnetId)
-                            .allocationId("eipalloc-0123456789abcdef0")
-                            .secondaryAllocationIds("eipalloc-0fedcba9876543210")
-                            .build(),
-                    CreateNatGatewayRequest.builder()
-                            .subnetId(subnetId)
-                            .connectivityType(ConnectivityType.PRIVATE)
-                            .secondaryPrivateIpAddresses("172.31.0.200")
-                            .build(),
-                    CreateNatGatewayRequest.builder()
-                            .subnetId(subnetId)
-                            .connectivityType(ConnectivityType.PRIVATE)
-                            .secondaryPrivateIpAddressCount(2)
-                            .build())) {
-                Ec2Exception error = assertThrows(Ec2Exception.class, () -> ec2.createNatGateway(request));
-                assertThat(error.awsErrorDetails().errorCode()).isEqualTo("UnsupportedOperation");
+            AllocateAddressResponse primaryEip = ec2.allocateAddress(AllocateAddressRequest.builder()
+                    .domain(DomainType.VPC).build());
+            AllocateAddressResponse secondaryEip = ec2.allocateAddress(AllocateAddressRequest.builder()
+                    .domain(DomainType.VPC).build());
+            String publicId = null;
+            String privateId = null;
+            try {
+                publicId = ec2.createNatGateway(CreateNatGatewayRequest.builder()
+                        .subnetId(subnetId)
+                        .allocationId(primaryEip.allocationId())
+                        .secondaryAllocationIds(secondaryEip.allocationId())
+                        .build()).natGateway().natGatewayId();
+                List<NatGatewayAddress> publicAddresses = describe(ec2, publicId).natGatewayAddresses();
+                assertThat(publicAddresses).hasSize(2);
+                assertThat(publicAddresses.get(0).isPrimary()).isTrue();
+                NatGatewayAddress secondary = publicAddresses.get(1);
+                assertThat(secondary.isPrimary()).isFalse();
+                assertThat(secondary.allocationId()).isEqualTo(secondaryEip.allocationId());
+                assertThat(secondary.publicIp()).isEqualTo(secondaryEip.publicIp());
+                assertThat(secondary.privateIp()).isNotBlank().isNotEqualTo(publicAddresses.get(0).privateIp());
+                assertThat(secondary.networkInterfaceId()).isEqualTo(publicAddresses.get(0).networkInterfaceId());
+
+                privateId = ec2.createNatGateway(CreateNatGatewayRequest.builder()
+                        .subnetId(subnetId)
+                        .connectivityType(ConnectivityType.PRIVATE)
+                        .secondaryPrivateIpAddressCount(2)
+                        .build()).natGateway().natGatewayId();
+                List<NatGatewayAddress> privateAddresses = describe(ec2, privateId).natGatewayAddresses();
+                assertThat(privateAddresses).hasSize(3);
+                assertThat(privateAddresses).extracting(NatGatewayAddress::isPrimary).containsExactly(true, false, false);
+                assertThat(privateAddresses).extracting(NatGatewayAddress::privateIp).doesNotHaveDuplicates();
+                assertThat(privateAddresses).extracting(NatGatewayAddress::publicIp).containsOnlyNulls();
+            } finally {
+                for (String id : new String[] {publicId, privateId}) {
+                    if (id != null) {
+                        ec2.deleteNatGateway(DeleteNatGatewayRequest.builder().natGatewayId(id).build());
+                    }
+                }
+                ec2.releaseAddress(ReleaseAddressRequest.builder().allocationId(primaryEip.allocationId()).build());
+                ec2.releaseAddress(ReleaseAddressRequest.builder().allocationId(secondaryEip.allocationId()).build());
             }
         }
+    }
+
+    private static NatGateway describe(Ec2Client ec2, String natGatewayId) {
+        return ec2.describeNatGateways(DescribeNatGatewaysRequest.builder().natGatewayIds(natGatewayId).build())
+                .natGateways().get(0);
     }
 }

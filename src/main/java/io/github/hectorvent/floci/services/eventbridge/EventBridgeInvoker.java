@@ -89,6 +89,7 @@ public class EventBridgeInvoker {
     private final RedshiftDataService redshiftDataService;
     private final RedshiftTargetAuthorizer redshiftTargetAuthorizer;
     private final RedshiftDataTargetSubmitter redshiftSubmitter;
+    private final AppSyncTargetInvoker appSyncTargetInvoker;
     private final ServiceRegistry serviceRegistry;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -97,6 +98,19 @@ public class EventBridgeInvoker {
     private final Map<String, RateWindow> rateWindows = new ConcurrentHashMap<>();
 
     @Inject
+    public EventBridgeInvoker(LambdaService lambdaService, SqsService sqsService, SnsService snsService,
+                              BatchService batchService, FirehoseService firehoseService,
+                              EventBridgeService eventBridgeService, EcsService ecsService,
+                              EcsJsonHandler ecsJsonHandler, StepFunctionsService stepFunctionsService,
+                              RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                              ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
+                              EmulatorConfig config, AppSyncTargetInvoker appSyncTargetInvoker) {
+        this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
+                ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
+                serviceRegistry, regionResolver, objectMapper, config,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), appSyncTargetInvoker);
+    }
+
     public EventBridgeInvoker(LambdaService lambdaService,
                               SqsService sqsService,
                               SnsService snsService,
@@ -114,8 +128,7 @@ public class EventBridgeInvoker {
                               EmulatorConfig config) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config,
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+                serviceRegistry, regionResolver, objectMapper, config, (AppSyncTargetInvoker) null);
     }
 
     EventBridgeInvoker(LambdaService lambdaService,
@@ -134,6 +147,18 @@ public class EventBridgeInvoker {
                        ObjectMapper objectMapper,
                        EmulatorConfig config,
                        HttpClient httpClient) {
+        this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
+                ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
+                serviceRegistry, regionResolver, objectMapper, config, httpClient, null);
+    }
+
+    private EventBridgeInvoker(LambdaService lambdaService, SqsService sqsService, SnsService snsService,
+                               BatchService batchService, FirehoseService firehoseService,
+                               EventBridgeService eventBridgeService, EcsService ecsService,
+                               EcsJsonHandler ecsJsonHandler, StepFunctionsService stepFunctionsService,
+                               RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                               ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
+                               EmulatorConfig config, HttpClient httpClient, AppSyncTargetInvoker appSyncTargetInvoker) {
         this.lambdaService = lambdaService;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -146,6 +171,7 @@ public class EventBridgeInvoker {
         this.redshiftDataService = redshiftDataService;
         this.redshiftTargetAuthorizer = redshiftTargetAuthorizer;
         this.redshiftSubmitter = new RedshiftDataTargetSubmitter(redshiftDataService, objectMapper);
+        this.appSyncTargetInvoker = appSyncTargetInvoker;
         this.serviceRegistry = serviceRegistry;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
@@ -344,6 +370,11 @@ public class EventBridgeInvoker {
                 }
             } else if (arn.contains(":events:") && arn.contains(":api-destination/")) {
                 deliverToApiDestination(target, payload, region);
+            } else if (arn.contains(":appsync:")) {
+                if (appSyncTargetInvoker == null) {
+                    throw new AwsException("ServiceNotAvailableException", "AppSync delivery is not available.", 400);
+                }
+                appSyncTargetInvoker.invoke(target, payload, ruleArn, regionResolver.getAccountId());
             } else {
                 LOG.warnv("EventBridge: unsupported target ARN type: {0}", arn);
             }
@@ -612,14 +643,14 @@ public class EventBridgeInvoker {
 
         HttpParameters httpParameters = target.getHttpParameters();
         JsonNode authNode = readAuthParameters(connection);
-        JsonNode invocationHttp = authNode.path("InvocationHttpParameters");
+        ConnectionHttpParameters connectionParameters = invocationHttpParameters(authNode);
 
         // The connection's parameters are applied last so a target cannot override what the connection configures
         Map<String, String> queryParams = new LinkedHashMap<>();
         if (httpParameters != null && httpParameters.getQueryStringParameters() != null) {
             queryParams.putAll(httpParameters.getQueryStringParameters());
         }
-        queryParams.putAll(readKeyValues(invocationHttp.path("QueryStringParameters")));
+        queryParams.putAll(connectionParameters.queryStringParameters());
         String resolvedUrl = appendQueryParameters(
                 substitutePathParameters(rawUrl,
                         httpParameters != null ? httpParameters.getPathParameterValues() : null),
@@ -631,7 +662,7 @@ public class EventBridgeInvoker {
         if (httpParameters != null && httpParameters.getHeaderParameters() != null) {
             httpParameters.getHeaderParameters().forEach((name, value) -> putHeader(headers, name, value));
         }
-        readKeyValues(invocationHttp.path("HeaderParameters")).forEach((name, value) -> putHeader(headers, name, value));
+        connectionParameters.headers().forEach((name, value) -> putHeader(headers, name, value));
         applyConnectionAuth(connection, authNode, headers);
 
         String method = destination.getHttpMethod() != null ? destination.getHttpMethod().toUpperCase() : "POST";
@@ -640,7 +671,7 @@ public class EventBridgeInvoker {
             headers.put("Content-Type", "application/json; charset=utf-8");
         }
         String body = hasBody
-                ? mergeBodyParameters(payload, readKeyValues(invocationHttp.path("BodyParameters")))
+                ? mergeBodyParameters(payload, connectionParameters.bodyParameters())
                 : null;
 
         HttpRequest request;
@@ -823,6 +854,29 @@ public class EventBridgeInvoker {
                     connection.getName(), e.getOriginalMessage());
             return MissingNode.getInstance();
         }
+    }
+
+    /**
+     * The parameters a connection adds to a request it authorizes, with its authorization among the headers.
+     * Callers apply them over their own: on a conflict, the connection's value wins.
+     */
+    public ConnectionHttpParameters connectionHttpParameters(String connectionArn, String region) {
+        Connection connection = eventBridgeService.findConnectionByArn(connectionArn, region);
+        JsonNode authNode = readAuthParameters(connection);
+        ConnectionHttpParameters parameters = invocationHttpParameters(authNode);
+        applyConnectionAuth(connection, authNode, parameters.headers());
+        return parameters;
+    }
+
+    private static ConnectionHttpParameters invocationHttpParameters(JsonNode authNode) {
+        JsonNode invocationHttp = authNode.path("InvocationHttpParameters");
+        return new ConnectionHttpParameters(readKeyValues(invocationHttp.path("HeaderParameters")),
+                readKeyValues(invocationHttp.path("QueryStringParameters")),
+                readKeyValues(invocationHttp.path("BodyParameters")));
+    }
+
+    public record ConnectionHttpParameters(Map<String, String> headers, Map<String, String> queryStringParameters,
+                                           Map<String, String> bodyParameters) {
     }
 
     private static Map<String, String> readKeyValues(JsonNode params) {

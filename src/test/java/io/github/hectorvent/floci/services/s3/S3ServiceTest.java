@@ -206,11 +206,14 @@ class S3ServiceTest {
     }
 
     @Test
-    void listBucketsHidesSpectrumScratchBucketButKeepsOtherInternalPrefixBuckets() {
+    void listBucketsHidesScratchBucketsButKeepsOtherInternalPrefixBuckets() {
         s3Service.createBucket("bucket-a", "us-east-1");
         s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
         s3Service.putBucketTagging(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, Map.of(
                 S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE));
+        s3Service.createBucket(S3Service.REDSHIFT_UNLOAD_STAGING_BUCKET, "us-east-1");
+        s3Service.putBucketTagging(S3Service.REDSHIFT_UNLOAD_STAGING_BUCKET, Map.of(
+                S3Service.INTERNAL_BUCKET_TAG_KEY, S3Service.REDSHIFT_UNLOAD_STAGING_TAG_VALUE));
         String userBucket = S3Service.INTERNAL_BUCKET_PREFIX + "customer-data";
         s3Service.createBucket(userBucket, "us-east-1");
 
@@ -224,13 +227,19 @@ class S3ServiceTest {
     }
 
     @Test
-    void listBucketsKeepsAUserBucketThatOnlySharesTheScratchBucketName() {
-        s3Service.createBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, "us-east-1");
-
-        List<Bucket> buckets = s3Service.listBuckets();
-
-        assertEquals(1, buckets.size());
-        assertEquals(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET, buckets.get(0).getName());
+    void scratchSetupRejectsUserBucketsAndReusesInternalBuckets() throws Exception {
+        for (S3ScratchSpace space : S3ScratchSpace.values()) {
+            s3Service.createBucket(space.bucketName(), "us-east-1");
+            assertThrows(IOException.class, () -> space.ensureBucket(s3Service, "us-east-1"));
+            assertFalse(s3Service.isScratchBucket(space.bucketName()));
+            assertTrue(s3Service.getBucketTagging(space.bucketName()).isEmpty());
+            assertTrue(s3Service.listBuckets().stream().anyMatch(bucket -> space.bucketName().equals(bucket.getName())));
+            s3Service.deleteBucket(space.bucketName());
+            space.ensureBucket(s3Service, "us-east-1");
+            space.ensureBucket(s3Service, "us-east-1");
+            assertTrue(s3Service.isScratchBucket(space.bucketName()));
+            assertTrue(s3Service.listBuckets().stream().noneMatch(bucket -> space.bucketName().equals(bucket.getName())));
+        }
     }
 
     @Test

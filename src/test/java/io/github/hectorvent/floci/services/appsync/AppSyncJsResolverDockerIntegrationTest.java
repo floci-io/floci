@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync;
 
+import com.fasterxml.jackson.core.io.JsonStringEncoder;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -52,8 +53,31 @@ class AppSyncJsResolverDockerIntegrationTest {
               asyncResolver: String
               importsNode: String
               loops: String
+              withStatement: String
+              misplacedAwait: String
+              misplacedYield: String
+              malformedSyntax: String
               keywordsInText: String
+              templateHole: String
+              keywordObjectKey: String
+              conditionalThis: String
+              regexLiteral: String
+              regexKeyword: String
+              regexClassThenUnsupported: String
+              regexDivision: String
+              forOfIdentifierDivision: String
+              regexAfterCaseBlock(n: Int): String
+              regexAfterLabelBlock: String
+              commentCr: String
+              commentLineSeparator: String
+              commentParagraphSeparator: String
+              divisionAfterFunction: String
+              divisionAfterObject: String
+              taggedRawInvalidEscape: String
+              taggedRawInvalidEscapeHole: String
+              untaggedInvalidEscape: String
               normalizeString: String
+              subscriptionFilter(mode: Int): String
             }
             """;
 
@@ -159,6 +183,35 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
+    private static final String WITH_RESOLVER = """
+            export function request(ctx) {
+              with (ctx) { return { payload: { value: "nope" } }; }
+            }
+            """;
+
+    private static final String AWAIT_RESOLVER = """
+            export function request(ctx) {
+              await 1;
+              return { payload: { value: "nope" } };
+            }
+            """;
+
+    private static final String YIELD_RESOLVER = """
+            export function request(ctx) {
+              yield 1;
+              return { payload: { value: "nope" } };
+            }
+            """;
+
+    private static final String MALFORMED_RESOLVER = """
+            export function request(ctx) {
+              // with await yield
+              const text = "with";
+              const value = ;
+              return { payload: { value } };
+            }
+            """;
+
     /** The same keywords, but only inside a string, a comment and a template: still valid. */
     private static final String KEYWORDS_IN_TEXT_RESOLVER = """
             export function request(ctx) {
@@ -168,6 +221,147 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             export function response(ctx) {
               return ctx.result.value;
+            }
+            """;
+
+    private static final String TEMPLATE_HOLE_RESOLVER = """
+            export function request(ctx) {
+              const prefix = `${"value"}-`;
+              return { payload: { value: `its class: ${prefix}` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String KEYWORD_OBJECT_KEY_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { class: "allowed" } };
+            }
+            export function response(ctx) {
+              return ctx.result.class;
+            }
+            """;
+
+    private static final String CONDITIONAL_THIS_RESOLVER = """
+            export function request(ctx) {
+              return { payload: ctx.args.flag ? this : null };
+            }
+            export function response(ctx) {
+              return ctx.result;
+            }
+            """;
+
+    private static final String REGEX_KEYWORD_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: /while/.test("while") } };
+            }
+            export function response(ctx) {
+              return String(ctx.result.value);
+            }
+            """;
+
+    private static final String REGEX_LITERAL_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: /foo/.test("foo") } };
+            }
+            """;
+
+    private static final String REGEX_CLASS_UNSUPPORTED_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: /[//]/.test("/") && this.value } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String REGEX_DIVISION_RESOLVER = """
+            export function request(ctx) {
+              const sum = (value) => value;
+              return { payload: { value: `${sum(6) / 2}% vs ${sum(8) / 2}%` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String FOR_OF_IDENTIFIER_DIVISION_RESOLVER = """
+            export function request(ctx) {
+              const of = 8;
+              for (const value of [of / 2 / 2]) {
+                return { payload: { value: String(value) } };
+              }
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String REGEX_AFTER_CASE_BLOCK_RESOLVER = """
+            export function request(ctx) {
+              switch (ctx.args.n) { case 1: {} /foo/.test("foo"); }
+              return { payload: { value: "unreachable" } };
+            }
+            """;
+
+    private static final String REGEX_AFTER_LABEL_BLOCK_RESOLVER = """
+            export function request(ctx) {
+              label: {} /foo/.test("foo");
+              return { payload: { value: "unreachable" } };
+            }
+            """;
+
+    static final String COMMENT_CR_RESOLVER = """
+            export function request(ctx) {
+              // comment\rwhile(false) {}
+              return { payload: { value: "unreachable" } };
+            }
+            """;
+
+    private static final String COMMENT_LINE_SEPARATOR_RESOLVER =
+            "export function request(ctx) { // comment" + Character.toString(0x2028)
+                + "const pattern = /foo/; return { payload: { value: pattern.test('foo') } }; }";
+
+    private static final String COMMENT_PARAGRAPH_SEPARATOR_RESOLVER =
+            "export function request(ctx) { // comment" + Character.toString(0x2029)
+                + "return { payload: { value: this } }; }";
+
+    private static final String DIVISION_AFTER_FUNCTION_RESOLVER = """
+            export function request(ctx) {
+              const value = function() {} / 2;
+              while (false) {}
+              return { payload: { value } };
+            }
+            """;
+
+    private static final String DIVISION_AFTER_OBJECT_RESOLVER = """
+            export function request(ctx) {
+              const value = true ? { x: 1 } / this : 2;
+              return { payload: { value } };
+            }
+            """;
+
+    private static final String TAGGED_RAW_INVALID_ESCAPE_RESOLVER = """
+            export function request(ctx) {
+              const raw = (parts) => parts.raw[0];
+              return { payload: { value: raw`\\x while` } };
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String TAGGED_RAW_INVALID_ESCAPE_HOLE_RESOLVER = """
+            export function request(ctx) {
+              const raw = (parts, value) => value;
+              return { payload: { value: raw`\\x while ${(() => { while (false) {} return 1; })()}` } };
+            }
+            """;
+
+    private static final String UNTAGGED_INVALID_ESCAPE_RESOLVER = """
+            export function request(ctx) {
+              return { payload: { value: `\\x while` } };
             }
             """;
 
@@ -188,6 +382,94 @@ class AppSyncJsResolverDockerIntegrationTest {
         }
         export function response(ctx) {
           return JSON.stringify(ctx.result);
+        }
+        """;
+
+    private static final String SUBSCRIPTION_FILTER_RESOLVER = """
+        import { util } from "@aws-appsync/utils";
+        export function request(ctx) {
+          return { payload: null };
+        }
+        export function response(ctx) {
+          const mode = ctx.args.mode;
+          let filter = { score: { lte: 50, gte: 20 }, owner: { eq: "ignored" } };
+          let ignored = ["owner"];
+          let rules = { owner: { eq: "A" } };
+          if (mode === 1 || mode === 2) {
+            filter = {};
+            ignored = [];
+            rules = {};
+            for (let i = 0; i < (mode === 1 ? 9 : 30); i++) {
+              filter["field" + i] = { eq: i, ne: i };
+            }
+          } else if (mode === 3 || mode === 4 || mode === 6 || mode === 7) {
+            const branches = [];
+            for (let i = 0; i < (mode === 4 ? 1001 : 1000); i++) {
+              branches.push({ branch: { eq: i } });
+            }
+            filter = { or: branches };
+            ignored = [];
+            rules = {};
+            if (mode === 6 || mode === 7) {
+              for (let i = 0; i < (mode === 6 ? 9 : 10); i++) {
+                filter["field" + i] = { eq: i };
+              }
+            }
+          } else if (mode === 5) {
+            filter = {};
+            ignored = [];
+            rules = {};
+            for (let i = 0; i < 1001; i++) {
+              rules["field" + i] = { eq: i };
+            }
+          } else if (mode === 8) {
+            filter = { payload: { eq: "x".repeat(2 * 1024 * 1024) } };
+            ignored = [];
+            rules = {};
+          } else if (mode === 9) {
+            const operators = {};
+            for (let i = 0; i < 1000; i++) {
+              operators["operator" + i] = "x".repeat(6144);
+            }
+            filter = { payload: operators };
+            ignored = [];
+            rules = {};
+          } else if (mode === 10) {
+            filter = { status: { eq: "open" } };
+          } else if (mode === 11) {
+            filter = { status: { eq: "open" }, priority: { ge: 3 } };
+          } else if (mode === 12) {
+            filter = { score: { lte: 50, gte: 20 } };
+          } else if (mode === 13) {
+            filter = {};
+          } else if (mode === 14) {
+            filter = null;
+          } else if (mode === 15 || mode === 16) {
+            filter = { score: { lte: 50, gte: 20 }, and: [
+              { title: { ne: "Book1" } },
+              { or: [{ author: { eq: "Admin" } }, { published: { eq: false } }] }
+            ] };
+            if (mode === 16) {
+              ignored = ["score", "author"];
+            }
+          } else if (mode === 17) {
+            filter = { status: { eq: "open" } };
+            rules = { priority: { ge: 7 }, owner: { eq: "A" } };
+          }
+          if (mode >= 10 && mode <= 17 && mode !== 16) {
+            ignored = [];
+          }
+          if (mode >= 10 && mode <= 16) {
+            rules = {};
+          }
+          const result = util.transform.toSubscriptionFilter(filter, ignored, rules);
+          if (mode === 1 || mode === 3 || mode === 6) {
+            return result.filterGroup.length + "/" + result.filterGroup[0].filters.length;
+          }
+          if (mode === 8) {
+            return String(result.filterGroup[0].filters[0].value.length);
+          }
+          return JSON.stringify(result);
         }
         """;
 
@@ -214,8 +496,39 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "asyncResolver", "local", ASYNC_RESOLVER);
         createUnitResolver(apiId, "Query", "importsNode", "local", NODE_IMPORT_RESOLVER);
         createUnitResolver(apiId, "Query", "loops", "local", WHILE_RESOLVER);
+        createUnitResolver(apiId, "Query", "withStatement", "local", WITH_RESOLVER);
+        createUnitResolver(apiId, "Query", "misplacedAwait", "local", AWAIT_RESOLVER);
+        createUnitResolver(apiId, "Query", "misplacedYield", "local", YIELD_RESOLVER);
+        createUnitResolver(apiId, "Query", "malformedSyntax", "local", MALFORMED_RESOLVER);
         createUnitResolver(apiId, "Query", "keywordsInText", "local", KEYWORDS_IN_TEXT_RESOLVER);
+        createUnitResolver(apiId, "Query", "templateHole", "local", TEMPLATE_HOLE_RESOLVER);
+        createUnitResolver(apiId, "Query", "keywordObjectKey", "local", KEYWORD_OBJECT_KEY_RESOLVER);
+        createUnitResolver(apiId, "Query", "conditionalThis", "local", CONDITIONAL_THIS_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexLiteral", "local", REGEX_LITERAL_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexKeyword", "local", REGEX_KEYWORD_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexClassThenUnsupported", "local",
+                REGEX_CLASS_UNSUPPORTED_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexDivision", "local", REGEX_DIVISION_RESOLVER);
+        createUnitResolver(apiId, "Query", "forOfIdentifierDivision", "local",
+                FOR_OF_IDENTIFIER_DIVISION_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexAfterCaseBlock", "local", REGEX_AFTER_CASE_BLOCK_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexAfterLabelBlock", "local", REGEX_AFTER_LABEL_BLOCK_RESOLVER);
+        createUnitResolver(apiId, "Query", "commentCr", "local", COMMENT_CR_RESOLVER);
+        createUnitResolver(apiId, "Query", "commentLineSeparator", "local", COMMENT_LINE_SEPARATOR_RESOLVER);
+        createUnitResolver(apiId, "Query", "commentParagraphSeparator", "local",
+                COMMENT_PARAGRAPH_SEPARATOR_RESOLVER);
+        createUnitResolver(apiId, "Query", "divisionAfterFunction", "local",
+                DIVISION_AFTER_FUNCTION_RESOLVER);
+        createUnitResolver(apiId, "Query", "divisionAfterObject", "local",
+                DIVISION_AFTER_OBJECT_RESOLVER);
+        createUnitResolver(apiId, "Query", "taggedRawInvalidEscape", "local",
+                TAGGED_RAW_INVALID_ESCAPE_RESOLVER);
+        createUnitResolver(apiId, "Query", "taggedRawInvalidEscapeHole", "local",
+                TAGGED_RAW_INVALID_ESCAPE_HOLE_RESOLVER);
+        createUnitResolver(apiId, "Query", "untaggedInvalidEscape", "local",
+                UNTAGGED_INVALID_ESCAPE_RESOLVER);
         createUnitResolver(apiId, "Query", "normalizeString", "local", NORMALIZE_STRING_RESOLVER);
+        createUnitResolver(apiId, "Query", "subscriptionFilter", "local", SUBSCRIPTION_FILTER_RESOLVER);
     }
 
     @Test
@@ -292,6 +605,82 @@ class AppSyncJsResolverDockerIntegrationTest {
                 "{\"defaultForm\":\"é\",\"nfc\":\"é\",\"nfd\":\"é\","
                     + "\"nfkc\":\"é\",\"nfkd\":\"é\",\"lowercaseNfkd\":\"é\"}"
             ));
+    }
+
+    @Test
+    void subscriptionFilterHelperExpandsBranchesThroughTheJsResolver() {
+        query("{ subscriptionFilter }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("{\"filterGroup\":[{\"filters\":["
+                    + "{\"fieldName\":\"score\",\"operator\":\"lte\",\"value\":50},"
+                    + "{\"fieldName\":\"owner\",\"operator\":\"eq\",\"value\":\"A\"}]},"
+                    + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"gte\",\"value\":20},"
+                    + "{\"fieldName\":\"owner\",\"operator\":\"eq\",\"value\":\"A\"}]}]}"));
+    }
+
+    @Test
+    void subscriptionFilterHelperKeepsBasicAndNestedShapes() {
+        assertSubscriptionFilter(10, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"status\",\"operator\":\"eq\",\"value\":\"open\"}]}]}");
+        assertSubscriptionFilter(11, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"status\",\"operator\":\"eq\",\"value\":\"open\"},"
+                + "{\"fieldName\":\"priority\",\"operator\":\"ge\",\"value\":3}]}]}");
+        assertSubscriptionFilter(12, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"score\",\"operator\":\"lte\",\"value\":50}]},"
+                + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"gte\",\"value\":20}]}]}");
+        assertSubscriptionFilter(13, "{\"filterGroup\":[]}");
+        assertSubscriptionFilter(14, "null");
+        assertSubscriptionFilter(15, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"score\",\"operator\":\"lte\",\"value\":50},"
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"author\",\"operator\":\"eq\",\"value\":\"Admin\"}]},"
+                + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"lte\",\"value\":50},"
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"published\",\"operator\":\"eq\",\"value\":false}]},"
+                + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"gte\",\"value\":20},"
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"author\",\"operator\":\"eq\",\"value\":\"Admin\"}]},"
+                + "{\"filters\":[{\"fieldName\":\"score\",\"operator\":\"gte\",\"value\":20},"
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"published\",\"operator\":\"eq\",\"value\":false}]}]}");
+        assertSubscriptionFilter(16, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"title\",\"operator\":\"ne\",\"value\":\"Book1\"},"
+                + "{\"fieldName\":\"published\",\"operator\":\"eq\",\"value\":false}]}]}");
+        assertSubscriptionFilter(17, "{\"filterGroup\":[{\"filters\":["
+                + "{\"fieldName\":\"status\",\"operator\":\"eq\",\"value\":\"open\"},"
+                + "{\"fieldName\":\"priority\",\"operator\":\"ge\",\"value\":7}]},"
+                + "{\"filters\":[{\"fieldName\":\"status\",\"operator\":\"eq\",\"value\":\"open\"},"
+                + "{\"fieldName\":\"owner\",\"operator\":\"eq\",\"value\":\"A\"}]}]}");
+    }
+
+    @Test
+    void subscriptionFilterBudgetAllowsBoundedExpansion() {
+        query("{ subscriptionFilter(mode: 1) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("512/9"));
+        query("{ subscriptionFilter(mode: 3) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("1000/1"));
+        query("{ subscriptionFilter(mode: 6) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("1000/10"));
+        query("{ subscriptionFilter(mode: 8) }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo("2097152"));
+    }
+
+    @Test
+    void subscriptionFilterBudgetRejectsExcessiveExpansion() {
+        assertSubscriptionFilterBudgetError(2, "subscription filter exceeds 1000 groups");
+        assertSubscriptionFilterBudgetError(4, "subscription filter exceeds 1000 groups");
+        assertSubscriptionFilterBudgetError(5, "subscription filter exceeds 1000 groups");
+        assertSubscriptionFilterBudgetError(7, "subscription filter exceeds 10000 filter entries");
+        assertSubscriptionFilterBudgetError(9, "subscription filter exceeds 5242880 output bytes");
     }
 
     @Test
@@ -376,6 +765,29 @@ class AppSyncJsResolverDockerIntegrationTest {
     }
 
     @Test
+    void strictModeFailuresKeepTheirUnsupportedFeatureDiagnostics() {
+        query("{ withStatement }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("with statements"));
+        query("{ misplacedAwait }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("await"));
+        query("{ misplacedYield }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("generators"));
+    }
+
+    @Test
+    void malformedCodeWithBannedWordsOnlyInLiteralsRemainsSyntaxError() {
+        query("{ malformedSyntax }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("SyntaxError"));
+    }
+
+    @Test
     void theSameKeywordsInStringsAndCommentsAreNotRefused() {
         // The check would be worse than useless if it rejected valid resolvers, so the scan blanks
         // comments, strings and template text before looking for constructs.
@@ -383,6 +795,144 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.keywordsInText", equalTo("try catch class while ok"));
+    }
+
+    @Test
+    void aTemplateLiteralResumesAfterItsExpression() {
+        query("{ templateHole }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.templateHole", equalTo("its class: value-"));
+    }
+
+    @Test
+    void aKeywordUsedAsAnObjectKeyIsNotReadAsADeclaration() {
+        query("{ keywordObjectKey }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.keywordObjectKey", equalTo("allowed"));
+    }
+
+    @Test
+    void aConditionalThisBeforeAColonIsStillRefused() {
+        query("{ conditionalThis }")
+            .statusCode(200)
+            .body("data.conditionalThis", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
+    }
+
+    @Test
+    void aRegexLiteralIsReportedAsUnsupported() {
+        query("{ regexLiteral }")
+            .statusCode(200)
+            .body("data.regexLiteral", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+    }
+
+    @Test
+    void aKeywordInsideARegexLiteralIsReportedAsUnsupportedRegex() {
+        query("{ regexKeyword }")
+            .statusCode(200)
+            .body("data.regexKeyword", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+    }
+
+    @Test
+    void slashesInsideARegexCharacterClassCannotHideUnsupportedCode() {
+        query("{ regexClassThenUnsupported }")
+            .statusCode(200)
+            .body("data.regexClassThenUnsupported", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
+    }
+
+    @Test
+    void divisionInsideTwoTemplateInterpolationsIsNotReadAsRegex() {
+        query("{ regexDivision }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.regexDivision", equalTo("3% vs 4%"));
+    }
+
+    @Test
+    void anIdentifierNamedOfInsideAForOfIterableKeepsDivisionOperators() {
+        query("{ forOfIdentifierDivision }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.forOfIdentifierDivision", equalTo("2"));
+    }
+
+    @Test
+    void regexAfterCaseAndLabelBlocksIsRefused() {
+        query("{ regexAfterCaseBlock(n: 1) }")
+            .statusCode(200)
+            .body("data.regexAfterCaseBlock", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+        query("{ regexAfterLabelBlock }")
+            .statusCode(200)
+            .body("data.regexAfterLabelBlock", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+    }
+
+    @Test
+    void everyJavaScriptLineTerminatorEndsALineComment() {
+        query("{ commentCr }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while loops"));
+        query("{ commentLineSeparator }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+        query("{ commentParagraphSeparator }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
+    }
+
+    @Test
+    void divisionAfterFunctionExpressionDoesNotHideLaterUnsupportedCode() {
+        query("{ divisionAfterFunction }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while loops"));
+    }
+
+    @Test
+    void divisionAfterTernaryObjectDoesNotHideLaterUnsupportedCode() {
+        query("{ divisionAfterObject }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
+    }
+
+    @Test
+    void invalidEscapeInTaggedRawTemplateDoesNotExposeKeywordsToSubsetScan() {
+        query("{ taggedRawInvalidEscape }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.taggedRawInvalidEscape", equalTo("\\x while"));
+    }
+
+    @Test
+    void invalidEscapeInUntaggedTemplateRemainsSyntaxError() {
+        query("{ untaggedInvalidEscape }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("SyntaxError"))
+            .body("errors[0].message", containsString("escape sequence"));
+    }
+
+    @Test
+    void invalidEscapeInTaggedRawTemplateStillScansExpressions() {
+        query("{ taggedRawInvalidEscapeHole }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while loops"));
     }
 
     @Test
@@ -396,6 +946,21 @@ class AppSyncJsResolverDockerIntegrationTest {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    private void assertSubscriptionFilter(int mode, String expected) {
+        query("{ subscriptionFilter(mode: " + mode + ") }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.subscriptionFilter", equalTo(expected));
+    }
+
+    private void assertSubscriptionFilterBudgetError(int mode, String message) {
+        query("{ subscriptionFilter(mode: " + mode + ") }")
+            .statusCode(200)
+            .body("data.subscriptionFilter", nullValue())
+            .body("errors[0].errorType", equalTo("RangeError"))
+            .body("errors[0].message", containsString(message));
+    }
 
     private ValidatableResponse query(String graphql) {
         return given()
@@ -509,7 +1074,7 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200);
     }
 
-    private static String escape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+    static String escape(String value) {
+        return new String(JsonStringEncoder.getInstance().quoteAsString(value));
     }
 }

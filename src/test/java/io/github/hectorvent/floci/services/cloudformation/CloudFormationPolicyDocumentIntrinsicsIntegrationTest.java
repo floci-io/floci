@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
@@ -161,6 +162,7 @@ class CloudFormationPolicyDocumentIntrinsicsIntegrationTest {
         String policyName = "sub-shorthand-policy-" + suffix;
 
         createStack(stackName, stackWithSubShorthandPolicy(roleName, bucketName, policyName));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         cfnQuery("DescribeStacks", stackName).then().statusCode(200)
                 .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 

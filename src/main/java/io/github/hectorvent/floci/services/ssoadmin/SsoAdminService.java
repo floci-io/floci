@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -64,7 +65,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class SsoAdminService implements Resettable {
+public class SsoAdminService implements Resettable, StoredResourceArns {
     private static final String BOOTSTRAP_INSTANCE = "instance/ssoins-7223b02a5d9f7c8e";
     private static final String IDENTITY_STORE_ID = "d-9067f2a3c1";
     private static final Pattern INSTANCE_ARN_PATTERN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":sso:::instance/(?:sso)?ins-[a-zA-Z0-9-.]{16}");
@@ -138,6 +139,7 @@ public class SsoAdminService implements Resettable {
     private final StorageBackend<String, String> trustedTokenIssuerClientTokens;
     private final IdentityStoreService identityStoreService;
     private final OrganizationsService organizationsService;
+    private final SsoAdminRequestContext requestContext;
     private final String defaultAccountId;
     private final String defaultRegion;
     /** The seeded instance lives in the deployment's home region, so its ARN takes that partition. */
@@ -145,7 +147,8 @@ public class SsoAdminService implements Resettable {
 
     @Inject
     public SsoAdminService(StorageFactory storageFactory, IdentityStoreService identityStoreService,
-                           OrganizationsService organizationsService, EmulatorConfig config) {
+                           OrganizationsService organizationsService, SsoAdminRequestContext requestContext,
+                           EmulatorConfig config) {
         this(
                 storageFactory.create("ssoadmin", "ssoadmin-permission-sets.json", new TypeReference<Map<String, PermissionSet>>() {}),
                 storageFactory.create("ssoadmin", "ssoadmin-assignments.json", new TypeReference<Map<String, Assignment>>() {}),
@@ -174,6 +177,7 @@ public class SsoAdminService implements Resettable {
                 storageFactory.create("ssoadmin", "ssoadmin-trusted-token-issuer-client-tokens.json", new TypeReference<Map<String, String>>() {}),
                 identityStoreService,
                 organizationsService,
+                requestContext,
                 config.defaultAccountId(),
                 config.defaultRegion());
     }
@@ -205,6 +209,7 @@ public class SsoAdminService implements Resettable {
                     StorageBackend<String, String> trustedTokenIssuerClientTokens,
                     IdentityStoreService identityStoreService,
                     OrganizationsService organizationsService,
+                    SsoAdminRequestContext requestContext,
                     String defaultAccountId,
                     String defaultRegion) {
         this.permissionSets = permissionSets;
@@ -234,6 +239,7 @@ public class SsoAdminService implements Resettable {
         this.trustedTokenIssuerClientTokens = trustedTokenIssuerClientTokens;
         this.identityStoreService = identityStoreService;
         this.organizationsService = organizationsService;
+        this.requestContext = requestContext;
         this.defaultAccountId = defaultAccountId;
         this.defaultRegion = defaultRegion;
         this.bootstrapInstanceArn = globalArn("sso", defaultRegion, "", BOOTSTRAP_INSTANCE);
@@ -1874,10 +1880,7 @@ public class SsoAdminService implements Resettable {
             if (targetId != null) {
                 throw validation("TargetId must not be provided when TargetType is ALL_PROVISIONED_ACCOUNTS.");
             }
-            permissionSetProvisionings.scan(key -> true).stream()
-                    .filter(provisioning -> permissionSetArn.equals(provisioning.permissionSetArn()))
-                    .map(PermissionSetProvisioning::accountId)
-                    .distinct()
+            provisionedAccounts(permissionSetArn)
                     .forEach(accountId -> ensurePermissionSetProvisioned(permissionSetArn, accountId));
         } else {
             throw validation("TargetType must be AWS_ACCOUNT or ALL_PROVISIONED_ACCOUNTS.");
@@ -1887,6 +1890,53 @@ public class SsoAdminService implements Resettable {
                 requestId, "SUCCEEDED", System.currentTimeMillis(), targetId, permissionSetArn, null);
         permissionSetProvisioningOperations.put(requestId, operation);
         return operation;
+    }
+
+    /**
+     * The accounts the permission set is provisioned to, as this request found them.
+     *
+     * <p>They are found once for the request, and kept: the permission check of a {@code ProvisionPermissionSet} for
+     * {@code ALL_PROVISIONED_ACCOUNTS} finds them and checks each one, and the request must provision to those.
+     * Another request may provision the permission set to one more account in between, and an account found again
+     * afterwards could be one no policy was checked against.
+     */
+    private List<String> provisionedAccounts(String permissionSetArn) {
+        List<String> accountIds = requestContext.provisionedAccounts(permissionSetArn);
+        if (accountIds == null) {
+            accountIds = permissionSetProvisionings.scan(key -> true).stream()
+                    .filter(provisioning -> permissionSetArn.equals(provisioning.permissionSetArn()))
+                    .map(PermissionSetProvisioning::accountId)
+                    .distinct()
+                    .toList();
+            requestContext.pinProvisionedAccounts(permissionSetArn, accountIds);
+        }
+        return accountIds;
+    }
+
+    @Override
+    public String namespace() {
+        return "sso";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The accounts a permission set is provisioned to, in its partition, which a {@code ProvisionPermissionSet} for
+     * {@code ALL_PROVISIONED_ACCOUNTS} provisions it to again, as {@link #provisionPermissionSet} does: the same
+     * ones, found once for the request.
+     */
+    @Override
+    public List<String> through(String member, String value, String region) {
+        if (!"PermissionSetArn".equals(member) || !AwsArnUtils.isArn(value)) {
+            return List.of();
+        }
+        String partition = AwsArnUtils.parse(value).partition();
+        return provisionedAccounts(value).stream()
+                .map(accountId -> AwsArnUtils.Arn.global(partition, "sso", "", "account/" + accountId).toString())
+                .toList();
     }
 
     private void ensurePermissionSetProvisioned(String permissionSetArn, String accountId) {
@@ -2481,11 +2531,9 @@ public class SsoAdminService implements Resettable {
     }
 
     private static String instanceArnForPermissionSet(String permissionSetArn) {
-        int serviceIndex = permissionSetArn.indexOf(":sso::");
-        int instanceStart = permissionSetArn.indexOf("permissionSet/") + "permissionSet/".length();
-        int instanceEnd = permissionSetArn.indexOf('/', instanceStart);
-        return permissionSetArn.substring(0, serviceIndex) + ":sso:::instance/"
-                + permissionSetArn.substring(instanceStart, instanceEnd);
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(permissionSetArn);
+        String instanceId = arn.resource().split("/", 3)[1];
+        return AwsArnUtils.Arn.global(arn.partition(), "sso", "", "instance/" + instanceId).toString();
     }
 
     static String applicationAccessScopeKey(String applicationArn, String scope) {

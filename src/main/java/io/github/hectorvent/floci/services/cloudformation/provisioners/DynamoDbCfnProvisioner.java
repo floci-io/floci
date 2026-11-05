@@ -3,9 +3,12 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
@@ -14,6 +17,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess.
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.KinesisStreamingDestination;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -43,9 +47,11 @@ import java.util.Set;
  * {@code Ref} of a replica follows CDK's {@code <tableName>-<region>} format.
  *
  * <p>A table's {@code TimeToLiveSpecification} is reconciled against what DescribeTimeToLive
- * reports, so UpdateTimeToLive is called only when the setting differs. An in-place update of an
- * {@code AWS::DynamoDB::Table} keeps the tags, stream and TTL setting it replaces, so a failed
- * stack update can put all three back.
+ * reports, so UpdateTimeToLive is called only when the setting differs. Its
+ * {@code KinesisStreamSpecification} is reconciled against the table's active Kinesis streaming
+ * destinations the same way. An in-place update of an {@code AWS::DynamoDB::Table} keeps the tags,
+ * stream, TTL setting and Kinesis streaming destinations it replaces, so a failed stack update can
+ * put all four back.
  */
 @ApplicationScoped
 public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
@@ -62,6 +68,14 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     private static final String REPLICA_REGION_ATTR = "__FlociDynamoDbReplicaRegion";
     private static final String REPLICA_SKIP_DELETION_ATTR = "__FlociDynamoDbReplicaSkipDeletion";
     private static final int TABLE_NAME_MAX_LENGTH = 255;
+    private static final String KINESIS_STREAM_SPECIFICATION = "KinesisStreamSpecification";
+    private static final String DESTINATION_ACTIVE = "ACTIVE";
+    private static final int STREAM_ARN_MIN_LENGTH = 37;
+    private static final int STREAM_ARN_MAX_LENGTH = 1024;
+
+    /** One Kinesis streaming destination a table should forward to, with its timestamp precision. */
+    private record KinesisDestinationSpec(String streamArn, String precision) {
+    }
 
     private final DynamoDbFacade dynamoDb;
 
@@ -133,6 +147,15 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         // survives an update; removing a block the previous template declared turns TTL off.
         boolean ttlManaged = ttlDeclared || ctx.previouslyDeclared("TimeToLiveSpecification");
         TimeToLive desiredTtl = ttlDeclared ? declaredTimeToLive(ttlSpec, engine) : TIME_TO_LIVE_OFF;
+        JsonNode kinesisSpec = props != null ? engine.resolveNode(props.get(KINESIS_STREAM_SPECIFICATION)) : null;
+        boolean kinesisDeclared = kinesisSpec != null && !kinesisSpec.isNull();
+        if (kinesisDeclared) {
+            CfnPropertyTypes.requireType(KINESIS_STREAM_SPECIFICATION, kinesisSpec, JsonNodeType.OBJECT);
+        }
+        boolean kinesisManaged = kinesisDeclared || ctx.previouslyDeclared(KINESIS_STREAM_SPECIFICATION);
+        List<KinesisDestinationSpec> desiredKinesis = kinesisDeclared
+                ? List.of(declaredKinesisDestination(kinesisSpec, engine))
+                : List.of();
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
         List<AttributeDefinition> attrDefs = new ArrayList<>();
@@ -232,7 +255,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             }
             Map<String, String> currentTags = dynamoDb.tables().listTagsOfResource(scope, table.getTableArn());
             if (inPlaceUpdate && TABLE.equals(r.getResourceType())) {
-                snapshotBeforeUpdate(r, scope, tableName, table, currentTags, currentTtl);
+                snapshotBeforeUpdate(r, scope, tableName, table, currentTags, currentTtl, kinesisManaged);
             }
 
             reconcileTags(scope, table.getTableArn(), currentTags,
@@ -260,6 +283,10 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
             // for the attribute, and Enabled false or a block removed on an update turns it off.
             if (ttlManaged && currentTtl != null) {
                 reconcileTimeToLive(scope, tableName, currentTtl, desiredTtl);
+            }
+
+            if (kinesisManaged) {
+                table = reconcileKinesisDestinations(scope, tableName, table, desiredKinesis, true);
             }
 
             r.setPhysicalId(tableName);
@@ -382,12 +409,128 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Keeps the tags, stream setting and TTL setting the table has before an in-place update
-     * changes them, with the account and region that address it, so {@link #rollbackUpdate} can
-     * put all three back.
+     * Runs before the table is created, as AWS validates the template before any resource exists. An
+     * empty {@code StreamArn} is present, so it passes here and fails the API's length check later.
+     */
+    private static KinesisDestinationSpec declaredKinesisDestination(JsonNode spec,
+                                                                     CloudFormationTemplateEngine engine) {
+        JsonNode streamArnNode = spec.get("StreamArn");
+        String streamArn = streamArnNode == null || streamArnNode.isNull() ? null : engine.resolve(streamArnNode);
+        if (streamArn == null) {
+            throw new AwsException("InvalidRequest",
+                    "Model validation failed (#/KinesisStreamSpecification: required key [StreamArn] not found)", 400);
+        }
+        JsonNode precisionNode = spec.get("ApproximateCreationDateTimePrecision");
+        String precision = precisionNode == null || precisionNode.isNull()
+                ? KinesisStreamingDestination.PRECISION_MILLISECOND
+                : engine.resolve(precisionNode);
+        if (!KinesisStreamingDestination.PRECISION_MILLISECOND.equals(precision)
+                && !KinesisStreamingDestination.PRECISION_MICROSECOND.equals(precision)) {
+            throw new AwsException("InvalidRequest", "Model validation failed"
+                    + " (#/KinesisStreamSpecification/ApproximateCreationDateTimePrecision:"
+                    + " failed validation constraint for keyword [enum])", 400);
+        }
+        return new KinesisDestinationSpec(streamArn, precision);
+    }
+
+    private static List<KinesisDestinationSpec> activeKinesisDestinations(TableDefinition table) {
+        List<KinesisDestinationSpec> active = new ArrayList<>();
+        for (KinesisStreamingDestination destination : table.getKinesisStreamingDestinations()) {
+            if (DESTINATION_ACTIVE.equals(destination.getDestinationStatus())) {
+                active.add(new KinesisDestinationSpec(destination.getStreamArn(),
+                        destination.getApproximateCreationDateTimePrecision()));
+            }
+        }
+        return active;
+    }
+
+    /**
+     * Leaves exactly the desired destinations active. A destination whose precision alone differs is
+     * updated in place, as CloudFormation does with one UpdateKinesisStreamingDestination call. The
+     * active list is copied first: the service may hand back the stored table, whose destination list
+     * the calls below change.
+     * {@code fromTemplate} checks every declared {@code StreamArn} as the AWS handler does, whether
+     * or not the table already forwards to it; a rollback restores destinations the table already had
+     * and enables them as they were.
+     */
+    private TableDefinition reconcileKinesisDestinations(Scope scope, String tableName, TableDefinition table,
+                                                         List<KinesisDestinationSpec> desired, boolean fromTemplate) {
+        if (fromTemplate) {
+            for (KinesisDestinationSpec destination : desired) {
+                requireUsableStreamArn(tableName, destination.streamArn());
+            }
+        }
+        List<KinesisDestinationSpec> active = activeKinesisDestinations(table);
+        for (KinesisDestinationSpec destination : active) {
+            if (!containsStream(desired, destination.streamArn())) {
+                table = dynamoDb.tables().disableKinesisStreamingDestination(scope, tableName,
+                        destination.streamArn());
+            }
+        }
+        for (KinesisDestinationSpec destination : desired) {
+            if (active.contains(destination)) {
+                continue;
+            }
+            if (containsStream(active, destination.streamArn())) {
+                table = dynamoDb.tables().updateKinesisStreamingDestination(scope, tableName,
+                        destination.streamArn(), destination.precision());
+            } else if (fromTemplate) {
+                table = enableKinesisDestination(scope, tableName, destination);
+            } else {
+                table = dynamoDb.tables().enableKinesisStreamingDestination(scope, tableName,
+                        destination.streamArn(), destination.precision());
+            }
+        }
+        return table;
+    }
+
+    /**
+     * Fails the way the AWS handler does. A {@code StreamArn} outside the API's 37 to 1024 characters
+     * fails EnableKinesisStreamingDestination's own validation. Any other value that is not a Kinesis
+     * stream ARN, such as a stream's name from {@code Ref}, never becomes active, so the table does
+     * not stabilize.
+     */
+    private static void requireUsableStreamArn(String tableName, String streamArn) {
+        String violation = SmithyValidationErrors.lengthOutOfRange("streamArn", streamArn,
+                STREAM_ARN_MIN_LENGTH, STREAM_ARN_MAX_LENGTH);
+        if (violation != null) {
+            throw SmithyValidationErrors.exception("InvalidRequest", violation);
+        }
+        if (!AwsArnUtils.isArnFor(streamArn, "kinesis")) {
+            throw notStabilized(tableName);
+        }
+    }
+
+    /** A stream that does not exist, as the table's account and region see it, never becomes active either. */
+    private TableDefinition enableKinesisDestination(Scope scope, String tableName,
+                                                     KinesisDestinationSpec destination) {
+        try {
+            return dynamoDb.tables().enableKinesisStreamingDestination(scope, tableName, destination.streamArn(),
+                    destination.precision());
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw notStabilized(tableName);
+            }
+            throw e;
+        }
+    }
+
+    private static AwsException notStabilized(String tableName) {
+        return new AwsException("NotStabilized", "Resource of type '" + TABLE + "' with identifier '" + tableName
+                + "' did not stabilize.", 400);
+    }
+
+    private static boolean containsStream(List<KinesisDestinationSpec> destinations, String streamArn) {
+        return destinations.stream().anyMatch(destination -> destination.streamArn().equals(streamArn));
+    }
+
+    /**
+     * Keeps the tags, stream setting, TTL setting and active Kinesis streaming destinations the table
+     * has before an in-place update changes them, with the account and region that address it, so
+     * {@link #rollbackUpdate} can put all four back.
      */
     private static void snapshotBeforeUpdate(StackResource r, Scope scope, String tableName, TableDefinition table,
-                                             Map<String, String> tags, TimeToLive ttl) {
+                                             Map<String, String> tags, TimeToLive ttl, boolean kinesisManaged) {
         ObjectNode snapshot = MAPPER.createObjectNode();
         snapshot.put("accountId", scope.accountId());
         snapshot.put("region", scope.region());
@@ -398,6 +541,14 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("streamViewType", table.getStreamViewType());
         snapshot.put("ttlEnabled", ttl.enabled());
         snapshot.put("ttlAttributeName", ttl.attributeName());
+        if (kinesisManaged) {
+            ArrayNode destinations = snapshot.putArray("kinesisDestinations");
+            for (KinesisDestinationSpec destination : activeKinesisDestinations(table)) {
+                destinations.addObject()
+                        .put("streamArn", destination.streamArn())
+                        .put("precision", destination.precision());
+            }
+        }
         r.getAttributes().put(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
     }
 
@@ -412,9 +563,21 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts back the tags, stream setting and TTL setting an in-place table update changed. All
-     * three go back or none is claimed: restoring one alone would report a rollback while the
-     * others stayed changed. Only an in-place {@code AWS::DynamoDB::Table} update takes the
+     * The engine calls this for every resource once a stack update commits. A committed update is
+     * never rolled back, so its snapshot is dropped here: left on the resource, a retried rollback
+     * of a later update would put the table back to its state before this one.
+     */
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);
+        return UpdateCleanupResult.notApplicable();
+    }
+
+    /**
+     * Puts back the tags, stream setting, TTL setting and Kinesis streaming destinations an in-place
+     * table update changed. All four go back or none is claimed: restoring one alone would report a
+     * rollback while the others stayed changed. A snapshot without destinations leaves them as they
+     * are. Only an in-place {@code AWS::DynamoDB::Table} update takes the
      * snapshot, so a global table or a replacing update still reports that rollback is not
      * implemented. The snapshot is spent only once the restore succeeded: a restore that throws
      * leaves it in place for the next attempt.
@@ -452,6 +615,15 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         TimeToLive currentTtl = dynamoDb.tables().timeToLive(scope, tableName);
         requireTimeToLiveChangeAllowed(currentTtl, priorTtl);
         reconcileTimeToLive(scope, tableName, currentTtl, priorTtl);
+
+        if (snapshot.has("kinesisDestinations")) {
+            List<KinesisDestinationSpec> priorDestinations = new ArrayList<>();
+            for (JsonNode destination : snapshot.path("kinesisDestinations")) {
+                priorDestinations.add(new KinesisDestinationSpec(destination.path("streamArn").asText(),
+                        destination.path("precision").asText()));
+            }
+            table = reconcileKinesisDestinations(scope, tableName, table, priorDestinations, false);
+        }
 
         publishStreamArn(resource, table);
         resource.getAttributes().remove(CfnRollback.DYNAMODB_TABLE_UPDATE_SNAPSHOT_ATTR);

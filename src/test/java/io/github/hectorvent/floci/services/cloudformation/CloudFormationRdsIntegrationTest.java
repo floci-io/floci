@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -61,6 +62,7 @@ class CloudFormationRdsIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         // Stack reaches CREATE_COMPLETE and Ref(DbSubnets) exports the subnet group name.
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -108,6 +110,7 @@ class CloudFormationRdsIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         String beforeXml = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -134,6 +137,7 @@ class CloudFormationRdsIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
         String afterXml = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -210,6 +214,7 @@ class CloudFormationRdsIntegrationTest {
             .statusCode(200);
 
         try {
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
             String xml = given()
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", CFN_AUTH)

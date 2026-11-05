@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -130,6 +131,7 @@ class CloudFormationCdkDeployLoopIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -203,6 +205,7 @@ class CloudFormationCdkDeployLoopIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -251,6 +254,7 @@ class CloudFormationCdkDeployLoopIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

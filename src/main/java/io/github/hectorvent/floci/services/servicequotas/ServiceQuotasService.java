@@ -108,6 +108,25 @@ public class ServiceQuotasService {
         return listQuotas(serviceCode, quotaCodeFilter, null, nextToken, maxResults, region, accountId, false);
     }
 
+    public ObjectNode listServices(String nextToken, Integer maxResults) {
+        List<String> serviceCodes = new ArrayList<>(SERVICE_NAMES.keySet());
+        serviceCodes.sort(String::compareToIgnoreCase);
+        Page<String> page = paginate(serviceCodes, nextToken, maxResults);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("Services");
+        for (String code : page.items()) {
+            ObjectNode service = objectMapper.createObjectNode();
+            service.put("ServiceCode", code);
+            service.put("ServiceName", SERVICE_NAMES.getOrDefault(code, code));
+            array.add(service);
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return response;
+    }
+
     private ObjectNode listQuotas(String serviceCode, String quotaCodeFilter, String appliedAtLevel,
                                   String nextToken, Integer maxResults, String region, String accountId, boolean applied) {
         requireServiceCode(serviceCode);
@@ -241,8 +260,11 @@ public class ServiceQuotasService {
     }
 
     private static int decodeToken(String token) {
-        if (token == null || token.isEmpty()) {
+        if (token == null) {
             return 0;
+        }
+        if (token.isEmpty()) {
+            return -1;
         }
         try {
             return Integer.parseInt(Base64Url.decode(token));

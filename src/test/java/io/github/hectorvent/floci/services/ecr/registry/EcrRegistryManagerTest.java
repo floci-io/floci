@@ -12,6 +12,8 @@ import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.exception.DockerClientException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerNetwork;
+import com.github.dockerjava.api.model.ContainerNetworkSettings;
 import com.github.dockerjava.api.model.ContainerPort;
 import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -450,6 +452,67 @@ class EcrRegistryManagerTest {
 
         verify(lifecycleManager).stopAndRemove("0123456789abcdef", null);
         verify(builder).withLoopbackPortBinding(eq(5000), anyInt());
+    }
+
+    @Test
+    void survivorOnAnotherDockerNetworkIsRecreatedKeepingItsVolume() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(currentContainerNetworkResolver.resolveNetworkName()).thenReturn(Optional.of("net-b"));
+        Container survivor = loopbackSurvivorOn("net-a");
+        when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(survivor));
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+
+        manager.ensureStarted();
+
+        verify(lifecycleManager, never()).adopt(anyString(), any(), any());
+        verify(lifecycleManager).stopAndRemove("0123456789abcdef", null);
+        verify(builder).withDockerNetwork(Optional.of("net-b"));
+        verify(builder).withNamedVolume(anyString(), eq("/var/lib/registry"));
+        verify(lifecycleManager, never()).removeVolume(anyString());
+        assertTrue(manager.isStarted());
+    }
+
+    @Test
+    void survivorOnFlocisDockerNetworkIsAdopted() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(currentContainerNetworkResolver.resolveNetworkName()).thenReturn(Optional.of("net-b"));
+        Container survivor = loopbackSurvivorOn("resolved:net-b");
+        when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(survivor));
+        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000), Optional.of("resolved:net-b")))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef", Map.of()));
+
+        manager.ensureStarted();
+
+        verify(lifecycleManager, never()).stopAndRemove(anyString(), any());
+        verify(lifecycleManager, never()).createAndStart(any());
+        assertTrue(manager.isStarted());
+    }
+
+    @Test
+    void survivorOnAnotherDockerNetworkIsAdoptedWhenFlociRunsOnTheHost() {
+        Container survivor = loopbackSurvivorOn("net-a");
+        when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(survivor));
+        when(ecr.dockerNetwork()).thenReturn(Optional.of("net-b"));
+        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000), Optional.of("resolved:net-b")))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef", Map.of()));
+
+        manager.ensureStarted();
+
+        verify(lifecycleManager, never()).stopAndRemove(anyString(), any());
+        verify(lifecycleManager, never()).createAndStart(any());
+        assertTrue(manager.isStarted());
+    }
+
+    private static Container loopbackSurvivorOn(String network) {
+        Container existing = Mockito.mock(Container.class);
+        when(existing.getId()).thenReturn("0123456789abcdef");
+        when(existing.getPorts()).thenReturn(new ContainerPort[] {
+                new ContainerPort().withIp("127.0.0.1").withPrivatePort(5000).withPublicPort(BASE_PORT)
+        });
+        when(existing.getNetworkSettings()).thenReturn(
+                new ContainerNetworkSettings().withNetworks(Map.of(network, new ContainerNetwork())));
+        return existing;
     }
 
     @Test

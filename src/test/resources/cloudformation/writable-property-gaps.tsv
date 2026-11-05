@@ -169,7 +169,6 @@ AWS::DynamoDB::Table	BillingMode	accepted and ignored
 AWS::DynamoDB::Table	ContributorInsightsSpecification	accepted and ignored
 AWS::DynamoDB::Table	DeletionProtectionEnabled	accepted and ignored
 AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
-AWS::DynamoDB::Table	KinesisStreamSpecification	accepted and ignored
 AWS::DynamoDB::Table	OnDemandThroughput	accepted and ignored
 AWS::DynamoDB::Table	PointInTimeRecoverySpecification	accepted and ignored
 AWS::DynamoDB::Table	ProvisionedThroughput	accepted and ignored
@@ -189,7 +188,6 @@ AWS::EC2::FlowLog	DeliverCrossAccountRole	accepted and ignored
 AWS::EC2::FlowLog	DestinationOptions	accepted and ignored
 AWS::EC2::FlowLog	LogGroupName	accepted and ignored
 AWS::EC2::FlowLog	TagFieldSpecifications	accepted and ignored
-AWS::EC2::FlowLog	Tags	accepted and ignored
 AWS::EC2::Instance	AdditionalInfo	accepted and ignored
 AWS::EC2::Instance	Affinity	accepted and ignored
 AWS::EC2::Instance	BlockDeviceMappings	accepted and ignored
@@ -366,7 +364,6 @@ AWS::IAM::ManagedPolicy	Path	accepted and ignored
 AWS::IAM::ManagedPolicy	PolicyDocument	accepted and ignored
 AWS::IAM::ManagedPolicy	Users	accepted and ignored
 AWS::IAM::Policy	PolicyDocument	accepted and ignored
-AWS::IAM::Role	MaxSessionDuration	accepted and ignored
 AWS::IAM::Role	Tags	accepted and ignored
 AWS::IAM::User	LoginProfile	documented as ignored (docs/services/cloudformation.md, IAM)
 AWS::KMS::Key	BypassPolicyLockoutSafetyCheck	accepted and ignored
@@ -399,6 +396,7 @@ AWS::KinesisFirehose::DeliveryStream	RedshiftDestinationConfiguration	documented
 AWS::KinesisFirehose::DeliveryStream	SnowflakeDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
 AWS::KinesisFirehose::DeliveryStream	SplunkDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
 AWS::Lambda::Alias	ProvisionedConcurrencyConfig	accepted and ignored
+AWS::Lambda::CodeSigningConfig	Tags	accepted and ignored
 AWS::Lambda::EventSourceMapping	AmazonManagedKafkaEventSourceConfig	accepted and ignored
 AWS::Lambda::EventSourceMapping	DocumentDBEventSourceConfig	accepted and ignored
 AWS::Lambda::EventSourceMapping	KmsKeyArn	accepted and ignored
@@ -411,7 +409,6 @@ AWS::Lambda::EventSourceMapping	SelfManagedKafkaEventSourceConfig	accepted and i
 AWS::Lambda::EventSourceMapping	Tags	accepted and ignored
 AWS::Lambda::EventSourceMapping	TumblingWindowInSeconds	documented as ignored (docs/services/cloudformation.md, Lambda)
 AWS::Lambda::Function	CapacityProviderConfig	accepted and ignored
-AWS::Lambda::Function	CodeSigningConfigArn	accepted and ignored
 AWS::Lambda::Function	FunctionScalingConfig	accepted and ignored
 AWS::Lambda::Function	KmsKeyArn	accepted and ignored
 AWS::Lambda::Function	PublishToLatestPublished	accepted and ignored
@@ -651,6 +648,7 @@ AWS::SecretsManager::Secret	Type	accepted and ignored
 AWS::ServiceDiscovery::PrivateDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::PublicDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::Service	ServiceAttributes	accepted and ignored
+AWS::Signer::SigningProfile	Tags	accepted and ignored: Floci has no Signer API to tag
 AWS::Transfer::Server	Certificate	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	CreateWithHostKey	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	IpAddressType	rejected with a ValidationError, not supported by Floci

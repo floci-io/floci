@@ -5,7 +5,6 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.RestartContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
@@ -13,8 +12,6 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
-import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
-import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.container.TimestreamInfluxDbContainerManager.InfluxDbEndpoint;
@@ -24,7 +21,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
@@ -35,7 +32,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -59,6 +55,7 @@ import static org.mockito.Mockito.when;
 class TimestreamInfluxDbContainerManagerTest {
 
     private ContainerLifecycleManager lifecycleManager;
+    private ContainerBuilder containerBuilder;
     private ContainerBuilder.Builder builder;
     private PortAllocator portAllocator;
     private TimestreamInfluxDbContainerManager manager;
@@ -68,10 +65,9 @@ class TimestreamInfluxDbContainerManagerTest {
     @BeforeEach
     void setUp() {
         lifecycleManager = mock(ContainerLifecycleManager.class);
-        ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
+        containerBuilder = mock(ContainerBuilder.class);
         builder = mock(ContainerBuilder.Builder.class, Mockito.RETURNS_SELF);
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
-        when(containerBuilder.resolveDockerNetwork(any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
         portAllocator = mock(PortAllocator.class);
         when(portAllocator.allocate(8086, 8185)).thenReturn(8090);
@@ -93,15 +89,16 @@ class TimestreamInfluxDbContainerManagerTest {
     }
 
     @ParameterizedTest
-    @NullSource
-    @ValueSource(strings = "service-network")
-    void restartResolvesTheCurrentEndpointAfterDockerCompletes(String network) {
+    @CsvSource({"service-network,resolved-network", ",resolved-network", ","})
+    void restartResolvesTheCurrentEndpointAfterDockerCompletes(String network, String resolvedNetwork) {
         DockerClient docker = mock(DockerClient.class);
         RestartContainerCmd restart = mock(RestartContainerCmd.class);
         when(lifecycleManager.getDockerClient()).thenReturn(docker);
         when(docker.restartContainerCmd("container-id")).thenReturn(restart);
         when(influx.dockerNetwork()).thenReturn(Optional.ofNullable(network));
-        when(lifecycleManager.resolveEndpoint("container-id", 8086, network))
+        when(containerBuilder.resolveDockerNetwork(Optional.ofNullable(network)))
+                .thenReturn(Optional.ofNullable(resolvedNetwork));
+        when(lifecycleManager.resolveEndpoint("container-id", 8086, resolvedNetwork))
                 .thenReturn(new EndpointInfo("reassigned-host", 18086));
 
         assertEquals(new InfluxDbEndpoint("container-id", "reassigned-host", 18086),
@@ -109,46 +106,8 @@ class TimestreamInfluxDbContainerManagerTest {
 
         InOrder order = inOrder(restart, lifecycleManager);
         order.verify(restart).exec();
-        order.verify(lifecycleManager).resolveEndpoint("container-id", 8086, network);
-        verify(portAllocator, never()).allocate(anyInt(), anyInt());
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"service", "global", "detected", "none"})
-    void restartUsesTheSameEffectiveNetworkAsCreation(String selection) {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        CurrentContainerNetworkResolver networks = mock(CurrentContainerNetworkResolver.class);
-        when(config.services()).thenReturn(services);
-        when(services.timestreamInfluxdb()).thenReturn(influx);
-        when(influx.dockerNetwork()).thenReturn("service".equals(selection)
-                ? Optional.of("service-network") : Optional.empty());
-        when(services.dockerNetwork()).thenReturn("service".equals(selection) || "global".equals(selection)
-                ? Optional.of("global-network") : Optional.empty());
-        when(networks.resolveNetworkName()).thenReturn("none".equals(selection)
-                ? Optional.empty() : Optional.of("detected-network"));
-        ContainerBuilder realBuilder = new ContainerBuilder(config, mock(DockerHostResolver.class),
-                mock(EmbeddedDnsServer.class), networks);
-        String expectedNetwork = "none".equals(selection) ? null : selection + "-network";
-        assertEquals(expectedNetwork,
-                realBuilder.resolveDockerNetwork(influx.dockerNetwork()).orElse(null));
-        TimestreamInfluxDbContainerManager networkManager = new TimestreamInfluxDbContainerManager(
-                realBuilder, lifecycleManager, mock(ContainerDetector.class), portAllocator, config);
-        DockerClient docker = mock(DockerClient.class);
-        RestartContainerCmd restart = mock(RestartContainerCmd.class);
-        when(lifecycleManager.getDockerClient()).thenReturn(docker);
-        when(docker.restartContainerCmd("container-id")).thenReturn(restart);
-        when(lifecycleManager.resolveEndpoint(eq("container-id"), eq(8086), any()))
-                .thenAnswer(invocation -> new EndpointInfo(
-                        Objects.equals(expectedNetwork, invocation.getArgument(2))
-                                ? "reachable-workload" : "unreachable-bridge", 8086));
-
-        assertEquals(new InfluxDbEndpoint("container-id", "reachable-workload", 8086),
-                networkManager.restart("container-id"));
-
-        InOrder order = inOrder(restart, lifecycleManager);
-        order.verify(restart).exec();
-        order.verify(lifecycleManager).resolveEndpoint("container-id", 8086, expectedNetwork);
+        order.verify(lifecycleManager).resolveEndpoint("container-id", 8086, resolvedNetwork);
+        verify(containerBuilder).resolveDockerNetwork(Optional.ofNullable(network));
         verify(portAllocator, never()).allocate(anyInt(), anyInt());
     }
 

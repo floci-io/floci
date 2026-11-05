@@ -27,6 +27,8 @@ public class Table {
     @JsonProperty("LastAccessTime")
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant lastAccessTime;
+    @JsonProperty("Retention")
+    private Integer retention;
     @JsonProperty("PartitionKeys")
     private List<Column> partitionKeys;
     @JsonProperty("StorageDescriptor")
@@ -41,6 +43,8 @@ public class Table {
     private String versionId;
     @JsonProperty("Parameters")
     private Map<String, String> parameters;
+    @JsonProperty("IsRegisteredWithLakeFormation")
+    private Boolean registeredWithLakeFormation;
 
     public Table() {}
 
@@ -58,6 +62,8 @@ public class Table {
     public void setUpdateTime(Instant updateTime) { this.updateTime = updateTime; }
     public Instant getLastAccessTime() { return lastAccessTime; }
     public void setLastAccessTime(Instant lastAccessTime) { this.lastAccessTime = lastAccessTime; }
+    public Integer getRetention() { return retention; }
+    public void setRetention(Integer retention) { this.retention = retention; }
     public List<Column> getPartitionKeys() { return partitionKeys; }
     public void setPartitionKeys(List<Column> partitionKeys) { this.partitionKeys = partitionKeys; }
     public StorageDescriptor getStorageDescriptor() { return storageDescriptor; }
@@ -72,4 +78,8 @@ public class Table {
     public void setVersionId(String versionId) { this.versionId = versionId; }
     public Map<String, String> getParameters() { return parameters; }
     public void setParameters(Map<String, String> parameters) { this.parameters = parameters; }
+    public Boolean getRegisteredWithLakeFormation() { return registeredWithLakeFormation; }
+    public void setRegisteredWithLakeFormation(Boolean registeredWithLakeFormation) {
+        this.registeredWithLakeFormation = registeredWithLakeFormation;
+    }
 }

@@ -123,6 +123,20 @@ public final class Pagination {
         return slice(all, cursorOf, limit, after, scope, markers::issue);
     }
 
+    /** Paginates markers whose scope is signed without being carried in the token. */
+    public static <T> PaginatedResult<T> slice(List<T> all, Function<T, String> cursorOf,
+                                               int limit, String marker, SignedMarkers markers,
+                                               String scope, Function<String, AwsException> invalidMarker) {
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was " + limit);
+        }
+        String after = marker == null ? null : markers.cursorOf(scope, marker);
+        if (marker != null && after == null) {
+            throw invalidMarker.apply(marker);
+        }
+        return slice(all, cursorOf, limit, after, "", cursor -> markers.issue(scope, cursor));
+    }
+
     /** Validates service-specific bounds before applying the existing namespaced cursor format. */
     public static <T> PaginatedResult<T> paginate(List<T> all, Function<T, String> cursorOf,
                                                   Integer maxResults, String nextToken,

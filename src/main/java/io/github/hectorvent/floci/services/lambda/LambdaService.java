@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.lambda.durable.DurableExecutionService;
@@ -78,6 +79,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Business logic for Lambda function management and invocation.
@@ -243,6 +245,18 @@ public class LambdaService implements ResourceProvider {
                   EmulatorConfig config,
                   RegionResolver regionResolver,
                   StorageFactory storageFactory) {
+        this(functionStore, warmPool, codeStore, zipExtractor, config, regionResolver, storageFactory, null);
+    }
+
+    /** Package-private constructor for tests that attach functions to EC2 resources. */
+    LambdaService(LambdaFunctionStore functionStore,
+                  WarmPool warmPool,
+                  CodeStore codeStore,
+                  ZipExtractor zipExtractor,
+                  EmulatorConfig config,
+                  RegionResolver regionResolver,
+                  StorageFactory storageFactory,
+                  Ec2Service ec2Service) {
         this.functionStore = functionStore;
         this.executorService = null;
         this.concurrencyLimiter = new LambdaConcurrencyLimiter();
@@ -261,7 +275,7 @@ public class LambdaService implements ResourceProvider {
         this.dynamodbStreamsPoller = null;
         this.storageFactory = storageFactory;
         this.layerService = null;
-        this.ec2Service = null;
+        this.ec2Service = ec2Service;
         this.customResourceLiveness = null;
         this.durableExecutionService = null;
         this.codeSigningConfigService = storageFactory == null
@@ -722,6 +736,42 @@ public class LambdaService implements ResourceProvider {
         return updateFunctionCodeSigningConfig(region, functionName, codeSigningConfigArn);
     }
 
+    /**
+     * Validates and attaches a code-signing configuration under the configuration's lock, as
+     * PutFunctionCodeSigningConfig does.
+     */
+    public LambdaFunction attachFunctionCodeSigningConfig(String region, String functionName,
+                                                          String codeSigningConfigArn) {
+        if (codeSigningConfigService == null) {
+            throw new IllegalStateException("Lambda code-signing configuration service is unavailable");
+        }
+        LambdaCodeSigningConfigService.validateArn(codeSigningConfigArn);
+        return codeSigningConfigService.withConfigLock(codeSigningConfigArn, () -> {
+            codeSigningConfigService.requireForAttachment(region, regionResolver.getAccountId(), codeSigningConfigArn);
+            return putFunctionCodeSigningConfig(region, functionName, codeSigningConfigArn);
+        });
+    }
+
+    /**
+     * Deletes a code-signing configuration under the configuration's lock, refusing one a function
+     * still uses, as DeleteCodeSigningConfig does.
+     */
+    public void deleteCodeSigningConfig(String region, String accountId, String codeSigningConfigArn) {
+        if (codeSigningConfigService == null) {
+            throw new IllegalStateException("Lambda code-signing configuration service is unavailable");
+        }
+        codeSigningConfigService.withConfigLock(codeSigningConfigArn, () -> {
+            codeSigningConfigService.get(region, accountId, codeSigningConfigArn);
+            if (!listFunctionsByCodeSigningConfig(region, accountId, codeSigningConfigArn, 1, null)
+                    .items().isEmpty()) {
+                throw new AwsException("ResourceConflictException",
+                        "The code signing configuration is still attached to a function.", 409);
+            }
+            codeSigningConfigService.delete(region, codeSigningConfigArn);
+            return null;
+        });
+    }
+
     /** Removes a code-signing configuration from the function's {@code $LATEST}. */
     public void deleteFunctionCodeSigningConfig(String region, String functionName) {
         updateFunctionCodeSigningConfig(region, functionName, null);
@@ -1039,8 +1089,10 @@ public class LambdaService implements ResourceProvider {
                 ? validatedConfigurationInteger(request.get("Timeout"), "Timeout", 1, 900) : 0;
 
         Map<String, Object> requestedVpcConfig = fn.getVpcConfig();
+        String requestedVpcId = fn.getVpcId();
         if (requestedVpcConfigUpdate != null) {
             requestedVpcConfig = new HashMap<>(requestedVpcConfigUpdate);
+            requestedVpcId = resolveVpcId(region, requestedVpcConfig);
         }
         List<LambdaFileSystemConfig> requestedFileSystemConfigs = fn.getFileSystemConfigs();
         if (request.containsKey("FileSystemConfigs")) {
@@ -1111,7 +1163,7 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("VpcConfig")) {
             if (requestedVpcConfigUpdate != null) {
                 fn.setVpcConfig(requestedVpcConfig);
-                fn.setVpcId(resolveVpcId(region, requestedVpcConfig));
+                fn.setVpcId(requestedVpcId);
             }
         }
 
@@ -2718,30 +2770,54 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
-    /**
-     * The VpcConfig request shape carries no VpcId; VpcConfigResponse does. AWS derives it from
-     * the subnets the function is attached to, so resolve it once at attach time and store it.
-     * A subnet EC2 has never heard of resolves to null rather than failing the call - Floci's
-     * Lambda accepts unmanaged subnet ids, and CreateFunction must not start rejecting them.
-     */
+    /** Resolve the common VPC only after every requested subnet and security group is validated. */
     private String resolveVpcId(String region, Map<String, Object> vpcConfig) {
-        if (ec2Service == null || !hasValues(vpcConfig, "SubnetIds")) {
+        List<String> subnetIds = vpcResourceIds(vpcConfig, "SubnetIds");
+        List<String> groupIds = vpcResourceIds(vpcConfig, "SecurityGroupIds");
+        if (subnetIds.isEmpty() && groupIds.isEmpty()) {
             return null;
         }
-        for (Object subnetId : (List<?>) vpcConfig.get("SubnetIds")) {
-            if (subnetId == null) {
-                continue;
-            }
-            try {
-                List<Subnet> found = ec2Service.describeSubnets(region, List.of(subnetId.toString()), Map.of());
-                if (!found.isEmpty() && found.get(0).getVpcId() != null) {
-                    return found.get(0).getVpcId();
-                }
-            } catch (RuntimeException e) {
-                LOG.debugv(e, "Could not resolve VpcId for subnet {0} in {1}", subnetId, region);
-            }
+        if (subnetIds.isEmpty() || groupIds.isEmpty()) {
+            throw new AwsException("InvalidParameterValueException",
+                    "VpcConfig requires both subnet IDs and security group IDs", 400);
         }
-        return null;
+        if (ec2Service == null) {
+            return null;
+        }
+        List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
+        List<SecurityGroup> groups = ec2Service.describeSecurityGroups(region, groupIds, List.of(), Map.of());
+        Set<String> knownVpcIds = subnets.stream().map(Subnet::getVpcId).collect(Collectors.toSet());
+        groups.stream().map(SecurityGroup::getVpcId).forEach(knownVpcIds::add);
+        if (knownVpcIds.contains(null) || knownVpcIds.size() > 1) {
+            throw new AwsException("InvalidParameterValueException",
+                    "All known subnets and security groups in VpcConfig must belong to the same VPC", 400);
+        }
+        if (!Set.copyOf(subnetIds).equals(
+                subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toSet()))
+                || !Set.copyOf(groupIds).equals(
+                groups.stream().map(SecurityGroup::getGroupId).collect(Collectors.toSet()))) {
+            return null;
+        }
+        return knownVpcIds.stream().findFirst().orElse(null);
+    }
+
+    private static List<String> vpcResourceIds(Map<String, Object> vpcConfig, String member) {
+        Object value = vpcConfig == null ? null : vpcConfig.get(member);
+        if (value == null) {
+            return List.of();
+        }
+        if (!(value instanceof List<?> list)) {
+            throw new AwsException("SerializationException", "VpcConfig." + member + " must be an array", 400);
+        }
+        List<String> ids = new ArrayList<>(list.size());
+        for (Object id : list) {
+            if (!(id instanceof String resourceId)) {
+                throw new AwsException("SerializationException",
+                        "VpcConfig." + member + " must contain strings", 400);
+            }
+            ids.add(resourceId);
+        }
+        return ids;
     }
 
     private static Map<String, Object> structureMember(Map<String, Object> request, String member) {

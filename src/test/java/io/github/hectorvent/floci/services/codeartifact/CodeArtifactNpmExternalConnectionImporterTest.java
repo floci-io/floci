@@ -489,9 +489,10 @@ class CodeArtifactNpmExternalConnectionImporterTest {
     }
 
     /**
-     * Raised by Greptile's review: Verdaccio always points a fresh package's {@code dist-tags.
-     * latest} at whichever version was retained most recently (confirmed live, nothing a
-     * retention write sends can suppress it), so a local tag pointing at a version with a
+     * Raised by Greptile's review: Verdaccio points a package's dist-tags.latest at its very
+     * first-ever stored version with no way to suppress that one-time default (confirmed live;
+     * see {@code VerdaccioSidecarClient#storeVersion}'s own javadoc for the full story, including
+     * why a later write no longer clobbers it). So a local tag pointing at a version with a
      * confirmed external-retention claim is not a deliberate local choice at all and must still
      * be replaced once the real registry names a different version for that same tag.
      */

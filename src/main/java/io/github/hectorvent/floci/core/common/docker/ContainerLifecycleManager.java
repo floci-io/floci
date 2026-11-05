@@ -23,6 +23,7 @@ import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Ports;
 import com.github.dockerjava.api.model.Volume;
+import com.github.dockerjava.api.model.WaitContainerCondition;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -653,6 +654,8 @@ public class ContainerLifecycleManager {
      * {@link #stopAndRemove(String, Closeable)}. Resource-deletion paths that must retain their
      * persisted record for a retry use this stricter variant instead. The log stream is closed
      * only once the container is gone; when removal fails it is left open for the retry.
+     * A concurrent Docker removal is given up to five seconds to finish, followed by an
+     * independent absence check before cleanup succeeds.
      */
     public void stopAndRemoveStrict(String containerId, Closeable logStream) {
         stopAndRemoveStrict(containerId, logStream, 5);
@@ -698,18 +701,40 @@ public class ContainerLifecycleManager {
         } catch (NotFoundException e) {
             // Already gone, so cleanup succeeded.
         } catch (Exception e) {
-            IllegalStateException cleanupFailure = new IllegalStateException(
-                    "Failed to remove container " + containerId, e);
-            if (stopFailure != null) {
-                cleanupFailure.addSuppressed(stopFailure);
+            boolean absent = presenceOf(containerId) == ContainerPresence.ABSENT;
+            if (!absent && e instanceof ConflictException) {
+                absent = awaitConcurrentRemoval(containerId);
             }
-            // The container still exists and may still be logging, so the stream stays open for
-            // the caller's retry.
-            throw cleanupFailure;
+            if (!absent) {
+                IllegalStateException cleanupFailure = new IllegalStateException(
+                        "Failed to remove container " + containerId, e);
+                if (stopFailure != null) {
+                    cleanupFailure.addSuppressed(stopFailure);
+                }
+                // Retain the stream and original failure for the caller's retry.
+                throw cleanupFailure;
+            }
+            LOG.debugv("Container {0} is absent after its removal response failed", containerId);
         }
         // Closed only once the container is stopped and gone, as in stopAndRemove, so the follower
         // can drain the final tail.
         closeLogStreamIfPresent(logStream);
+    }
+
+    private boolean awaitConcurrentRemoval(String containerId) {
+        try (WaitContainerResultCallback callback = new WaitContainerResultCallback()) {
+            dockerClient.waitContainerCmd(containerId).withCondition(WaitContainerCondition.REMOVED).exec(callback);
+            callback.awaitCompletion(5, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            LOG.debugv("Interrupted waiting for container {0} removal", containerId);
+            return false;
+        } catch (Exception e) {
+            // Removal can finish before the wait registers, or the wait transport can fail.
+            // In either case, inspect must confirm absence before cleanup succeeds.
+            LOG.debugv("Could not await container {0} removal: {1}", containerId, e.getMessage());
+        }
+        return presenceOf(containerId) == ContainerPresence.ABSENT;
     }
 
     private void withTeardownSlot(Runnable stopAndRemove) {
@@ -975,6 +1000,51 @@ public class ContainerLifecycleManager {
             // Already gone — nothing to do.
         } catch (Exception e) {
             throw new IllegalStateException("Failed to remove volume " + volumeName, e);
+        }
+    }
+
+    /**
+     * Creates the bridge network {@code networkName} with {@code labels}, as {@link #ensureVolume(String, Map)} does a
+     * volume, when Docker has no network of that name; one that exists is used as it is. Containers on it reach each
+     * other, and containers on no other network reach them through it.
+     */
+    public void ensureNetwork(String networkName, Map<String, String> labels) {
+        try {
+            dockerClient.inspectNetworkCmd().withNetworkId(networkName).exec();
+            return;
+        } catch (NotFoundException e) {
+            // Made below.
+        }
+        dockerClient.createNetworkCmd()
+                .withName(networkName)
+                .withDriver("bridge")
+                .withLabels(mergedLabels(labels))
+                .exec();
+        LOG.debugv("Created network {0}", networkName);
+    }
+
+    /** Connects the created container {@code containerId} to {@code networkName} too, before it starts. */
+    public void connectToNetwork(String containerId, String networkName) {
+        dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(networkName)
+                .exec();
+    }
+
+    /**
+     * Removes the network {@code networkName}: true once it is gone, false when Docker kept it, as
+     * {@link #removeVolume} says of a volume.
+     */
+    public boolean removeNetwork(String networkName) {
+        try {
+            dockerClient.removeNetworkCmd(networkName).exec();
+            LOG.debugv("Removed network {0}", networkName);
+            return true;
+        } catch (NotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Error removing network {0}: {1}", networkName, e.getMessage());
+            return false;
         }
     }
 

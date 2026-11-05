@@ -52,6 +52,7 @@ import io.github.hectorvent.floci.services.iam.model.VirtualMfaDevice;
 import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -445,6 +446,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * caller names, so a China ARN resolves under any signing scope and lists in China scope.
      */
     private final Map<String, Map<String, IamPolicy>> awsManagedPoliciesByPartition = new ConcurrentHashMap<>();
+
+    /**
+     * Lazy so IAM never depends on Organizations at construction (Organizations already depends on
+     * IAM). Null when the service is built by hand, where no organization exists.
+     */
+    @Inject
+    Instance<ScpProvider> scpProvider;
+
+    /**
+     * The service control policy levels that cap {@code accountId}, or null when SCPs do not apply
+     * to it, for callers that evaluate a principal outside the request filter.
+     */
+    public List<List<String>> effectiveScpLevels(String accountId) {
+        return scpProvider != null && scpProvider.isResolvable()
+                ? scpProvider.get().effectiveScpLevels(accountId) : null;
+    }
 
     @Inject
     public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
@@ -1524,20 +1541,28 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * request carrying both is refused whole, before the description is written.
      */
     public IamRole updateRole(String roleName, String description, int maxSessionDuration) {
+        return updateRole(roleName, description, maxSessionDuration, null);
+    }
+
+    /** Applies an update only to the verified role, even if another role has since taken its name. */
+    public IamRole updateRole(String roleName, String description, int maxSessionDuration, String expectedRoleId) {
         validateRoleName(roleName);
         validateRoleDescription(description);
-        IamRole role = getRole(roleName);
-        if (maxSessionDuration > 0) {
-            requireNotServiceLinked(role, roleName);
+        synchronized (resourceNameLock) {
+            IamRole role = getRole(roleName);
+            requireSameRole(role, roleName, expectedRoleId);
+            if (maxSessionDuration > 0) {
+                requireNotServiceLinked(role, roleName);
+            }
+            if (description != null) {
+                role.setDescription(description);
+            }
+            if (maxSessionDuration > 0) {
+                role.setMaxSessionDuration(maxSessionDuration);
+            }
+            roles.put(roleName, role);
+            return role;
         }
-        if (description != null) {
-            role.setDescription(description);
-        }
-        if (maxSessionDuration > 0) {
-            role.setMaxSessionDuration(maxSessionDuration);
-        }
-        roles.put(roleName, role);
-        return role;
     }
 
     /**
@@ -2798,12 +2823,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * password programmatically", which is only true if the change itself clears the state the
      * reset left behind.
      *
-     * <p>An old password that does not match is the one refusal the reference leaves unnamed:
-     * every error it publishes for this operation describes something else, and the error it
-     * documents for a caller that is not an IAM user is {@code InvalidUserType}, raised by the
-     * handler. The common error types are additive per action, so this answers
-     * {@code InvalidParameterValue}, which is the published one for a parameter value the service
-     * cannot accept, with the same 400 as the operation's other sender faults.
+     * <p>A mismatched old password answers {@link #passwordChangeRefused}, captured from a real
+     * account: the reference publishes no error for one, and none of the six this operation
+     * declares describes it. The error it does document for a caller that is not an IAM user is
+     * {@code InvalidUserType}, raised by the handler. A new password the account's policy refuses
+     * is the case the operation does declare an error for, and keeps it.
      */
     public void changePassword(String userName, String oldPassword, String newPassword) {
         validatePassword(oldPassword, "oldPassword");
@@ -2811,9 +2835,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         synchronized (loginProfileLock) {
             LoginProfile profile = getLoginProfile(userName);
             if (!oldPassword.equals(profile.getPassword())) {
-                throw new AwsException("InvalidParameterValue",
-                        "The old password supplied is not the current password for user "
-                                + userName + ".", 400);
+                throw passwordChangeRefused();
             }
             checkPasswordPolicy(newPassword, profile);
             recordSupersededPassword(profile);
@@ -2826,10 +2848,32 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
+     * What a wrong old password is refused with, captured from a real account:
+     * {@code AccessDenied} 403 and "Either the new password does not conform to the account
+     * password policy or the old password was incorrect.". The sentence is AWS's own and is sent
+     * as captured, naming both of the operation's causes without saying which one refused the
+     * call, so a caller who cannot prove the current password learns nothing about the policy
+     * either.
+     *
+     * <p>That it names the policy half does not settle the policy half. The capture covers a wrong
+     * old password with a conforming new one, nothing records AWS answering this for a password
+     * the policy refuses, and the model declares {@code PasswordPolicyViolation} on this operation
+     * for exactly that case, so that is what the policy half keeps until a capture says otherwise.
+     */
+    private static AwsException passwordChangeRefused() {
+        return new AwsException("AccessDenied",
+                "Either the new password does not conform to the account password policy or the "
+                        + "old password was incorrect.", 403);
+    }
+
+    /**
      * The account's password policy applied to a password about to be stored, and only when the
      * account has ever set one, matching {@link #getAccountPasswordPolicy}'s own
      * NoSuchEntity-by-default semantics. {@code replacing} is the profile the password is being
      * written over, or null when there is none to reuse a password from.
+     *
+     * <p>Every caller that stores a password answers it the same way, {@code ChangePassword}
+     * included: {@code PasswordPolicyViolation} naming the rule that failed.
      */
     private void checkPasswordPolicy(String password, LoginProfile replacing) {
         getAccountPasswordPolicy().ifPresent(policy -> {
@@ -4791,28 +4835,21 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         session.getPresignedAction(), session.getPresignedResourceArn()));
     }
 
-    /** Binds a Redshift Spectrum scratch object ARN to an active transfer role session. */
-    public void registerSpectrumScratchResource(String accessKeyId, String resourceArn) {
+    /** Binds, or clears with null, an internal S3 scratch scope for this transfer session. */
+    public void registerScratchResource(String accessKeyId, String resourceArn) {
         currentSession(accessKeyId).ifPresent(session -> {
-            session.setSpectrumScratchResourceArn(resourceArn);
+            session.setScratchResourceArn(resourceArn);
             String accountId = session.getOriginAccountId() != null ? session.getOriginAccountId() : "000000000000";
             putSessionForAccount(accountId, accessKeyId, session);
         });
     }
 
-    /** Clears the Spectrum scratch object permission from the session when the transfer completes. */
-    public void clearSpectrumScratchResource(String accessKeyId) {
-        currentSession(accessKeyId).ifPresent(session -> {
-            session.setSpectrumScratchResourceArn(null);
-            String accountId = session.getOriginAccountId() != null ? session.getOriginAccountId() : "000000000000";
-            putSessionForAccount(accountId, accessKeyId, session);
-        });
+    public void clearScratchResource(String accessKeyId) {
+        registerScratchResource(accessKeyId, null);
     }
 
-    /** The exact scratch object ARN permitted for this session, if it is a Spectrum transfer session. */
-    public Optional<String> spectrumScratchResourceArn(String accessKeyId) {
-        return currentSession(accessKeyId)
-                .map(SessionCredential::getSpectrumScratchResourceArn)
+    public Optional<String> scratchResourceArn(String accessKeyId) {
+        return currentSession(accessKeyId).map(SessionCredential::getScratchResourceArn)
                 .filter(arn -> arn != null && !arn.isBlank());
     }
 
@@ -5715,6 +5752,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private CallerContext principalContext(String principalArn, boolean withAccountGrants) {
         if (principalArn == null || principalArn.isBlank()) {
             throw new AwsException("ValidationError", "PolicySourceArn is required.", 400);
+        }
+        // Captured from a real account: a value that clears the member's 20-character minimum and
+        // parses as no ARN is refused rather than resolved out of whatever follows its last slash,
+        // which used to simulate `arn:aws:iam:user/bob` as the user `bob`.
+        if (!AwsArnUtils.isArn(principalArn)) {
+            throw new AwsException("InvalidInput",
+                    "Invalid ARN provided in the request: " + principalArn, 400);
         }
         if (principalArn.contains(":user/")) {
             String userName = principalArn.substring(principalArn.lastIndexOf('/') + 1);

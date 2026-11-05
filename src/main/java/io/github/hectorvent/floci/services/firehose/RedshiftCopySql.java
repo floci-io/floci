@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.firehose;
 
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -13,9 +15,10 @@ import java.util.regex.Pattern;
  * quoting rules rather than a simplified one, because the statement is later run in simple query mode, where
  * PostgreSQL executes every {@code ;}-separated statement it receives.
  *
- * <p>{@link #build} adds no {@code IAM_ROLE} or credentials. AWS hands the cluster temporary credentials of the
- * stream's role; the wire proxy reads a staged object straight from Floci's S3 when the statement names no role,
- * whereas an {@code IAM_ROLE} would have to exist in IAM and be associated with the cluster.
+ * <p>{@link #build} adds an {@code IAM_ROLE} never: the stream's role is not necessarily associated with the cluster.
+ * AWS hands the cluster temporary credentials of that role, so a caller that has minted them passes them in and they
+ * go in as a {@code CREDENTIALS} clause, which the wire proxy reads S3 with. Without them the proxy reads the staged
+ * object as an unsigned request.
  */
 final class RedshiftCopySql {
 
@@ -24,10 +27,17 @@ final class RedshiftCopySql {
     private static final Pattern SIMPLE_NAME = Pattern.compile(NAME);
     private static final Pattern BUCKET = Pattern.compile("[^/'\"\\s]+");
     private static final Pattern OBJECT_KEY = Pattern.compile("[^'\"\\s]*");
+    private static final Pattern CREDENTIAL_VALUE = Pattern.compile("[A-Za-z0-9+/=_.-]+");
 
     private RedshiftCopySql() {}
 
     static String build(String table, String columns, String bucket, String key, String copyOptions) {
+        return build(table, columns, bucket, key, copyOptions, null);
+    }
+
+    /** @param credentials temporary credentials the COPY reads S3 with, or null to send none */
+    static String build(String table, String columns, String bucket, String key, String copyOptions,
+                        RedshiftRoleAccess.RoleSession credentials) {
         if (!isValidTableName(table)) {
             throw new IllegalArgumentException("DataTableName is not a table identifier: " + table);
         }
@@ -50,12 +60,37 @@ final class RedshiftCopySql {
             sql.append(" (").append(String.join(", ", trimmed)).append(')');
         }
         sql.append(" FROM 's3://").append(bucket).append('/').append(key).append('\'');
+        if (credentials != null) {
+            sql.append(" CREDENTIALS '").append(credentialsClause(credentials)).append('\'');
+        }
         // The closing terminator is dropped: the statement is sent on its own, and a second one cannot follow it.
         String options = copyOptions == null ? "" : withoutTrailingTerminator(copyOptions).trim();
         if (!options.isEmpty()) {
             sql.append(' ').append(options);
         }
         return sql.toString();
+    }
+
+    /** The message never echoes a value: a credential that cannot be quoted safely must not reach a log either. */
+    private static String credentialsClause(RedshiftRoleAccess.RoleSession credentials) {
+        for (String value : List.of(credentials.accessKeyId(), credentials.secretAccessKey(),
+                credentials.sessionToken())) {
+            if (!CREDENTIAL_VALUE.matcher(value).matches()) {
+                throw new IllegalArgumentException("The temporary credentials for the COPY contain a character "
+                        + "that cannot be placed in a CREDENTIALS clause.");
+            }
+        }
+        return "aws_access_key_id=" + credentials.accessKeyId()
+                + ";aws_secret_access_key=" + credentials.secretAccessKey()
+                + ";token=" + credentials.sessionToken();
+    }
+
+    /** Replaces the secret and token of {@code credentials} in {@code text}, for anything that leaves the process. */
+    static String redact(String text, RedshiftRoleAccess.RoleSession credentials) {
+        if (text == null || credentials == null) {
+            return text;
+        }
+        return text.replace(credentials.secretAccessKey(), "***").replace(credentials.sessionToken(), "***");
     }
 
     static boolean isValidTableName(String table) {

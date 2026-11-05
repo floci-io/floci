@@ -26,14 +26,22 @@ public enum ChecksumAlgorithm {
     private static final Set<String> KNOWN_UNSUPPORTED = Set.of("SHA512", "MD5", "XXHASH3", "XXHASH64", "XXHASH128");
 
     private final Set<ChecksumType> multipartTypes;
+    private final String wireValue;
+    private final String headerName;
 
     ChecksumAlgorithm(Set<ChecksumType> multipartTypes) {
         this.multipartTypes = multipartTypes;
+        this.wireValue = name().toLowerCase(Locale.ROOT);
+        this.headerName = "x-amz-checksum-" + wireValue;
+    }
+
+    public String headerName() {
+        return headerName;
     }
 
     /** Lowercase name, as AWS spells the algorithm in error messages. */
     public String wireValue() {
-        return name().toLowerCase(Locale.ROOT);
+        return wireValue;
     }
 
     public boolean supports(ChecksumType type) {

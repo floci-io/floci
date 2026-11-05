@@ -377,4 +377,52 @@ class AthenaCreateWorkGroupIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"));
     }
+
+    @Test
+    void aWorkGroupWithManagedResultsReportsNoResultLocationAndTheAutoEngineVersion() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "Name": "analytics-managed-results",
+                  "Configuration": {
+                    "EnforceWorkGroupConfiguration": true,
+                    "PublishCloudWatchMetricsEnabled": true,
+                    "ManagedQueryResultsConfiguration": { "Enabled": true }
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"analytics-managed-results\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("WorkGroup.Configuration.containsKey('ResultConfiguration')", equalTo(false))
+            .body("WorkGroup.Configuration.ManagedQueryResultsConfiguration.Enabled", equalTo(true))
+            .body("WorkGroup.Configuration.ManagedQueryResultsConfiguration.containsKey('EncryptionConfiguration')",
+                    equalTo(false))
+            .body("WorkGroup.Configuration.EnforceWorkGroupConfiguration", equalTo(true))
+            .body("WorkGroup.Configuration.EngineVersion.SelectedEngineVersion", equalTo("AUTO"))
+            .body("WorkGroup.Configuration.EngineVersion.EffectiveEngineVersion",
+                    equalTo("Athena engine version 3"))
+            .body("WorkGroup.Configuration.EnableMinimumEncryptionConfiguration", equalTo(false));
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"analytics-managed-results\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 }

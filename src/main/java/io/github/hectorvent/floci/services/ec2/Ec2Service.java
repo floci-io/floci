@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -37,6 +38,7 @@ import io.github.hectorvent.floci.services.ec2.model.Host;
 import io.github.hectorvent.floci.services.ec2.model.IamInstanceProfileAssociation;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceConnectEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecification;
 import io.github.hectorvent.floci.services.ec2.model.InstanceCreditSpecificationListResult;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
@@ -131,6 +133,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -156,6 +159,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.services.ec2.Ec2Ids.randomHex;
+
 @ApplicationScoped
 public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettable {
 
@@ -173,10 +178,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // An EC2 id is a known resource prefix, a hyphen and either 8 or more hex digits (8, 17, or 33
     // for an IPAM pool allocation) or a UUID (EC2 Fleet and Spot Fleet requests). Longer prefixes
     // come first so that eni-attach- is read as one type, not as eni-.
-    private static final String TAGGABLE_RESOURCE_TYPES = "(subnet-cidr-assoc|vpc-cidr-assoc"
+    private static final String TAGGABLE_RESOURCE_TYPES = "(cvpn-endpoint|subnet-cidr-assoc|vpc-cidr-assoc"
             + "|ipam-pool-alloc|ipam-scope|ipam-pool|ipam"
             + "|traf-mir-fil|traf-mir-tar|iip-assoc|eni-attach|tgw-attach|tgw-rtb|vpce-svc|aclassoc|eipassoc"
-            + "|eipalloc|rtbassoc|subnet|fleet|cagw|dopt|eigw|snap|vpce|acl|ami|cgw|eni|igw|key|nat|pcx|rtb|scr"
+            + "|eipalloc|rtbassoc|subnet|fleet|cagw|dopt|eice|eigw|snap|vpce|acl|ami|cgw|eni|igw|key|nat|pcx|rtb|scr"
             + "|sfr|sgr|sir|tgw|tms|vgw|vol|vpc|vpn|cr|fl|lt|pl|sg|h|i|r)-";
     private static final Pattern TAGGABLE_RESOURCE_ID = Pattern.compile(TAGGABLE_RESOURCE_TYPES
             + "(?:[0-9a-f]{8,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})");
@@ -302,6 +307,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private final StorageBackend<String, LaunchTemplate> launchTemplates;
     private final StorageBackend<String, VpcEndpoint> vpcEndpoints;
     private final StorageBackend<String, NatGateway> natGateways;
+    private final StorageBackend<String, InstanceConnectEndpoint> instanceConnectEndpoints;
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     private final StorageBackend<String, NetworkAcl> networkAcls;
     private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
@@ -586,7 +592,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 storageFactory.create("ec2", "ec2-egress-only-internet-gateways.json",
                         new TypeReference<Map<String, EgressOnlyInternetGateway>>() {}),
                 storageFactory.create("ec2", "ec2-dhcp-options.json",
-                        new TypeReference<Map<String, DhcpOptions>>() {}));
+                        new TypeReference<Map<String, DhcpOptions>>() {}),
+                storageFactory.create("ec2", "ec2-instance-connect-endpoints.json",
+                        new TypeReference<Map<String, InstanceConnectEndpoint>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -652,7 +660,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 null, null, null, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), dhcpOptions);
+                new InMemoryStorage<>(), dhcpOptions, AccountAwareStorageBackend.inMemory("000000000000"));
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
@@ -879,7 +887,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
                 networkInterfaces, capacityReservations, volumeModifications,
                 requestContextInstance, iamService, volumeBlockDeviceManager, hosts,
-                transitGatewayPeeringAttachments, egressOnlyInternetGateways, new InMemoryStorage<>());
+                transitGatewayPeeringAttachments, egressOnlyInternetGateways, new InMemoryStorage<>(),
+                AccountAwareStorageBackend.inMemory("000000000000"));
     }
 
     Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -920,7 +929,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                StorageBackend<String, Host> hosts,
                StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments,
                StorageBackend<String, EgressOnlyInternetGateway> egressOnlyInternetGateways,
-               StorageBackend<String, DhcpOptions> dhcpOptions) {
+               StorageBackend<String, DhcpOptions> dhcpOptions,
+               StorageBackend<String, InstanceConnectEndpoint> instanceConnectEndpoints) {
+        this.instanceConnectEndpoints = instanceConnectEndpoints;
         this.hosts = hosts;
         this.egressOnlyInternetGateways = egressOnlyInternetGateways;
         this.transitGatewayPeeringAttachments = transitGatewayPeeringAttachments;
@@ -2214,23 +2225,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return resourceLocks[Math.max(stripeOf(keyA), stripeOf(keyB))];
     }
 
-    private String randomHex(int len) {
-        StringBuilder sb = new StringBuilder(len);
-        Random rand = new Random();
-        for (int i = 0; i < len; i++) {
-            sb.append(Integer.toHexString(rand.nextInt(16)));
-        }
-        return sb.toString();
-    }
-
     /** Synthesizes a locally-administered unicast MAC (AWS never discloses how it derives its own). */
     private String randomMac() {
-        Random rand = new Random();
-        StringBuilder sb = new StringBuilder("02");
-        for (int i = 0; i < 5; i++) {
-            sb.append(':').append(String.format("%02x", rand.nextInt(256)));
-        }
-        return sb.toString();
+        byte[] bytes = new byte[5];
+        new Random().nextBytes(bytes);
+        return "02:" + HexFormat.ofDelimiter(":").formatHex(bytes);
     }
 
     // ─── Transit Gateways ──────────────────────────────────────────────────────
@@ -4535,11 +4534,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 addresses.add(assignPrivateIp(region, subnetId, addresses));
             }
         } catch (AwsException e) {
-            if (vpcNetworkManager != null) {
-                for (String address : addresses) {
-                    vpcNetworkManager.releasePrivateIp(region, subnetId, address);
-                }
-            }
+            releasePrivateIps(region, subnetId, addresses);
             throw e;
         }
         return addresses;
@@ -4547,6 +4542,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private String assignPrivateIp(String region, String subnetId) {
         return assignPrivateIp(region, subnetId, List.of());
+    }
+
+    /**
+     * Gives back the VPC network's lease on each address, so automatic allocation can offer it
+     * again. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private void releasePrivateIps(String region, String subnetId, Collection<String> addresses) {
+        if (vpcNetworkManager == null) {
+            return;
+        }
+        for (String address : addresses) {
+            vpcNetworkManager.releasePrivateIp(region, subnetId, address);
+        }
     }
 
     /**
@@ -4568,6 +4576,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // failed launch is still giving it back keeps it without one.
             if (allocated.isPresent()) {
                 held = privateIpsHeldOnVpcNetwork(region, subnetId);
+                held.addAll(pending);
             }
             List<String> skipped = new ArrayList<>();
             while (allocated.isPresent() && held.contains(allocated.get())) {
@@ -4575,11 +4584,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
             }
             // Given back only once the walk is over, or the network would offer them again. Their
-            // holders took no lease, and deleting an interface or NAT gateway returns none, so a
-            // lease kept here would outlive the holder.
-            for (String address : skipped) {
-                vpcNetworkManager.releasePrivateIp(region, subnetId, address);
-            }
+            // holders took no lease, and deleting an interface returns none, so a lease kept here
+            // would outlive the holder.
+            releasePrivateIps(region, subnetId, skipped);
             if (allocated.isPresent()) {
                 return allocated.get();
             }
@@ -4663,10 +4670,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * lease to show for it: an interface created with its own address never takes one, and a
      * restart re-leases only instances. Any other subnet id belongs to one account, so for it the
      * wider scan finds nothing more. A lease with nothing in any account behind it does not fail
-     * the launch: it is stale (DeleteNetworkInterface and DeleteNatGateway never return theirs),
-     * or it belongs to a launch that failed and has not given the address back yet, which it does
-     * once its container is detached. Either way the instance keeps the address without a lease of
-     * its own, and {@link #assignPrivateIp} still skips it, because the stored instance holds it.
+     * the launch: it is stale (DeleteNetworkInterface never returns its lease), or it belongs to
+     * a launch that failed and has not given the address back yet, which it does once its
+     * container is detached. Either way the instance keeps the address without a lease of its
+     * own, and {@link #assignPrivateIp} still skips it, because the stored instance holds it.
      * An address outside a substituted subnet's effective range is never leased at all, in which
      * case the instance keeps it the way it keeps a synthesised address.
      */
@@ -4679,10 +4686,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /**
      * The in-use half of {@link #claimRequestedPrivateIp}, without the lease. CreateNetworkInterface
      * and CreateNatGateway use it alone: neither an interface nor a NAT gateway has a container to
-     * hold the address on the VPC network, and DeleteNetworkInterface and DeleteNatGateway return
-     * no lease, so one taken here would keep the address from automatic allocation after its
-     * holder is gone. {@link #assignPrivateIp} already steps around addresses stored interfaces and
-     * NAT gateways hold. Callers must hold {@link #privateIpAllocationLock}.
+     * hold the address on the VPC network, and {@link #assignPrivateIp} already steps around
+     * addresses stored interfaces and NAT gateways hold. DeleteNetworkInterface returns no lease,
+     * so one taken here would keep the address from automatic allocation after the interface is
+     * gone. Callers must hold {@link #privateIpAllocationLock}.
      *
      * @return whether the address lies in a Docker-backed range, where a lease could be taken
      */
@@ -4710,14 +4717,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         String regionPrefix = region + "::";
         return privateIpsBySubnet(valuesOfEveryAccount(networkInterfaces, regionPrefix),
                 valuesOfEveryAccount(instances, regionPrefix),
-                valuesOfEveryAccount(natGateways, regionPrefix))
+                valuesOfEveryAccount(natGateways, regionPrefix),
+                valuesOfEveryAccount(instanceConnectEndpoints, regionPrefix))
                 .getOrDefault(subnetId, Set.of());
     }
 
     /**
      * Every address a stored resource holds in the subnet: {@link #privateIpsTaken}, plus what the
-     * instances, network interfaces and NAT gateways of every account hold there. Default subnet
-     * ids are the same in every account, so their Docker network, and its lease table, is shared.
+     * instances, network interfaces, NAT gateways and EC2 Instance Connect Endpoints of every
+     * account hold there. Default subnet ids are the same in every account, so their Docker
+     * network, and its lease table, is shared.
      */
     private Set<String> privateIpsHeldOnVpcNetwork(String region, String subnetId) {
         Set<String> held = privateIpsTaken(region, subnetId);
@@ -4738,7 +4747,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 400);
     }
 
-    /** Every private address a live instance, network interface or NAT gateway holds in the subnet. */
+    /**
+     * Every private address a live instance, network interface, NAT gateway or EC2 Instance Connect
+     * Endpoint holds in the subnet.
+     */
     private Set<String> privateIpsInUse(String region, String subnetId) {
         return new HashSet<>(privateIpsBySubnet(region).getOrDefault(subnetId, Set.of()));
     }
@@ -4758,12 +4770,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         String regionPrefix = region + "::";
         return privateIpsBySubnet(networkInterfaces.scan(k -> k.startsWith(regionPrefix)),
                 instances.scan(k -> k.startsWith(regionPrefix)),
-                natGateways.scan(k -> k.startsWith(regionPrefix)));
+                natGateways.scan(k -> k.startsWith(regionPrefix)),
+                instanceConnectEndpoints.scan(k -> k.startsWith(regionPrefix)));
     }
 
     private static Map<String, Set<String>> privateIpsBySubnet(List<NetworkInterface> regionInterfaces,
                                                                List<Instance> regionInstances,
-                                                               List<NatGateway> regionNatGateways) {
+                                                               List<NatGateway> regionNatGateways,
+                                                               List<InstanceConnectEndpoint> regionInstanceConnectEndpoints) {
         Map<String, Set<String>> bySubnet = new HashMap<>();
         for (NetworkInterface ni : regionInterfaces) {
             Set<String> inUse = bySubnet.computeIfAbsent(ni.getSubnetId(), ignored -> new HashSet<>());
@@ -4783,6 +4797,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 addIfSet(bySubnet.computeIfAbsent(ni.getSubnetId(), ignored -> new HashSet<>()),
                         ni.getPrivateIpAddress());
             }
+        }
+        for (InstanceConnectEndpoint endpoint : regionInstanceConnectEndpoints) {
+            addIfSet(bySubnet.computeIfAbsent(endpoint.getSubnetId(), ignored -> new HashSet<>()),
+                    endpoint.getPrivateIpAddress());
         }
         for (NatGateway natGateway : regionNatGateways) {
             if ("deleted".equals(natGateway.getState())) {
@@ -6408,12 +6426,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     static void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters) {
+        requireSupportedFilters(filterNames, supportedFilters, "InvalidParameterValue");
+    }
+
+    static void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters, String errorCode) {
         filterNames.stream()
                 .filter(name -> !supportedFilters.contains(name)
                         && !(supportedFilters.contains("tag-key") && name.startsWith("tag:")))
                 .findFirst()
                 .ifPresent(name -> {
-                    throw new AwsException("InvalidParameterValue", "The filter '" + name + "' is invalid", 400);
+                    throw new AwsException(errorCode, "The filter '" + name + "' is invalid", 400);
                 });
     }
 
@@ -6498,7 +6520,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         .anyMatch(ni -> subnetIds.contains(ni.getSubnetId()))
                 || vpcEndpoints.scan(k -> k.startsWith(regionPrefix)).stream()
                         .anyMatch(endpoint -> !"deleted".equals(endpoint.getState())
-                                && nullToEmpty(endpoint.getSubnetIds()).stream().anyMatch(subnetIds::contains));
+                                && nullToEmpty(endpoint.getSubnetIds()).stream().anyMatch(subnetIds::contains))
+                || instanceConnectEndpoints.scan(k -> k.startsWith(regionPrefix)).stream()
+                        .anyMatch(endpoint -> subnetIds.contains(endpoint.getSubnetId()));
         if (occupied) {
             throw new AwsException("DependencyViolation", message, 400);
         }
@@ -7001,7 +7025,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(endpoint -> matchesFilters(endpoint, filters, region))
                 .collect(Collectors.toList());
     }
-
 
     public List<VpcEndpoint> deleteVpcEndpoints(String region, List<String> endpointIds) {
         ensureDefaultResources(region);
@@ -8162,11 +8185,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * <p>Returns the permissions that remain.
      */
     private List<IpPermission> revokeSources(List<IpPermission> existing, List<IpPermission> toRemove) {
+        // A caller can pass permissions stored on the group. Freeze all removal criteria before
+        // mutating any of them; an emptied source list otherwise becomes a wildcard for later rules.
+        List<IpPermission> removals = toRemove.stream().map(Ec2Service::copyPermissionSources).toList();
         List<IpPermission> remaining = new ArrayList<>();
         for (IpPermission perm : existing) {
             boolean dropWholePermission = false;
             boolean hadSources = hasSources(perm);
-            for (IpPermission removal : toRemove) {
+            for (IpPermission removal : removals) {
                 if (!sameProtocolAndPorts(perm, removal)) {
                     continue;
                 }
@@ -8174,8 +8200,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     dropWholePermission = true;
                     break;
                 }
-                // authorize stores the caller's IpPermission object, so a revoke can name the very
-                // instance held on the group. Snapshot the values before mutating either list.
                 List<String> cidrs = removal.getIpRanges().stream().map(IpRange::getCidrIp).toList();
                 List<String> cidrsV6 = removal.getIpv6Ranges().stream().map(Ipv6Range::getCidrIpv6).toList();
                 List<String> lists = removal.getPrefixListIds().stream()
@@ -8194,6 +8218,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         return remaining;
+    }
+
+    private static IpPermission copyPermissionSources(IpPermission permission) {
+        IpPermission copy = new IpPermission();
+        copy.setIpProtocol(permission.getIpProtocol());
+        copy.setFromPort(permission.getFromPort());
+        copy.setToPort(permission.getToPort());
+        copy.setIpRanges(new ArrayList<>(permission.getIpRanges()));
+        copy.setIpv6Ranges(new ArrayList<>(permission.getIpv6Ranges()));
+        copy.setPrefixListIds(new ArrayList<>(permission.getPrefixListIds()));
+        copy.setUserIdGroupPairs(new ArrayList<>(permission.getUserIdGroupPairs()));
+        return copy;
     }
 
     private boolean sameProtocolAndPorts(IpPermission a, IpPermission b) {
@@ -9637,26 +9673,43 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion) {
+        return modifyLaunchTemplate(region, id, name, defaultVersion, false);
+    }
+
+    public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion, boolean dryRun) {
+        boolean hasId = id != null && !id.isBlank();
+        boolean hasName = name != null && !name.isBlank();
+        if (hasId == hasName) {
+            throw new AwsException(hasId ? "InvalidParameterCombination" : "MissingParameter",
+                    "Specify either LaunchTemplateId or LaunchTemplateName, but not both.", 400);
+        }
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
-        ensureLaunchTemplateVersions(launchTemplate);
-        if (defaultVersion != null && !defaultVersion.isBlank()) {
-            String resolved = switch (defaultVersion) {
-                case "$Latest" -> launchTemplate.getLatestVersionNumber();
-                case "$Default" -> launchTemplate.getDefaultVersionNumber();
-                default -> defaultVersion;
-            };
-            int requested = parseLaunchTemplateVersion(resolved);
-            int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
-            if (requested < 1 || requested > latest
-                    || !launchTemplate.getVersions().containsKey(String.valueOf(requested))) {
-                throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
-                        "The specified launch template version does not exist.", 400);
+        synchronized (launchTemplate) {
+            ensureLaunchTemplateVersions(launchTemplate);
+            String nextDefault = launchTemplate.getDefaultVersionNumber();
+            if (defaultVersion != null && !defaultVersion.isBlank()) {
+                String resolved = switch (defaultVersion) {
+                    case "$Latest" -> launchTemplate.getLatestVersionNumber();
+                    case "$Default" -> launchTemplate.getDefaultVersionNumber();
+                    default -> defaultVersion;
+                };
+                int requested = parseLaunchTemplateVersion(resolved);
+                int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
+                if (requested < 1 || requested > latest
+                        || !launchTemplate.getVersions().containsKey(String.valueOf(requested))) {
+                    throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
+                            "The specified launch template version does not exist.", 400);
+                }
+                nextDefault = String.valueOf(requested);
             }
-            launchTemplate.setDefaultVersionNumber(String.valueOf(requested));
+            if (dryRun) {
+                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+            }
+            launchTemplate.setDefaultVersionNumber(nextDefault);
+            launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
+            return launchTemplate;
         }
-        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
-        return launchTemplate;
     }
 
     /**
@@ -10118,7 +10171,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * caller-supplied pattern of many stars made the regex backtrack for seconds, and its dot
      * skipped line terminators that a tag value may hold.
      */
-    private static boolean wildcardMatches(String pattern, String value) {
+    public static boolean wildcardMatches(String pattern, String value) {
         return IamPolicyEvaluator.caseSensitiveGlobMatches(pattern, value);
     }
 
@@ -10253,6 +10306,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             case "nat" -> getRequiredNatGateway(region, resourceId);
             case "eipalloc" -> getRequiredAddress(region, resourceId);
             case "vpce" -> getRequiredVpcEndpoint(region, resourceId);
+            case "eice" -> requireInstanceConnectEndpoint(region, resourceId);
             case "pl" -> getRequiredManagedPrefixList(region, resourceId);
             case "tgw" -> getRequiredTransitGateway(region, resourceId);
             case "tgw-rtb" -> getRequiredTransitGatewayRouteTable(region, resourceId);
@@ -12141,7 +12195,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return findAnyVpcEntry(region, vpcId).map(AccountAwareStorageBackend.OwnedEntry::account);
     }
 
-
     public List<VpcPeeringConnection> describeVpcPeeringConnections(String region, List<String> ids,
                                                                      Map<String, List<String>> filters) {
         return describeVpcPeeringConnections(region, ids, filterList(filters));
@@ -12377,23 +12430,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    /**
-     * Refuses the secondary-address parameters. Floci gives a NAT gateway its primary address only,
-     * so a gateway created with them would report fewer addresses than it was asked for.
-     */
-    public static void requireNoSecondaryNatGatewayAddresses(List<String> secondaryAllocationIds,
-                                                             List<String> secondaryPrivateIpAddresses,
-                                                             String secondaryPrivateIpAddressCount) {
-        if (!secondaryAllocationIds.isEmpty() || !secondaryPrivateIpAddresses.isEmpty()
-                || isSet(secondaryPrivateIpAddressCount)) {
-            throw new AwsException("UnsupportedOperation",
-                    "NAT gateways with secondary addresses are not supported.", 400);
-        }
-    }
-
     public NatGateway createNatGateway(String region, String subnetId, String allocationId,
                                        String connectivityType, List<Tag> natGatewayTags) {
         return createNatGateway(region, subnetId, allocationId, connectivityType, null, natGatewayTags);
+    }
+
+    public NatGateway createNatGateway(String region, String subnetId, String allocationId,
+                                       String connectivityType, String privateIpAddress,
+                                       List<Tag> natGatewayTags) {
+        return createNatGateway(region, subnetId, allocationId, connectivityType, privateIpAddress,
+                List.of(), List.of(), null, natGatewayTags);
     }
 
     /**
@@ -12401,25 +12447,41 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      *                         null to let the subnet pick one. It is checked as RunInstances checks
      *                         its own: an assignable address of the subnet that no other resource
      *                         holds.
+     * @param secondaryAllocationIds SecondaryAllocationIds: extra Elastic IPs, public gateways only.
+     *                               Each is paired with the secondary private address at the same
+     *                               position, or one the subnet picks.
+     * @param secondaryPrivateIpAddresses SecondaryPrivateIpAddresses, checked as PrivateIpAddress is
+     * @param secondaryPrivateIpAddressCount SecondaryPrivateIpAddressCount, private gateways only,
+     *                                       1 to 31: that many more addresses the subnet picks
      */
     public NatGateway createNatGateway(String region, String subnetId, String allocationId,
                                        String connectivityType, String privateIpAddress,
+                                       List<String> secondaryAllocationIds,
+                                       List<String> secondaryPrivateIpAddresses,
+                                       String secondaryPrivateIpAddressCount,
                                        List<Tag> natGatewayTags) {
         ensureDefaultResources(region);
         Subnet subnet = requireSubnet(region, subnetId);
         boolean privateGateway = "private".equalsIgnoreCase(connectivityType);
-        if (privateGateway && isSet(allocationId)) {
+        List<String> secondaryEips = secondaryAllocationIds == null ? List.of() : secondaryAllocationIds;
+        if (privateGateway && (isSet(allocationId) || !secondaryEips.isEmpty())) {
             // A private NAT gateway has no route to the internet and so nothing to attach an
             // Elastic IP to. Accepting the pair would have the response report a public address
             // on a gateway that cannot have one.
             throw new AwsException("InvalidParameterCombination",
                     "Elastic IP addresses cannot be associated with private NAT gateways.", 400);
         }
+        int secondaryCount = secondaryPrivateIpCount(secondaryPrivateIpAddressCount, privateGateway);
         if (isSet(allocationId)) {
             getRequiredAddress(region, allocationId);
         }
+        secondaryEips.forEach(id -> getRequiredAddress(region, id));
         String requestedPrivateIp = isSet(privateIpAddress)
                 ? validateRequestedPrivateIp(privateIpAddress, subnet, null, 1) : null;
+        List<String> requestedSecondaryIps = (secondaryPrivateIpAddresses == null ? List.<String>of()
+                : secondaryPrivateIpAddresses).stream()
+                .map(ip -> validateRequestedPrivateIp(ip, subnet, null, 1))
+                .toList();
 
         NatGateway natGateway = new NatGateway();
         natGateway.setNatGatewayId("nat-" + randomHex(17));
@@ -12434,31 +12496,24 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // cannot both see the allocation free. As on AWS, an allocation already held by an
             // instance or another gateway does not fail the call: the gateway is created in state
             // failed, with no interface, and the allocation is left with its holder.
+            List<String> eips = new ArrayList<>();
             if (isSet(allocationId)) {
-                Address held = getRequiredAddress(region, allocationId);
-                // The gateway scan covers gateways persisted before the Address record was marked.
-                if (isSet(held.getAssociationId()) || isSet(held.getInstanceId())
-                        || isHeldByNatGateway(region, allocationId)) {
+                eips.add(allocationId);
+            }
+            eips.addAll(secondaryEips);
+            Set<String> seen = new HashSet<>();
+            for (String eipId : eips) {
+                if (!seen.add(eipId) || isElasticIpTaken(region, eipId)) {
                     natGateway.setState("failed");
                     natGateway.setFailureCode("Resource.AlreadyAssociated");
-                    natGateway.setFailureMessage("Elastic IP address " + allocationId + " is already associated");
+                    natGateway.setFailureMessage("Elastic IP address " + eipId + " is already associated");
+                    break;
                 }
             }
             if (!"failed".equals(natGateway.getState())) {
-                NatGatewayAddress gatewayAddress = natGatewayAddress(region, natGateway.getNatGatewayId(),
-                        subnetId, allocationId, requestedPrivateIp);
-                natGateway.getNatGatewayAddresses().add(gatewayAddress);
-                // The Elastic IP is now held by the gateway's interface, so DescribeAddresses has to
-                // say so: an allocation that looks free is one Terraform and the console would offer
-                // to reuse. No instanceId, a NAT gateway is not an instance.
-                if (isSet(allocationId)) {
-                    addresses.get(key(region, allocationId)).ifPresent(eip -> {
-                        eip.setAssociationId(gatewayAddress.getAssociationId());
-                        eip.setNetworkInterfaceId(gatewayAddress.getNetworkInterfaceId());
-                        eip.setPrivateIpAddress(gatewayAddress.getPrivateIp());
-                        addresses.put(key(region, allocationId), eip);
-                    });
-                }
+                natGateway.getNatGatewayAddresses().addAll(natGatewayAddresses(region, natGateway.getNatGatewayId(),
+                        subnetId, allocationId, requestedPrivateIp, secondaryEips, requestedSecondaryIps, secondaryCount));
+                natGateway.getNatGatewayAddresses().forEach(a -> holdNatGatewayEip(region, a));
             }
             if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
                 natGateway.setTags(new ArrayList<>(natGatewayTags));
@@ -12470,27 +12525,112 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * SecondaryPrivateIpAddressCount as a number, 0 when absent. The EC2 API reference marks it
+     * "[Private NAT gateway only]" with a valid range of 1 to 31.
+     */
+    public static int secondaryPrivateIpCount(String value, boolean privateGateway) {
+        if (!isSet(value)) {
+            return 0;
+        }
+        if (!privateGateway) {
+            throw new AwsException("InvalidParameterCombination",
+                    "SecondaryPrivateIpAddressCount is only valid for private NAT gateways.", 400);
+        }
+        int count;
+        try {
+            count = Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            count = 0;
+        }
+        if (count < 1 || count > 31) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + value + ") for parameter SecondaryPrivateIpAddressCount is invalid. "
+                            + "It must be between 1 and 31.", 400);
+        }
+        return count;
+    }
+
+    /**
+     * The primary address, then each secondary one, all on the gateway's one interface. Every
+     * requested address is checked free before any is assigned, so a request that fails leaves no
+     * lease behind. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private List<NatGatewayAddress> natGatewayAddresses(String region, String natGatewayId, String subnetId,
+                                                        String allocationId, String requestedPrivateIp,
+                                                        List<String> secondaryEips, List<String> requestedSecondaryIps,
+                                                        int secondaryCount) {
+        List<String> requested = new ArrayList<>(requestedSecondaryIps);
+        if (requestedPrivateIp != null) {
+            requested.add(requestedPrivateIp);
+        }
+        Set<String> pending = new HashSet<>();
+        for (String ip : requested) {
+            if (!pending.add(ip)) {
+                throw new AwsException("InvalidIPAddress.InUse", "Address " + ip + " is in use.", 400);
+            }
+            requireRequestedPrivateIpFree(region, subnetId, ip);
+        }
+        List<String> eips = new ArrayList<>();
+        eips.add(allocationId);
+        eips.addAll(secondaryEips);
+        List<String> ips = new ArrayList<>();
+        ips.add(requestedPrivateIp);
+        ips.addAll(requestedSecondaryIps);
+        NatGatewayAddress[] slots = new NatGatewayAddress[
+                1 + Math.max(secondaryEips.size(), requestedSecondaryIps.size()) + secondaryCount];
+        fillNatGatewaySlots(region, natGatewayId, subnetId, slots, eips, ips, pending);
+        slots[0].setPrimary(true);
+        return new ArrayList<>(List.of(slots));
+    }
+
+    /**
+     * Builds an address for every empty slot from the Elastic IP and private address at the same
+     * position of {@code eips} and {@code ips}, either of which may be shorter than {@code slots}
+     * or hold null. A slot with no private address takes the next free one; if any slot fails, the
+     * addresses taken here are given back. Every address built is secondary. Callers must hold
+     * {@link #privateIpAllocationLock} and have checked the requested addresses free.
+     *
+     * @param pending addresses already spoken for, which automatic assignment must not hand out
+     */
+    private void fillNatGatewaySlots(String region, String natGatewayId, String subnetId, NatGatewayAddress[] slots,
+                                     List<String> eips, List<String> ips, Set<String> pending) {
+        List<String> assigned = new ArrayList<>();
+        try {
+            for (int i = 0; i < slots.length; i++) {
+                if (slots[i] != null) {
+                    continue;
+                }
+                String ip = i < ips.size() ? ips.get(i) : null;
+                if (ip == null) {
+                    ip = assignPrivateIp(region, subnetId, pending);
+                    pending.add(ip);
+                    assigned.add(ip);
+                }
+                slots[i] = natGatewayAddress(region, natGatewayId, i < eips.size() ? eips.get(i) : null, ip);
+                slots[i].setPrimary(false);
+            }
+        } catch (AwsException e) {
+            releasePrivateIps(region, subnetId, assigned);
+            throw e;
+        }
+    }
+
+    /**
      * The address a NAT gateway reports. AWS gives every gateway an interface in its subnet with a
      * private address, and a public one additionally carries the Elastic IP it was created with,
      * aws_nat_gateway exposes all three as resource outputs (public_ip, private_ip,
      * network_interface_id), and Gruntwork's VPC modules re-export nat_gateway_public_ips, so an
      * address carrying only an allocation id propagates empty values into dependent modules.
-     * Callers must hold {@link #privateIpAllocationLock}.
+     * Every address of one gateway shares its one interface.
      *
-     * @param requestedPrivateIp the request's PrivateIpAddress, already checked by
-     *                           {@link #validateRequestedPrivateIp}, or null. It takes no lease on
-     *                           the VPC network (see {@link #requireRequestedPrivateIpFree}).
+     * @param privateIp the address, already checked free. A requested one takes no lease on the
+     *                  VPC network (see {@link #requireRequestedPrivateIpFree}).
      */
-    private NatGatewayAddress natGatewayAddress(String region, String natGatewayId, String subnetId,
-                                                String allocationId, String requestedPrivateIp) {
+    private NatGatewayAddress natGatewayAddress(String region, String natGatewayId, String allocationId,
+                                                String privateIp) {
         NatGatewayAddress address = new NatGatewayAddress();
         address.setNetworkInterfaceId(eniIdFromSeed("nat|" + natGatewayId));
-        if (requestedPrivateIp != null) {
-            requireRequestedPrivateIpFree(region, subnetId, requestedPrivateIp);
-            address.setPrivateIp(requestedPrivateIp);
-        } else {
-            address.setPrivateIp(assignPrivateIp(region, subnetId));
-        }
+        address.setPrivateIp(privateIp);
         if (isSet(allocationId)) {
             address.setAllocationId(allocationId);
             address.setAssociationId("eipassoc-" + randomHex(17));
@@ -12515,36 +12655,313 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (subnet == null) {
             return List.of();
         }
-        List<NetworkInterface> result = new ArrayList<>();
+        Map<String, NetworkInterface> result = new LinkedHashMap<>();
         for (NatGatewayAddress address : natGateway.getNatGatewayAddresses()) {
             if (address.getNetworkInterfaceId() == null) {
                 continue;
             }
-            NetworkInterface ni = new NetworkInterface();
-            ni.setNetworkInterfaceId(address.getNetworkInterfaceId());
-            ni.setSubnetId(natGateway.getSubnetId());
-            ni.setVpcId(natGateway.getVpcId());
-            ni.setAvailabilityZone(subnet.getAvailabilityZone());
-            ni.setDescription("Interface for NAT Gateway " + natGateway.getNatGatewayId());
-            ni.setInterfaceType("nat_gateway");
-            ni.setRequesterManaged(true);
-            ni.setOwnerId(ownerId);
-            ni.setPrivateIpAddress(address.getPrivateIp());
-            NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
-            primaryIp.setPrivateIpAddress(address.getPrivateIp());
-            primaryIp.setPrimary(true);
+            // A secondary address sits on the primary address's interface; the helper marks its one
+            // address primary, so a secondary is added to the interface it returned.
+            NetworkInterface ni = result.get(address.getNetworkInterfaceId());
+            NetworkInterfacePrivateIpAddress ip;
+            if (ni == null) {
+                ni = requesterManagedInterface(address.getNetworkInterfaceId(),
+                        natGateway.getSubnetId(), natGateway.getVpcId(), subnet.getAvailabilityZone(),
+                        "Interface for NAT Gateway " + natGateway.getNatGatewayId(), "nat_gateway", ownerId,
+                        address.getPrivateIp());
+                ip = ni.getPrivateIpAddresses().getFirst();
+                result.put(address.getNetworkInterfaceId(), ni);
+            } else {
+                ip = new NetworkInterfacePrivateIpAddress();
+                ip.setPrivateIpAddress(address.getPrivateIp());
+                ip.setPrimary(address.isPrimary());
+                ni.getPrivateIpAddresses().add(ip);
+            }
             if (address.getPublicIp() != null) {
                 NetworkInterfaceAssociation assoc = new NetworkInterfaceAssociation();
                 assoc.setPublicIp(address.getPublicIp());
                 assoc.setAllocationId(address.getAllocationId());
                 assoc.setAssociationId(address.getAssociationId());
                 assoc.setIpOwnerId(ownerId);
-                primaryIp.setAssociation(assoc);
+                ip.setAssociation(assoc);
             }
-            ni.getPrivateIpAddresses().add(primaryIp);
+        }
+        return new ArrayList<>(result.values());
+    }
+
+    /**
+     * A requester-managed interface with one primary private address: the shape a NAT gateway's
+     * and an instance connect endpoint's interface share.
+     */
+    private static NetworkInterface requesterManagedInterface(String eniId, String subnetId, String vpcId,
+                                                              String availabilityZone, String description,
+                                                              String interfaceType, String ownerId,
+                                                              String privateIp) {
+        NetworkInterface ni = new NetworkInterface();
+        ni.setNetworkInterfaceId(eniId);
+        ni.setSubnetId(subnetId);
+        ni.setVpcId(vpcId);
+        ni.setAvailabilityZone(availabilityZone);
+        ni.setDescription(description);
+        ni.setInterfaceType(interfaceType);
+        ni.setRequesterManaged(true);
+        ni.setOwnerId(ownerId);
+        ni.setPrivateIpAddress(privateIp);
+        NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
+        primaryIp.setPrivateIpAddress(privateIp);
+        primaryIp.setPrimary(true);
+        ni.getPrivateIpAddresses().add(primaryIp);
+        return ni;
+    }
+
+    /**
+     * The interface an instance connect endpoint owns, built from the endpoint so the id
+     * DescribeInstanceConnectEndpoints publishes in networkInterfaceIdSet resolves in
+     * DescribeNetworkInterfaces for as long as the endpoint exists. Its address is the endpoint's
+     * own, already counted by privateIpsBySubnet from the endpoint record.
+     */
+    private List<NetworkInterface> instanceConnectEndpointNetworkInterfacesOf(InstanceConnectEndpoint endpoint,
+                                                                              String ownerId) {
+        List<NetworkInterface> result = new ArrayList<>();
+        for (String eniId : endpoint.getNetworkInterfaceIds()) {
+            NetworkInterface ni = requesterManagedInterface(eniId, endpoint.getSubnetId(), endpoint.getVpcId(),
+                    endpoint.getAvailabilityZone(),
+                    "EC2 Instance Connect Endpoint " + endpoint.getInstanceConnectEndpointId(),
+                    "ec2_instance_connect_endpoint", ownerId, endpoint.getPrivateIpAddress());
+            for (String securityGroupId : endpoint.getSecurityGroupIds()) {
+                GroupIdentifier group = new GroupIdentifier();
+                group.setGroupId(securityGroupId);
+                // Read for the account the endpoint was read for, as natNetworkInterfacesOf reads
+                // its subnet: the explicit-account overload may run under another ambient account.
+                String groupKey = key(endpoint.getRegion(), securityGroupId);
+                (securityGroups instanceof AccountAwareStorageBackend<SecurityGroup> aware
+                        ? aware.getForAccount(ownerId, groupKey).or(() -> aware.getLegacyForAccount(ownerId, groupKey))
+                        : securityGroups.get(groupKey))
+                        .ifPresent(sg -> group.setGroupName(sg.getGroupName()));
+                ni.getGroups().add(group);
+            }
             result.add(ni);
         }
         return result;
+    }
+
+    // ─── EC2 Instance Connect Endpoints ─────────────────────────────────────
+
+    /** The public suffix every endpoint DNS name ends in; it resolves to 127.0.0.1 in public DNS. */
+    static final String INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX = "localhost.floci.io";
+    private static final Set<String> INSTANCE_CONNECT_ENDPOINT_IP_TYPES = Set.of("ipv4", "dualstack", "ipv6");
+    /**
+     * The names matchesInstanceConnectEndpointFilter implements, exactly the DescribeInstanceConnectEndpoints
+     * reference's list; tag:&lt;key&gt; is admitted through tag-key.
+     */
+    private static final Set<String> INSTANCE_CONNECT_ENDPOINT_FILTERS = Set.of("instance-connect-endpoint-id",
+            "state", "vpc-id", "subnet-id", "tag-key", "tag-value");
+    /**
+     * Creates an endpoint in {@code subnetId}. Creation is immediate ({@code create-complete}); on
+     * AWS it takes a few minutes. The DNS names live under {@link #INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX},
+     * which resolves to the loopback address where Floci's HTTPS listener is published, and which
+     * Floci's wildcard server certificate covers. A replayed {@code clientToken} returns the endpoint
+     * the first call created; reused with another subnet, security group set, IP address type,
+     * PreserveClientIp or tag set it fails with {@code IdempotentParameterMismatch}.
+     */
+    public InstanceConnectEndpoint createInstanceConnectEndpoint(String region, String subnetId,
+                                                                 List<String> securityGroupIds,
+                                                                 Boolean preserveClientIp, String ipAddressType,
+                                                                 List<Tag> tagList, String clientToken) {
+        return createInstanceConnectEndpoint(region, subnetId, securityGroupIds, preserveClientIp, ipAddressType,
+                tagList, clientToken, false);
+    }
+
+    /** As above; with {@code dryRun} the request is validated and then answered with DryRunOperation. */
+    public InstanceConnectEndpoint createInstanceConnectEndpoint(String region, String subnetId,
+                                                                 List<String> securityGroupIds,
+                                                                 Boolean preserveClientIp, String ipAddressType,
+                                                                 List<Tag> tagList, String clientToken,
+                                                                 boolean dryRun) {
+        // Held from the client-token replay scan to the save: two creates with one token then see
+        // each other, and deleteSubnet, which takes the same lock, cannot remove the subnet between
+        // requireSubnet and the save.
+        synchronized (attachmentTopologyLock(region)) {
+            return createInstanceConnectEndpointHeld(region, subnetId, securityGroupIds, preserveClientIp,
+                    ipAddressType, tagList, clientToken, dryRun);
+        }
+    }
+
+    private InstanceConnectEndpoint createInstanceConnectEndpointHeld(String region, String subnetId,
+                                                                      List<String> securityGroupIds,
+                                                                      Boolean preserveClientIp, String ipAddressType,
+                                                                      List<Tag> tagList, String clientToken,
+                                                                      boolean dryRun) {
+        if (subnetId == null || subnetId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter SubnetId", 400);
+        }
+        Subnet subnet = requireSubnet(region, subnetId);
+        String type = ipAddressType == null || ipAddressType.isBlank() ? "ipv4" : ipAddressType;
+        if (!INSTANCE_CONNECT_ENDPOINT_IP_TYPES.contains(type)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + type + ") for parameter IpAddressType is invalid.", 400);
+        }
+        if (Boolean.TRUE.equals(preserveClientIp) && !"ipv4".equals(type)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "PreserveClientIp is only supported on IPv4 EC2 Instance Connect Endpoints.", 400);
+        }
+        List<String> groups = new ArrayList<>();
+        if (securityGroupIds == null || securityGroupIds.isEmpty()) {
+            securityGroups.scan(k -> true).stream()
+                    .filter(sg -> region.equals(sg.getRegion()) && subnet.getVpcId().equals(sg.getVpcId())
+                            && "default".equals(sg.getGroupName()))
+                    .findFirst()
+                    .ifPresent(sg -> groups.add(sg.getGroupId()));
+        } else {
+            for (String groupId : securityGroupIds) {
+                SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+                if (!subnet.getVpcId().equals(sg.getVpcId())) {
+                    throw new AwsException("InvalidParameter", "Security group " + groupId
+                            + " does not belong to VPC " + subnet.getVpcId() + ".", 400);
+                }
+                groups.add(groupId);
+            }
+        }
+        if (dryRun) {
+            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+        }
+        String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
+        if (token != null) {
+            // Compared after defaults are applied, so a retry that omits a defaulted parameter the
+            // first call also omitted still matches.
+            Optional<InstanceConnectEndpoint> replay = instanceConnectEndpoints.scan(k -> k.startsWith(region + "::"))
+                    .stream().filter(existing -> token.equals(existing.getClientToken())).findFirst();
+            if (replay.isPresent()) {
+                InstanceConnectEndpoint first = replay.get();
+                if (!subnetId.equals(first.getSubnetId())
+                        || !new HashSet<>(groups).equals(new HashSet<>(first.getSecurityGroupIds()))
+                        || !type.equals(first.getIpAddressType())
+                        || Boolean.TRUE.equals(preserveClientIp) != first.isPreserveClientIp()
+                        || !tagMap(tagList).equals(tagMap(first.getCreationTags()))) {
+                    throw new AwsException("IdempotentParameterMismatch",
+                            "The client token '" + token + "' was already used with different parameters", 400);
+                }
+                return withTags(first);
+            }
+        }
+
+        String id = "eice-" + randomHex(17);
+        InstanceConnectEndpoint endpoint = new InstanceConnectEndpoint();
+        endpoint.setInstanceConnectEndpointId(id);
+        endpoint.setInstanceConnectEndpointArn(AwsArnUtils.Arn.of("ec2", region, callerAccountId(),
+                "instance-connect-endpoint/" + id).toString());
+        endpoint.setOwnerId(callerAccountId());
+        endpoint.setState("create-complete");
+        endpoint.setDnsName(id + "." + INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX);
+        endpoint.setFipsDnsName(id + "-fips." + INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX);
+        endpoint.setNetworkInterfaceIds(new ArrayList<>(List.of("eni-" + randomHex(17))));
+        endpoint.setVpcId(subnet.getVpcId());
+        endpoint.setSubnetId(subnetId);
+        endpoint.setAvailabilityZone(subnet.getAvailabilityZone());
+        endpoint.setAvailabilityZoneId(subnet.getAvailabilityZoneId());
+        endpoint.setCreatedAt(Instant.now());
+        endpoint.setPreserveClientIp(Boolean.TRUE.equals(preserveClientIp));
+        endpoint.setSecurityGroupIds(groups);
+        endpoint.setIpAddressType(type);
+        endpoint.setRegion(region);
+        endpoint.setClientToken(token);
+        endpoint.setCreationTags(InstanceConnectEndpoint.copyTags(tagList == null ? List.of() : tagList));
+        synchronized (privateIpAllocationLock) {
+            endpoint.setPrivateIpAddress(assignPrivateIp(region, subnetId));
+            instanceConnectEndpoints.put(key(region, id), endpoint);
+        }
+        if (tagList != null && !tagList.isEmpty()) {
+            createTags(region, List.of(id), tagList);
+        }
+        return withTags(endpoint);
+    }
+
+    public List<InstanceConnectEndpoint> describeInstanceConnectEndpoints(String region, List<String> ids,
+                                                                          Map<String, List<String>> filters) {
+        return describeInstanceConnectEndpoints(region, ids, filterList(filters));
+    }
+
+    public List<InstanceConnectEndpoint> describeInstanceConnectEndpoints(String region, List<String> ids,
+                                                                          List<Map.Entry<String, List<String>>> filters) {
+        // Checked before the scan, so a bad name fails even when no endpoint is there to test it on.
+        if (filters != null) {
+            requireSupportedFilters(filters.stream().map(Map.Entry::getKey).toList(),
+                    INSTANCE_CONNECT_ENDPOINT_FILTERS);
+        }
+        for (String id : ids) {
+            requireInstanceConnectEndpoint(region, id);
+        }
+        return instanceConnectEndpoints.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(endpoint -> ids.isEmpty() || ids.contains(endpoint.getInstanceConnectEndpointId()))
+                .map(this::withTags)
+                .filter(endpoint -> filters == null || filters.stream()
+                        .allMatch(filter -> matchesInstanceConnectEndpointFilter(endpoint, filter.getKey(),
+                                filter.getValue())))
+                .sorted(Comparator.comparing(InstanceConnectEndpoint::getInstanceConnectEndpointId))
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * One page of {@link #describeInstanceConnectEndpoints}, in endpoint ID order. A null
+     * {@code maxResults} (omitted) returns every match; a value sent outside the model's 1 to 50
+     * (InstanceConnectEndpointMaxResults), zero and negatives included, is InvalidMaxResults, as
+     * DescribeTags refuses its own range.
+     */
+    public PaginatedResult<InstanceConnectEndpoint> describeInstanceConnectEndpoints(
+            String region, List<String> ids, List<Map.Entry<String, List<String>>> filters,
+            Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 50)) {
+            throw new AwsException("InvalidMaxResults",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 1 and 50.", 400);
+        }
+        return Pagination.paginate(describeInstanceConnectEndpoints(region, ids, filters),
+                InstanceConnectEndpoint::getInstanceConnectEndpointId,
+                maxResults == null ? Integer.MAX_VALUE : maxResults, nextToken, "eice",
+                token -> new AwsException("InvalidParameterValue", "Invalid NextToken", 400));
+    }
+
+    /** Deletes the endpoint and answers with it in {@code delete-in-progress}, as AWS does. */
+    public InstanceConnectEndpoint deleteInstanceConnectEndpoint(String region, String id) {
+        InstanceConnectEndpoint endpoint = withTags(requireInstanceConnectEndpoint(region, id));
+        synchronized (privateIpAllocationLock) {
+            instanceConnectEndpoints.delete(key(region, id));
+            releasePrivateIps(region, endpoint.getSubnetId(),
+                    Collections.singletonList(endpoint.getPrivateIpAddress()));
+        }
+        removeTags(region, id);
+        endpoint.getNetworkInterfaceIds().forEach(eniId -> removeTags(region, eniId));
+        endpoint.setState("delete-in-progress");
+        return endpoint;
+    }
+
+    private InstanceConnectEndpoint requireInstanceConnectEndpoint(String region, String id) {
+        return instanceConnectEndpoints.get(key(region, id)).orElseThrow(() -> new AwsException(
+                "InvalidInstanceConnectEndpointId.NotFound",
+                "The instance connect endpoint ID '" + id + "' does not exist", 400));
+    }
+
+    /** A copy of the stored endpoint carrying its current tags; the stored object is never changed. */
+    private InstanceConnectEndpoint withTags(InstanceConnectEndpoint stored) {
+        InstanceConnectEndpoint endpoint = new InstanceConnectEndpoint(stored);
+        endpoint.setTags(new ArrayList<>(resourceTags(stored.getRegion(), stored.getInstanceConnectEndpointId())));
+        return endpoint;
+    }
+
+    private boolean matchesInstanceConnectEndpointFilter(InstanceConnectEndpoint endpoint, String name,
+                                                         List<String> values) {
+        if (name.startsWith("tag:") || "tag-key".equals(name)) {
+            return matchesTagFilter(endpoint.getTags(), name, values, Ec2Service::matchesFilterValue);
+        }
+        return switch (name) {
+            case "instance-connect-endpoint-id" -> matchesFilterValue(values, endpoint.getInstanceConnectEndpointId());
+            case "state" -> matchesFilterValue(values, endpoint.getState());
+            case "vpc-id" -> matchesFilterValue(values, endpoint.getVpcId());
+            case "subnet-id" -> matchesFilterValue(values, endpoint.getSubnetId());
+            case "tag-value" -> endpoint.getTags().stream().anyMatch(tag -> matchesFilterValue(values, tag.getValue()));
+            default -> throw new AwsException("InvalidParameterValue",
+                    "The filter '" + name + "' is invalid", 400);
+        };
     }
 
     public List<NatGateway> describeNatGateways(String region, List<String> natGatewayIds,
@@ -12570,30 +12987,188 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public NatGateway deleteNatGateway(String region, String natGatewayId) {
         ensureDefaultResources(region);
-        NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
-        // Hand the Elastic IP back, but only if the association is still the gateway's own. Under
-        // the lock createNatGateway takes, so a concurrent create cannot have its association wiped.
+        // Read under the lock createNatGateway and updateNatGatewaySecondaryAddresses take, so what
+        // is given back is what the gateway holds now. The Elastic IP is handed back only if the
+        // association is still the gateway's own, so a concurrent create cannot have it wiped.
         synchronized (privateIpAllocationLock) {
-            natGateway.setState("deleted");
-            for (NatGatewayAddress gatewayAddress : natGateway.getNatGatewayAddresses()) {
-                if (!isSet(gatewayAddress.getAllocationId())) {
-                    continue;
-                }
-                addresses.get(key(region, gatewayAddress.getAllocationId()))
-                        .filter(eip -> gatewayAddress.getAssociationId() != null
-                                && gatewayAddress.getAssociationId().equals(eip.getAssociationId()))
-                        .ifPresent(eip -> {
-                            eip.setAssociationId(null);
-                            eip.setNetworkInterfaceId(null);
-                            eip.setPrivateIpAddress(null);
-                            addresses.put(key(region, eip.getAllocationId()), eip);
-                        });
+            NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
+            // A CreateTags write that read the gateway before an earlier delete can store it back
+            // marked deleted. That delete gave its addresses back, and the network may have leased
+            // them to something else since. A requested address took no lease of its own. The one it
+            // can carry is either a stale lease DeleteNetworkInterface left behind, which should go,
+            // or a failed launch's, given back once its container is detached; giving that back
+            // sooner matters only if the allocator wraps around to it in between.
+            if (!"deleted".equals(natGateway.getState())) {
+                releasePrivateIps(region, natGateway.getSubnetId(), natGateway.getNatGatewayAddresses().stream()
+                        .map(NatGatewayAddress::getPrivateIp).toList());
             }
+            natGateway.setState("deleted");
+            natGateway.getNatGatewayAddresses().forEach(a -> releaseNatGatewayEip(region, a));
             natGateways.delete(key(region, natGatewayId));
             removeTags(region, natGatewayId);
             natGateway.getNatGatewayAddresses().forEach(a -> removeTags(region, a.getNetworkInterfaceId()));
+            return natGateway;
         }
-        return natGateway;
+    }
+
+    /**
+     * Sets a gateway's secondary addresses to the ones given, as AssociateNatGatewayAddress,
+     * DisassociateNatGatewayAddress, AssignPrivateNatGatewayAddress and
+     * UnassignPrivateNatGatewayAddress together would, keeping the gateway and its id: a secondary
+     * the request still names is kept, one it no longer names is dropped and its Elastic IP and
+     * private address handed back, and a new one is checked as {@link #createNatGateway} checks it.
+     * Every check runs before anything changes, so a refused request leaves the gateway as it was.
+     * The arguments mean what they mean to {@link #createNatGateway}.
+     */
+    public NatGateway updateNatGatewaySecondaryAddresses(String region, String natGatewayId,
+                                                         List<String> secondaryAllocationIds,
+                                                         List<String> secondaryPrivateIpAddresses,
+                                                         String secondaryPrivateIpAddressCount) {
+        ensureDefaultResources(region);
+        NatGateway requested = getRequiredNatGateway(region, natGatewayId);
+        String subnetId = requested.getSubnetId();
+        Subnet subnet = requireSubnet(region, subnetId);
+        boolean privateGateway = "private".equalsIgnoreCase(requested.getConnectivityType());
+        List<String> eips = nullToEmpty(secondaryAllocationIds);
+        if (privateGateway && !eips.isEmpty()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Elastic IP addresses cannot be associated with private NAT gateways.", 400);
+        }
+        int count = secondaryPrivateIpCount(secondaryPrivateIpAddressCount, privateGateway);
+        eips.forEach(id -> getRequiredAddress(region, id));
+        List<String> ips = nullToEmpty(secondaryPrivateIpAddresses).stream()
+                .map(ip -> validateRequestedPrivateIp(ip, subnet, null, 1))
+                .toList();
+        if (new HashSet<>(ips).size() != ips.size()) {
+            throw new AwsException("InvalidIPAddress.InUse", "A secondary address is listed twice.", 400);
+        }
+        int slots = Math.max(eips.size(), ips.size()) + count;
+        synchronized (privateIpAllocationLock) {
+            // Read again under the lock DeleteNatGateway takes, so a gateway deleted since the read
+            // above is refused rather than written back holding its Elastic IPs again.
+            NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
+            if ("deleted".equals(natGateway.getState())) {
+                throw new AwsException("NatGatewayNotFound", "NatGateway " + natGatewayId + " was not found", 400);
+            }
+            List<NatGatewayAddress> dropped = new ArrayList<>(natGateway.getNatGatewayAddresses().stream()
+                    .filter(a -> !a.isPrimary()).toList());
+            NatGatewayAddress[] result = new NatGatewayAddress[slots];
+            // A slot naming an Elastic IP or an address keeps the secondary that already matches it;
+            // the counted slots then keep the last of the other secondaries with neither. Slot
+            // position is the only record of where an address came from: counted addresses usually
+            // follow the listed ones, so the last are usually ones the subnet picked rather than
+            // listed ones the request dropped. Across updates an address once listed can move
+            // behind a picked one, and then it is the one kept.
+            for (int i = 0; i < slots; i++) {
+                String eip = i < eips.size() ? eips.get(i) : null;
+                String ip = i < ips.size() ? ips.get(i) : null;
+                if (eip != null || ip != null) {
+                    result[i] = takeFirst(dropped, a -> Objects.equals(eip, a.getAllocationId())
+                            && (ip == null || ip.equals(a.getPrivateIp())));
+                }
+            }
+            int listed = Math.max(eips.size(), ips.size());
+            List<NatGatewayAddress> unlisted = dropped.stream()
+                    .filter(a -> a.getAllocationId() == null && !ips.contains(a.getPrivateIp()))
+                    .toList();
+            List<NatGatewayAddress> counted = unlisted.subList(Math.max(0, unlisted.size() - count), unlisted.size());
+            for (int i = 0; i < counted.size(); i++) {
+                result[listed + i] = counted.get(i);
+                dropped.remove(counted.get(i));
+            }
+            Set<String> droppedEips = new HashSet<>();
+            Set<String> droppedIps = new HashSet<>();
+            dropped.forEach(a -> {
+                addIfSet(droppedEips, a.getAllocationId());
+                addIfSet(droppedIps, a.getPrivateIp());
+            });
+            Set<String> seen = new HashSet<>();
+            for (int i = 0; i < slots; i++) {
+                if (result[i] != null) {
+                    continue;
+                }
+                String eip = i < eips.size() ? eips.get(i) : null;
+                if (eip != null && (!seen.add(eip) || !droppedEips.contains(eip) && isElasticIpTaken(region, eip))) {
+                    throw new AwsException("Resource.AlreadyAssociated",
+                            "Elastic IP address " + eip + " is already associated", 400);
+                }
+                String ip = i < ips.size() ? ips.get(i) : null;
+                if (ip != null && !droppedIps.contains(ip)) {
+                    requireRequestedPrivateIpFree(region, subnetId, ip);
+                }
+            }
+            fillNatGatewaySlots(region, natGatewayId, subnetId, result, eips, ips, new HashSet<>(ips));
+            dropped.forEach(a -> releaseNatGatewayEip(region, a));
+            List<NatGatewayAddress> addresses = new ArrayList<>(natGateway.getNatGatewayAddresses().stream()
+                    .filter(NatGatewayAddress::isPrimary).toList());
+            addresses.addAll(List.of(result));
+            addresses.forEach(a -> holdNatGatewayEip(region, a));
+            // A dropped address that a new slot names again is still the gateway's, so it keeps
+            // its lease.
+            Set<String> heldIps = addresses.stream().map(NatGatewayAddress::getPrivateIp)
+                    .collect(Collectors.toSet());
+            releasePrivateIps(region, subnetId, dropped.stream().map(NatGatewayAddress::getPrivateIp)
+                    .filter(ip -> !heldIps.contains(ip)).toList());
+            natGateway.setNatGatewayAddresses(addresses);
+            natGateways.put(key(region, natGatewayId), natGateway);
+            return natGateway;
+        }
+    }
+
+    private static <T> T takeFirst(List<T> from, Predicate<T> matching) {
+        for (T item : from) {
+            if (matching.test(item)) {
+                from.remove(item);
+                return item;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether an instance or a NAT gateway already holds the Elastic IP. The gateway scan covers
+     * gateways persisted before the Address record was marked.
+     */
+    private boolean isElasticIpTaken(String region, String allocationId) {
+        Address held = getRequiredAddress(region, allocationId);
+        return isSet(held.getAssociationId()) || isSet(held.getInstanceId()) || isHeldByNatGateway(region, allocationId);
+    }
+
+    /**
+     * Marks the address's Elastic IP held by the gateway's interface, so DescribeAddresses says so:
+     * an allocation that looks free is one Terraform and the console would offer to reuse. No
+     * instanceId, a NAT gateway is not an instance. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private void holdNatGatewayEip(String region, NatGatewayAddress gatewayAddress) {
+        if (!isSet(gatewayAddress.getAllocationId())) {
+            return;
+        }
+        addresses.get(key(region, gatewayAddress.getAllocationId())).ifPresent(eip -> {
+            eip.setAssociationId(gatewayAddress.getAssociationId());
+            eip.setNetworkInterfaceId(gatewayAddress.getNetworkInterfaceId());
+            eip.setPrivateIpAddress(gatewayAddress.getPrivateIp());
+            addresses.put(key(region, eip.getAllocationId()), eip);
+        });
+    }
+
+    /**
+     * Hands the address's Elastic IP back, but only if the association is still the gateway's own.
+     * Callers must hold {@link #privateIpAllocationLock}, so a concurrent create cannot have its
+     * association wiped.
+     */
+    private void releaseNatGatewayEip(String region, NatGatewayAddress gatewayAddress) {
+        if (!isSet(gatewayAddress.getAllocationId())) {
+            return;
+        }
+        addresses.get(key(region, gatewayAddress.getAllocationId()))
+                .filter(eip -> gatewayAddress.getAssociationId() != null
+                        && gatewayAddress.getAssociationId().equals(eip.getAssociationId()))
+                .ifPresent(eip -> {
+                    eip.setAssociationId(null);
+                    eip.setNetworkInterfaceId(null);
+                    eip.setPrivateIpAddress(null);
+                    addresses.put(key(region, eip.getAllocationId()), eip);
+                });
     }
 
     private NatGateway getRequiredNatGateway(String region, String natGatewayId) {
@@ -12639,6 +13214,71 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public Address associateAddress(String region, String allocationId, String instanceId) {
         return associateAddress(region, allocationId, instanceId, null);
+    }
+
+    public Address associateAddress(String region, String allocationId, String instanceId,
+                                   String networkInterfaceId, String privateIpAddress) {
+        if (!isSet(networkInterfaceId)) {
+            if (!isSet(instanceId)) {
+                throw new AwsException("MissingParameter",
+                        "Specify either InstanceId or NetworkInterfaceId.", 400);
+            }
+            return associateAddress(region, allocationId, instanceId, privateIpAddress);
+        }
+        if (isSet(instanceId)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Specify either InstanceId or NetworkInterfaceId, but not both.", 400);
+        }
+        ensureDefaultResources(region);
+        synchronized (privateIpAllocationLock) {
+            NetworkInterface networkInterface = networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
+            if (networkInterface == null) {
+                networkInterface = describeNetworkInterfaces(region, List.of(networkInterfaceId), Map.of())
+                        .networkInterfaces().getFirst();
+            }
+            networkInterface = releaseIfHostIsGone(region, networkInterface);
+            NetworkInterfaceAttachment attachment = networkInterface.getAttachment();
+            if (attachment != null) {
+                if (attachment.getDeviceIndex() != 0) {
+                    throw new AwsException("Unsupported",
+                            "Elastic IP association to a non-primary attached interface is not supported.", 400);
+                }
+                return associateAddress(region, allocationId, attachment.getInstanceId(), privateIpAddress);
+            }
+            if (!"available".equals(networkInterface.getStatus())) {
+                throw new AwsException("Unsupported",
+                        "Elastic IP association to a service-managed interface is not supported.", 400);
+            }
+            String selectedPrivateIp = isSet(privateIpAddress)
+                    ? privateIpAddress : networkInterface.getPrivateIpAddress();
+            if (networkInterface.getPrivateIpAddresses().stream()
+                    .noneMatch(ip -> selectedPrivateIp.equals(ip.getPrivateIpAddress()))) {
+                throw new AwsException("InvalidParameterValue",
+                        "The private IP address is not assigned to the selected network interface.", 400);
+            }
+            Address address = getRequiredAddress(region, allocationId);
+            if (isHeldByNatGateway(region, allocationId)) {
+                throw new AwsException("Resource.AlreadyAssociated",
+                        "The Elastic IP address is already associated with a NAT gateway.", 400);
+            }
+            if (address.getAssociationId() != null) {
+                disassociateAddress(region, address.getAssociationId());
+            }
+            for (Address previous : addresses.scan(k -> k.startsWith(region + "::"))) {
+                if (previous.getAssociationId() != null
+                        && networkInterfaceId.equals(previous.getNetworkInterfaceId())
+                        && selectedPrivateIp.equals(previous.getPrivateIpAddress())) {
+                    disassociateAddress(region, previous.getAssociationId());
+                }
+            }
+            address.setInstanceId(null);
+            address.setNetworkInterfaceId(networkInterfaceId);
+            address.setPrivateIpAddress(selectedPrivateIp);
+            address.setAssociationId("eipassoc-" + randomHex(17));
+            updateStoredAddressAssociation(address);
+            addresses.put(key(region, allocationId), address);
+            return address;
+        }
     }
 
     /**
@@ -14472,27 +15112,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             result.add(endpointNi);
         }
 
-        // The ENI a NAT gateway owns. DescribeNatGateways publishes its id (aws_nat_gateway's
-        // network_interface_id), so it has to resolve here too. Unlike the endpoint arm above this
-        // one honours the explicit account: gateways and their subnets are read for safeAccount.
+        // The ENIs a NAT gateway and an instance connect endpoint own, NAT first. DescribeNatGateways
+        // publishes a gateway's id (aws_nat_gateway's network_interface_id) and an endpoint publishes
+        // its own in networkInterfaceIdSet, so both have to resolve here too. Unlike the VPC endpoint
+        // arm above this one honours the explicit account: gateways, endpoints and the records their
+        // interfaces are built from are read for safeAccount.
+        List<NetworkInterface> managedInterfaces = new ArrayList<>();
         for (NatGateway natGateway : natGatewaysOf(safeAccount)) {
-            if (!region.equals(natGateway.getRegion())) {
+            if (region.equals(natGateway.getRegion())) {
+                managedInterfaces.addAll(natNetworkInterfacesOf(natGateway, safeAccount));
+            }
+        }
+        List<InstanceConnectEndpoint> regionEndpoints =
+                instanceConnectEndpoints instanceof AccountAwareStorageBackend<InstanceConnectEndpoint> aware
+                        ? aware.scanForAccount(safeAccount, k -> k.startsWith(region + "::"))
+                        : instanceConnectEndpoints.scan(k -> k.startsWith(region + "::"));
+        for (InstanceConnectEndpoint endpoint : regionEndpoints) {
+            managedInterfaces.addAll(instanceConnectEndpointNetworkInterfacesOf(endpoint, safeAccount));
+        }
+        for (NetworkInterface managedNi : managedInterfaces) {
+            String managedEniId = managedNi.getNetworkInterfaceId();
+            if (foundIds.contains(managedEniId)
+                    || !networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(managedEniId)) {
                 continue;
             }
-            for (NetworkInterface natNi : natNetworkInterfacesOf(natGateway, safeAccount)) {
-                String natEniId = natNi.getNetworkInterfaceId();
-                if (foundIds.contains(natEniId)) {
-                    continue;
-                }
-                if (!networkInterfaceIds.isEmpty() && !networkInterfaceIds.contains(natEniId)) {
-                    continue;
-                }
-                foundIds.add(natEniId);
-                natNi.getTagSet().addAll(tagsOf(safeAccount, region, natEniId).orElse(List.of()));
-                if (!matchesFilters(natNi, filters, region)) {
-                    continue;
-                }
-                result.add(natNi);
+            foundIds.add(managedEniId);
+            managedNi.getTagSet().addAll(tagsOf(safeAccount, region, managedEniId).orElse(List.of()));
+            if (matchesFilters(managedNi, filters, region)) {
+                result.add(managedNi);
             }
         }
 
@@ -14623,13 +15270,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * behind, so the status is what says the interface is spoken for.
      */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
-        NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
-        if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
-            throw new AwsException("InvalidParameterValue",
-                    "Network interface '" + networkInterfaceId + "' is currently in use", 400);
+        synchronized (privateIpAllocationLock) {
+            NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
+            if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
+                throw new AwsException("InvalidParameterValue",
+                        "Network interface '" + networkInterfaceId + "' is currently in use", 400);
+            }
+            releaseInterfaceAddresses(region, networkInterfaceId, true);
+            networkInterfaces.delete(key(region, networkInterfaceId));
         }
-        releaseInterfaceAddresses(region, networkInterfaceId, true);
-        networkInterfaces.delete(key(region, networkInterfaceId));
     }
 
     /**
@@ -15381,4 +16030,32 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         return converted;
     }
+
+    /**
+     * GetConsoleOutput: a console log carrying the instance's SSH host keys between the markers
+     * cloud-init prints, the part clients read from it. An instance that is not running, or whose
+     * container cannot be read, has an empty log, as a just-launched one does on AWS.
+     */
+    public String getConsoleOutput(String region, String instanceId) {
+        Instance instance = getRequiredInstance(region, instanceId);
+        String containerId = instance.getDockerContainerId();
+        if (containerId == null || containerId.isBlank() || instance.getState() == null
+                || !"running".equals(instance.getState().getName())) {
+            return "";
+        }
+        String keys;
+        try {
+            keys = containerManager.readSshHostKeys(containerId);
+        } catch (RuntimeException e) {
+            // The container stopped or went away between the state check and the read.
+            LOG.debugv("No console output for {0}: {1}", instanceId, e.getMessage());
+            return "";
+        }
+        if (keys == null || keys.isBlank()) {
+            return "";
+        }
+        return "Cloud-init finished for " + instanceId + "\n"
+                + "-----BEGIN SSH HOST KEY KEYS-----\n" + keys.strip() + "\n-----END SSH HOST KEY KEYS-----\n";
+    }
+
 }

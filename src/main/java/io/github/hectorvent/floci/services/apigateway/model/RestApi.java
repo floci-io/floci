@@ -12,6 +12,9 @@ import java.util.Map;
 @RegisterForReflection
 public class RestApi {
 
+    public static final String API_KEY_SOURCE_HEADER = "HEADER";
+    public static final String API_KEY_SOURCE_AUTHORIZER = "AUTHORIZER";
+
     private String id;
     private String name;
     private String description;
@@ -23,7 +26,25 @@ public class RestApi {
     private List<String> binaryMediaTypes = new ArrayList<>();
     /** Resource policy document, stored exactly as the caller sent it. */
     private String policy;
+    /**
+     * Where a request's API key is read from: {@code HEADER} (the {@code x-api-key} header, AWS's
+     * default) or {@code AUTHORIZER} (the {@code usageIdentifierKey} a Lambda authorizer returns).
+     */
+    private String apiKeySource = API_KEY_SOURCE_HEADER;
     private List<String> warnings = new ArrayList<>();
+
+    public String getApiKeySource() {
+        return apiKeySource;
+    }
+
+    /** {@code null} keeps the default, {@code HEADER}. */
+    public void setApiKeySource(String apiKeySource) {
+        this.apiKeySource = apiKeySource != null ? apiKeySource : API_KEY_SOURCE_HEADER;
+    }
+
+    public boolean readsApiKeyFromAuthorizer() {
+        return API_KEY_SOURCE_AUTHORIZER.equals(apiKeySource);
+    }
 
     public List<String> getWarnings() {
         return warnings;

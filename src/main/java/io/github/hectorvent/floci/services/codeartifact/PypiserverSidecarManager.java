@@ -39,6 +39,7 @@ public class PypiserverSidecarManager implements ContainerTeardown {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
+    private final SidecarRepositoryLease lease;
 
     @Inject
     public PypiserverSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
@@ -47,6 +48,7 @@ public class PypiserverSidecarManager implements ContainerTeardown {
         this.lifecycleManager = lifecycleManager;
         this.config = config;
         this.pool = new PerKeyContainerPool(lifecycleManager, HEALTH_PATH);
+        this.lease = new SidecarRepositoryLease("pypiserver", pool);
     }
 
     /**
@@ -62,7 +64,19 @@ public class PypiserverSidecarManager implements ContainerTeardown {
 
     /** Stops and removes the container for one pypi repository, if one was ever started. */
     public void release(String pypiRepositoryId) {
-        pool.stopContainer(pypiRepositoryId);
+        lease.release(pypiRepositoryId);
+    }
+
+    public void registerRepository(String pypiRepositoryId) {
+        lease.registerRepository(pypiRepositoryId);
+    }
+
+    public void beginUse(String pypiRepositoryId) {
+        lease.beginUse(pypiRepositoryId);
+    }
+
+    public void endUse(String pypiRepositoryId) {
+        lease.endUse(pypiRepositoryId);
     }
 
     /**
@@ -124,6 +138,6 @@ public class PypiserverSidecarManager implements ContainerTeardown {
 
     @Override
     public void stopManagedContainers() {
-        pool.stopAll();
+        lease.stopManagedContainers();
     }
 }

@@ -53,6 +53,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     private void assertStackStatus(String stackName, String status) {
+        CfnStackWaits.awaitStatus(stackName, status, CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

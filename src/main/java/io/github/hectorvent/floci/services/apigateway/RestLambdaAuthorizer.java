@@ -47,9 +47,19 @@ public class RestLambdaAuthorizer {
         }
     }
 
-    record Result(String principalId, String policyDocument, Map<String, Object> context) {
+    /**
+     * What a Lambda authorizer returned. {@code usageIdentifierKey} is the API key a REST API whose
+     * {@code apiKeySource} is {@code AUTHORIZER} meters and checks the request with; null when the
+     * authorizer returned none.
+     */
+    record Result(String principalId, String policyDocument, Map<String, Object> context,
+                  String usageIdentifierKey) {
         Result {
             context = Map.copyOf(context);
+        }
+
+        Result(String principalId, String policyDocument, Map<String, Object> context) {
+            this(principalId, policyDocument, context, null);
         }
     }
 
@@ -63,7 +73,9 @@ public class RestLambdaAuthorizer {
         }
         JsonNode policy = output.path("policyDocument");
         AuthorizerPolicyEvaluator.validate(policy);
-        return new Result(output.path("principalId").asText(), policy.toString(), parseContext(output.get("context")));
+        JsonNode usageIdentifierKey = output.path("usageIdentifierKey");
+        return new Result(output.path("principalId").asText(), policy.toString(), parseContext(output.get("context")),
+                usageIdentifierKey.isTextual() ? usageIdentifierKey.asText() : null);
     }
 
     private Map<String, Object> parseContext(JsonNode context) {

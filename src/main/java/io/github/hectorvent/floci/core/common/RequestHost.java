@@ -16,7 +16,11 @@ public final class RequestHost {
     }
 
     public static String of(ContainerRequestContext requestContext) {
-        return of(requestContext.getHeaderString("Host"), requestContext.getUriInfo().getRequestUri());
+        String hostHeader = requestContext.getHeaderString("Host");
+        if (hostHeader != null && !hostHeader.isBlank()) {
+            return hostHeader.trim();
+        }
+        return of(hostHeader, requestContext.getUriInfo().getRequestUri());
     }
 
     /**

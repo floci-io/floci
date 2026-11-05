@@ -31,6 +31,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -43,6 +44,9 @@ public class Route53Service implements Resettable {
 
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     private static final SecureRandom RANDOM = new SecureRandom();
+    private static final List<String> DEFAULT_NAME_SERVERS = List.of("ns-1.awsdns-01.org", "ns-2.awsdns-02.net",
+            "ns-3.awsdns-03.com", "ns-4.awsdns-04.co.uk");
+    private static final List<String> NAME_SERVER_TLDS = List.of("org", "net", "com", "co.uk");
     private static final int MAX_VPC_ASSOCIATIONS_PER_ZONE = 300;
     private static final int MAX_VPC_ASSOCIATION_AUTHORIZATIONS = 1000;
 
@@ -57,6 +61,7 @@ public class Route53Service implements Resettable {
     private final StorageBackend<String, Map<String, String>> tagStore;
     private final StorageBackend<String, List<VpcAssociation>> vpcAuthorizationStore;
     private final List<String> nameServers;
+    private final List<Boolean> configuredNameServerSlots;
     private final String defaultAccountId;
     private final RegionResolver regionResolver;
     private final Ec2Service ec2Service;
@@ -85,12 +90,20 @@ public class Route53Service implements Resettable {
                 new TypeReference<Map<String, List<VpcAssociation>>>() {});
 
         EmulatorConfig.Route53ServiceConfig r53 = config.services().route53();
-        this.nameServers = List.of(
+        List<Optional<String>> configuredNames = List.of(
                 r53.defaultNameserver1(),
                 r53.defaultNameserver2(),
                 r53.defaultNameserver3(),
                 r53.defaultNameserver4()
-        ).stream().map(Route53Service::delegationName).toList();
+        );
+        List<String> effectiveNames = new ArrayList<>(4);
+        List<Boolean> configuredSlots = new ArrayList<>(4);
+        for (int i = 0; i < 4; i++) {
+            configuredSlots.add(configuredNames.get(i).isPresent());
+            effectiveNames.add(delegationName(configuredNames.get(i).orElse(DEFAULT_NAME_SERVERS.get(i))));
+        }
+        this.configuredNameServerSlots = List.copyOf(configuredSlots);
+        this.nameServers = List.copyOf(effectiveNames);
         this.defaultAccountId = config.defaultAccountId();
         this.regionResolver = regionResolver;
         this.ec2Service = ec2Service;
@@ -137,7 +150,7 @@ public class Route53Service implements Resettable {
         }
         String id = "N" + generateZoneId().substring(1);
         DelegationSet set = new DelegationSet(id, callerReference,
-                source == null ? nameServers : assignedNameServers(source));
+                source == null ? newNameServers(id) : assignedNameServers(source));
         delegationSetStore.put(id, set);
         if (source != null) {
             source.setDelegationSetId(id);
@@ -162,8 +175,23 @@ public class Route53Service implements Resettable {
     }
 
     public DelegationSet getDelegationSet(HostedZone zone) {
-        return zone.getDelegationSetId() == null ? new DelegationSet(null, null, nameServers)
+        return zone.getDelegationSetId() == null ? new DelegationSet(null, null, assignedNameServers(zone))
                 : getReusableDelegationSet(zone.getDelegationSetId());
+    }
+
+    private List<String> newNameServers(String id) {
+        BigInteger value = new BigInteger(id, 36);
+        List<String> assigned = new ArrayList<>(4);
+        for (int i = 0; i < 4; i++) {
+            if (configuredNameServerSlots.get(i)) {
+                assigned.add(nameServers.get(i));
+            } else {
+                int slot = value.shiftRight(i * 18).intValue() & 0x3ffff;
+                assigned.add(String.format(Locale.ROOT, "ns-%d.awsdns-%02d.%s",
+                        (slot & 0x7ff) + 1, (slot >>> 11) % 100, NAME_SERVER_TLDS.get(i)));
+            }
+        }
+        return List.copyOf(assigned);
     }
 
     public long getReusableDelegationSetCount() {
@@ -245,7 +273,8 @@ public class Route53Service implements Resettable {
         HostedZone zone = new HostedZone(id, normalizedName, callerReference, comment, vpcAssociation);
         zone.setOwnerAccountId(callerAccountId);
         zone.setDelegationSetId(set == null ? null : set.id());
-        zone.setDelegationNameServers(set == null ? nameServers : set.nameServers());
+        zone.setDelegationNameServers(set != null ? set.nameServers()
+                : vpcAssociation != null ? nameServers : newNameServers(id));
         if (vpcAssociation != null) {
             vpcAssociation.setOwnerAccountId(callerAccountId);
         }
@@ -731,6 +760,10 @@ public class Route53Service implements Resettable {
 
     public List<String> getNameServers() {
         return nameServers;
+    }
+
+    public List<String> getAssignedNameServers(String hostedZoneId) {
+        return getDelegationSet(getHostedZone(hostedZoneId)).nameServers();
     }
 
     public String getDefaultAccountId() {

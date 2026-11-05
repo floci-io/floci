@@ -22,8 +22,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -41,12 +39,15 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
+import static io.github.hectorvent.floci.testing.CodeArtifactRequests.npmIntegrity;
+import static io.github.hectorvent.floci.testing.CodeArtifactRequests.npmPublishEnvelope;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -267,7 +268,7 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
-                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
+                npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
 
         assertEquals(200, response.statusCode());
         assertEquals(false, upstreamReceivedPut.get());
@@ -305,7 +306,7 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
-                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", newContent));
+                npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", newContent));
 
         assertEquals(409, response.statusCode());
         assertEquals(true, upstreamReceivedPut.get());
@@ -339,7 +340,8 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
-                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", "fresh bytes".getBytes(StandardCharsets.UTF_8)));
+                npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "fresh bytes".getBytes(StandardCharsets.UTF_8)));
 
         assertEquals(201, response.statusCode());
         assertEquals(true, upstreamReceivedPut.get());
@@ -368,7 +370,7 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
-                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
                         "fresh bytes".getBytes(StandardCharsets.UTF_8)));
 
         assertEquals(201, response.statusCode());
@@ -410,13 +412,194 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
-                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
                         "fresh bytes".getBytes(StandardCharsets.UTF_8)));
 
         assertEquals(409, response.statusCode());
         assertEquals(false, upstreamReceivedPut.get());
         verify(service, never()).forgetContainerBackedStatusOverrideIfUnchanged(any(), any(), any(), any(), any(),
                 any(), any(), any(), any());
+    }
+
+    /**
+     * Issue #7116: a package whose origin configuration sets publish:BLOCK refuses an npm publish
+     * the way PublishPackageVersion already refuses it for the generic format, ahead of the
+     * byte-identical shortcut: Verdaccio already holds this exact tarball, which would otherwise
+     * answer 200 without forwarding.
+     */
+    @Test
+    void aByteIdenticalRepublishToAPackageWhoseOriginConfigurationBlocksPublishIsRefused() throws Exception {
+        byte[] content = "tarball bytes".getBytes(StandardCharsets.UTF_8);
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = blockedPublishService(null, "my-pkg");
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        givenStoredVersion(verdaccioClient, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
+                npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    /**
+     * The restriction needs nothing from the envelope, so a body too malformed to scan (which is
+     * otherwise forwarded unchanged for Verdaccio to reject) is refused too, scoped package
+     * included.
+     */
+    @Test
+    void anUnscannablePublishToAScopedPackageWhoseOriginConfigurationBlocksPublishIsRefused() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = blockedPublishService("scope", "my-pkg");
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@scope%2fmy-pkg",
+                "good-token", "{not json");
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    /**
+     * Issue #7439: a scoped publish may name its package with a literal slash ({@code PUT
+     * /@scope/name}, the shape VerdaccioSidecarClient itself publishes with) instead of {@code
+     * %2F}. It is the same publish, so a blocked package refuses it the same way.
+     */
+    @Test
+    void aLiteralSlashScopedPublishToABlockedPackageIsRefused() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = blockedPublishService("scope", "my-pkg");
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@scope/my-pkg", "good-token",
+                npmPublishEnvelope("@scope/my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "fresh bytes".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    /**
+     * Issue #7439: the literal slash form reaches the Archived/Disposed guard too.
+     */
+    @Test
+    void aLiteralSlashScopedPublishToAnArchivedVersionIsRefused() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        doThrow(new AwsException("ConflictException", "Package version '1.0.0' of package 'my-pkg' is Archived "
+                + "and cannot be republished.", 409))
+                .when(service).requireContainerBackedVersionNotArchivedOrDisposed(eq("us-east-1"), eq(DOMAIN),
+                        eq("000000000000"), eq(REPOSITORY), eq("npm"), eq("scope"), eq("my-pkg"), eq("1.0.0"));
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@scope/my-pkg", "good-token",
+                npmPublishEnvelope("@scope/my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "fresh bytes".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    /**
+     * An allowed literal slash publish still reaches Verdaccio at the path the client sent, and
+     * its bytes are counted under the scope and name that path carries.
+     */
+    @Test
+    void aLiteralSlashScopedPublishIsForwardedAsSentAndAccountedUnderItsScope() throws Exception {
+        AtomicReference<String> upstreamPutPath = new AtomicReference<>();
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.PUT) {
+                        upstreamPutPath.set(request.path());
+                    }
+                    request.response().setStatusCode(201).end();
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@scope/my-pkg", "good-token",
+                npmPublishEnvelope("@scope/my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "fresh bytes".getBytes(StandardCharsets.UTF_8)));
+
+        assertEquals(201, response.statusCode());
+        assertEquals("/@scope/my-pkg", upstreamPutPath.get());
+        verify(service, timeout(2000)).recordContainerBackedAssetBytes(eq("us-east-1"), eq(DOMAIN),
+                eq("000000000000"), eq(REPOSITORY), eq("npm"), eq("scope"), eq("my-pkg"), anyLong(), anyLong());
+    }
+
+    /**
+     * Only the bare scoped package path is a publish: a dist-tag update to a blocked package is a
+     * multi-segment {@code /-/package/...} PUT and is still proxied as before.
+     */
+    @Test
+    void aDistTagPutToABlockedPackageIsStillProxied() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = blockedPublishService("scope", "my-pkg");
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY
+                + "/-/package/@scope%2fmy-pkg/dist-tags/latest", "good-token", "\"1.0.0\"");
+
+        assertEquals(201, response.statusCode());
+        assertEquals(true, upstreamReceivedPut.get());
+    }
+
+    private HttpServer startUpstreamRecordingPuts(AtomicReference<Boolean> receivedPut) throws Exception {
+        return vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.PUT) {
+                        receivedPut.set(true);
+                    }
+                    request.response().setStatusCode(201).end();
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+    }
+
+    private static CodeArtifactService blockedPublishService(String namespace, String packageName) {
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        doThrow(new AwsException("ConflictException", "Package '" + packageName + "' cannot be published because "
+                + "its origin configuration blocks direct publish.", 409))
+                .when(service).requireContainerBackedPackagePublishAllowed(eq("us-east-1"), eq(DOMAIN),
+                        eq("000000000000"), eq(REPOSITORY), eq("npm"), eq(namespace), eq(packageName));
+        return service;
     }
 
     /**
@@ -458,7 +641,7 @@ class CodeArtifactNpmDataPlaneTest {
         String oversizedReadme = "x".repeat(1_000_001);
         String envelope = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\",\"version\":\"1.0.0\","
                 + "\"readme\":\"" + oversizedReadme + "\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\","
-                + "\"integrity\":\"" + integrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
+                + "\"integrity\":\"" + npmIntegrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
                 + "\"content_type\":\"application/octet-stream\",\"data\":\""
                 + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length + "}}}";
 
@@ -500,7 +683,7 @@ class CodeArtifactNpmDataPlaneTest {
         String oversizedReadme = "x".repeat(1_000_001);
         String envelope = "{\"name\":\"my-pkg\",\"versions\":{\"1.0.0\":{\"name\":\"my-pkg\",\"version\":\"1.0.0\","
                 + "\"readme\":\"" + oversizedReadme + "\",\"dist\":{\"tarball\":\"http://ignored/my-pkg-1.0.0.tgz\","
-                + "\"integrity\":\"" + integrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
+                + "\"integrity\":\"" + npmIntegrity(content) + "\"}}},\"_attachments\":{\"my-pkg-1.0.0.tgz\":{"
                 + "\"content_type\":\"application/octet-stream\",\"data\":\""
                 + Base64.getEncoder().encodeToString(content) + "\",\"length\":" + content.length + "}}}";
 
@@ -546,7 +729,7 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
-                publishEnvelope("other-pkg", "1.0.0", "other-pkg-1.0.0.tgz", content));
+                npmPublishEnvelope("other-pkg", "1.0.0", "other-pkg-1.0.0.tgz", content));
 
         assertEquals(201, response.statusCode());
         assertEquals(true, upstreamReceivedPut.get());
@@ -585,7 +768,7 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@myscope%2Fmy-pkg",
-                "good-token", publishEnvelope("@myscope/my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
+                "good-token", npmPublishEnvelope("@myscope/my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
 
         assertEquals(200, response.statusCode());
         assertEquals(false, upstreamReceivedPut.get());
@@ -623,7 +806,7 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
-                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
+                npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
 
         assertEquals(409, response.statusCode());
         assertEquals(true, upstreamReceivedPut.get());
@@ -652,7 +835,8 @@ class CodeArtifactNpmDataPlaneTest {
     @Test
     void aPublishWhoseSidecarLookupFailsFallsThroughToTheBackend() throws Exception {
         assertForwardedWhenNotConfirmable(
-                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", "tarball bytes".getBytes(StandardCharsets.UTF_8)),
+                npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz",
+                        "tarball bytes".getBytes(StandardCharsets.UTF_8)),
                 verdaccioClient -> when(verdaccioClient.fetchPackageDocument(anyString(), isNull(), eq("my-pkg")))
                         .thenThrow(new IllegalStateException("sidecar unreachable")));
     }
@@ -696,7 +880,7 @@ class CodeArtifactNpmDataPlaneTest {
         when(verdaccioClient.fetchPackageDocument(anyString(), eq(namespace), eq(name)))
                 .thenReturn(Optional.of(storedDocument(name, version, filename, storedContent, storedTags)));
         when(verdaccioClient.storedTarballIntegrity(anyString(), eq(namespace), eq(name), eq(filename)))
-                .thenReturn(Optional.of(integrity(storedContent)));
+                .thenReturn(Optional.of(npmIntegrity(storedContent)));
     }
 
     /**
@@ -730,7 +914,7 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/big-pkg", "good-token",
-                publishEnvelope("big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content));
+                npmPublishEnvelope("big-pkg", "1.0.0", "big-pkg-1.0.0.tgz", content));
 
         assertEquals(200, response.statusCode());
         assertEquals(false, upstreamReceivedPut.get());
@@ -744,16 +928,8 @@ class CodeArtifactNpmDataPlaneTest {
         storedTags.forEach(tags::put);
         ObjectNode dist = document.putObject("versions").putObject(version).putObject("dist");
         dist.put("tarball", "http://ignored/" + filename);
-        dist.put("integrity", integrity(content));
+        dist.put("integrity", npmIntegrity(content));
         return document;
-    }
-
-    private static String integrity(byte[] content) {
-        try {
-            return "sha512-" + Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-512").digest(content));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException(e);
-        }
     }
 
     private HttpResponse putUnchecked(String path, String body) {
@@ -773,7 +949,7 @@ class CodeArtifactNpmDataPlaneTest {
     @Test
     void aPublishArrivingWhilePreflightsAreFullWaitsForAPermitInsteadOfBypassingTheCheck() throws Exception {
         byte[] content = "tarball bytes".getBytes(StandardCharsets.UTF_8);
-        String envelope = publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content);
+        String envelope = npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content);
         AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
         upstream = vertx.createHttpServer()
                 .requestHandler(request -> {
@@ -797,7 +973,7 @@ class CodeArtifactNpmDataPlaneTest {
         CountDownLatch release = new CountDownLatch(1);
         ObjectNode document = storedDocument("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
         when(verdaccioClient.storedTarballIntegrity(anyString(), isNull(), eq("my-pkg"), eq("my-pkg-1.0.0.tgz")))
-                .thenReturn(Optional.of(integrity(content)));
+                .thenReturn(Optional.of(npmIntegrity(content)));
         when(verdaccioClient.fetchPackageDocument(anyString(), isNull(), eq("my-pkg"))).thenAnswer(invocation -> {
             entered.countDown();
             release.await(5, TimeUnit.SECONDS);
@@ -833,7 +1009,7 @@ class CodeArtifactNpmDataPlaneTest {
     @Test
     void aQueuedPublishReleasesItsUseWhenTheClientDisconnects() throws Exception {
         byte[] content = "tarball bytes".getBytes(StandardCharsets.UTF_8);
-        String envelope = publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content);
+        String envelope = npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content);
         CodeArtifactService service = mock(CodeArtifactService.class);
         when(service.resolveAuthorizationToken("good-token", DOMAIN))
                 .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
@@ -851,7 +1027,7 @@ class CodeArtifactNpmDataPlaneTest {
             return Optional.of(document);
         });
         when(verdaccioClient.storedTarballIntegrity(anyString(), isNull(), eq("my-pkg"),
-                eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(integrity(content)));
+                eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(npmIntegrity(content)));
         startDataPlane(service, verdaccioClient);
 
         String path = "/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg";
@@ -884,21 +1060,6 @@ class CodeArtifactNpmDataPlaneTest {
         }
     }
 
-    private static String publishEnvelope(String name, String version, String filename, byte[] content) {
-        return publishEnvelopeWithDistTags(name, version, filename, content, null);
-    }
-
-    private static String publishEnvelopeWithDistTags(String name, String version, String filename, byte[] content,
-            String distTagsJson) {
-        String base64Content = Base64.getEncoder().encodeToString(content);
-        String distTags = distTagsJson == null ? "" : ",\"dist-tags\":" + distTagsJson;
-        return "{\"name\":\"" + name + "\",\"versions\":{\"" + version + "\":{\"name\":\"" + name
-                + "\",\"version\":\"" + version + "\",\"dist\":{\"tarball\":\"http://ignored/" + filename
-                + "\",\"integrity\":\"" + integrity(content) + "\"}}}" + distTags + ",\"_attachments\":{\"" + filename
-                + "\":{\"content_type\":\"application/octet-stream\","
-                + "\"data\":\"" + base64Content + "\",\"length\":" + content.length + "}}}";
-    }
-
     /**
      * Republishes byte-identical content whose envelope sends {@code distTagsJson}, against a
      * package whose tags Verdaccio already has as {@code storedTags}. The backend always answers 409
@@ -929,7 +1090,7 @@ class CodeArtifactNpmDataPlaneTest {
         startDataPlane(service, verdaccioClient);
 
         return put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
-                publishEnvelopeWithDistTags("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, distTagsJson));
+                npmPublishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, distTagsJson));
     }
 
     @Test

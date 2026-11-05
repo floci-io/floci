@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.RequestUriRewrite;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import jakarta.annotation.Priority;
@@ -120,8 +121,9 @@ public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
                                 || !apiGatewayV2Service.hasApi(mappedRegion, restApiId)));
         routeContext.routeToMappedApi(domain, restApi);
         routeContext.recordSignedRequestPath(path);
+        routeContext.recordRewrittenRequestPath(newUri.getRawPath());
         requestContext.setProperty(ROUTED_PROPERTY, Boolean.TRUE);
-        requestContext.setRequestUri(newUri);
+        RequestUriRewrite.apply(requestContext, newUri);
     }
 
     private static String stripPort(String host) {

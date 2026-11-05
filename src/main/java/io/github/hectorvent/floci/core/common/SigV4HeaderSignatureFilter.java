@@ -125,6 +125,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
     // Lazily resolved: JAX-RS providers are instantiated before runtime config mappings exist
     // (the AwsProtocolClaimFilter pattern).
     private final jakarta.inject.Provider<EmulatorConfig> configProvider;
+    private volatile EmulatorConfig config;
     private final IamService iamService;
     private final ResolvedServiceCatalog catalog;
     private final CurrentVertxRequest currentVertxRequest;
@@ -142,9 +143,18 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
         this.currentVertxRequest = currentVertxRequest;
     }
 
+    private EmulatorConfig config() {
+        EmulatorConfig resolved = config;
+        if (resolved == null) {
+            resolved = configProvider.get();
+            config = resolved;
+        }
+        return resolved;
+    }
+
     @Override
     public void filter(ContainerRequestContext ctx) throws IOException {
-        if (!configProvider.get().auth().validateSignatures()) {
+        if (!config().auth().validateSignatures()) {
             return;
         }
         Class<?> resource = resourceInfo != null ? resourceInfo.getResourceClass() : null;

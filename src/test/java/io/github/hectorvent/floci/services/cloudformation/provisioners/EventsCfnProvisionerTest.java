@@ -548,7 +548,7 @@ class EventsCfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(r));
 
-        assertEquals(List.of("keep", "gone"), idsOfPutTargets(2).get(1));
+        assertEquals(List.of("keep", "gone"), idsOfWrittenTargets().get(1));
         assertNull(r.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
     }
 
@@ -566,7 +566,7 @@ class EventsCfnProvisionerTest {
         ArgumentCaptor<List<String>> removed = ArgumentCaptor.forClass(List.class);
         verify(events).removeTargets(eq("orders"), any(), removed.capture(), anyString());
         assertEquals(List.of("added"), removed.getValue());
-        assertEquals(List.of("keep"), idsOfPutTargets(2).get(1));
+        assertEquals(List.of("keep"), idsOfWrittenTargets().get(1));
     }
 
     @Test
@@ -579,6 +579,7 @@ class EventsCfnProvisionerTest {
         assertFalse(provisioner.rollbackUpdate(r));
 
         verify(events, never()).putTargets(anyString(), any(), any(), anyString());
+        verify(events, never()).restoreAcceptedTargets(anyString(), any(), any(), anyString());
         verify(events, never()).removeTargets(anyString(), any(), any(), anyString());
     }
 
@@ -588,14 +589,14 @@ class EventsCfnProvisionerTest {
         stubTargetSequence(List.of(storedTarget("keep"), storedTarget("gone")),
                 List.of(storedTarget("keep"), storedTarget("gone")));
         AwsException putFailure = new AwsException("ValidationException", "Too many targets", 400);
-        when(events.putTargets(anyString(), any(), any(), anyString())).thenThrow(putFailure).thenReturn(1);
+        when(events.putTargets(anyString(), any(), any(), anyString())).thenThrow(putFailure);
         StackResource r = resource("AWS::Events::Rule", "Rule");
 
         AwsException thrown = assertThrows(AwsException.class,
                 () -> provisioner.provision(r, ruleProps("keep"), ctx("orders")));
 
         assertSame(putFailure, thrown);
-        assertEquals(List.of("keep", "gone"), idsOfPutTargets(2).get(1));
+        assertEquals(List.of("keep", "gone"), idsOfWrittenTargets().get(1));
         assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
         assertNull(r.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
     }
@@ -610,6 +611,7 @@ class EventsCfnProvisionerTest {
                 List.of(storedTarget("keep"), storedTarget("gone")));
         AwsException putFailure = new AwsException("ValidationException", "Too many targets", 400);
         doThrow(putFailure).when(events).putTargets(anyString(), any(), any(), anyString());
+        doThrow(putFailure).when(events).restoreAcceptedTargets(anyString(), any(), any(), anyString());
         StackResource r = resource("AWS::Events::Rule", "Rule");
 
         assertThrows(AwsException.class, () -> provisioner.provision(r, ruleProps("keep"), ctx("orders")));
@@ -653,10 +655,11 @@ class EventsCfnProvisionerTest {
         }
     }
 
-    /** The target ids of each PutTargets call, in order, asserting there were exactly {@code n}. */
-    private List<List<String>> idsOfPutTargets(int n) {
+    /** The target ids of the update and snapshot restore, asserting exactly one of each. */
+    private List<List<String>> idsOfWrittenTargets() {
         ArgumentCaptor<List<Target>> put = ArgumentCaptor.forClass(List.class);
-        verify(events, times(n)).putTargets(eq("orders"), any(), put.capture(), anyString());
+        verify(events).putTargets(eq("orders"), any(), put.capture(), anyString());
+        verify(events).restoreAcceptedTargets(eq("orders"), any(), put.capture(), anyString());
         return put.getAllValues().stream().map(call -> call.stream().map(Target::getId).toList()).toList();
     }
 
@@ -779,6 +782,27 @@ class EventsCfnProvisionerTest {
 
         assertFalse(provisioner.rollbackUpdate(r));
         verify(events, never()).restoreApiDestination(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aRuleTargetKeepsItsAppSyncParameters() {
+        stubPutRule();
+        when(events.listTargetsByRule(anyString(), any(), anyString())).thenReturn(List.of());
+        ObjectNode appSyncTarget = target("appsync",
+                "arn:aws:appsync:us-east-1:000000000000:endpoints/graphql-api/example");
+        String operation = "mutation Publish($id: ID!) { publish(id: $id) { id } }";
+        appSyncTarget.putObject("AppSyncParameters").put("GraphQLOperation", operation);
+        appSyncTarget.put("RoleArn", "arn:aws:iam::000000000000:role/events-appsync");
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders");
+        props.putArray("Targets").add(appSyncTarget);
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, ctx("orders"));
+
+        ArgumentCaptor<List<Target>> put = ArgumentCaptor.forClass(List.class);
+        verify(events).putTargets(eq("orders"), any(), put.capture(), anyString());
+        JsonNode stored = mapper.valueToTree(put.getValue().getFirst());
+        assertEquals(operation, stored.path("appSyncParameters").path("GraphQLOperation").asText());
+        assertEquals("arn:aws:iam::000000000000:role/events-appsync", stored.path("roleArn").asText());
     }
 
     @Test

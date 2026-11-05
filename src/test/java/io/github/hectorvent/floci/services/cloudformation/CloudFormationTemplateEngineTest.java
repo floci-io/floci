@@ -40,6 +40,111 @@ class CloudFormationTemplateEngineTest {
     }
 
     @Test
+    void mappedListsKeepTheirShapeMemberCommasAndEmptyEntries() {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
+                "stack/id", Map.of(), Map.of(), Map.of(), Map.of("UseMapping", true),
+                Map.of("Values", json("""
+                        {
+                          "Example": {
+                            "List": [
+                              "first,with-comma",
+                              "",
+                              "last"
+                            ],
+                            "Scalar": "unchanged",
+                            "Empty": []
+                          }
+                        }
+                        """)), mapper, (Function<String, String>) name -> null);
+        JsonNode list = json("{\"Fn::FindInMap\":[\"Values\",\"Example\",\"List\"]}");
+        assertEquals(json("[\"first,with-comma\",\"\",\"last\"]"), e.resolveNode(list));
+        assertEquals(List.of("first,with-comma", "last"), e.resolveStringList(list));
+        assertEquals(List.of("first,with-comma", "", "last"), e.resolveLiteralList(mapper.createArrayNode().add(list)));
+        assertEquals("first,with-comma", e.resolve(json("""
+                {
+                  "Fn::Select": [
+                    0,
+                    {
+                      "Fn::FindInMap": [
+                        "Values",
+                        "Example",
+                        "List"
+                      ]
+                    }
+                  ]
+                }
+                """)));
+        assertEquals("", e.resolve(json("""
+                {
+                  "Fn::Select": [
+                    1,
+                    {
+                      "Fn::FindInMap": [
+                        "Values",
+                        "Example",
+                        "List"
+                      ]
+                    }
+                  ]
+                }
+                """)));
+        assertEquals("last", e.resolve(json("""
+                {
+                  "Fn::Select": [
+                    2,
+                    {
+                      "Fn::If": [
+                        "UseMapping",
+                        {
+                          "Fn::FindInMap": [
+                            "Values",
+                            "Example",
+                            "List"
+                          ]
+                        },
+                        [
+                          "unused"
+                        ]
+                      ]
+                    }
+                  ]
+                }
+                """)));
+        assertEquals("first,with-comma||last", e.resolve(json("""
+                {
+                  "Fn::Join": [
+                    "|",
+                    {
+                      "Fn::FindInMap": [
+                        "Values",
+                        "Example",
+                        "List"
+                      ]
+                    }
+                  ]
+                }
+                """)));
+        assertEquals(json("[]"), e.resolveNode(json("""
+                {
+                  "Fn::FindInMap": [
+                    "Values",
+                    "Example",
+                    "Empty"
+                  ]
+                }
+                """)));
+        assertEquals("unchanged", e.resolve(json("""
+                {
+                  "Fn::FindInMap": [
+                    "Values",
+                    "Example",
+                    "Scalar"
+                  ]
+                }
+                """)));
+    }
+
+    @Test
     void joinAndSelectConsumeTypedGetAttArraysWithoutSplittingMemberCommas() {
         CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
                 "stack/id", Map.of(), Map.of(), Map.of("Watcher", Map.of("SourceIdsList", "stored")),

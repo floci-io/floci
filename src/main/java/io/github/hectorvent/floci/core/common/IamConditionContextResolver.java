@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
@@ -155,6 +156,7 @@ public class IamConditionContextResolver {
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
             case "lambda" -> lambdaConditionContext(action, ctx);
+            case "redshift" -> redshiftConditionContext(action, ctx);
             default -> null;
         };
     }
@@ -205,6 +207,10 @@ public class IamConditionContextResolver {
             if (!keys.isEmpty()) {
                 conditions.put("aws:TagKeys", keys);
             }
+        }
+        if (direct && CloudWatchLogsDeliveryService.isDeliveryResourceArn(body.path("resourceArn").asText())) {
+            // A delivery source, destination or delivery: its request tags apply, its own tags are not read.
+            return conditions.isEmpty() ? null : conditions;
         }
         String group = direct ? logsService.get().resolveTagTarget(body.path("resourceArn").asText(), region).name()
                 : body.path("logGroupName").asText();
@@ -262,28 +268,55 @@ public class IamConditionContextResolver {
         };
     }
 
+    /** The {@code redshift:} keys a Redshift request carries in its own members, such as its DbUser. */
+    private Map<String, List<String>> redshiftConditionContext(String action, ContainerRequestContext ctx) {
+        List<String> keys = RequestConditionKeys.requestKeys(action);
+        if (keys.isEmpty()) {
+            return null;
+        }
+        Map<String, String> form = formParameters(ctx);
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        for (String key : keys) {
+            for (String member : RequestConditionKeys.members(action, key)) {
+                putIfPresent(conditions, key, form.get(member));
+            }
+        }
+        return conditions.isEmpty() ? null : conditions;
+    }
+
     public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
                                                         String resourceArn, String region,
                                                         String accountId, String resourceOwnerAccountId) {
+        return withGlobalContext(serviceContext, resourceArn, region, accountId, resourceOwnerAccountId, null);
+    }
+
+    public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
+                                                        String resourceArn, String region,
+                                                        String accountId, String resourceOwnerAccountId, String action) {
         Map<String, List<String>> conditions = serviceContext == null
                 ? new LinkedHashMap<>()
                 : new LinkedHashMap<>(serviceContext);
-        // aws:ResourceAccount is the account that OWNS the resource, which is not always the
-        // caller's. Some ARNs carry it; S3 bucket and object ARNs deliberately do not, and there
-        // the owner has to come from service state. When neither source knows it, the key is left
-        // out rather than guessed: an absent key fails a Condition that tests it, whereas a wrong
-        // one would silently authorize cross-account access the policy meant to refuse.
-        String resourceAccount = AwsArnUtils.accountOrDefault(resourceArn, null);
-        if (resourceAccount == null || resourceAccount.isBlank()) {
-            resourceAccount = resourceOwnerAccountId;
-        }
-        putIfPresent(conditions, "aws:ResourceAccount", resourceAccount);
+        putResourceAccount(conditions, resourceArn, resourceOwnerAccountId, action);
         putIfPresent(conditions, "aws:PrincipalAccount", accountId);
         putIfPresent(conditions, "aws:RequestedRegion", region);
         conditions.putIfAbsent("aws:ViaAWSService", List.of("false"));
         // Enforcement evaluates signed IAM credentials, not direct AWS service principals.
         conditions.put("aws:PrincipalIsAWSService", List.of("false"));
         return conditions;
+    }
+
+    private static void putResourceAccount(Map<String, List<String>> conditions, String resourceArn,
+                                           String resourceOwnerAccountId, String action) {
+        // S3 ARNs omit the owner account. Both condition keys must use the stored bucket owner,
+        // never the caller; leave them absent when neither the ARN nor service state knows it.
+        String account = AwsArnUtils.accountOrDefault(resourceArn, null);
+        if (account == null || account.isBlank()) {
+            account = resourceOwnerAccountId;
+        }
+        putIfPresent(conditions, "aws:ResourceAccount", account);
+        if (S3ControlTagConditionKeys.takes(action, "s3:ResourceAccount")) {
+            putIfPresent(conditions, "s3:ResourceAccount", account);
+        }
     }
 
     /**
@@ -301,6 +334,12 @@ public class IamConditionContextResolver {
     public static Map<String, List<String>> serviceCallContext(String servicePrincipal, String resourceArn,
                                                                String resourceOwnerAccountId,
                                                                String sourceArn, String sourceAccount) {
+        return serviceCallContext(servicePrincipal, resourceArn, resourceOwnerAccountId, sourceArn, sourceAccount, null);
+    }
+
+    public static Map<String, List<String>> serviceCallContext(String servicePrincipal, String resourceArn,
+                                                               String resourceOwnerAccountId,
+                                                               String sourceArn, String sourceAccount, String action) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
         conditions.put("aws:PrincipalIsAWSService", List.of("true"));
         conditions.put("aws:ViaAWSService", List.of("false"));
@@ -312,9 +351,7 @@ public class IamConditionContextResolver {
                 && AwsArnUtils.isArnFor(resourceArn, "sns")) {
             putIfPresent(conditions, "aws:SourceOwner", sourceAccount);
         }
-        String resourceAccount = AwsArnUtils.accountOrDefault(resourceArn, null);
-        putIfPresent(conditions, "aws:ResourceAccount",
-                resourceAccount == null || resourceAccount.isBlank() ? resourceOwnerAccountId : resourceAccount);
+        putResourceAccount(conditions, resourceArn, resourceOwnerAccountId, action);
         putIfPresent(conditions, "aws:RequestedRegion", AwsArnUtils.regionOrDefault(resourceArn, null));
         return conditions;
     }
@@ -330,11 +367,11 @@ public class IamConditionContextResolver {
     /** The authType a web function endpoint request names, and the one the endpoint has before it. */
     private Map<String, List<String>> lambdaConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        for (String member : LambdaWebConditionKeys.members(action, REQUEST_AUTH_TYPE)) {
+        for (String member : RequestConditionKeys.members(action, REQUEST_AUTH_TYPE)) {
             PassedRoles.values(PassedRoles.jsonBody(ctx), member.split("\\."))
                     .forEach(value -> putIfPresent(conditions, REQUEST_AUTH_TYPE, value));
         }
-        if (LambdaWebConditionKeys.takes(action, RESOURCE_AUTH_TYPE)) {
+        if (RequestConditionKeys.takes(action, RESOURCE_AUTH_TYPE)) {
             putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
         }
         return conditions.isEmpty() ? null : conditions;

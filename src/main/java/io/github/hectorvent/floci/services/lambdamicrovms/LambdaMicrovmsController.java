@@ -394,7 +394,7 @@ public class LambdaMicrovmsController {
             node.putNull("tags");
         } else if (shape == ImageShape.GET) {
             ObjectNode tags = node.putObject("tags");
-            image.tags.forEach(tags::put);
+            service.snapshotTags(image.tags).forEach(tags::put);
         }
         return node;
     }

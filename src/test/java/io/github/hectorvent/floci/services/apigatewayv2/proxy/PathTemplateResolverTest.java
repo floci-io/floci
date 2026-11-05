@@ -78,4 +78,17 @@ class PathTemplateResolverTest {
     void missingGreedyPlaceholderBecomesEmpty() {
         assertEquals("/x/", PathTemplateResolver.resolve("/x/{missing+}", Map.of()));
     }
+
+    @Test
+    void encodePathValueEncodesWhatCannotAppearInAPathAndKeepsSegmentSeparators() {
+        assertEquals("NIFTY%2050/constituents", PathTemplateResolver.encodePathValue("NIFTY 50/constituents"));
+        assertEquals("a%3Fb%23c%25d", PathTemplateResolver.encodePathValue("a?b#c%d"));
+        assertEquals("caf%C3%A9", PathTemplateResolver.encodePathValue("caf\u00e9"));
+        assertEquals("a-b_c.d~e+f:g@h", PathTemplateResolver.encodePathValue("a-b_c.d~e+f:g@h"));
+    }
+
+    @Test
+    void encodePathValueOfNullIsNull() {
+        assertNull(PathTemplateResolver.encodePathValue(null));
+    }
 }

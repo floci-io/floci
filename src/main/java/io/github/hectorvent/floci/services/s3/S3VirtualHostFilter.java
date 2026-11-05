@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.config.LocalStackParity;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RequestHost;
+import io.github.hectorvent.floci.core.common.RequestUriRewrite;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayCustomDomainFilter;
@@ -175,14 +176,12 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // Rewrite path from /key to /bucket/key
         String newPath = "/" + bucket + (path.startsWith("/") ? "" : "/") + path;
 
-        // RESTEasy keeps the decoded path of the URI it is given and decodes it again to route,
-        // so escape it once more to leave the raw path in place, as a path-style request has it.
         URI newUri = UriBuilder.fromUri(uri)
-                .replacePath(newPath.replace("%", "%25"))
+                .replacePath(newPath)
                 .build();
 
         requestContext.setProperty(ORIGINAL_REQUEST_URI_PROPERTY, uri);
-        requestContext.setRequestUri(newUri);
+        RequestUriRewrite.apply(requestContext, newUri);
     }
 
     /**

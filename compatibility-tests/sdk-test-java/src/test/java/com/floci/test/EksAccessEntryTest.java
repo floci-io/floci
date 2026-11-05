@@ -39,7 +39,7 @@ class EksAccessEntryTest {
                 assertThat(eks.describeAccessEntry(builder -> builder.clusterName(cluster).principalArn(first))
                         .accessEntry().principalArn()).isEqualTo(first);
                 eks.createAccessEntry(builder -> builder.clusterName(cluster).principalArn(second));
-                String admin = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
+                String admin = TestFixtures.globalArn("eks", "aws", "cluster-access-policy/AmazonEKSClusterAdminPolicy");
                 AssociateAccessPolicyResponse associated = eks.associateAccessPolicy(builder -> builder
                         .clusterName(cluster).principalArn(second).policyArn(admin)
                         .accessScope(scope -> scope.type(AccessScopeType.NAMESPACE).namespaces("dev-*", "payments")));

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeInvoker;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.LambdaTargetResolver;
@@ -122,6 +123,7 @@ final class AslExecutorFixture {
         private AslExecutor.NestedWaiter nestedWaiter;
         private EmrTaskInvoker emrTaskInvoker;
         private EmrServerlessTaskInvoker emrServerlessTaskInvoker;
+        private EventBridgeInvoker eventBridgeInvoker;
 
         private Builder() {
         }
@@ -291,6 +293,11 @@ final class AslExecutorFixture {
             return this;
         }
 
+        Builder eventBridgeInvoker(EventBridgeInvoker eventBridgeInvoker) {
+            this.eventBridgeInvoker = eventBridgeInvoker;
+            return this;
+        }
+
         AslExecutor build() {
             return new AslExecutor(lambdaExecutor,
                     targetResolver != null ? targetResolver : new LambdaTargetResolver(functionStore, null),
@@ -300,7 +307,8 @@ final class AslExecutorFixture {
                     jsonataEvaluator != null ? jsonataEvaluator : new JsonataEvaluator(objectMapper),
                     sfnService, config, vertx, customResourceLiveness, clock, sleeper, maxWaitSeconds,
                     redshiftDataHandler, serviceRegistry, null, lambdaTaskAuthorizer, expressMaxExecutionTime,
-                    nanoTime, null, emrTaskInvoker, emrServerlessTaskInvoker, null, nestedWaiter);
+                    nanoTime, null, emrTaskInvoker, emrServerlessTaskInvoker, null, nestedWaiter,
+                    eventBridgeInvoker);
         }
     }
 }

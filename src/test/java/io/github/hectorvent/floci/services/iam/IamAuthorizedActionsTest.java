@@ -7,9 +7,12 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class IamAuthorizedActionsTest {
 
@@ -43,10 +46,43 @@ class IamAuthorizedActionsTest {
 
     @Test
     void entriesAreKeyedByNamespaceAndOperation() throws IOException {
-        Map<String, String> parsed = IamAuthorizedActions.parse(json("""
-                {"authorizedActions": {"sqs": {"SendMessageBatch": "sqs:SendMessage"}}}
+        IamAuthorizedActions.Table parsed = IamAuthorizedActions.parse(json("""
+                {"authorizedActions": {"sqs": {"SendMessageBatch": "sqs:SendMessage"}},
+                 "actionsWithoutResourceTypes": {"es": ["ListDomainNames"], "dsql": []}}
                 """));
-        assertEquals(Map.of("sqs:SendMessageBatch", "sqs:SendMessage"), parsed);
+        assertEquals(Map.of("sqs:SendMessageBatch", "sqs:SendMessage"), parsed.actions());
+        assertEquals(Set.of("es:listdomainnames"), parsed.withoutResourceTypes());
+    }
+
+    /**
+     * The actions of a routed REST scope that AWS authorizes on no resource type are known, matched as IAM matches
+     * action names; one acting on a resource, or of a scope whose routes are not read, is not one of them.
+     */
+    @Test
+    void anActionOfNoResourceTypeIsKnownWhateverTheCaseOfItsName() {
+        assertTrue(IamAuthorizedActions.actsOnNoResourceType("es:ListDomainNames"));
+        assertTrue(IamAuthorizedActions.actsOnNoResourceType("ES:listdomainnames"));
+        assertTrue(IamAuthorizedActions.actsOnNoResourceType("es:CreateVpcEndpoint"));
+        assertTrue(IamAuthorizedActions.actsOnNoResourceType("access-analyzer:ValidatePolicy"));
+        assertFalse(IamAuthorizedActions.actsOnNoResourceType("es:DescribeDomain"));
+        assertFalse(IamAuthorizedActions.actsOnNoResourceType("access-analyzer:CreateAnalyzer"));
+        assertFalse(IamAuthorizedActions.actsOnNoResourceType("sqs:ListQueues"));
+        assertFalse(IamAuthorizedActions.actsOnNoResourceType(null));
+    }
+
+    @Test
+    void aFileWithoutTheActionsOfNoResourceTypeIsRefused() {
+        assertThrows(IllegalStateException.class, () -> IamAuthorizedActions.parse(json("""
+                {"authorizedActions": {"sqs": {"SendMessageBatch": "sqs:SendMessage"}}}
+                """)));
+        assertThrows(IllegalStateException.class, () -> IamAuthorizedActions.parse(json("""
+                {"authorizedActions": {"sqs": {"SendMessageBatch": "sqs:SendMessage"}},
+                 "actionsWithoutResourceTypes": {"es": "ListDomainNames"}}
+                """)));
+        assertThrows(IllegalStateException.class, () -> IamAuthorizedActions.parse(json("""
+                {"authorizedActions": {"sqs": {"SendMessageBatch": "sqs:SendMessage"}},
+                 "actionsWithoutResourceTypes": {"es": [""]}}
+                """)));
     }
 
     @Test

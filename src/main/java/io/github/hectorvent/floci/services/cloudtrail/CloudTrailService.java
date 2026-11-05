@@ -446,7 +446,15 @@ public class CloudTrailService {
         }
     }
 
+    /** Whether the current account has a trail, so a caller can skip building an event. */
+    public boolean hasTrails() {
+        return !store.isEmpty();
+    }
+
     public void emitS3DataEvent(S3EventInput in) {
+        if (store.isEmpty()) {
+            return;
+        }
         try {
             String region = in.region() != null ? in.region() : regionResolver.getDefaultRegion();
             List<MatchedTrail> matched = trailsMatching(region, in);

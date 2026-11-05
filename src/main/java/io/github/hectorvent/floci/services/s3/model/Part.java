@@ -5,6 +5,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.List;
 
 @RegisterForReflection
 public class Part {
@@ -29,6 +31,26 @@ public class Part {
         this.size = size;
         this.checksum = new S3Checksum();
         this.lastModified = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+    }
+
+    public Part(Part source) {
+        this.partNumber = source.partNumber;
+        this.eTag = source.eTag;
+        this.size = source.size;
+        this.checksum = source.checksum == null ? null : source.checksum.copy();
+        this.lastModified = source.lastModified;
+    }
+
+    /** Copies of {@code parts}, an empty list for null, null entries kept. */
+    public static List<Part> copyAll(List<Part> parts) {
+        if (parts == null) {
+            return new ArrayList<>();
+        }
+        List<Part> copies = new ArrayList<>(parts.size());
+        for (Part part : parts) {
+            copies.add(part == null ? null : new Part(part));
+        }
+        return copies;
     }
 
     public int getPartNumber() { return partNumber; }

@@ -34,18 +34,24 @@ OPERATIONS = (
 COMMERCIAL = "arn:aws:"
 EVERY_PARTITION = "arn:aws[a-z0-9-]*:"
 
+# The region the model writes in its ARN patterns and on `Region`, which fits the commercial
+# partition's two-part prefix alone, and the one that fits every published region: `us-gov-west-1`
+# has a further part and `eusc-de-east-1` a longer prefix.
+COMMERCIAL_REGION = "[a-z]{2}-[a-z]{1,16}-[0-9]+"
+EVERY_REGION = "[a-z]{2,4}(-[a-z]{1,16})+-[0-9]+"
 
-def widen_partition(doc: dict) -> dict:
-    """The model's patterns, with the partition they name widened to every partition.
 
-    The model writes the commercial partition, as the service's own model need not name the
-    others, but the service mints and takes the ARN of the partition a key is in, so the check
-    must not refuse the ARN of a key outside the commercial one.
+def widen_partition_and_region(doc: dict) -> dict:
+    """The model's patterns, with the partition and the region they name widened to every partition's.
+
+    The model writes the commercial partition and regions of its shape, as the service's own model
+    need not name the others, but the service mints and takes the ARN of the partition and the
+    region a key is in, so the check must not refuse the ARN of a key outside the commercial one.
     """
     for shape in doc["shapes"].values():
         pattern = shape.get("pattern")
-        if pattern and COMMERCIAL in pattern:
-            shape["pattern"] = pattern.replace(COMMERCIAL, EVERY_PARTITION)
+        if pattern:
+            shape["pattern"] = pattern.replace(COMMERCIAL, EVERY_PARTITION).replace(COMMERCIAL_REGION, EVERY_REGION)
     return doc
 
 
@@ -55,8 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--botocore-data", type=Path, help="botocore data directory")
     args = parser.parse_args(argv)
     data, provenance = resolve_botocore_data(args.botocore_data)
-    doc = widen_partition(build_constraints(load_model(data, MODEL), OPERATIONS, provenance,
-                                           "tools/aws/regen_payment_cryptography_shapes.py"))
+    doc = widen_partition_and_region(build_constraints(load_model(data, MODEL), OPERATIONS, provenance,
+                                                      "tools/aws/regen_payment_cryptography_shapes.py"))
     fresh = json.dumps(doc, indent=2) + "\n"
     if args.check:
         if not OUTPUT.exists() or strip_source(OUTPUT.read_text(encoding="utf-8")) != strip_source(fresh):

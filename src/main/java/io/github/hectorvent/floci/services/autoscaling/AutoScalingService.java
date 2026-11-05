@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2UserDataDecoder;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
@@ -91,6 +92,13 @@ public class AutoScalingService implements PassedRoleLookup {
                     + "capacity-reservations-only, capacity-reservations-first, none, default.";
     static final String CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE =
             "You cannot specify a CapacityReservationTarget when CapacityReservationPreference is none.";
+    // AWS returns "Resoure" verbatim; retain it for callers that classify service errors by message.
+    static final String MULTIPLE_CAPACITY_RESERVATION_TARGETS_MESSAGE =
+            "Specifying more than one target CapacityReservationIds or CapacityReservationResoureGroupArns "
+                    + "is not supported.";
+    static final String MIXED_CAPACITY_RESERVATION_TARGETS_MESSAGE =
+            "You can't specify CapacityReservationIds and CapacityReservationResourceGroupArns in the same request. "
+                    + "Remove either CapacityReservationIds or CapacityReservationResourceGroupArns.";
     static final int MAX_SERVICE_LINKED_ROLE_ARN_LENGTH = 1600;
     static final int MAX_RESOURCE_NAME_LENGTH = 1600;
     private static final Pattern CAPACITY_RESERVATION_ID_PATTERN = Pattern.compile("^[A-Za-z0-9\\-_/]+$");
@@ -415,7 +423,7 @@ public class AutoScalingService implements PassedRoleLookup {
         asg.setMaxSize(maxSize);
         asg.setDesiredCapacity(desiredCapacity);
         asg.setDefaultCooldown(defaultCooldown > 0 ? defaultCooldown : 300);
-        asg.setAvailabilityZones(availabilityZones != null ? new ArrayList<>(availabilityZones) : new ArrayList<>());
+        asg.setAvailabilityZones(new ArrayList<>(resolveAvailabilityZones(region, availabilityZones, subnetIds)));
         asg.setSubnetIds(subnetIds != null ? new ArrayList<>(subnetIds) : new ArrayList<>());
         asg.setTargetGroupARNs(targetGroupArns != null ? new ArrayList<>(targetGroupArns) : new ArrayList<>());
         asg.setLoadBalancerNames(lbNames != null ? new ArrayList<>(lbNames) : new ArrayList<>());
@@ -472,6 +480,10 @@ public class AutoScalingService implements PassedRoleLookup {
             validateDesiredCapacityType(
                     effectiveDesiredCapacityType(asg, optionalFields),
                     effectiveIdentity.mixedInstancesPolicy());
+            List<String> updatedZones = availabilityZones;
+            if (subnetIds != null && !subnetIds.isEmpty()) {
+                updatedZones = resolveAvailabilityZones(region, availabilityZones, subnetIds);
+            }
             if (launchConfigName != null) {
                 asg.setLaunchConfigurationName(launchConfigName);
                 asg.setLaunchTemplateId(null);
@@ -497,7 +509,7 @@ public class AutoScalingService implements PassedRoleLookup {
             if (maxSize != null) { asg.setMaxSize(maxSize); }
             if (desiredCapacity != null) { asg.setDesiredCapacity(desiredCapacity); }
             if (defaultCooldown != null) { asg.setDefaultCooldown(defaultCooldown); }
-            if (availabilityZones != null) { asg.setAvailabilityZones(new ArrayList<>(availabilityZones)); }
+            if (updatedZones != null) { asg.setAvailabilityZones(new ArrayList<>(updatedZones)); }
             if (subnetIds != null) { asg.setSubnetIds(new ArrayList<>(subnetIds)); }
             if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
             if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
@@ -507,6 +519,20 @@ public class AutoScalingService implements PassedRoleLookup {
             }
             groups.put(key, asg);
         }
+    }
+
+    private List<String> resolveAvailabilityZones(String region, List<String> availabilityZones, List<String> subnetIds) {
+        if ((availabilityZones == null || availabilityZones.isEmpty()) && subnetIds != null && !subnetIds.isEmpty()) {
+            List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, null);
+            Set<String> foundIds = subnets.stream().map(Subnet::getSubnetId).collect(Collectors.toSet());
+            for (String subnetId : subnetIds) {
+                if (!foundIds.contains(subnetId)) {
+                    throw new AwsException("ValidationError", "The subnet ID '" + subnetId + "' does not exist", 400);
+                }
+            }
+            return subnets.stream().map(Subnet::getAvailabilityZone).distinct().toList();
+        }
+        return availabilityZones != null ? availabilityZones : List.of();
     }
 
     /**
@@ -1939,9 +1965,13 @@ public class AutoScalingService implements PassedRoleLookup {
         if ("none".equals(preference) && specification.hasTarget()) {
             throw new AwsException("ValidationError", CAPACITY_RESERVATION_TARGET_WITH_NONE_MESSAGE, 400);
         }
+        if (!specification.getCapacityReservationIds().isEmpty()
+                && !specification.getCapacityReservationResourceGroupArns().isEmpty()) {
+            throw new AwsException("ValidationError", MIXED_CAPACITY_RESERVATION_TARGETS_MESSAGE, 400);
+        }
         if (specification.getCapacityReservationIds().size()
                 + specification.getCapacityReservationResourceGroupArns().size() > 1) {
-            throw new AwsException("ValidationError", "Specify only one Capacity Reservation target.", 400);
+            throw new AwsException("ValidationError", MULTIPLE_CAPACITY_RESERVATION_TARGETS_MESSAGE, 400);
         }
         for (String id : specification.getCapacityReservationIds()) {
             if (id == null || id.isEmpty() || id.length() > 255

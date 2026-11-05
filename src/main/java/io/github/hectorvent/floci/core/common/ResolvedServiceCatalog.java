@@ -15,9 +15,11 @@ import io.github.hectorvent.floci.services.backup.BackupController;
 import io.github.hectorvent.floci.services.batch.BatchController;
 import io.github.hectorvent.floci.services.bedrock.BedrockController;
 import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreController;
+import io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreHarnessInvokeController;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlController;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreGatewayController;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreGatewayRuleController;
+import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreHarnessController;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreIdentityController;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreMemoryController;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreResourcePolicyController;
@@ -463,13 +465,14 @@ public class ResolvedServiceCatalog {
                         Set.of(BedrockAgentCoreControlController.class, BedrockAgentCoreIdentityController.class,
                                 BedrockAgentCoreGatewayController.class, BedrockAgentCoreMemoryController.class,
                                 BedrockAgentCoreToolsController.class, BedrockAgentCoreGatewayRuleController.class,
-                                BedrockAgentCoreResourcePolicyController.class)),
+                                BedrockAgentCoreResourcePolicyController.class,
+                                BedrockAgentCoreHarnessController.class)),
                 descriptor("bedrock-agentcore", "bedrock-agentcore",
                         config.services().bedrockAgentCore().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of(), Set.of(),
-                        Set.of(BedrockAgentCoreController.class)),
+                        Set.of(BedrockAgentCoreController.class, BedrockAgentCoreHarnessInvokeController.class)),
                 descriptor("elasticloadbalancing", "elbv2", config.services().elbv2().enabled(), true,
                         "elbv2", config.storage().mode(), 5000L, AwsNamespaces.ELB_V2, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),

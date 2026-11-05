@@ -11,6 +11,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -1167,7 +1169,7 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
-            .body("message", equalTo("Can not use both expression and non-expression parameters in the same request: "
+            .body("message", equalTo("1 validation error detected: Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}"));
     }
 
@@ -4669,7 +4671,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+            .body("message", equalTo("1 validation error detected: Value provided in ExpressionAttributeNames "
                     + "unused in expressions: keys: {#st}"));
 
         // PutItem: unused ExpressionAttributeValues entry
@@ -4688,7 +4690,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+            .body("message", equalTo("1 validation error detected: Value provided in ExpressionAttributeValues "
                     + "unused in expressions: keys: {:unused}"));
 
         // DeleteItem: unused ExpressionAttributeNames entry
@@ -4707,7 +4709,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+            .body("message", equalTo("1 validation error detected: Value provided in ExpressionAttributeNames "
                     + "unused in expressions: keys: {#st}"));
 
         // DeleteItem: unused ExpressionAttributeValues entry
@@ -4726,7 +4728,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Value provided in ExpressionAttributeValues "
+            .body("message", equalTo("1 validation error detected: Value provided in ExpressionAttributeValues "
                     + "unused in expressions: keys: {:unused}"));
 
         // Scan: unused ExpressionAttributeNames entry
@@ -4863,12 +4865,11 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Value provided in ExpressionAttributeNames "
+            .body("message", equalTo("1 validation error detected: Value provided in ExpressionAttributeNames "
                     + "unused in expressions: keys: {#a, #b}"));
 
         // No expression parameter at all: AWS reports the alias map "can only be specified
         // when using expressions", distinct from the "unused in expressions" wording above.
-        // PutItem and DeleteItem only accept ConditionExpression, so it is the named param.
 
         // PutItem: ExpressionAttributeNames without ConditionExpression
         given()
@@ -4885,10 +4886,10 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("ExpressionAttributeNames can only be specified "
-                    + "when using expressions: ConditionExpression is null"));
+            .body("message", equalTo("1 validation error detected: ExpressionAttributeNames can only be specified "
+                    + "when using expressions"));
 
-        // PutItem: ExpressionAttributeValues without ConditionExpression (pre-existing guard)
+        // PutItem: ExpressionAttributeValues without ConditionExpression
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -4903,8 +4904,8 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("ExpressionAttributeValues can only be specified "
-                    + "when using expressions: ConditionExpression is null"));
+            .body("message", equalTo("1 validation error detected: ExpressionAttributeValues can only be specified "
+                    + "when using expressions"));
 
         // DeleteItem: ExpressionAttributeNames without ConditionExpression
         given()
@@ -4921,11 +4922,10 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("ExpressionAttributeNames can only be specified "
-                    + "when using expressions: ConditionExpression is null"));
+            .body("message", equalTo("1 validation error detected: ExpressionAttributeNames can only be specified "
+                    + "when using expressions"));
 
-        // DeleteItem: ExpressionAttributeValues without ConditionExpression; with both maps
-        // present the values message wins, matching the pre-existing PutItem guard order.
+        // DeleteItem: with both maps present the ExpressionAttributeNames message wins.
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -4941,8 +4941,8 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("ExpressionAttributeValues can only be specified "
-                    + "when using expressions: ConditionExpression is null"));
+            .body("message", equalTo("1 validation error detected: ExpressionAttributeNames can only be specified "
+                    + "when using expressions"));
 
         // Control: fully-referenced expression attributes are still accepted.
         given()
@@ -5068,7 +5068,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
         // PutItem: ConditionExpression references an undefined #name.
@@ -5086,7 +5086,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #n"));
 
         // Both undefined; the textually-first token (:v) is reported, not names before values.
@@ -5104,7 +5104,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
         // The undefined name must be reported ahead of contains()'s distinct-operand semantic error.
@@ -5122,7 +5122,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #missing"));
 
         // DeleteItem: ConditionExpression references an undefined :value.
@@ -5140,7 +5140,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
         // DeleteItem: ConditionExpression references an undefined #name.
@@ -5158,7 +5158,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #n"));
 
         // UpdateItem: valid UpdateExpression, but ConditionExpression is undefined.
@@ -5259,7 +5259,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #b"));
 
         // Edge case: the same undefined token used twice must still report once, not crash.
@@ -5277,7 +5277,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
         // Control: a different token than the one supplied is missing and must be named.
@@ -5297,7 +5297,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
         // Control: a fully-defined ConditionExpression is still accepted; seed the item first.
@@ -5805,6 +5805,107 @@ given()
         .then().statusCode(200);
 
         deleteTable(tableName);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query              | {"TableName": "SyntaxTable", "KeyConditionExpression": "   ", "ExpressionAttributeValues": {":v": {"S": "x"}}} | Invalid KeyConditionExpression: Syntax error; token: "<EOF>", near: "   "
+            Scan               | {"TableName": "SyntaxTable", "FilterExpression": "a = = b", "ExpressionAttributeValues": {":v": {"S": "x"}}} | Invalid FilterExpression: Syntax error; token: "=", near: "= = b"
+            TransactWriteItems | {"TransactItems": [{"ConditionCheck": {"TableName": "SyntaxTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "attribute_not_exists(", "ExpressionAttributeValues": {":v": {"S": "x"}}}}]} | Invalid ConditionExpression: Syntax error; token: "<EOF>", near: "("
+            """)
+    void conditionSyntaxErrorsNameTheTokenAndTheTextAroundIt(String operation, String body, String message) {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "SyntaxTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
+
+        deleteTable("SyntaxTable");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "": {"S": "x"}}}}
+            {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "l": {"L": [{"M": {"": {"S": "x"}}}]}}}}
+            {"ConditionCheck": {"TableName": "EmptyNameTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "m = :m", "ExpressionAttributeValues": {":m": {"M": {"": {"S": "x"}}}}}}
+            """)
+    void transactWriteItemsRefusesAnEmptyAttributeName(String action) {
+        createOnDemandTableForGsiUpdates("EmptyNameTable");
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TransactItems\": [" + action + "]}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("Empty attribute name"));
+
+        deleteTable("EmptyNameTable");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            DeleteItem | {"TableName": "Missing", "Key": {"pk": {"S": "a"}}, "ReturnValues": "ALL_NEW"} | 1 validation error detected: ReturnValues can only be ALL_OLD or NONE
+            PutItem    | {"TableName": "bad!name", "Item": {"pk": {"S": "a"}}, "ReturnValues": "BOGUS", "ReturnConsumedCapacity": "BOGUS"} | 3 validation errors detected: Value 'bad!name' at 'tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]
+            PutItem    | {"TableName": "Missing", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "attribute_exists(pk)", "ExpressionAttributeNames": {}, "ExpressionAttributeValues": {}} | 1 validation error detected: ExpressionAttributeNames must not be empty
+            DeleteItem | {"TableName": "Missing", "Key": {"pk": {"S": "a"}}, "ExpressionAttributeValues": {":v": {"S": "x"}}} | 1 validation error detected: ExpressionAttributeValues can only be specified when using expressions
+            DeleteItem | {"TableName": "Missing", "Key": {"pk": {"S": "a"}}, "ConditionExpression": ""} | 1 validation error detected: Invalid ConditionExpression: The expression can not be empty;
+            """)
+    void putAndDeleteItemReportTheirNewerChecksInsideTheEnvelope(String operation, String body, String message) {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            DeleteItem | {"TableName": "Missing", "ReturnValues": "BOGUS", "ReturnConsumedCapacity": "BOGUS"} | 3 validation errors detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value null at 'key' failed to satisfy constraint: Member must not be null
+            PutItem    | {"TableName": "Missing", "Item": {"pk": {"S": "a"}}, "Expected": {"a": {"Value": "DEEP"}, "b": {"Exists": false}}, "ConditionalOperator": "XOR"} | 1 validation error detected: Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [OR, AND]
+            DeleteItem | {"TableName": "Missing", "Key": {"pk": "DEEP"}, "ReturnValues": "UPDATED_NEW"} | ReturnValues can only be ALL_OLD or NONE
+            PutItem    | {"TableName": "Missing", "Item": {"pk": {"S": "a"}, "d": {"S": "x", "Foo": "y"}}, "ReturnValues": "BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]
+            UpdateItem | {"TableName": "", "UpdateExpression": "SET a = :a", "ExpressionAttributeValues": {":a": {"S": "x"}}, "ReturnConsumedCapacity": "BOGUS", "ReturnValues": "BOGUS"} | 4 validation errors detected: Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value '' at 'tableName' failed to satisfy constraint: Member must have length greater than or equal to 1; Value 'BOGUS' at 'returnValues' failed to satisfy constraint: Member must satisfy enum value set: [ALL_NEW, UPDATED_OLD, ALL_OLD, NONE, UPDATED_NEW]; Value null at 'key' failed to satisfy constraint: Member must not be null
+            UpdateItem | {"TableName": "Missing", "AttributeUpdates": {"a": {"Action": "BOGUS", "Value": {"S": "x"}}}} | 2 validation errors detected: Value 'BOGUS' at 'attributeUpdates.a.member.action' failed to satisfy constraint: Member must satisfy enum value set: [ADD, DELETE, PUT]; Value null at 'key' failed to satisfy constraint: Member must not be null
+            UpdateItem | {"TableName": "Missing", "Key": {"pk": {"S": "a"}}, "AttributeUpdates": {"x": {"Action": "PUT", "Value": {"S": "1"}}}, "Expected": {"a": {"Value": "DEEP"}, "b": {"Exists": false}}, "ConditionalOperator": "XOR"} | 1 validation error detected: Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [OR, AND]
+            UpdateItem | {"TableName": "Missing", "Key": {"pk": {"S": "a"}}, "UpdateExpression": "SET t = :t", "ConditionExpression": "d = :deep", "ExpressionAttributeValues": {":t": {"S": "y"}, ":deep": "DEEP"}} | ExpressionAttributeValues contains invalid value: Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit for key :deep
+            """)
+    void itemWritesGetTheOlderChecksWhenTheNewerValidatorGivesUp(String operation, String body,
+            String message) {
+        String deep = "{\"M\": {\"n\": ".repeat(63) + "{\"S\": \"leaf\"}" + "}}".repeat(63);
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body.replace("\"DEEP\"", deep))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
     }
 
     private void deleteTable(String tableName) {

@@ -786,6 +786,37 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void deliveryActionsAreAuthorizedOnTheSourceDestinationOrDeliveryTheyName() {
+        String prefix = "arn:aws:logs:us-east-1:" + ACCOUNT + ":";
+        for (String action : List.of("logs:PutDeliverySource", "logs:GetDeliverySource", "logs:DeleteDeliverySource")) {
+            setJsonBody("{\"name\":\"bus-source\"}");
+            assertEquals(List.of(prefix + "delivery-source:bus-source"),
+                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+        }
+        for (String action : List.of("logs:PutDeliveryDestination", "logs:GetDeliveryDestination",
+                "logs:DeleteDeliveryDestination")) {
+            setJsonBody("{\"name\":\"bus-logs\"}");
+            assertEquals(List.of(prefix + "delivery-destination:bus-logs"),
+                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+        }
+        for (String action : List.of("logs:GetDelivery", "logs:DeleteDelivery", "logs:UpdateDeliveryConfiguration")) {
+            setJsonBody("{\"id\":\"AbCdEfGh12345678\"}");
+            assertEquals(List.of(prefix + "delivery:AbCdEfGh12345678"),
+                    builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+        }
+        setJsonBody("{\"deliverySourceName\":\"bus-source\",\"deliveryDestinationArn\":\""
+                + prefix + "delivery-destination:bus-logs\"}");
+        assertEquals(List.of(prefix + "delivery-destination:bus-logs", prefix + "delivery:*",
+                        prefix + "delivery-source:bus-source"),
+                builder.buildLogResources("logs:CreateDelivery", ctx, "us-east-1", ACCOUNT, "aws"));
+        for (String action : List.of("logs:DescribeDeliverySources", "logs:DescribeDeliveryDestinations",
+                "logs:DescribeDeliveries")) {
+            setJsonBody("{}");
+            assertEquals(List.of("*"), builder.buildLogResources(action, ctx, "us-east-1", ACCOUNT, "aws"));
+        }
+    }
+
+    @Test
     void excludedLogsActionsKeepWildcardResources() {
         for (String action : List.of("logs:PutLogEvents")) {
             setJsonBody("{\"logGroupName\":\"group\",\"logStreamName\":\"stream\"}");
@@ -853,6 +884,28 @@ class ResourceArnBuilderTest {
 
 
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
+
+    @Test
+    void listTablesUsesTheCollectionInTheRequestPartitionRegionAndAccount() {
+        for (String body : List.of("{}", "{\"ExclusiveStartTableName\":\"page-start\"}",
+                "{\"TableName\":\"decoy\",\"ResourceArn\":\"decoy\"}")) {
+            setJsonBody(body);
+            assertEquals(List.of("arn:aws-cn:dynamodb:cn-north-1:123456789012:table/*"),
+                    builder.buildResources("dynamodb", "dynamodb:ListTables", ctx,
+                            "cn-north-1", "123456789012", "aws-cn"));
+        }
+    }
+
+    @Test
+    void listTablesDoesNotChangeOtherTablelessOperations() {
+        setJsonBody("{}");
+        assertEquals(List.of("*"), builder.buildResources("dynamodb", "dynamodb:DescribeLimits",
+                ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"TableName\":\"Orders\"}");
+        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/Orders"),
+                builder.buildResources("dynamodb", "dynamodb:DescribeTable",
+                        ctx, "us-east-1", ACCOUNT, "aws"));
+    }
 
     @Test
     void dynamoDbBuildsArnFromShortTableName() {
@@ -1525,6 +1578,12 @@ class ResourceArnBuilderTest {
     }
 
     // ── SQS ─────────────────────────────────────────────────────────────────────
+
+    @Test
+    void sqsNamesTheAccountTheQueueUrlNames() {
+        queryParams.putSingle("QueueUrl", "http://localhost:4566/111122223333/orders");
+        assertEquals("arn:aws:sqs:us-east-1:111122223333:orders", builder.build("sqs", ctx, "us-east-1", "000000000000"));
+    }
 
     @Test
     void sqsBuildsArnFromJsonQueueName() {

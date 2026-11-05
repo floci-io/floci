@@ -162,7 +162,7 @@ class AutoScalingQueryHandlerTest {
         params.add(prefix + field + ".member.2", target + "-other");
         Response rejected = handler.handle("UpdateAutoScalingGroup", params, REGION);
         assertEquals(400, rejected.getStatus());
-        assertTrue(rejected.getEntity().toString().contains("Specify only one Capacity Reservation target."));
+        assertTrue(rejected.getEntity().toString().contains(AutoScalingService.MULTIPLE_CAPACITY_RESERVATION_TARGETS_MESSAGE));
         assertEquals("CapacityReservationIds".equals(field) ? List.of(target) : List.of(),
                 group.getCapacityReservationSpecification().getCapacityReservationIds());
         assertEquals("CapacityReservationResourceGroupArns".equals(field) ? List.of(target) : List.of(),

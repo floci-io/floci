@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -198,6 +199,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus("test-stack", "CREATE_COMPLETE");
         // 2. Verify S3 Bucket exists
         given()
             .header("Host", "cf-test-bucket.localhost")
@@ -245,6 +247,7 @@ class CloudFormationIntegrationTest {
         .when().post("/")
         .then().statusCode(200).body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus("tp-stack", "CREATE_COMPLETE");
         // DescribeStacks reports protection off by default.
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -290,6 +293,7 @@ class CloudFormationIntegrationTest {
         .when().post("/")
         .then().statusCode(200).body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus("tp-del-stack", "CREATE_COMPLETE");
         // Enable termination protection.
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -338,6 +342,7 @@ class CloudFormationIntegrationTest {
         .when().post("/")
         .then().statusCode(200).body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus("tp-create-stack", "CREATE_COMPLETE");
         // The CreateStackInput flag is honored — DescribeStacks reports protection on.
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -385,6 +390,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        awaitStackStatus("cfn-cors-stack", "CREATE_COMPLETE");
 
         // The bucket's ?cors subresource should reflect the CloudFormation CorsConfiguration.
         given()
@@ -436,6 +442,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        awaitStackStatus("cfn-cors-blank-stack", "CREATE_COMPLETE");
 
         // A blank list entry must be skipped rather than emitted as an empty (invalid) element.
         given()
@@ -513,6 +520,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
 
         given()
         .when()
@@ -531,6 +539,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
 
         given()
         .when()
@@ -550,6 +559,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
 
         given()
         .when()
@@ -587,6 +597,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        awaitStackStatus("cfn-versioning-stack", "CREATE_COMPLETE");
 
         // The bucket's ?versioning subresource should reflect the CloudFormation VersioningConfiguration.
         given()
@@ -621,6 +632,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus("cfn-versioning-unset-stack", "CREATE_COMPLETE");
 
         // No VersioningConfiguration in the template → versioning must stay unset (no <Status> element),
         // matching real AWS behavior for a bucket that was never versioned.
@@ -676,6 +688,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
 
         given()
         .when()
@@ -694,6 +707,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
 
         given()
         .when()
@@ -754,6 +768,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus("cfn-s3code-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -802,6 +817,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus("cfn-nocode-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -849,6 +865,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String createdResourceXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
@@ -881,6 +898,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
         String updatedResourceXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
@@ -939,6 +957,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
 
         String createdResourceXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -963,6 +982,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1055,6 +1075,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String createdResourceXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
@@ -1077,6 +1098,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
         String updatedResourceXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
@@ -1132,6 +1154,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
         .when()
             .get("/2017-03-31/tags/" + functionArn)
@@ -1175,6 +1198,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
         given()
         .when()
             .get("/2017-03-31/tags/" + functionArn)
@@ -1230,6 +1254,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
@@ -1288,6 +1313,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
@@ -1342,6 +1368,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         ssmParameterTags(parameterName)
             .body("TagList.size()", equalTo(2))
@@ -1370,6 +1397,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
     }
 
     private static ValidatableResponse ssmParameterTags(String parameterName) {
@@ -1403,6 +1431,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
@@ -1413,6 +1442,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
         String updatedResourceXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
@@ -1474,6 +1504,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
         .when()
             .get("/2015-03-31/functions/" + functionName)
@@ -1492,6 +1523,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
         String resourceXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
@@ -1550,6 +1582,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus(stackName, "ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1624,6 +1657,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        awaitStackStatus("cfn-kms-override-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -1682,6 +1716,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus("cfn-http-api-override-stack", "CREATE_COMPLETE");
 
         // Infrastructure tools resend the full tag set, override included, on every update.
         given()
@@ -1693,6 +1728,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus("cfn-http-api-override-stack", "UPDATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1723,6 +1759,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackStatus("cfn-http-api-override-stack", "UPDATE_ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1778,6 +1815,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus("cfn-env-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -1828,6 +1866,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        awaitStackStatus("cfn-image-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1874,6 +1913,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus("cfn-zipfile-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -1924,6 +1964,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus("cfn-inline-zipfile-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -1997,6 +2038,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("test-dynamo-index-stack", "CREATE_COMPLETE");
 
         // 2. Verify GSI and LSI via DescribeTable
         given()
@@ -2120,6 +2162,7 @@ class CloudFormationIntegrationTest {
             .body(containsString("<StackId>"))
             .extract().asString();
 
+        CfnStackWaits.awaitStatus("arn-events-stack", "CREATE_COMPLETE");
         // Extract the ARN from the response
         String stackArn = createResponse.substring(
                 createResponse.indexOf("<StackId>") + "<StackId>".length(),
@@ -2216,6 +2259,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"))
             .extract().asString();
+        CfnStackWaits.awaitStatus("deleted-arn-events-stack", "CREATE_COMPLETE");
 
         String stackArn = createResponse.substring(
                 createResponse.indexOf("<StackId>") + "<StackId>".length(),
@@ -2302,6 +2346,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-nonempty-delete-stack", "CREATE_COMPLETE");
 
         // The managed bucket exists.
         given()
@@ -2541,6 +2586,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"))
             .extract().asString();
+        CfnStackWaits.awaitStatus("deleted-arn-expiry-stack", "CREATE_COMPLETE");
 
         String stackArn = createResponse.substring(
                 createResponse.indexOf("<StackId>") + "<StackId>".length(),
@@ -2639,6 +2685,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus("live-no-deletion-time-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -2713,6 +2760,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"))
             .extract().asString();
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String stackArn = createResponse.substring(
                 createResponse.indexOf("<StackId>") + "<StackId>".length(),
@@ -2862,6 +2910,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("auto-name-stack", "CREATE_COMPLETE");
 
         // 2. Verify stack completed and the auto-generated table name follows the pattern
         String describeResponse = given()
@@ -2940,6 +2989,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -2951,6 +3001,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -3023,6 +3074,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("explicit-names-stack", "CREATE_COMPLETE");
 
         // Verify explicit names are used as-is in DescribeStackResources
         given()
@@ -3066,6 +3118,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("S3LowerCase-Stack", "CREATE_COMPLETE");
 
         // The auto-generated name should be all lowercase: s3lowercase-stack-myuppercasebucket-...
         given()
@@ -3105,6 +3158,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("CaseSensitive-Stack", "CREATE_COMPLETE");
 
         // The SQS auto-generated name should preserve case: CaseSensitive-Stack-MyMixedCaseQueue-...
         given()
@@ -3156,6 +3210,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("SchedulerGroupStack", "CREATE_COMPLETE");
 
         given()
         .when()
@@ -3218,6 +3273,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("multi-table-stack", "CREATE_COMPLETE");
 
         // Both tables should have distinct names derived from their logical IDs
         given()
@@ -3259,6 +3315,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("ssm-auto-stack", "CREATE_COMPLETE");
 
         // SSM Parameter physical ID should follow {stackName}-{logicalId}-{suffix} pattern
         given()
@@ -3345,6 +3402,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("getatt-stack", "CREATE_COMPLETE");
 
         // Verify Outputs contain the auto-generated name and ARN
         given()
@@ -3406,6 +3464,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus("sns-auto-stack", "CREATE_COMPLETE");
         // SNS Ref returns ARN (which contains the auto-generated topic name)
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -3445,6 +3504,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus("ECR-Upper-Stack", "CREATE_COMPLETE");
         // ECR auto-name should be lowercase
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -3487,6 +3547,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus("gen-secret-default", "CREATE_COMPLETE");
         // Verify secret was created and has a generated value (default 32 chars)
         String body = given()
             .header("X-Amz-Target", "secretsmanager.GetSecretValue")
@@ -3536,6 +3597,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("gen-secret-len64", "CREATE_COMPLETE");
 
         String body = given()
             .header("X-Amz-Target", "secretsmanager.GetSecretValue")
@@ -3588,6 +3650,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("gen-secret-tpl", "CREATE_COMPLETE");
 
         String body = given()
             .header("X-Amz-Target", "secretsmanager.GetSecretValue")
@@ -3639,6 +3702,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("desc-secret-stack", "CREATE_COMPLETE");
 
         // Verify description via DescribeSecret
         given()
@@ -3682,6 +3746,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("desc-gen-stack", "CREATE_COMPLETE");
 
         // Verify description
         given()
@@ -3744,6 +3809,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("both-secret-stack", "ROLLBACK_COMPLETE");
 
         // The resource should have failed provisioning
         given()
@@ -3781,6 +3847,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("no-value-secret-stack", "CREATE_COMPLETE");
 
         given()
             .header("X-Amz-Target", "secretsmanager.GetSecretValue")
@@ -3822,6 +3889,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("auto-gen-stack", "CREATE_COMPLETE");
 
         // Verify resource was created with auto-generated name
         given()
@@ -3866,6 +3934,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("ref-secret-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -3925,6 +3994,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-eventbridge-stack", "CREATE_COMPLETE");
 
         // 2. Verify stack is CREATE_COMPLETE
         given()
@@ -4008,6 +4078,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-eb-getatt-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -4058,6 +4129,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-eb-autoname-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -4129,6 +4201,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus("cfn-eb-fifo-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -4200,6 +4273,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-eb-fifo-e2e-stack", "CREATE_COMPLETE");
 
         // Match the issue #787 reproducer: re-apply ContentBasedDeduplication via
         // SetQueueAttributes to control for a separate Floci CFN→SQS bug where
@@ -4298,6 +4372,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-eb-no-sqs-params-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -4356,6 +4431,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-eb-empty-sqs-params-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -4425,6 +4501,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-eb-mixed-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -4471,6 +4548,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("dep-order-ref-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -4534,6 +4612,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("dep-order-getatt-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -4591,6 +4670,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("dep-order-sub-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -4643,6 +4723,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-eb-delete-stack", "CREATE_COMPLETE");
 
         // Verify rule exists
         given()
@@ -4664,6 +4745,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted("cfn-eb-delete-stack");
 
         // Verify rule is gone
         given()
@@ -4793,6 +4875,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-pipe-stack", "CREATE_COMPLETE");
 
         // 2. Stack should reach CREATE_COMPLETE
         given()
@@ -4828,6 +4911,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted("cfn-pipe-stack");
 
         given()
             .contentType("application/json")
@@ -4852,6 +4936,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus("cfn-pipe-update-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
@@ -4862,6 +4947,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus("cfn-pipe-update-stack", "UPDATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -4894,6 +4980,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted("cfn-pipe-update-stack");
 
         given()
             .contentType("application/json")
@@ -4967,6 +5054,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -4978,6 +5066,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -5005,6 +5094,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
 
         given()
             .contentType("application/json")
@@ -5080,6 +5170,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-template-url-stack", "CREATE_COMPLETE");
 
         // Verify stack and its resource were provisioned from the S3 template
         given()
@@ -5140,6 +5231,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-vhost-template-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -5201,6 +5293,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -5275,6 +5368,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         // 2. Stack must reach CREATE_COMPLETE
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -5398,6 +5492,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -5489,6 +5584,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         // 2. Stack must reach CREATE_COMPLETE
         String describeXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -5551,22 +5647,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
-            String deleteStatus = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when()
-                .post("/")
-            .then()
-                .extract().body().asString();
-            if (deleteStatus.contains("DELETE_COMPLETE") || deleteStatus.contains("does not exist")) {
-                break;
-            }
-            Thread.sleep(200);
-        }
+        awaitStackDeleted(stackName);
 
         given()
         .when()
@@ -5628,6 +5709,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -5712,6 +5794,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "ROLLBACK_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
@@ -5758,6 +5841,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("exporter-stack", "CREATE_COMPLETE");
 
         // Verify Stack A is complete and has export in output
         given()
@@ -5819,6 +5903,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("importer-stack", "CREATE_COMPLETE");
 
         // Verify Stack B is complete and resolved the import correctly
         given()
@@ -5884,6 +5969,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("sub-exporter-stack", "CREATE_COMPLETE");
 
         // Verify the dynamic export name resolved correctly
         given()
@@ -5924,6 +6010,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("sub-importer-stack", "CREATE_COMPLETE");
 
         // Verify the queue was created with the correctly resolved imported value
         given()
@@ -5969,6 +6056,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("export-rename-stack", "CREATE_COMPLETE");
 
         String newTemplate = """
             {
@@ -5990,6 +6078,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("export-rename-stack", "UPDATE_COMPLETE");
 
         String exportsXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -6027,6 +6116,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("duplicate-export-stack-a", "CREATE_COMPLETE");
 
         String secondTemplate = """
             {
@@ -6048,6 +6138,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("duplicate-export-stack-b", "CREATE_FAILED");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -6098,6 +6189,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("missing-import-stack", "ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -6169,6 +6261,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -6248,6 +6341,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -6325,6 +6419,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -6417,6 +6512,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -6480,6 +6576,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -6551,6 +6648,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -6658,6 +6756,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
@@ -6727,6 +6826,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus("cfn-inline-subs-stack", "CREATE_COMPLETE");
         String subscriptions = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "ListSubscriptionsByTopic")
@@ -6785,6 +6885,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-conditional-subs-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -6816,6 +6917,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", "cfn-update-inline-subs-stack")
             .formParam("TemplateBody", initialTemplate)
         .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-update-inline-subs-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -6831,6 +6933,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", "cfn-update-inline-subs-stack")
             .formParam("TemplateBody", updatedTemplate)
         .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-update-inline-subs-stack", "UPDATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -6870,6 +6973,7 @@ class CloudFormationIntegrationTest {
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200);
 
+        awaitStackStatus("cfn-lambda-inline-subs-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -6934,6 +7038,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         // 1. Verify SNS Topic attributes
         given()
@@ -7039,6 +7144,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -7128,6 +7234,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -7206,6 +7313,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         // 2. Describe Stacks and capture outputs
         String describeXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -7331,6 +7439,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         // 2. Describe Stacks and capture outputs
         String describeXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -7373,6 +7482,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
 
         // 5. Verify resources are deleted
         given()
@@ -7438,6 +7548,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("parent-nested-stack", "CREATE_COMPLETE");
 
         // Parent stack reaches CREATE_COMPLETE
         given()
@@ -7608,6 +7719,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("ws-api-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -7734,6 +7846,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String describeXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -7842,6 +7955,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String describeXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -7915,6 +8029,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String createXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -7938,6 +8053,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
         String updateXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -7990,6 +8106,7 @@ class CloudFormationIntegrationTest {
                 .formParam("TemplateBody", template)
                 .when().post("/")
                 .then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
                 .formParam("Action", "DescribeSecurityGroups")
@@ -8022,6 +8139,7 @@ class CloudFormationIntegrationTest {
                 .formParam("TemplateBody", template)
                 .when().post("/")
                 .then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         // Tear the recreated stack back down so the security group is not left behind in the
         // shared in-memory EC2 store, where it would pollute other tests' DescribeSecurityGroups.
@@ -8031,6 +8149,7 @@ class CloudFormationIntegrationTest {
                 .formParam("StackName", stackName)
                 .when().post("/")
                 .then().statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -8075,6 +8194,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         // Sanity: cluster exists before delete
         given()
@@ -8211,6 +8331,7 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String describeXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -8341,6 +8462,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String createXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -8373,6 +8495,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         given()
             .formParam("Action", "DescribeListeners")
@@ -8432,6 +8555,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         // Sanity: target group exists before delete
         given()
@@ -8559,6 +8683,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String createXml = apigwv2DescribeStacks(stackName);
         String apiId = apigwOutputValue(createXml, "ApiId");
@@ -8584,6 +8709,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         String updateXml = apigwv2DescribeStacks(stackName);
         // Physical IDs are stable across the update (in-place patch, not replacement)
@@ -8624,6 +8750,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         apigwv2DescribeStacks(stackName);
         getRoutes(apiId).body("Items.size()", equalTo(1))
@@ -8740,6 +8867,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String createXml = apigwv2DescribeStacks(stackName);
         String apiId = apigwOutputValue(createXml, "ApiId");
@@ -8817,6 +8945,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String createXml = apigwv2DescribeStacks(stackName);
         String apiId = apigwOutputValue(createXml, "ApiId");
@@ -8836,6 +8965,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         apigwv2DescribeStacks(stackName);
         getRoutes(apiId).body("Items.size()", equalTo(1))
@@ -8887,6 +9017,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String apiId = apigwOutputValue(apigwv2DescribeStacks(stackName), "ApiId");
 
@@ -8930,6 +9061,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -9008,6 +9140,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String createXml = apigwv2DescribeStacks(stackName);
         String apiId = apigwOutputValue(createXml, "ApiId");
         String authorizerId = apigwOutputValue(createXml, "AuthorizerId");
@@ -9067,6 +9200,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         getAuthorizers(apiId).body("Items.size()", equalTo(1));
 
@@ -9078,6 +9212,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
 
         // The API was never part of the stack, so it (and GetAuthorizers against it) still works
         // — the authorizer itself must be gone.
@@ -9120,6 +9255,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
@@ -9178,6 +9314,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -9264,6 +9401,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String createXml = apigwv2DescribeStacks(stackName);
         String apiId = apigwOutputValue(createXml, "ApiId");
 
@@ -9370,6 +9508,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String createXml = apigwv2DescribeStacks(stackName);
         String apiId = apigwOutputValue(createXml, "ApiId");
 
@@ -9443,6 +9582,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_FAILED");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -9516,6 +9656,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_FAILED");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -9595,6 +9736,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String createXml = apigwv2DescribeStacks(stackName);
         String apiId = apigwOutputValue(createXml, "ApiId");
 
@@ -9681,6 +9823,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         String apiId = apigwOutputValue(apigwv2DescribeStacks(stackName), "ApiId");
 
         getRoutes(apiId).body("Items.size()", equalTo(2))
@@ -9741,6 +9884,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("sfn-cfn-stack", "CREATE_COMPLETE");
 
         String expectedArn = "arn:aws:states:us-east-1:000000000000:stateMachine:cfn-sfn-pipeline";
 
@@ -9779,6 +9923,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted("sfn-cfn-stack");
 
         given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
@@ -9829,6 +9974,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         // Update the definition; the StateMachineName is unchanged, so this is an in-place update.
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -9840,6 +9986,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "UPDATE_COMPLETE");
         // The stack update succeeded (no UPDATE_ROLLBACK), and the ARN is stable across the update.
         String describeXml = given()
             .contentType("application/x-www-form-urlencoded")
@@ -9873,6 +10020,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -9919,6 +10067,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -9929,6 +10078,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         given()
             .header("X-Amz-Target", "AWSStepFunctions.ListTagsForResource")
@@ -9953,6 +10103,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         given()
             .header("X-Amz-Target", "AWSStepFunctions.ListTagsForResource")
@@ -9972,6 +10123,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -10007,6 +10159,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String initialRevision = given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
@@ -10028,6 +10181,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
@@ -10059,6 +10213,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -10130,6 +10285,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String initialRevision = given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
@@ -10150,6 +10306,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10215,6 +10372,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -10263,6 +10421,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10273,6 +10432,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10325,6 +10485,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -10383,6 +10544,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
@@ -10393,6 +10555,7 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        awaitStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -10431,6 +10594,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -10467,6 +10631,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
@@ -10492,6 +10657,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10531,6 +10697,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
         given()
             .header("X-Amz-Target", "AWSStepFunctions.DeleteStateMachine")
             .contentType(SFN_CONTENT_TYPE)
@@ -10573,6 +10740,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -10583,6 +10751,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
@@ -10627,6 +10796,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -10678,6 +10848,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
@@ -10687,6 +10858,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
@@ -10715,6 +10887,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
         given()
             .header("X-Amz-Target", "AWSStepFunctions.DeleteStateMachine")
             .contentType(SFN_CONTENT_TYPE)
@@ -10806,6 +10979,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "UpdateStack")
@@ -10815,6 +10989,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
@@ -10901,6 +11076,7 @@ class CloudFormationIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200);
+            CfnStackWaits.awaitStatus(invalidTemplate.getKey(), "ROLLBACK_COMPLETE");
             given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DescribeStacks")
@@ -10934,6 +11110,7 @@ class CloudFormationIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200);
+            awaitStackDeleted(stack);
         }
     }
 
@@ -10964,6 +11141,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String oldArn = physicalIdByLogicalId(given()
             .contentType("application/x-www-form-urlencoded")
@@ -10987,6 +11165,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         String newArn = physicalIdByLogicalId(given()
             .contentType("application/x-www-form-urlencoded")
@@ -11007,6 +11186,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -11037,6 +11217,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String oldArn = physicalIdByLogicalId(given()
             .contentType("application/x-www-form-urlencoded")
@@ -11057,6 +11238,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         String newArn = physicalIdByLogicalId(given()
             .contentType("application/x-www-form-urlencoded")
@@ -11097,6 +11279,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -11128,6 +11311,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String generatedArn = physicalIdByLogicalId(given()
             .contentType("application/x-www-form-urlencoded")
@@ -11149,6 +11333,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         String explicitArn = physicalIdByLogicalId(given()
             .contentType("application/x-www-form-urlencoded")
@@ -11172,6 +11357,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         String regeneratedArn = physicalIdByLogicalId(given()
             .contentType("application/x-www-form-urlencoded")
@@ -11211,6 +11397,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     @Test
@@ -11280,6 +11467,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String initialRevision = given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
@@ -11312,6 +11500,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         String updatedRevision = given()
             .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
@@ -11350,6 +11539,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        awaitStackDeleted(stackName);
     }
 
     // ── Issue #924: roll back failed stack creates (criterion #9) ────────────
@@ -11388,6 +11578,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-rollback-stack", "ROLLBACK_COMPLETE");
 
         // The stack rolled back rather than being left half-built
         given()
@@ -11429,6 +11620,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-rollback-retry-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -11489,6 +11681,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", "cfn-rb-stack")
             .formParam("TemplateBody", failingTemplate)
         .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-rb-stack", "ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -11539,6 +11732,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-rollback-lone-stack", "ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -11678,6 +11872,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", stackName)
             .formParam("TemplateBody", failingTemplate)
         .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -11727,6 +11922,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", stackName)
             .formParam("TemplateBody", workingTemplate)
         .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -11984,6 +12180,7 @@ class CloudFormationIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body(containsString("<StackId>"));
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         String resourcesXml = given()
                 .contentType("application/x-www-form-urlencoded")
@@ -12043,6 +12240,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", "cfn-it-transform-stack")
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-it-transform-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -12120,6 +12318,7 @@ class CloudFormationIntegrationTest {
             .formParam("TemplateBody", template)
         .when().post("/")
         .then().statusCode(200).body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-eventbus-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -12156,12 +12355,14 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", "cfn-eventbus-delete-stack")
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus("cfn-eventbus-delete-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DeleteStack")
             .formParam("StackName", "cfn-eventbus-delete-stack")
         .when().post("/").then().statusCode(200);
+        awaitStackDeleted("cfn-eventbus-delete-stack");
 
         // The bus is gone.
         given()
@@ -12199,6 +12400,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", "cfn-teardown-stack")
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-teardown-stack", "CREATE_COMPLETE");
 
         // Sanity: the rule exists on the custom bus before teardown.
         given()
@@ -12263,6 +12465,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", "cfn-e2e-stack")
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-e2e-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -12342,6 +12545,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", "cfn-eventbuspolicy-stack")
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-eventbuspolicy-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -12405,6 +12609,7 @@ class CloudFormationIntegrationTest {
             .formParam("StackName", "cfn-stmt-stack")
             .formParam("TemplateBody", template)
         .when().post("/").then().statusCode(200).body(containsString("<StackId>"));
+        CfnStackWaits.awaitStatus("cfn-stmt-stack", "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -12469,6 +12674,7 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         given()
             .contentType("application/x-www-form-urlencoded")

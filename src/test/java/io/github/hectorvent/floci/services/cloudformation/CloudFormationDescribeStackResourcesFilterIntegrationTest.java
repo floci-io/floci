@@ -47,6 +47,7 @@ class CloudFormationDescribeStackResourcesFilterIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         return stackName;
     }
 

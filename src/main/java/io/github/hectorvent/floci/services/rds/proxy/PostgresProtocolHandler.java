@@ -869,19 +869,15 @@ public class PostgresProtocolHandler {
     }
 
     private static String computeMd5Password(String password, String username, byte[] salt) {
-        try {
-            MessageDigest md5 = MessageDigest.getInstance("MD5");
-            md5.update(password.getBytes(StandardCharsets.UTF_8));
-            md5.update(username.getBytes(StandardCharsets.UTF_8));
-            String hex1 = bytesToHex(md5.digest());
+        MessageDigest md5 = Digests.md5Digest();
+        md5.update(password.getBytes(StandardCharsets.UTF_8));
+        md5.update(username.getBytes(StandardCharsets.UTF_8));
+        String hex1 = HexFormat.of().formatHex(md5.digest());
 
-            md5.reset();
-            md5.update(hex1.getBytes(StandardCharsets.UTF_8));
-            md5.update(salt);
-            return "md5" + bytesToHex(md5.digest());
-        } catch (Exception e) {
-            throw new RuntimeException("MD5 computation failed", e);
-        }
+        md5.reset();
+        md5.update(hex1.getBytes(StandardCharsets.UTF_8));
+        md5.update(salt);
+        return "md5" + HexFormat.of().formatHex(md5.digest());
     }
 
     // ── Post-auth buffering ───────────────────────────────────────────────────
@@ -1562,10 +1558,9 @@ public class PostgresProtocolHandler {
                 closeQuietly(backend);
             }
         };
-        Thread t1 = Thread.ofVirtual().name("rds-pg-c2b")
-                .start(() -> relay(clientIn, backendOut, closeBoth));
-        Thread t2 = Thread.ofVirtual().name("rds-pg-b2c")
-                .start(() -> relayToClient(backendIn, clientOut, session.iamRole(), closeBoth));
+        Thread t1 = RelayThreads.start("rds-pg-c2b", () -> relay(clientIn, backendOut, closeBoth));
+        Thread t2 = RelayThreads.start("rds-pg-b2c",
+                () -> relayToClient(backendIn, clientOut, session.iamRole(), closeBoth));
         try {
             t1.join();
             t2.join();
@@ -1585,7 +1580,7 @@ public class PostgresProtocolHandler {
         }
         BufferedOutputStream buffered = new BufferedOutputStream(to, 8192);
         try {
-            relayGuardingSessionRole(from, buffered, iamRole);
+            relayGuardingSessionRole(new RelayInputStream(from), buffered, iamRole);
         } catch (IOException e) {
             // Either side closing mid-relay is the normal way a session ends, so this stays at
             // debug: it is one line per connection teardown, not per message.
@@ -1605,7 +1600,7 @@ public class PostgresProtocolHandler {
      * Copies framed backend messages, stopping the session if PostgreSQL ever reports a
      * {@code session_authorization} other than {@code iamRole}.
      */
-    private static void relayGuardingSessionRole(InputStream from, OutputStream to, String iamRole)
+    private static void relayGuardingSessionRole(RelayInputStream from, OutputStream to, String iamRole)
             throws IOException {
         byte[] buf = new byte[8192];
         while (true) {
@@ -1652,7 +1647,7 @@ public class PostgresProtocolHandler {
             }
 
             // Batch while the backend keeps talking, flush as soon as it pauses.
-            if (from.available() == 0) {
+            if (from.isDrained()) {
                 to.flush();
             }
         }
@@ -1689,14 +1684,6 @@ public class PostgresProtocolHandler {
     }
 
     // ── Wire helpers ──────────────────────────────────────────────────────────
-
-    private static String bytesToHex(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
-    }
 
     static void closeQuietly(Socket s) {
         try { s.close(); } catch (IOException ignored) {}

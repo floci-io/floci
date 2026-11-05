@@ -53,6 +53,11 @@ public interface StorageBackend<K, V> {
     /** Return all keys in this store. */
     Set<K> keys();
 
+    /** Whether the store holds no entries. */
+    default boolean isEmpty() {
+        return keys().isEmpty();
+    }
+
     /** Persist data to disk if applicable. */
     void flush();
 

@@ -4,20 +4,27 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider.ResourcePolicy;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.lambda.LambdaResourcePolicyProvider;
+import io.github.hectorvent.floci.services.stepfunctions.LambdaTaskAuthorizer.Permission;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -45,8 +52,20 @@ class LambdaTaskAuthorizerTest {
             {"Version":"2012-10-17","Statement":[
               {"Effect":"Allow","Action":"sts:AssumeRole","Resource":"*"}]}""";
 
+    private static final String BUCKET = "arn:aws:s3:::orders";
+    private static final String PUT_OBJECTS = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}]}""";
+    private static final String STATES_DESCRIBE_ANYTHING = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"states:DescribeRegions","Resource":"*"}]}""";
+    private static final String STATES_TRUST = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
+              "Principal":{"Service":"states.amazonaws.com"}}]}""";
+
     private IamService iamService;
     private LambdaResourcePolicyProvider functionPolicies;
+    private ResourcePolicyProvider bucketPolicies;
     private Instance<ScpProvider> scpProvider;
     private LambdaTaskAuthorizer authorizer;
 
@@ -56,14 +75,19 @@ class LambdaTaskAuthorizerTest {
         iamService = mock(IamService.class);
         functionPolicies = mock(LambdaResourcePolicyProvider.class);
         scpProvider = mock(Instance.class);
-        when(functionPolicies.getResourcePolicies(anyString(), anyString()))
+        when(functionPolicies.getResourcePolicies(eq("lambda"), anyString()))
                 .thenReturn(List.of(new ResourcePolicy(null, FUNCTION_ACCOUNT)));
         when(functionPolicies.getResourcePolicies("lambda", OWN_FUNCTION))
                 .thenReturn(List.of(new ResourcePolicy(null, SFN_ACCOUNT)));
+        when(functionPolicies.getResourcePolicies(anyString(), anyString(), anyString())).thenCallRealMethod();
+        bucketPolicies = mock(ResourcePolicyProvider.class);
+        when(bucketPolicies.getResourcePolicies(anyString(), anyString(), anyString())).thenReturn(List.of());
+        Instance<ResourcePolicyProvider> providers = mock(Instance.class);
+        when(providers.iterator()).thenAnswer(call -> List.of(functionPolicies, bucketPolicies).iterator());
         ObjectMapper mapper = new ObjectMapper();
         IamPolicyEvaluator evaluator = new IamPolicyEvaluator(mapper);
         authorizer = new LambdaTaskAuthorizer(iamService, evaluator, new AssumeRolePolicyEvaluator(mapper, evaluator),
-                functionPolicies, scpProvider);
+                providers, scpProvider);
     }
 
     @Test
@@ -387,6 +411,166 @@ class LambdaTaskAuthorizerTest {
 
         assertEquals(assumeDenied(OWN_TASK_ROLE, "because no permissions boundary allows the sts:AssumeRole action"),
                 authorizer.assumeRefusal(ROLE, OWN_TASK_ROLE, STATE_MACHINE));
+    }
+
+    @Test
+    void aPermissionOnAnyResourceNeedsAPolicyOnAnyResource() {
+        roleWithPolicies(STATES_DESCRIBE_ANYTHING);
+        executionRole(STATES_TRUST);
+
+        authorizer.authorize(machine(), null, "Ec2.", List.of(new Permission("states:DescribeRegions", "*")));
+    }
+
+    @Test
+    void aPolicyOnOneResourceDoesNotCoverAPermissionOnAnyResource() {
+        roleWithPolicies("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"states:DescribeRegions","Resource":"%s"}]}""".formatted(BUCKET));
+        executionRole(STATES_TRUST);
+
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> authorizer.authorize(machine(), null, "Ec2.",
+                        List.of(new Permission("states:DescribeRegions", "*"))));
+
+        assertEquals("Ec2.AccessDeniedException", refused.error);
+        assertEquals("User: " + SESSION + " is not authorized to perform: states:DescribeRegions on resource: * "
+                + "because no identity-based policy allows the states:DescribeRegions action", refused.cause);
+    }
+
+    /** An S3 ARN has no account segment: with no owner known, it is not another account's resource. */
+    @Test
+    void anS3ArnWithNoAccountIsNotCrossAccount() {
+        roleWithPolicies(PUT_OBJECTS);
+
+        assertEquals(Optional.empty(), authorizer.refusal(ROLE, "s3:PutObject", BUCKET));
+    }
+
+    @Test
+    void anS3BucketOfAnotherAccountIsCrossAccount() {
+        roleWithPolicies(PUT_OBJECTS);
+        when(bucketPolicies.getResourcePolicies("s3", "s3:PutObject", BUCKET))
+                .thenReturn(List.of(new ResourcePolicy(null, FUNCTION_ACCOUNT)));
+
+        assertEquals(Optional.of("User: " + SESSION + " is not authorized to perform: s3:PutObject on resource: " + BUCKET
+                + " because no resource-based policy allows the s3:PutObject action"),
+                authorizer.refusal(ROLE, "s3:PutObject", BUCKET));
+    }
+
+    @Test
+    void aResourcePolicyOfAnyServiceCanGrantTheRole() {
+        roleWithPolicies(READ_OBJECTS);
+        when(bucketPolicies.getResourcePolicies("s3", "s3:PutObject", BUCKET))
+                .thenReturn(List.of(new ResourcePolicy("""
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"%s"},
+                          "Action":"s3:PutObject","Resource":"%s"}]}""".formatted(ROLE, BUCKET), SFN_ACCOUNT)));
+
+        assertEquals(Optional.empty(), authorizer.refusal(ROLE, "s3:PutObject", BUCKET));
+    }
+
+    @Test
+    void aResourcePolicyOfAnyServiceCanRefuseTheRole() {
+        roleWithPolicies(PUT_OBJECTS);
+        when(bucketPolicies.getResourcePolicies("s3", "s3:PutObject", BUCKET))
+                .thenReturn(List.of(new ResourcePolicy("""
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*",
+                          "Action":"s3:PutObject","Resource":"%s"}]}""".formatted(BUCKET), SFN_ACCOUNT)));
+
+        assertEquals(Optional.of("User: " + SESSION + " is not authorized to perform: s3:PutObject on resource: " + BUCKET
+                + " with an explicit deny in a resource-based policy"),
+                authorizer.refusal(ROLE, "s3:PutObject", BUCKET));
+    }
+
+    @Test
+    void aPermissionsConditionKeysReachThePolicy() {
+        roleWithPolicies("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"states:InvokeHTTPEndpoint",
+                  "Resource":"*","Condition":{"StringEquals":{"states:HTTPEndpoint":"https://example.test"}}}]}""");
+        executionRole(STATES_TRUST);
+
+        authorizer.authorize(machine(), null, "States.", List.of(new Permission("states:InvokeHTTPEndpoint", "*",
+                Map.of("states:HTTPEndpoint", List.of("https://example.test")))));
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> authorizer.authorize(machine(), null, "States.", List.of(new Permission(
+                        "states:InvokeHTTPEndpoint", "*", Map.of("states:HTTPEndpoint", List.of("https://other.test"))))));
+        assertEquals("States.AccessDeniedException", refused.error);
+    }
+
+    /** An S3 ARN and {@code *} name no Region, and the task's call still goes to the state machine's. */
+    @Test
+    void theRequestedRegionIsTheStateMachinesWhateverTheResourceNames() {
+        roleWithPolicies("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:PutObject","Resource":"*",
+                  "Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-1"}}}]}""");
+        executionRole(STATES_TRUST);
+
+        authorizer.authorize(machine(), null, "S3.", List.of(new Permission("s3:PutObject", BUCKET)));
+    }
+
+    @Test
+    void anExecutionRoleThatDoesNotExistRefusesTheTask() {
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> authorizer.authorize(machine(), null, "SQS.", List.of()));
+
+        assertEquals("States.Permissions", refused.error);
+        assertTrue(refused.cause.contains(ROLE), refused.cause);
+    }
+
+    @Test
+    void anExecutionRoleThatDoesNotTrustStepFunctionsRefusesTheTaskWhateverItsPolicies() {
+        roleWithPolicies(PUT_OBJECTS);
+        executionRole(trust("{\"Service\":\"lambda.amazonaws.com\"}"));
+
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> authorizer.authorize(machine(), null, "S3.", List.of(new Permission("s3:PutObject", BUCKET))));
+
+        assertEquals("States.Permissions", refused.error);
+        assertTrue(refused.cause.contains(ROLE), refused.cause);
+    }
+
+    @Test
+    void everyPermissionIsDecidedAsTheRoleTheCredentialsName() {
+        roleWithPolicies(ASSUME_ANY_ROLE);
+        executionRole(STATES_TRUST);
+        taskRole(OWN_TASK_ROLE, trust("{\"AWS\":\"" + ROLE + "\"}"));
+        when(iamService.resolvePrincipalContext(ROLE)).thenReturn(CallerContext.of(List.of(ASSUME_ANY_ROLE)));
+        when(iamService.resolvePrincipalContext(OWN_TASK_ROLE)).thenReturn(CallerContext.of(List.of(PUT_OBJECTS)));
+
+        authorizer.authorize(machine(), OWN_TASK_ROLE, "S3.", List.of(new Permission("s3:PutObject", BUCKET)));
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> authorizer.authorize(machine(), OWN_TASK_ROLE, "S3.", List.of(
+                        new Permission("s3:PutObject", BUCKET), new Permission("s3:GetObject", BUCKET))));
+
+        assertEquals("S3.AccessDeniedException", refused.error);
+        assertTrue(refused.cause.contains("assumed-role/LambdaRole"), refused.cause);
+        assertTrue(refused.cause.contains("s3:GetObject"), refused.cause);
+    }
+
+    @Test
+    void aRoleTheExecutionRoleCannotAssumeFailsTheTaskInTheNestedForm() {
+        roleWithPolicies(PUT_OBJECTS);
+        executionRole(STATES_TRUST);
+        taskRole(OWN_TASK_ROLE, trust("{\"Service\":\"lambda.amazonaws.com\"}"));
+
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> authorizer.authorize(machine(), OWN_TASK_ROLE, "S3.", List.of()));
+
+        assertEquals("States.TaskFailed", refused.error);
+        assertEquals("The role " + ROLE + " is not authorized to assume the task state's role, " + OWN_TASK_ROLE + ".",
+                refused.cause);
+    }
+
+    private void executionRole(String trustPolicy) {
+        IamRole role = new IamRole();
+        role.setArn(ROLE);
+        role.setAssumeRolePolicyDocument(trustPolicy);
+        when(iamService.findRole(SFN_ACCOUNT, "sfn-exec")).thenReturn(Optional.of(role));
+    }
+
+    private static StateMachine machine() {
+        StateMachine machine = new StateMachine();
+        machine.setStateMachineArn(STATE_MACHINE);
+        machine.setRoleArn(ROLE);
+        return machine;
     }
 
     private static Optional<String> denied(String functionArn, String reason) {

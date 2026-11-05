@@ -15,11 +15,13 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
 
 import static io.github.hectorvent.floci.testing.PersistentStorageProfile.STORAGE_DIR;
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -84,6 +86,7 @@ class CloudFormationPersistenceIntegrationTest {
             given().when().head("/cfn-persist-it-bucket").then().statusCode(404);
         });
 
+        CfnStackWaits.awaitStatus("persist-it-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -97,7 +100,11 @@ class CloudFormationPersistenceIntegrationTest {
         // Read the on-disk file the way a fresh Floci process would on the next boot.
         PersistentStorage<String, Stack> store = new PersistentStorage<>(
                 STACKS_FILE, new TypeReference<Map<String, Stack>>() {});
-        store.load();
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            store.load();
+            assertEquals("CREATE_COMPLETE", store.get("000000000000/us-east-1:persist-it-stack")
+                    .map(Stack::getStatus).orElse(null));
+        });
 
         // Account-prefixed key: <defaultAccount>/<region>:<stackName>
         Optional<Stack> loaded = store.get("000000000000/us-east-1:persist-it-stack");

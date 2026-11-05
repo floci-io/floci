@@ -21,11 +21,16 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -33,10 +38,13 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -48,6 +56,8 @@ class MemoryDbServiceTest {
     private MemoryDbProxyManager proxyManager;
     private SigV4Validator sigV4Validator;
     private EmulatorConfig.MemoryDbServiceConfig mdbConfig;
+    private EmulatorConfig config;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
@@ -55,8 +65,8 @@ class MemoryDbServiceTest {
         proxyManager = mock(MemoryDbProxyManager.class);
         sigV4Validator = mock(SigV4Validator.class);
         StorageFactory storageFactory = mock(StorageFactory.class);
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        RegionResolver regionResolver = mock(RegionResolver.class);
+        config = mock(EmulatorConfig.class);
+        regionResolver = mock(RegionResolver.class);
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         mdbConfig = mock(EmulatorConfig.MemoryDbServiceConfig.class);
@@ -72,12 +82,35 @@ class MemoryDbServiceTest {
                         "000000000000", inv.getArgument(2)).toString());
 
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
-        when(containerManager.tryStart(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString(), any(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("cid", "cluster", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), anyBoolean(), anyInt(), anyString(), anyInt(), any());
 
         service = new MemoryDbService(containerManager, proxyManager, sigV4Validator,
                 storageFactory, config, regionResolver);
+    }
+
+    @Test
+    void recreatedPersistentClusterDoesNotReuseRetainedDataVolume() {
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+        when(config.storage()).thenReturn(storage);
+        when(storage.mode()).thenReturn("persistent");
+        when(containerManager.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(new MemoryDbContainerHandle("cid", "durable", "localhost", 6379));
+        Cluster spec = new Cluster();
+        spec.setName("durable");
+        spec.setAclName("open-access");
+
+        Cluster first = service.createCluster(spec, "us-east-1");
+        service.deleteCluster("durable", "us-east-1");
+        Cluster replacement = service.createCluster(spec, "us-east-1");
+
+        assertNotEquals(first.getVolumeId(), replacement.getVolumeId());
+        verify(containerManager).removeStorage("000000000000-us-east-1-durable", first.getVolumeId());
+        verify(containerManager).tryStart(eq("000000000000-us-east-1-durable"), eq("valkey/valkey:8"),
+                eq(first.getVolumeId()), eq("000000000000"), eq("us-east-1"), eq("durable"));
+        verify(containerManager).tryStart(eq("000000000000-us-east-1-durable"), eq("valkey/valkey:8"),
+                eq(replacement.getVolumeId()), eq("000000000000"), eq("us-east-1"), eq("durable"));
     }
 
     @Test
@@ -332,7 +365,7 @@ class MemoryDbServiceTest {
     void failedProvisioningReleasesProxyPort() {
         when(mdbConfig.proxyBasePort()).thenReturn(16400);
         when(mdbConfig.proxyMaxPort()).thenReturn(16400); // exactly one port available
-        when(containerManager.tryStart(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString(), any(), anyString(), anyString(), anyString()))
                 .thenThrow(new RuntimeException("docker unavailable"))
                 .thenReturn(new MemoryDbContainerHandle("cid", "c2", "localhost", 6379));
 
@@ -352,11 +385,11 @@ class MemoryDbServiceTest {
     @Test
     void failedProvisioningRollsBackContainerAndReleasesProxyPort() {
         MemoryDbContainerHandle handle = new MemoryDbContainerHandle("cid", "c1", "localhost", 6379);
-        when(containerManager.tryStart(anyString(), anyString())).thenReturn(handle);
+        when(containerManager.tryStart(anyString(), anyString(), any(), anyString(), anyString(), anyString())).thenReturn(handle);
 
         // Proxy startup blows up after the port is reserved and the container is started.
         doThrow(new RuntimeException("proxy boom"))
-                .when(proxyManager).startProxy(eq("c1"), anyBoolean(), anyInt(), anyString(), anyInt(), any());
+                .when(proxyManager).startProxy(eq("000000000000-us-east-1-c1"), anyBoolean(), anyInt(), anyString(), anyInt(), any());
 
         Cluster spec = new Cluster();
         spec.setName("c1");
@@ -369,9 +402,9 @@ class MemoryDbServiceTest {
         // handle from this request, not by name: a concurrent create for the same cluster name
         // could have raced ahead and overwritten the registered container, and looking it up by
         // name here would risk stopping that other request's container instead of this one's.
-        verify(proxyManager).stopProxy("c1");
+        verify(proxyManager).stopProxy("000000000000-us-east-1-c1");
         verify(containerManager).stop(handle);
-        verify(containerManager, never()).stopByClusterName(anyString());
+        verify(containerManager, never()).stopByClusterName(anyString(), anyString(), anyString(), anyString());
 
         // The reserved proxy port was released: a subsequent successful create reuses the base port
         // instead of skipping to the next one (which is what a leak would cause).
@@ -391,7 +424,8 @@ class MemoryDbServiceTest {
         // and (crucially) a readiness timeout, where start() created + registered the container
         // before throwing, so no handle ever reaches the service.
         doThrow(new RuntimeException("readiness boom"))
-                .when(containerManager).tryStart(eq("c1"), anyString());
+                .when(containerManager).tryStart(eq("000000000000-us-east-1-c1"), anyString(), any(),
+                        anyString(), anyString(), anyString());
 
         Cluster spec = new Cluster();
         spec.setName("c1");
@@ -404,10 +438,10 @@ class MemoryDbServiceTest {
         verify(proxyManager, never()).stopProxy(anyString());
         // ...but the container must still be cleaned up by name, since start() may have created
         // and registered it before failing. Cleaning up by handle here would orphan it.
-        verify(containerManager).stopByClusterName("c1");
+        verify(containerManager).stopByClusterName(eq("000000000000-us-east-1-c1"), anyString(), anyString(), anyString());
 
         // The reserved proxy port was still released: a subsequent successful create reuses the base port.
-        when(containerManager.tryStart(anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString(), any(), anyString(), anyString(), anyString()))
                 .thenReturn(new MemoryDbContainerHandle("cid", "c2", "localhost", 6379));
         Cluster second = new Cluster();
         second.setName("c2");
@@ -436,7 +470,7 @@ class MemoryDbServiceTest {
     void concurrentCreateForSameNameIsRejectedWhileFirstIsProvisioning() throws InterruptedException {
         CountDownLatch startedLatch = new CountDownLatch(1);
         CountDownLatch releaseLatch = new CountDownLatch(1);
-        when(containerManager.tryStart(anyString(), anyString())).thenAnswer(inv -> {
+        when(containerManager.tryStart(anyString(), anyString(), any(), anyString(), anyString(), anyString())).thenAnswer(inv -> {
             startedLatch.countDown();
             assertTrue(releaseLatch.await(5, TimeUnit.SECONDS), "test timed out waiting for release");
             return new MemoryDbContainerHandle("cid", "c1", "localhost", 6379);
@@ -456,12 +490,72 @@ class MemoryDbServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> service.createCluster(spec2, "us-east-1"));
         assertEquals("ClusterAlreadyExistsFault", ex.jsonType());
         verify(containerManager, never()).stop(any());
-        verify(containerManager, never()).stopByClusterName(anyString());
+        verify(containerManager, never()).stopByClusterName(anyString(), anyString(), anyString(), anyString());
 
         releaseLatch.countDown();
         firstRequest.join(5000);
 
         assertEquals(ClusterStatus.AVAILABLE, service.getCluster("c1").getStatus());
+    }
+
+    /**
+     * A create that checked the name before another create of it finished must not go on to start
+     * a second cluster once the first has released its claim: exactly one of the two creates
+     * succeeds and the other is refused, whichever order they end up in.
+     */
+    @Test
+    void createRacingAFinishingCreateOfTheSameNameStartsOneCluster() throws Exception {
+        AccountAwareStorageBackend<Cluster> clusterStore = spy(AccountAwareStorageBackend.<Cluster>inMemory("000000000000"));
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                "memorydb-clusters.json".equals(inv.getArgument(1))
+                        ? clusterStore
+                        : AccountAwareStorageBackend.inMemory("000000000000"));
+        MemoryDbService racedService = new MemoryDbService(containerManager, proxyManager, sigV4Validator,
+                storageFactory, config, regionResolver);
+        CountDownLatch slowCreateLookedUp = new CountDownLatch(1);
+        CountDownLatch otherCreateDone = new CountDownLatch(1);
+        AtomicBoolean heldOnce = new AtomicBoolean();
+        doAnswer(inv -> {
+            Object found = inv.callRealMethod();
+            if ("slow-create".equals(Thread.currentThread().getName()) && heldOnce.compareAndSet(false, true)) {
+                slowCreateLookedUp.countDown();
+                assertTrue(otherCreateDone.await(5, TimeUnit.SECONDS), "the other create never ended");
+            }
+            return found;
+        }).when(clusterStore).get(anyString());
+
+        CompletableFuture<Cluster> slow = new CompletableFuture<>();
+        Thread slowCreate = new Thread(() -> {
+            try {
+                slow.complete(racedService.createCluster(cluster("raced", "open-access"), "us-east-1"));
+            } catch (RuntimeException e) {
+                slow.completeExceptionally(e);
+            }
+        }, "slow-create");
+        slowCreate.start();
+        assertTrue(slowCreateLookedUp.await(5, TimeUnit.SECONDS), "the slow create never looked the name up");
+        CompletableFuture<Cluster> other = new CompletableFuture<>();
+        try {
+            other.complete(racedService.createCluster(cluster("raced", "open-access"), "us-east-1"));
+        } catch (RuntimeException e) {
+            other.completeExceptionally(e);
+        } finally {
+            otherCreateDone.countDown();
+        }
+
+        int succeeded = 0;
+        for (CompletableFuture<Cluster> outcome : List.of(slow, other)) {
+            try {
+                outcome.get(5, TimeUnit.SECONDS);
+                succeeded++;
+            } catch (ExecutionException refused) {
+                AwsException cause = assertInstanceOf(AwsException.class, refused.getCause());
+                assertEquals("ClusterAlreadyExistsFault", cause.jsonType());
+            }
+        }
+        assertEquals(1, succeeded, "exactly one create of the name succeeds");
+        verify(containerManager, times(1)).tryStart(anyString(), anyString(), any(), anyString(), anyString(), anyString());
     }
 
     @Test
@@ -520,7 +614,7 @@ class MemoryDbServiceTest {
         // tryStart() returns null when no Docker daemon is reachable. The cluster record is
         // metadata, so the create still succeeds, the cluster reaches 'available' on the first
         // describe (what SDK/Terraform waiters poll), and no auth proxy is started.
-        when(containerManager.tryStart(anyString(), anyString())).thenReturn(null);
+        when(containerManager.tryStart(anyString(), anyString(), any(), anyString(), anyString(), anyString())).thenReturn(null);
 
         Cluster spec = new Cluster();
         spec.setName("no-docker-cluster");

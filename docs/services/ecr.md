@@ -44,6 +44,11 @@
 | `PutRegistryScanningConfiguration` / `GetRegistryScanningConfiguration` | Store the registry's scan type and scanning rules (stored, not acted on) |
 | `GetAccountSetting` / `PutAccountSetting` | Read and store account settings for the registry (stored, not acted on) |
 
+`PutLifecyclePolicy` checks that the document is one JSON object with a nonempty
+`rules` array and unique positive integer priorities. Rejected documents return
+`InvalidParameterException` without replacing the prior policy. Selection and
+action validation, expiration, and registry garbage collection remain unimplemented.
+
 `GetAccountSetting` and `PutAccountSetting` keep values per account and Region.
 Supported names are `BASIC_SCAN_TYPE_VERSION` (`AWS_NATIVE`), `REGISTRY_POLICY_SCOPE`
 (`V2`), and `BLOB_MOUNTING` (`ENABLED` or `DISABLED`). Floci defaults to `AWS_NATIVE`,

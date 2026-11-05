@@ -20,14 +20,14 @@ final class ExtendedS3Exchange {
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3Statement statement, S3Service s3Service, IamService iamService,
             BackendResponseCoordinator coordinator, BackendResponseCoordinator.Ticket ticket) throws IOException {
-        execute(client, backend, executeFrame, statement, s3Service, iamService, null, List.of(), coordinator, ticket);
+        execute(client, backend, executeFrame, statement, s3Service, iamService, null, List.of(), coordinator, ticket, null);
     }
 
     static void execute(Socket client, Socket backend,
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3Statement statement, S3Service s3Service, IamService iamService,
             String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator,
-            BackendResponseCoordinator.Ticket ticket) throws IOException {
+            BackendResponseCoordinator.Ticket ticket, RedshiftParquetWriter parquetWriter) throws IOException {
         BackendResponseCoordinator.GateResult gate;
         try {
             gate = coordinator.awaitExtendedExecuteTurn(ticket);
@@ -51,7 +51,7 @@ final class ExtendedS3Exchange {
                 }
                 case CopyStatementParser.S3Unload unload -> {
                     CopyResult result = runUnload(client, backend, executeFrame, unload, s3Service, iamService,
-                            clusterAccountId, iamRoleArns, coordinator);
+                            clusterAccountId, iamRoleArns, coordinator, ticket, parquetWriter);
                     failed = !result.succeeded();
                     deferredReadyForQuery = result.deferredReadyForQuery();
                 }
@@ -122,8 +122,35 @@ final class ExtendedS3Exchange {
     private static CopyResult runUnload(Socket client, Socket backend,
             PostgresWireDecoder.FrontendMessage executeFrame,
             CopyStatementParser.S3Unload spec, S3Service s3Service, IamService iamService,
-            String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator) throws IOException {
+            String clusterAccountId, List<String> iamRoleArns, BackendResponseCoordinator coordinator,
+            BackendResponseCoordinator.Ticket ticket, RedshiftParquetWriter parquetWriter) throws IOException {
         OutputStream backendOut = backend.getOutputStream();
+        List<RedshiftParquetWriter.Column> columns = List.of();
+        if (spec.parquet()) {
+            backendOut.write(new byte[]{'H', 0, 0, 0, 4});
+            backendOut.flush();
+            PostgresWireDecoder preamble = new PostgresWireDecoder(backend.getInputStream());
+            while (!coordinator.isFirstPending(ticket)) {
+                PostgresWireDecoder.FrontendMessage message = preamble.nextMessage();
+                if (message == null) {
+                    throw new IOException("Backend closed before Parquet UNLOAD description");
+                }
+                coordinator.onBackendFrame(message.type(), message.body());
+                forward(client, message);
+                if (message.type() == 'E') {
+                    forwardClientSyncToBackend(client, backendOut, coordinator);
+                    return new CopyResult(false, drainReadyForQuery(client, preamble, coordinator));
+                }
+            }
+            RedshiftParquetWriter.Description description = RedshiftParquetWriter.describe(client, backend, spec.selectQuery());
+            if (description.error() != null) {
+                forward(client, description.error());
+                forwardClientSyncToBackend(client, backendOut, coordinator);
+                return new CopyResult(false, drainReadyForQuery(client,
+                        new PostgresWireDecoder(backend.getInputStream()), coordinator));
+            }
+            columns = description.columns();
+        }
         backendOut.write(executeFrame.toPacketBytes());
         backendOut.flush();
         forwardClientSyncToBackend(client, backendOut, coordinator);
@@ -140,7 +167,8 @@ final class ExtendedS3Exchange {
 
         S3CopySimulator.UnloadCollector collector;
         try {
-            collector = S3CopySimulator.prepareUnload(spec, s3Service, iamService, clusterAccountId, iamRoleArns);
+            collector = S3CopySimulator.prepareUnload(spec, s3Service, iamService, clusterAccountId, iamRoleArns, parquetWriter);
+            collector.columns(columns);
         } catch (S3CopySimulator.S3TransferException e) {
             S3CopySimulator.writeCopyFail(backendOut, e.getMessage());
             drainExecute(client, decoder, coordinator, false);

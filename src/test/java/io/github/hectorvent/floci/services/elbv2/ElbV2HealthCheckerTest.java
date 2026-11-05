@@ -2,18 +2,24 @@ package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
+import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
+import io.vertx.core.VertxOptions;
+import io.vertx.core.WorkerExecutor;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.HttpServerResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
@@ -22,10 +28,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -39,6 +47,48 @@ class ElbV2HealthCheckerTest {
     @AfterEach
     void closeVertx() {
         vertx.close().toCompletionStage().toCompletableFuture().join();
+    }
+
+    @Test
+    void slowProbeDoesNotOccupyTheSharedVertxWorker() throws Exception {
+        Vertx isolated = Vertx.vertx(new VertxOptions().setWorkerPoolSize(1));
+        HttpServer server = null;
+        ElbV2HealthChecker checker = null;
+        CompletableFuture<HttpServerResponse> response = new CompletableFuture<>();
+        try {
+            server = isolated.createHttpServer().requestHandler(request -> response.complete(request.response()))
+                    .listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+            when(config.services().elbv2().mock()).thenReturn(false);
+            checker = new ElbV2HealthChecker(isolated, config, mock(Ec2Service.class));
+            TargetGroup group = targetGroup(server.actualPort(), "200", 1, 1);
+            group.setHealthCheckTimeoutSeconds(10);
+            TargetDescription target = target("127.0.0.1", server.actualPort());
+            checker.addTargets(group.getTargetGroupArn(), List.of(target), group);
+            HttpServerResponse pendingResponse = response.get(2, TimeUnit.SECONDS);
+
+            assertEquals("unrelated", assertDoesNotThrow(() -> isolated.executeBlocking(() -> "unrelated", false)
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS)),
+                    "A probe awaiting its response must not occupy the shared worker");
+            pendingResponse.end().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            ElbV2HealthChecker observed = checker;
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals("healthy",
+                    observed.getState(group.getTargetGroupArn(), target.getId(), target.getPort())));
+        } finally {
+            try {
+                if (checker != null) {
+                    checker.destroy();
+                }
+                if (response.isDone() && !response.join().ended()) {
+                    response.join().end();
+                }
+                if (server != null) {
+                    server.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+                }
+            } finally {
+                isolated.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            }
+        }
     }
 
     @Test
@@ -103,6 +153,100 @@ class ElbV2HealthCheckerTest {
                 assertEquals("Request timed out", health.description());
             });
         } finally {
+            close(server);
+        }
+    }
+
+    @Test
+    void timedOutLookupKeepsOneProbeUntilTheLookupActuallyCompletes() throws Exception {
+        HttpServer server = startServer(200);
+        CompletableFuture<Void> entered = new CompletableFuture<>();
+        CompletableFuture<Void> release = new CompletableFuture<>();
+        AtomicInteger lookups = new AtomicInteger();
+        Ec2Service ec2 = mock(Ec2Service.class);
+        Instance instance = new Instance();
+        instance.setContainerBridgeIp("127.0.0.1");
+        when(ec2.findInstanceById("000000000000", "i-blocked")).thenAnswer(ignored -> {
+            lookups.incrementAndGet();
+            entered.complete(null);
+            // Like a native hostname lookup, join does not stop when its thread is interrupted.
+            release.join();
+            return instance;
+        });
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        ElbV2HealthChecker checker = new ElbV2HealthChecker(vertx, config, ec2);
+        TargetGroup group = targetGroup(server.actualPort(), "200", 1, 1);
+        group.setTargetType("instance");
+        TargetDescription blocked = target("i-blocked", server.actualPort());
+        try {
+            checker.addTargets(group.getTargetGroupArn(), List.of(blocked), group);
+            entered.get(2, TimeUnit.SECONDS);
+            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> assertEquals("Target.Timeout",
+                    checker.getHealth(group.getTargetGroupArn(), blocked.getId(), blocked.getPort()).reason()));
+            checker.addTargets(group.getTargetGroupArn(), List.of(target("127.0.0.1", server.actualPort())), group);
+            await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> assertEquals("healthy",
+                    checker.getState(group.getTargetGroupArn(), "127.0.0.1", server.actualPort())));
+            await().during(Duration.ofMillis(250)).atMost(Duration.ofSeconds(1)).untilAsserted(() -> {
+                checker.probeAll(group.getTargetGroupArn(), group);
+                assertEquals(1, lookups.get(), "A timed-out lookup still owns its target's probe");
+            });
+            release.complete(null);
+            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+                checker.probeAll(group.getTargetGroupArn(), group);
+                assertEquals("healthy",
+                        checker.getState(group.getTargetGroupArn(), blocked.getId(), blocked.getPort()));
+            });
+        } finally {
+            release.complete(null);
+            close(server);
+        }
+    }
+
+    @Test
+    void timedOutLookupsRetainTheirSharedProbeSlotsUntilTheyFinish() throws Exception {
+        HttpServer server = startServer(200);
+        CompletableFuture<Void> release = new CompletableFuture<>();
+        AtomicInteger lookups = new AtomicInteger();
+        Ec2Service ec2 = mock(Ec2Service.class);
+        Instance instance = new Instance();
+        instance.setContainerBridgeIp("127.0.0.1");
+        when(ec2.findInstanceById(eq("000000000000"), any())).thenAnswer(invocation -> {
+            if (invocation.<String>getArgument(1).startsWith("i-held-")) {
+                lookups.incrementAndGet();
+                release.join();
+            }
+            return instance;
+        });
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        ElbV2HealthChecker checker = new ElbV2HealthChecker(vertx, config, ec2);
+        TargetGroup group = targetGroup(server.actualPort(), "200", 1, 1);
+        group.setTargetType("instance");
+        List<TargetDescription> held = new ArrayList<>();
+        for (int i = 0; i < 32; i++) {
+            held.add(target("i-held-" + i, server.actualPort()));
+        }
+        try {
+            checker.addTargets(group.getTargetGroupArn(), held, group);
+            await().atMost(Duration.ofSeconds(3)).until(() -> lookups.get() == 32);
+            await().atMost(Duration.ofSeconds(3)).until(() -> held.stream().allMatch(target ->
+                    "Target.Timeout".equals(checker.getHealth(
+                            group.getTargetGroupArn(), target.getId(), target.getPort()).reason())));
+            checker.addTargets(group.getTargetGroupArn(), List.of(target("127.0.0.1", server.actualPort())), group);
+            await().during(Duration.ofMillis(250)).atMost(Duration.ofSeconds(1)).untilAsserted(() -> {
+                checker.probeAll(group.getTargetGroupArn(), group);
+                assertEquals(32, lookups.get());
+                assertEquals("initial", checker.getState(
+                        group.getTargetGroupArn(), "127.0.0.1", server.actualPort()),
+                        "An expired caller deadline must not release a still-running worker's slot");
+            });
+            release.complete(null);
+            await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
+                checker.probeAll(group.getTargetGroupArn(), group);
+                assertEquals("healthy",
+                        checker.getState(group.getTargetGroupArn(), "127.0.0.1", server.actualPort()));
+            });
+        } finally {
+            release.complete(null);
             close(server);
         }
     }
@@ -231,7 +375,9 @@ class ElbV2HealthCheckerTest {
     @SuppressWarnings("unchecked")
     void initialAdmissionRespectsTargetGroupKind(String protocol, int requiredSuccesses) {
         Vertx immediate = mock(Vertx.class);
-        when(immediate.executeBlocking(any(Callable.class))).thenReturn(Future.succeededFuture(200));
+        WorkerExecutor workers = mock(WorkerExecutor.class);
+        when(immediate.createSharedWorkerExecutor("floci-elbv2-health-probes", 32)).thenReturn(workers);
+        when(workers.executeBlocking(any(Callable.class), eq(false))).thenReturn(Future.succeededFuture(200));
         doAnswer(invocation -> {
             Handler<Long> callback = invocation.getArgument(1);
             callback.handle(1L);
@@ -265,7 +411,9 @@ class ElbV2HealthCheckerTest {
     @SuppressWarnings("unchecked")
     void periodicProbeRetainsIntervalAndNetworkAdmissionThreshold() {
         Vertx scheduled = mock(Vertx.class);
-        when(scheduled.executeBlocking(any(Callable.class))).thenReturn(Future.succeededFuture(200));
+        WorkerExecutor workers = mock(WorkerExecutor.class);
+        when(scheduled.createSharedWorkerExecutor("floci-elbv2-health-probes", 32)).thenReturn(workers);
+        when(workers.executeBlocking(any(Callable.class), eq(false))).thenReturn(Future.succeededFuture(200));
         AtomicReference<Handler<Long>> periodic = new AtomicReference<>();
         doAnswer(invocation -> {
             Handler<Long> callback = invocation.getArgument(1);
@@ -295,6 +443,43 @@ class ElbV2HealthCheckerTest {
         checker.stopMonitoring(group.getTargetGroupArn());
         verify(scheduled).cancelTimer(2L);
         assertEquals("initial", checker.getState(group.getTargetGroupArn(), target.getId(), target.getPort()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false", "true"})
+    @SuppressWarnings("unchecked")
+    void queuedProbeRetainsItsHealthProtocol(boolean changeProtocol) throws Exception {
+        HttpServer server = startServer(200);
+        try {
+            Vertx queued = mock(Vertx.class);
+            WorkerExecutor workers = mock(WorkerExecutor.class);
+            when(queued.createSharedWorkerExecutor("floci-elbv2-health-probes", 32)).thenReturn(workers);
+            AtomicReference<Callable<Integer>> work = new AtomicReference<>();
+            Promise<Integer> result = Promise.promise();
+            when(workers.executeBlocking(any(Callable.class), eq(false))).thenAnswer(invocation -> {
+                work.set(invocation.getArgument(0));
+                return result.future();
+            });
+            EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+            when(config.services().elbv2().mock()).thenReturn(false);
+            ElbV2HealthChecker checker = new ElbV2HealthChecker(queued, config, mock(Ec2Service.class));
+            TargetGroup group = targetGroup(server.actualPort(), "200", 1, 1);
+            group.setHealthCheckProtocol("HTTP");
+            TargetDescription target = target("127.0.0.1", server.actualPort());
+            checker.addTargets(group.getTargetGroupArn(), List.of(target), group);
+            checker.probeAll(group.getTargetGroupArn(), group);
+            if (changeProtocol) {
+                group.setHealthCheckProtocol("HTTPS");
+            }
+
+            int status = assertDoesNotThrow(() -> work.get().call(),
+                    "A queued HTTP probe must keep its captured protocol");
+            result.complete(status);
+            assertEquals(200, status);
+            assertEquals("healthy", checker.getState(group.getTargetGroupArn(), target.getId(), target.getPort()));
+        } finally {
+            close(server);
+        }
     }
 
     private ElbV2HealthChecker healthChecker() {

@@ -15,8 +15,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Starts and stops one Verdaccio container per CodeArtifact npm repository, unlike Reposilite's one
@@ -60,14 +58,7 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final PerKeyContainerPool pool;
-    private final ConcurrentHashMap<String, UseState> uses = new ConcurrentHashMap<>();
-
-    private static final class UseState {
-        private int active;
-        private boolean releasing;
-        private boolean stopping;
-        private boolean stopped;
-    }
+    private final SidecarRepositoryLease lease;
 
     @Inject
     public VerdaccioSidecarManager(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
@@ -76,6 +67,7 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
         this.lifecycleManager = lifecycleManager;
         this.config = config;
         this.pool = new PerKeyContainerPool(lifecycleManager, HEALTH_PATH);
+        this.lease = new SidecarRepositoryLease("Verdaccio", pool);
     }
 
     /**
@@ -89,71 +81,22 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
 
     /** Stops and removes the container for one npm repository, if one was ever started. */
     public void release(String npmRepositoryId) {
-        UseState use = uses.computeIfAbsent(npmRepositoryId, key -> new UseState());
-        synchronized (use) {
-            use.releasing = true;
-        }
-        stopIfUnused(npmRepositoryId, use);
+        lease.release(npmRepositoryId);
     }
 
     /** Only a repository resolved under CodeArtifactService's deletion lock may admit an id. */
     public void registerRepository(String npmRepositoryId) {
-        uses.putIfAbsent(npmRepositoryId, new UseState());
+        lease.registerRepository(npmRepositoryId);
     }
 
     /** Registers a call that may use this repository's sidecar before it touches the container. */
     public void beginUse(String npmRepositoryId) {
-        UseState use = uses.get(npmRepositoryId);
-        if (use == null) {
-            throw new IllegalStateException("No Verdaccio repository lease for " + npmRepositoryId);
-        }
-        synchronized (use) {
-            if (use.releasing) {
-                throw new IllegalStateException("Verdaccio sidecar is being released for repository "
-                        + npmRepositoryId);
-            }
-            use.active++;
-        }
+        lease.beginUse(npmRepositoryId);
     }
 
     /** Completes a prior {@link #beginUse}, stopping a released container after its last use. */
     public void endUse(String npmRepositoryId) {
-        UseState use = uses.get(npmRepositoryId);
-        if (use == null) {
-            throw new IllegalStateException("No Verdaccio sidecar use for repository " + npmRepositoryId);
-        }
-        synchronized (use) {
-            if (use.active == 0) {
-                throw new IllegalStateException("No active Verdaccio sidecar use for repository "
-                        + npmRepositoryId);
-            }
-            use.active--;
-        }
-        stopIfUnused(npmRepositoryId, use);
-    }
-
-    private void stopIfUnused(String npmRepositoryId, UseState use) {
-        synchronized (use) {
-            if (!use.releasing || use.active != 0 || use.stopping || use.stopped) {
-                return;
-            }
-            use.stopping = true;
-        }
-        boolean stopped = false;
-        try {
-            if (pool.isTracked(npmRepositoryId)) {
-                pool.stopContainerStrict(npmRepositoryId);
-            }
-            stopped = true;
-        } finally {
-            synchronized (use) {
-                use.stopped = stopped;
-                use.stopping = false;
-                if (stopped) {
-                    uses.remove(npmRepositoryId, use);
-                }
-            }
-        }
+        lease.endUse(npmRepositoryId);
     }
 
     /**
@@ -214,32 +157,6 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
 
     @Override
     public void stopManagedContainers() {
-        RuntimeException[] failure = new RuntimeException[1];
-        uses.forEach((id, use) -> {
-            synchronized (use) {
-                use.releasing = true;
-            }
-            try {
-                stopIfUnused(id, use);
-            } catch (RuntimeException e) {
-                if (failure[0] == null) {
-                    failure[0] = e;
-                } else {
-                    failure[0].addSuppressed(e);
-                }
-            }
-        });
-        try {
-            pool.stopAllStrictExcept(Set.copyOf(uses.keySet()));
-        } catch (RuntimeException e) {
-            if (failure[0] == null) {
-                failure[0] = e;
-            } else {
-                failure[0].addSuppressed(e);
-            }
-        }
-        if (failure[0] != null) {
-            throw failure[0];
-        }
+        lease.stopManagedContainers();
     }
 }

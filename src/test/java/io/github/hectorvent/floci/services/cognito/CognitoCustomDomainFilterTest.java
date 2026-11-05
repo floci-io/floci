@@ -58,13 +58,14 @@ class CognitoCustomDomainFilterTest {
     void rewritesManagedLoginPathsOnACustomDomainAndPinsThePool() {
         when(cognitoService.findCustomDomain(DOMAIN)).thenReturn(Optional.of(domain("us-east-1_abc")));
         for (String path : new String[] {"/login", "/logout"}) {
-            ContainerRequestContext request = request("GET", "https://" + DOMAIN + path + "?client_id=c&state=a%26b", DOMAIN);
+            String query = "?client_id=c&state=a%2525%26b%2F";
+            ContainerRequestContext request = request("GET", "https://" + DOMAIN + path + query, DOMAIN);
 
             filter.filter(request);
 
             verify(request).setProperty(CognitoCustomDomainFilter.POOL_PROPERTY, "us-east-1_abc");
             verify(request).setProperty(AccountContextFilter.PINNED_ACCOUNT_PROPERTY, ACCOUNT);
-            verify(request).setRequestUri(URI.create("https://" + DOMAIN + "/cognito-idp" + path + "?client_id=c&state=a%26b"));
+            verify(request).setRequestUri(URI.create("https://" + DOMAIN + "/cognito-idp" + path + query));
         }
     }
 

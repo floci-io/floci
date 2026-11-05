@@ -331,6 +331,9 @@ public class CloudFormationTemplateEngine {
             if (node.has("Fn::Select")) {
                 return resolveNode(selectedElement(node.get("Fn::Select")));
             }
+            if (node.has("Fn::FindInMap")) {
+                return resolveNode(findMappedValue(node.get("Fn::FindInMap")));
+            }
             if (callsIntrinsic(node)) {
                 return TextNode.valueOf(resolve(node));
             }
@@ -663,6 +666,9 @@ public class CloudFormationTemplateEngine {
             return resolveListElements(node, resolveDynamicReferences);
         }
         if (node.isObject()) {
+            if (node.has("Fn::FindInMap")) {
+                return resolveList(findMappedValue(node.get("Fn::FindInMap")), resolveDynamicReferences);
+            }
             if (node.has("Fn::GetAtt")) {
                 JsonNode attribute = resolveGetAttNode(node.get("Fn::GetAtt"));
                 if (attribute.isArray()) {
@@ -803,6 +809,9 @@ public class CloudFormationTemplateEngine {
         if (node.isObject()) {
             if (node.has("Fn::Split") || node.has("Fn::GetAZs") || node.has("Fn::Cidr")) {
                 return true;
+            }
+            if (node.has("Fn::FindInMap")) {
+                return findMappedValue(node.get("Fn::FindInMap")).isArray();
             }
             if (node.has("Fn::If")) {
                 JsonNode branch = selectIfBranch(node.get("Fn::If"));
@@ -963,6 +972,10 @@ public class CloudFormationTemplateEngine {
     }
 
     private String resolveFindInMap(JsonNode node) {
+        return resolve(findMappedValue(node));
+    }
+
+    private JsonNode findMappedValue(JsonNode node) {
         if (node.isArray()) {
             String mapName = resolve(node.get(0));
             String topLvlName = resolve(node.get(1));
@@ -974,12 +987,12 @@ public class CloudFormationTemplateEngine {
                 if (topLvl != null && topLvl.isObject()) {
                     JsonNode secondLvl = topLvl.get(secondLvlName);
                     if (secondLvl != null) {
-                        return resolve(secondLvl);
+                        return secondLvl;
                     }
                 }
             }
         }
-        return "";
+        return TextNode.valueOf("");
     }
 
     private String resolveImportValue(JsonNode node) {

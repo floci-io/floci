@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -77,6 +78,7 @@ class CloudFormationEcsCapacityIntegrationTest {
 
         createStack(stackName, template(clusterName, providerName));
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -91,6 +93,7 @@ class CloudFormationEcsCapacityIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -190,6 +193,7 @@ class CloudFormationEcsCapacityIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"))
             .extract().asString();
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         return xml.substring(xml.indexOf("<StackId>") + "<StackId>".length(), xml.indexOf("</StackId>"));
     }
 

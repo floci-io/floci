@@ -237,7 +237,7 @@ public class NodeAppSyncJsRuntime implements AppSyncJsRuntime, ContainerTeardown
      * rather than quoted into the shell: it contains the quotes, backticks and newlines of the
      * {@code @aws-appsync/utils} shim it writes, none of which survive shell interpolation.
      */
-    private String startCommand() {
+    String startCommand() {
         String encoded = Base64.getEncoder().encodeToString(serverScript().getBytes(StandardCharsets.UTF_8));
         return "echo " + encoded + " | base64 -d > " + SERVER_PATH + " && exec node " + SERVER_PATH;
     }

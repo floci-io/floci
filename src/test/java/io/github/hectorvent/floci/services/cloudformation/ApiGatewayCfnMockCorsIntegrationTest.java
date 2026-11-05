@@ -60,6 +60,7 @@ class ApiGatewayCfnMockCorsIntegrationTest {
                 .formParam("TemplateBody", TEMPLATE)
                 .when().post("/").then().statusCode(200);
         try {
+            CfnStackWaits.awaitStatus(STACK, "CREATE_COMPLETE");
             String xml = given().contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "DescribeStacks")
                     .formParam("StackName", STACK)
