@@ -91,6 +91,20 @@ class InstanceConnectTunnelHandlerTest {
     }
 
     @Test
+    void sshIsAlsoOfferedOnThePublishedHostPort() {
+        assertEquals(0, resolve(CLI_QUERY).fallbackPort(), "nothing published, nothing to fall back to");
+
+        instance.setSshHostPort(32022);
+        InstanceConnectTunnelHandler.Target target = resolve(CLI_QUERY);
+        assertEquals("127.0.0.1", target.fallbackHost());
+        assertEquals(32022, target.fallbackPort());
+        assertEquals("192.168.97.5", target.host(), "the container address is still tried first");
+
+        assertEquals(0, resolve(CLI_QUERY.replace("remotePort=22", "remotePort=3389")).fallbackPort(),
+                "only SSH is published");
+    }
+
+    @Test
     void refusesWhatAwsRefuses() {
         assertEquals(403, refusal(CLI_QUERY.replace("ec2-instance-connect%2Faws4", "ec2%2Faws4")));
         assertEquals(403, refusal(CLI_QUERY.replace("X-Amz-Algorithm=AWS4-HMAC-SHA256&", "")));

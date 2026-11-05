@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceConnectEndpoint;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.netty.handler.codec.http.QueryStringDecoder;
+import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.net.NetClient;
 import io.vertx.core.net.NetClientOptions;
@@ -110,7 +111,12 @@ public class InstanceConnectTunnelHandler {
     }
 
     /** What a valid request resolved to. */
-    record Target(InstanceConnectEndpoint endpoint, Instance instance, String host, int port, int maxSeconds) {}
+    record Target(InstanceConnectEndpoint endpoint, Instance instance, String host, int port, int maxSeconds,
+                  String fallbackHost, int fallbackPort) {
+        Target(InstanceConnectEndpoint endpoint, Instance instance, String host, int port, int maxSeconds) {
+            this(endpoint, instance, host, port, maxSeconds, null, 0);
+        }
+    }
 
     /** Thrown for a request the endpoint refuses; the status and message become the HTTP answer. */
     static final class Refusal extends RuntimeException {
@@ -138,7 +144,13 @@ public class InstanceConnectTunnelHandler {
         // Connect first, so an unreachable instance is a clean HTTP error rather than a socket
         // that opens and immediately closes.
         ctx.request().pause();
-        client().connect(target.port(), target.host()).onComplete(connected -> {
+        // The container's own address is tried first: it is the one that works when Floci shares a
+        // Docker network with the instance, whichever host it runs on. Where the host cannot route to
+        // containers (Docker Desktop on macOS or Windows) the published SSH port is the way in.
+        client().connect(target.port(), target.host()).recover(primary -> target.fallbackPort() <= 0
+                ? Future.<NetSocket>failedFuture(primary)
+                : client().connect(target.fallbackPort(), target.fallbackHost())
+                        .recover(ignored -> Future.<NetSocket>failedFuture(primary))).onComplete(connected -> {
             if (connected.failed()) {
                 ctx.request().resume();
                 ctx.response().setStatusCode(504).end("Unable to reach " + target.instance().getPrivateIpAddress()
@@ -237,7 +249,10 @@ public class InstanceConnectTunnelHandler {
         }
         String host = Optional.ofNullable(instance.getContainerBridgeIp()).filter(ip -> !ip.isBlank())
                 .orElse(privateIp);
-        return new Target(endpoint, instance, host, port, maxSeconds);
+        // Only SSH is published on the host (Ec2ContainerManager maps 22 to sshHostPort).
+        boolean published = port == 22 && instance.getSshHostPort() > 0;
+        return new Target(endpoint, instance, host, port, maxSeconds,
+                published ? "127.0.0.1" : null, published ? instance.getSshHostPort() : 0);
     }
 
     /**
