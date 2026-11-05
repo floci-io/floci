@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.physicalId;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -399,16 +400,6 @@ class CloudFormationSamEventInvokeConfigIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
-    }
-
-    private static String physicalId(String stackName, String logicalId) {
-        XmlPath xml = given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStackResource")
-            .formParam("StackName", stackName)
-            .formParam("LogicalResourceId", logicalId)
-        .when().post("/").then().statusCode(200).extract().xmlPath();
-        return xml.getString("**.find { it.name() == 'PhysicalResourceId' }");
     }
 
     private static ValidatableResponse getRolePolicy(String roleName, String policyName) {
