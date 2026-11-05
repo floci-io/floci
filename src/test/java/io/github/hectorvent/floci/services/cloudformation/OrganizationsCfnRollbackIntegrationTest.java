@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -8,12 +9,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
-import java.time.Duration;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -37,6 +35,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class OrganizationsCfnRollbackIntegrationTest {
 
     private static final String MANAGEMENT_ACCOUNT = "676767676767";
+    private static final String CLOUDFORMATION_AUTHORIZATION = "AWS4-HMAC-SHA256 Credential=" + MANAGEMENT_ACCOUNT
+            + "/20260823/us-east-1/cloudformation/aws4_request, SignedHeaders=host, Signature=abc";
     private static final String STACK_NAME = "organizations-rollback-stack";
     private static final String ORGANIZATIONS_TARGET = "AWSOrganizationsV20161128.";
     private static final String JSON_1_1 = "application/x-amz-json-1.1";
@@ -69,8 +69,7 @@ class OrganizationsCfnRollbackIntegrationTest {
 
     private static Response cloudFormation(String action, String... formParams) {
         RequestSpecification request = given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + MANAGEMENT_ACCOUNT
-                        + "/20260823/us-east-1/cloudformation/aws4_request, SignedHeaders=host, Signature=abc")
+                .header("Authorization", CLOUDFORMATION_AUTHORIZATION)
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", action);
         for (int i = 0; i < formParams.length; i += 2) {
@@ -89,26 +88,14 @@ class OrganizationsCfnRollbackIntegrationTest {
                 .when().post("/");
     }
 
-    private static String stackStatus() {
-        return cloudFormation("DescribeStacks", "StackName", STACK_NAME).xmlPath().getString(
-                "DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus");
-    }
-
     @Test
     void anAccountThatCannotBeMovedIsDeletedByRollbackRatherThanStranded() {
         cloudFormation("CreateStack", "StackName", STACK_NAME, "TemplateBody", TEMPLATE)
                 .then().statusCode(200);
 
-        await().atMost(Duration.ofSeconds(30)).pollInterval(200, TimeUnit.MILLISECONDS)
-                .until(() -> {
-                    String status = stackStatus();
-                    return status != null && (status.endsWith("_COMPLETE") || status.endsWith("_FAILED"))
-                            && !status.endsWith("IN_PROGRESS");
-                });
-
-        // ROLLBACK_FAILED here means rollback could not unwind the attempt — the account survived
-        // and kept the organization alive with it.
-        assertEquals("ROLLBACK_COMPLETE", stackStatus());
+        CfnStackWaits.StackState terminal = CfnStackWaits.awaitTerminal(STACK_NAME, CLOUDFORMATION_AUTHORIZATION);
+        // ROLLBACK_FAILED means the account survived and kept its organization alive.
+        assertEquals("ROLLBACK_COMPLETE", terminal.status(), terminal.reason());
 
         Response events = cloudFormation("DescribeStackEvents", "StackName", STACK_NAME);
         List<String> strandedStatuses = events.xmlPath().getList(

@@ -238,10 +238,12 @@ class CloudFormationCloudFrontPoliciesIntegrationTest {
 
     private static void createStack(String stackName, String template) {
         stackCall("CreateStack", stackName, template);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
     }
 
     private static void updateStack(String stackName, String template) {
         stackCall("UpdateStack", stackName, template);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
     }
 
     private static void stackCall(String action, String stackName, String template) {

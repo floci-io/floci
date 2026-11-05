@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -55,8 +56,6 @@ import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
@@ -3129,12 +3128,7 @@ public class GlueService {
      * derives it from the document so the same policy always yields the same hash.
      */
     private static String policyHash(String policyInJson) {
-        try {
-            byte[] digest = MessageDigest.getInstance("MD5").digest(policyInJson.getBytes(StandardCharsets.UTF_8));
-            return Base64.getEncoder().encodeToString(digest);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("MD5 is a required JDK algorithm", e);
-        }
+        return Base64.getEncoder().encodeToString(Digests.md5(policyInJson.getBytes(StandardCharsets.UTF_8)));
     }
 
     public void tagResource(String arn, Map<String, String> tags, String region) {

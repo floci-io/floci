@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -74,6 +75,7 @@ class CloudFormationUpdateRollbackParametersTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus("ssm-rollback-stack", "CREATE_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -99,6 +101,7 @@ class CloudFormationUpdateRollbackParametersTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus("ssm-rollback-stack", "UPDATE_ROLLBACK_COMPLETE");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
@@ -176,6 +179,7 @@ class CloudFormationUpdateRollbackParametersTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         // This fixture deliberately uses the still-unsupported metric-alarm rollback to exercise
         // parameter restoration when another resource prevents rollback from completing.
         given()
@@ -190,6 +194,7 @@ class CloudFormationUpdateRollbackParametersTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_FAILED");
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")

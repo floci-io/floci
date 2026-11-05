@@ -93,24 +93,23 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-tag-on-create.json"
 # The IAM namespaces whose operations this file reads: those Floci serves over the JSON and Query
 # protocols and Smithy RPC v2 CBOR, and the REST ones whose routes Floci authorizes by operation.
 NAMESPACES = (
-    "acm", "application-autoscaling", "athena", "autoscaling", "bcm-data-exports", "bcm-pricing-calculator",
-    "budgets", "ce", "cloudformation", "cloudhsm", "cloudtrail", "cloudwatch", "codedeploy", "codepipeline",
-    "cognito-identity", "cognito-idp", "comprehend", "config", "cur", "datasync", "dms", "dsql", "dynamodb",
-    "ec2", "ecr", "ecs", "eks", "elasticache", "elasticloadbalancing", "elasticmapreduce", "events",
-    "firehose", "globalaccelerator", "glue", "iam", "kinesis", "kinesisanalytics", "kms", "lambda",
-    "lightsail", "logs", "memorydb", "network-firewall", "organizations", "payment-cryptography", "pipes",
-    "rds", "redshift",
-    "redshift-serverless", "rekognition", "resource-groups", "route53resolver", "sagemaker", "scheduler",
-    "secretsmanager", "servicediscovery", "ses", "sns", "sqs", "ssm", "sso", "states", "sts", "swf", "textract",
-    "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2",
+    "access-analyzer", "acm", "application-autoscaling", "athena", "autoscaling", "bcm-data-exports",
+    "bcm-pricing-calculator", "budgets", "ce", "cloudformation", "cloudhsm", "cloudtrail", "cloudwatch",
+    "codedeploy", "codepipeline", "cognito-identity", "cognito-idp", "comprehend", "config", "cur", "datasync",
+    "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticloadbalancing",
+    "elasticmapreduce", "events", "firehose", "globalaccelerator", "glue", "iam", "kinesis", "kinesisanalytics",
+    "kms", "lambda", "lightsail", "logs", "memorydb", "network-firewall", "organizations", "payment-cryptography",
+    "pipes", "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "route53resolver",
+    "sagemaker", "scheduler", "secretsmanager", "servicediscovery", "ses", "sns", "sqs", "ssm", "sso", "states",
+    "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2",
 )
 
 _NO_ROUTES = "REST routes no rule maps yet"
 # Namespaces Floci serves whose operations list a tagging action but are not read here yet, each with
 # why. `TagOnCreateNamespacesIntegrationTest` fails for a namespace Floci serves that is in neither list.
 NOT_COVERED = {
-    "access-analyzer": _NO_ROUTES, "airflow": _NO_ROUTES, "app-integrations": _NO_ROUTES, "appconfig": _NO_ROUTES,
-    "appsync": _NO_ROUTES, "aps": _NO_ROUTES, "aws-marketplace": _NO_ROUTES, "backup": _NO_ROUTES,
+    "airflow": _NO_ROUTES, "app-integrations": _NO_ROUTES, "appconfig": _NO_ROUTES, "appsync": _NO_ROUTES,
+    "aps": _NO_ROUTES, "aws-marketplace": _NO_ROUTES, "backup": _NO_ROUTES,
     "batch": _NO_ROUTES, "bedrock": _NO_ROUTES, "bedrock-agentcore": _NO_ROUTES,
     "cloudfront": _NO_ROUTES, "codeguru-reviewer": _NO_ROUTES, "connect": _NO_ROUTES,
     "controltower": _NO_ROUTES, "detective": _NO_ROUTES, "dlm": _NO_ROUTES,

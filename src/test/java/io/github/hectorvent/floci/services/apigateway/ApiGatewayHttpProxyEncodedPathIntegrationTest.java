@@ -15,6 +15,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -131,7 +132,9 @@ class ApiGatewayHttpProxyEncodedPathIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"NIFTY%2050/constituents", "a%3Fb", "a%23b", "a%2Fb", "a%252Fb", "a+b", "caf%C3%A9"})
+    @ValueSource(strings = {
+            "NIFTY%2050/constituents", "x%25y", "trailing%25", "a%3Fb", "a%23b", "a%2Fb", "a%252Fb", "a+b", "caf%C3%A9"
+    })
     void restGreedyParameterKeepsTheCallersEncoding(String suffix) {
         String apiId = createRestApi("HTTP_PROXY", "/index/{proxy+}", "/backend/{proxy}", null);
 
@@ -139,6 +142,60 @@ class ApiGatewayHttpProxyEncodedPathIntegrationTest {
 
         assertEquals("/backend/" + suffix, lastRawPath.get());
         assertNull(lastRawQuery.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"plain", "x%25y", "trailing%25", "a%252Fb", "a%2Fb", "a%20b", "a%3Fb%23c", "caf%C3%A9"})
+    void restRoutedHostsKeepTheCallersEncoding(String suffix) {
+        String apiId = createRestApi("HTTP_PROXY", "/index/{proxy+}", "/backend/{proxy}", null);
+        String domain = createCustomDomain(apiId);
+
+        try {
+            given().contentType(ContentType.JSON)
+                    .body(Map.of("restApiId", apiId, "stage", "test", "basePath", "public"))
+                    .when().post("/domainnames/" + domain + "/basepathmappings").then().statusCode(201);
+            assertRoutedHostsForwardPath(apiId, domain, suffix, "/backend/" + suffix);
+        } finally {
+            given().delete("/domainnames/" + domain).then().statusCode(202);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"plain", "x%25y", "trailing%25", "a%252Fb", "a%2Fb", "a%20b", "a%3Fb%23c", "caf%C3%A9"})
+    void httpApiRoutedHostsKeepTheCallersEncoding(String suffix) {
+        String apiId = HttpProxyApiFixtures.createProxyApi("encoded-host-http-api", "", "test", backendPort,
+                "/index/{proxy+}");
+        String domain = createCustomDomain(apiId);
+
+        try {
+            given().contentType(ContentType.JSON)
+                    .body(Map.of("apiId", apiId, "stage", "test", "apiMappingKey", "public"))
+                    .when().post("/v2/domainnames/" + domain + "/apimappings").then().statusCode(201);
+            assertRoutedHostsForwardPath(apiId, domain, suffix, "/index/" + suffix);
+        } finally {
+            given().delete("/domainnames/" + domain).then().statusCode(202);
+        }
+    }
+
+    private static String createCustomDomain(String apiId) {
+        String domain = apiId + ".example.test";
+        given().contentType(ContentType.JSON)
+                .body(Map.of("domainName", domain, "endpointConfiguration", Map.of("types", List.of("REGIONAL"))))
+                .when().post("/domainnames").then().statusCode(201);
+        return domain;
+    }
+
+    private static void assertRoutedHostsForwardPath(String apiId, String domain, String suffix, String expectedPath) {
+        given().urlEncodingEnabled(false).header("Host", domain)
+                .when().get("/public/index/" + suffix)
+                .then().statusCode(200);
+        assertEquals(expectedPath, lastRawPath.get());
+
+        lastRawPath.set(null);
+        given().urlEncodingEnabled(false).header("Host", apiId + ".execute-api.localhost.floci.io")
+                .when().get("/test/index/" + suffix)
+                .then().statusCode(200);
+        assertEquals(expectedPath, lastRawPath.get());
     }
 
     @ParameterizedTest

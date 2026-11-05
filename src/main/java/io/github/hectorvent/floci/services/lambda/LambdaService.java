@@ -736,6 +736,42 @@ public class LambdaService implements ResourceProvider {
         return updateFunctionCodeSigningConfig(region, functionName, codeSigningConfigArn);
     }
 
+    /**
+     * Validates and attaches a code-signing configuration under the configuration's lock, as
+     * PutFunctionCodeSigningConfig does.
+     */
+    public LambdaFunction attachFunctionCodeSigningConfig(String region, String functionName,
+                                                          String codeSigningConfigArn) {
+        if (codeSigningConfigService == null) {
+            throw new IllegalStateException("Lambda code-signing configuration service is unavailable");
+        }
+        LambdaCodeSigningConfigService.validateArn(codeSigningConfigArn);
+        return codeSigningConfigService.withConfigLock(codeSigningConfigArn, () -> {
+            codeSigningConfigService.requireForAttachment(region, regionResolver.getAccountId(), codeSigningConfigArn);
+            return putFunctionCodeSigningConfig(region, functionName, codeSigningConfigArn);
+        });
+    }
+
+    /**
+     * Deletes a code-signing configuration under the configuration's lock, refusing one a function
+     * still uses, as DeleteCodeSigningConfig does.
+     */
+    public void deleteCodeSigningConfig(String region, String accountId, String codeSigningConfigArn) {
+        if (codeSigningConfigService == null) {
+            throw new IllegalStateException("Lambda code-signing configuration service is unavailable");
+        }
+        codeSigningConfigService.withConfigLock(codeSigningConfigArn, () -> {
+            codeSigningConfigService.get(region, accountId, codeSigningConfigArn);
+            if (!listFunctionsByCodeSigningConfig(region, accountId, codeSigningConfigArn, 1, null)
+                    .items().isEmpty()) {
+                throw new AwsException("ResourceConflictException",
+                        "The code signing configuration is still attached to a function.", 409);
+            }
+            codeSigningConfigService.delete(region, codeSigningConfigArn);
+            return null;
+        });
+    }
+
     /** Removes a code-signing configuration from the function's {@code $LATEST}. */
     public void deleteFunctionCodeSigningConfig(String region, String functionName) {
         updateFunctionCodeSigningConfig(region, functionName, null);

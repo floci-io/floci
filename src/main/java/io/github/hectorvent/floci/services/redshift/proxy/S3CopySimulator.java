@@ -86,6 +86,8 @@ public final class S3CopySimulator {
     interface UnloadCollector extends AutoCloseable {
         void accept(byte[] body) throws IOException;
 
+        void columns(List<RedshiftParquetWriter.Column> columns);
+
         void complete() throws IOException;
 
         void abort();
@@ -284,11 +286,12 @@ public final class S3CopySimulator {
 
     static UnloadCollector prepareUnload(CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService,
                                          String clusterAccountId) {
-        return prepareUnload(spec, s3, iamService, clusterAccountId, null);
+        return prepareUnload(spec, s3, iamService, clusterAccountId, null, null);
     }
 
     static UnloadCollector prepareUnload(CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService,
-                                         String clusterAccountId, List<String> associatedRoleArns) {
+                                         String clusterAccountId, List<String> associatedRoleArns,
+                                         RedshiftParquetWriter parquetWriter) {
         requireDefaultIamRole(spec);
         RedshiftRoleAccess.RoleSession roleSession = spec.iamRoleArn() != null
                 ? RedshiftRoleAccess.resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId, associatedRoleArns)
@@ -348,7 +351,7 @@ public final class S3CopySimulator {
                     "UNLOAD memory budget exhausted; retry shortly", null);
         }
         try {
-            return new S3UnloadCollector(spec, s3, iamService, roleSession, cleanPath);
+            return new S3UnloadCollector(spec, s3, iamService, roleSession, cleanPath, parquetWriter, clusterAccountId);
         } catch (IOException e) {
             UNLOAD_HEAP_MIB.release(UNLOAD_INITIAL_MIB);
             RedshiftRoleAccess.releaseRoleSession(roleSession, spec.iamRoleArn(), iamService);
@@ -1037,15 +1040,16 @@ public final class S3CopySimulator {
     public static boolean runUnload(Socket client, Socket backend,
             CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService, String clusterAccountId,
             char txStatus, IntConsumer onStatusChange) throws IOException {
-        return runUnload(client, backend, spec, s3, iamService, clusterAccountId, null, txStatus, onStatusChange);
+        return runUnload(client, backend, spec, s3, iamService, clusterAccountId, null, txStatus, onStatusChange, null);
     }
 
     public static boolean runUnload(Socket client, Socket backend,
             CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService, String clusterAccountId,
-            List<String> associatedRoleArns, char txStatus, IntConsumer onStatusChange) throws IOException {
+            List<String> associatedRoleArns, char txStatus, IntConsumer onStatusChange,
+            RedshiftParquetWriter parquetWriter) throws IOException {
         UnloadCollector collector;
         try {
-            collector = prepareUnload(spec, s3, iamService, clusterAccountId, associatedRoleArns);
+            collector = prepareUnload(spec, s3, iamService, clusterAccountId, associatedRoleArns, parquetWriter);
         } catch (S3TransferException e) {
             LOG.debugv(e, "UNLOAD preparation failed for s3://{0}/{1}", spec.bucket(), spec.prefix());
             sendError(client, backend, e.sqlState(), e.getMessage(), txStatus, onStatusChange);
@@ -1053,6 +1057,17 @@ public final class S3CopySimulator {
         }
 
         try (collector) {
+            if (spec.parquet()) {
+                RedshiftParquetWriter.Description description = RedshiftParquetWriter.describe(client, backend, spec.selectQuery());
+                if (description.error() != null) {
+                    forward(client, description.error());
+                    backend.getOutputStream().write(new byte[]{'S', 0, 0, 0, 4});
+                    backend.getOutputStream().flush();
+                    drainToReadyForQuery(new PostgresWireDecoder(backend.getInputStream()), client, onStatusChange);
+                    return true;
+                }
+                collector.columns(description.columns());
+            }
             return runUnloadStreaming(client, backend, spec, collector, txStatus, onStatusChange);
         }
     }
@@ -1242,6 +1257,9 @@ public final class S3CopySimulator {
     }
 
     private static String fabricateUnloadCopy(CopyStatementParser.S3Unload spec) {
+        if (spec.parquet()) {
+            return "COPY (" + spec.selectQuery() + ") TO STDOUT WITH (FORMAT csv, DELIMITER ',')";
+        }
         boolean csvFraming = spec.csv() || spec.addQuotes() || spec.header();
         StringBuilder sql = new StringBuilder("COPY (").append(spec.selectQuery())
                 .append(") TO STDOUT WITH (FORMAT ").append(csvFraming ? "csv" : "text");
@@ -1262,6 +1280,10 @@ public final class S3CopySimulator {
 
     private static final class S3UnloadCollector implements UnloadCollector {
         private final CopyStatementParser.S3Unload spec;
+        private final RedshiftParquetWriter parquetWriter;
+        private final String accountId;
+        private List<RedshiftParquetWriter.Column> columns = List.of();
+        private boolean quotedCsv;
         private final S3Service s3;
         private final IamService iamService;
         private final RedshiftRoleAccess.RoleSession roleSession;
@@ -1290,22 +1312,38 @@ public final class S3CopySimulator {
 
         private S3UnloadCollector(CopyStatementParser.S3Unload spec, S3Service s3,
                                   IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
-                                  boolean cleanPath) throws IOException {
+                                  boolean cleanPath, RedshiftParquetWriter parquetWriter,
+                                  String accountId) throws IOException {
             this.spec = spec;
+            this.parquetWriter = parquetWriter;
+            this.accountId = accountId;
             this.cleanPathPending = cleanPath;
             this.s3 = s3;
             this.iamService = iamService;
             this.roleSession = roleSession;
             threshold = spec.maxFileSizeBytes() > 0 ? spec.maxFileSizeBytes() : UNLOAD_TARGET_FILE_BYTES;
-            contentType = spec.gzip() ? "application/gzip" : "text/plain";
+            contentType = spec.parquet() ? "application/octet-stream"
+                    : spec.gzip() ? "application/gzip" : "text/plain";
             acc = newAccumulator();
             headerBuf = spec.header() ? new ByteArrayOutputStream() : null;
             capturingHeader = spec.header();
         }
 
         @Override
+        public void columns(List<RedshiftParquetWriter.Column> columns) {
+            this.columns = columns;
+        }
+
+        @Override
         public void accept(byte[] body) throws IOException {
             ensureOpen();
+            if (spec.parquet()) {
+                for (byte value : body) {
+                    if (value == '"') {
+                        quotedCsv = !quotedCsv;
+                    }
+                }
+            }
             runCleanPath();
             int dataStart = 0;
             if (capturingHeader) {
@@ -1346,7 +1384,8 @@ public final class S3CopySimulator {
                 fail(SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
                         "UNLOAD result exceeds the " + UNLOAD_MAX_TOTAL_BYTES + "-byte limit", null);
             }
-            if (slicePayload >= threshold && lastByteNewline) {
+            long bufferThreshold = spec.parquet() ? UNLOAD_TARGET_FILE_BYTES : threshold;
+            if (slicePayload >= bufferThreshold && lastByteNewline && !quotedCsv) {
                 writeCurrentSlice();
                 resetSlice();
             }
@@ -1358,7 +1397,7 @@ public final class S3CopySimulator {
             runCleanPath();
             byte[] payload = finishSlice(acc, sink);
             if (slicePayload > 0 || writtenKeys.isEmpty()) {
-                writePayload(payload, sliceIndex);
+                writeSlice(payload);
             }
             if (spec.manifest()) {
                 try {
@@ -1439,8 +1478,26 @@ public final class S3CopySimulator {
 
         private void writeCurrentSlice() throws IOException {
             byte[] payload = finishSlice(acc, sink);
-            writePayload(payload, sliceIndex);
-            sliceIndex++;
+            writeSlice(payload);
+        }
+
+        private void writeSlice(byte[] payload) throws IOException {
+            if (spec.parquet()) {
+                try {
+                    for (byte[] file : parquetWriter.convert(payload, columns, accountId, roleSession, threshold)) {
+                        writePayload(file, sliceIndex++);
+                    }
+                } catch (IOException | RuntimeException exception) {
+                    abort();
+                    if (exception instanceof S3TransferException transfer) {
+                        throw transfer;
+                    }
+                    throw new S3TransferException(SQLSTATE_INTERNAL,
+                            "UNLOAD Parquet conversion failed: " + exception.getMessage(), exception);
+                }
+            } else {
+                writePayload(payload, sliceIndex++);
+            }
         }
 
         private void writePayload(byte[] payload, int index) {
@@ -1513,7 +1570,7 @@ public final class S3CopySimulator {
             // EXTENSION 'txt.gz' GZIP), so the caller's extension is the whole suffix.
             return spec.extension().startsWith(".") ? base + spec.extension() : base + "." + spec.extension();
         }
-        return spec.gzip() ? base + ".gz" : base;
+        return spec.parquet() ? base + ".parquet" : spec.gzip() ? base + ".gz" : base;
     }
 
     private static byte[] finishSlice(OutputStream acc, ByteArrayOutputStream sink) throws IOException {

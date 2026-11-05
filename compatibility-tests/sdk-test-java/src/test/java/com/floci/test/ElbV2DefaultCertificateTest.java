@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Certificate;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.DescribeListenerCertificatesResponse;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.InvalidConfigurationRequestException;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Listener;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.OperationNotPermittedException;
@@ -49,6 +50,7 @@ class ElbV2DefaultCertificateTest {
                 assertThat(unchanged.protocolAsString()).isEqualTo("HTTP");
                 assertThat(unchanged.port()).isEqualTo(8080);
                 assertThat(unchanged.certificates()).isEmpty();
+                assertThat(unchanged.hasCertificates()).isFalse();
                 elb.modifyListener(b -> b.listenerArn(http).protocol("HTTPS").port(8443)
                         .certificates(Certificate.builder().certificateArn(certificate).build()));
                 assertThat(certificates(elb, http)).containsExactly(certificate);
@@ -144,7 +146,9 @@ class ElbV2DefaultCertificateTest {
     }
 
     private static List<String> certificates(ElasticLoadBalancingV2Client client, String listener) {
-        return client.describeListenerCertificates(b -> b.listenerArn(listener)).certificates().stream()
+        DescribeListenerCertificatesResponse response = client.describeListenerCertificates(b -> b.listenerArn(listener));
+        assertThat(response.nextMarker()).isNull();
+        return response.certificates().stream()
                 .map(Certificate::certificateArn).toList();
     }
 }

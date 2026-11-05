@@ -105,6 +105,7 @@ public class EcsExecChannelHandler {
         private volatile String execId;
         private volatile PipedOutputStream containerInput;
         private volatile Closeables exec;
+        private volatile boolean closed;
 
         Channel(String sessionId, ServerWebSocket webSocket) {
             this.sessionId = sessionId;
@@ -197,7 +198,13 @@ public class EcsExecChannelHandler {
                     .withStdIn(execStdin)
                     .withTty(current.interactive())
                     .exec(new ExecFrameCallback(this)), execStdin), false)
-                    .onSuccess(started -> exec = started)
+                    .onSuccess(started -> {
+                        exec = started;
+                        // The channel may have shut down while the attach was in flight.
+                        if (closed) {
+                            shutdown();
+                        }
+                    })
                     .onFailure(cause -> failChannel(cause, current.containerName()));
         }
 
@@ -363,6 +370,7 @@ public class EcsExecChannelHandler {
 
         /** Closing the exec streams talks to the daemon, so it too stays off the event loop. */
         private void shutdown() {
+            closed = true;
             Closeables open = exec;
             PipedOutputStream stream = containerInput;
             exec = null;

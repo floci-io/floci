@@ -10,11 +10,14 @@ import org.jboss.logging.Logger;
 
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.ECKey;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 
 /**
  * Reading PEM certificate and private-key material, and checking that the two belong together.
@@ -67,11 +70,20 @@ public final class Pem {
 
     /**
      * True when {@code privateKey} signs what {@code publicKey} verifies. Done by signing a probe
-     * rather than comparing key fields, so it holds for RSA and EC alike without either being
-     * special-cased beyond the signature algorithm.
+     * rather than comparing key fields, so it holds for RSA and EC alike. EC keys with a provider
+     * algorithm alias are re-encoded through the EC key factory before signing or verification.
      */
     public static boolean isPair(PrivateKey privateKey, PublicKey publicKey) throws Exception {
-        String algorithm = privateKey instanceof ECKey ? "SHA256withECDSA" : "SHA256withRSA";
+        boolean ellipticCurve = privateKey instanceof ECKey;
+        String algorithm = ellipticCurve ? "SHA256withECDSA" : "SHA256withRSA";
+        if (ellipticCurve && !"EC".equals(privateKey.getAlgorithm())) {
+            privateKey = KeyFactory.getInstance("EC")
+                    .generatePrivate(new PKCS8EncodedKeySpec(privateKey.getEncoded()));
+        }
+        if (ellipticCurve && publicKey instanceof ECKey && !"EC".equals(publicKey.getAlgorithm())) {
+            publicKey = KeyFactory.getInstance("EC")
+                    .generatePublic(new X509EncodedKeySpec(publicKey.getEncoded()));
+        }
         byte[] probe = "floci".getBytes(StandardCharsets.US_ASCII);
         Signature signer = Signature.getInstance(algorithm);
         signer.initSign(privateKey);

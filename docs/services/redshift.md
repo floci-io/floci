@@ -940,6 +940,14 @@ runs the `COPY` over a connection to the cluster proxy. See [Firehose](firehose.
 backing PostgreSQL container and writes
 the result to S3 as one or more objects under `<prefix>`.
 
+- `PARQUET` (also `FORMAT [AS] PARQUET`) writes Snappy-compressed Parquet v1 files using
+  floci-duck. The default extension is `.parquet`; `EXTENSION` overrides it.
+  Cast unconstrained `numeric` expressions to `DECIMAL(p,s)` (`p <= 38`, `0 <= s <= p`).
+  Unsupported types return SQLSTATE `0A000`. `SUPER`, `INTERVAL`, `ROWGROUPSIZE`, and
+  `PARTITION BY` are not supported. `MAXFILESIZE` is approximate at row-group boundaries,
+  so files may be larger or smaller than the target.
+  Internal staging access is scoped to the transfer session; no extra staging-bucket IAM
+  permissions are required. Destination permissions are checked normally.
 - Framing defaults to pipe-delimited text; `FORMAT CSV` (or `CSV`) switches to CSV
   with a `,` default. `DELIMITER`, `HEADER`, `NULL AS`, and `ADDQUOTES` are honoured
   (`ADDQUOTES` and `HEADER` force CSV framing on PostgreSQL 15).
@@ -995,7 +1003,7 @@ the result to S3 as one or more objects under `<prefix>`.
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` uses the cluster's default role with the same permission checks.
-- Any other option (`PARQUET`, `JSON`, `FIXEDWIDTH`, `MASTER_SYMMETRIC_KEY`, `MANIFEST VERBOSE`,
+- Any other option (`JSON`, `FIXEDWIDTH`, `MASTER_SYMMETRIC_KEY`, `MANIFEST VERBOSE`,
   `ZSTD`, `BZIP2`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.
 - Extended Query UNLOAD is supported when the complete statement is present in `Parse` and has no

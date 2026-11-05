@@ -98,8 +98,9 @@ public final class RequestResources {
         if (resources == null || resources.isEmpty()) {
             return List.of();
         }
-        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        JsonNode body = form.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
+        Map<String, String> sent = IamConditionContextResolver.formParameters(ctx);
+        JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
+        Map<String, String> form = located(table, operation, sent, ctx, labels);
         return named(resources, formats(table, operation), form, body, partition, region, accountId, stored);
     }
 
@@ -158,8 +159,9 @@ public final class RequestResources {
         if (creates == null && made.isEmpty()) {
             return List.of();
         }
-        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        JsonNode body = form.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
+        Map<String, String> sent = IamConditionContextResolver.formParameters(ctx);
+        JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
+        Map<String, String> form = located(table, operation, sent, ctx, labels);
         Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, operation);
         if (creates == null) {
             return named(made, formats, form, body, partition, region, accountId, null);
@@ -199,16 +201,46 @@ public final class RequestResources {
             return body;
         }
         ObjectNode overlaid = body instanceof ObjectNode object ? object.deepCopy() : JsonNodeFactory.instance.objectNode();
+        located.keySet().forEach(overlaid::remove);
+        locatedValues(located, ctx, labels).forEach(overlaid::put);
+        return overlaid;
+    }
+
+    /**
+     * The request's form with each member the table locates laid over it, as a body has them laid over it: a REST
+     * request sent as a form, to a handler that does not refuse one, is still routed by its path, so a member its path
+     * or query carries is read from there alone, never from the form. The form itself when the request sends none or
+     * the operation locates none.
+     */
+    private static Map<String, String> located(RequestResourceMembers.Table table, String operation,
+                                               Map<String, String> form, ContainerRequestContext ctx,
+                                               Map<String, String> labels) {
+        Map<String, String> located = table.located().getOrDefault(operation, Map.of());
+        if (form.isEmpty() || located.isEmpty()) {
+            return form;
+        }
+        Map<String, String> overlaid = new HashMap<>(form);
+        overlaid.keySet().removeAll(located.keySet());
+        overlaid.putAll(locatedValues(located, ctx, labels));
+        return overlaid;
+    }
+
+    /**
+     * The value the request gives each member the table locates, by the member's name: a path label's from
+     * {@code labels}, a query parameter's first value; none for one the request does not give.
+     */
+    private static Map<String, String> locatedValues(Map<String, String> located, ContainerRequestContext ctx,
+                                                     Map<String, String> labels) {
         MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
+        Map<String, String> values = new HashMap<>();
         located.forEach((member, where) -> {
-            overlaid.remove(member);
             String value = where.startsWith("{") ? labels.get(where.substring(1, where.length() - 1))
                     : query == null ? null : query.getFirst(where.substring(1));
             if (value != null) {
-                overlaid.put(member, value);
+                values.put(member, value);
             }
         });
-        return overlaid;
+        return values;
     }
 
     /**

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.efs;
 
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.efs.model.AccessPointDescription;
 import io.github.hectorvent.floci.services.efs.model.BackupPolicy;
@@ -8,7 +9,6 @@ import io.github.hectorvent.floci.services.efs.model.CreateFileSystemRequest;
 import io.github.hectorvent.floci.services.efs.model.CreateMountTargetRequest;
 import io.github.hectorvent.floci.services.efs.model.CreateTagsRequest;
 import io.github.hectorvent.floci.services.efs.model.DeleteTagsRequest;
-import io.github.hectorvent.floci.services.efs.model.DescribeAccessPointsResponse;
 import io.github.hectorvent.floci.services.efs.model.DescribeFileSystemPolicyResponse;
 import io.github.hectorvent.floci.services.efs.model.DescribeFileSystemsRequest;
 import io.github.hectorvent.floci.services.efs.model.DescribeFileSystemsResponse;
@@ -178,9 +178,11 @@ public class EfsController {
 
     @GET
     @Path("/resource-tags/{ResourceId}")
-    public Response listTagsForResource(@Context HttpHeaders headers, @PathParam("ResourceId") String resourceId) {
+    public Response listTagsForResource(@Context HttpHeaders headers, @PathParam("ResourceId") String resourceId,
+                                        @QueryParam("MaxResults") String maxResults,
+                                        @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(efsService.listTagsForResource(region, resourceId)).build();
+        return Response.ok(efsService.listTagsForResource(region, resourceId, parseMaxResults(maxResults), nextToken)).build();
     }
 
     // --- Mount Targets ---
@@ -236,11 +238,14 @@ public class EfsController {
 
     @GET
     @Path("/access-points")
-    public Response describeAccessPoints(@Context HttpHeaders headers, @QueryParam("FileSystemId") String fileSystemId, @QueryParam("AccessPointId") String accessPointId) {
+    public Response describeAccessPoints(@Context HttpHeaders headers,
+                                         @QueryParam("FileSystemId") String fileSystemId,
+                                         @QueryParam("AccessPointId") String accessPointId,
+                                         @QueryParam("MaxResults") String maxResults,
+                                         @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        DescribeAccessPointsResponse res = new DescribeAccessPointsResponse();
-        res.setAccessPoints(efsService.describeAccessPoints(region, fileSystemId, accessPointId));
-        return Response.ok(res).build();
+        return Response.ok(efsService.describeAccessPointsPage(
+                region, fileSystemId, accessPointId, parseMaxResults(maxResults), nextToken)).build();
     }
 
     @DELETE
@@ -320,5 +325,12 @@ public class EfsController {
         PutLifecycleConfigurationResponse res = new PutLifecycleConfigurationResponse();
         res.setLifecyclePolicies(efsService.getLifecycleConfiguration(region, fileSystemId));
         return Response.ok(res).build();
+    }
+
+    private static Integer parseMaxResults(String value) {
+        if (value != null && value.isBlank()) {
+            throw EfsException.badRequest("MaxResults must be an integer of at least 1.");
+        }
+        return Pagination.parseMaxResults(value, "BadRequest");
     }
 }

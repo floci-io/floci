@@ -228,7 +228,8 @@ public final class CopyStatementParser {
             boolean cleanPath,
             boolean encrypted,
             String sseKmsKeyId,
-            boolean defaultIamRoleRequested) implements S3Statement {
+            boolean defaultIamRoleRequested,
+            boolean parquet) implements S3Statement {
 
         public S3Unload(
                 String selectQuery,
@@ -252,7 +253,7 @@ public final class CopyStatementParser {
                 String sseKmsKeyId) {
             this(selectQuery, bucket, prefix, delimiter, header, gzip, csv, addQuotes, nullAs, manifest,
                     allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
-                    escape, cleanPath, encrypted, sseKmsKeyId, false);
+                    escape, cleanPath, encrypted, sseKmsKeyId, false, false);
         }
 
         public S3Unload(
@@ -304,6 +305,9 @@ public final class CopyStatementParser {
             "(?is)^\\s*UNLOAD\\s*\\(\\s*'(.*)'\\s*\\)\\s*TO\\s*"
                     + "['\"]s3://([^/'\"\\s]+)(?:/([^'\"\\s]*))?['\"]\\s*(.*)$");
 
+    private static final Pattern PARQUET_PATTERN = Pattern.compile(
+            "(?i)(?:FORMAT\\s+(?:AS\\s+)?)?PARQUET\\b");
+
     private static final Pattern PARALLEL_PATTERN = Pattern.compile(
             "(?i)\\bPARALLEL\\b(?:\\s+(ON|OFF|TRUE|FALSE))?");
     private static final Pattern MAXFILESIZE_PATTERN = Pattern.compile(
@@ -325,7 +329,7 @@ public final class CopyStatementParser {
      * UNLOAD-supported here, while PARTITION is UNLOAD-only and unsupported.
      */
     private static final Pattern UNLOAD_UNSUPPORTED_CLAUSE = Pattern.compile(
-            "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|JSON|SHAPEFILE|BZIP2|LZOP|ZSTD"
+            "(?i)\\b(FIXEDWIDTH|AVRO|ORC|JSON|SHAPEFILE|BZIP2|LZOP|ZSTD"
                     + "|ENCODING|MASTER_SYMMETRIC_KEY"
                     + "|PARTITION|MAXFILESIZE\\s+\\d+\\s*(?:TB|PB))\\b");
 
@@ -437,6 +441,7 @@ public final class CopyStatementParser {
             options = options.substring(0, semi);
         }
 
+        boolean parquet = false;
         boolean csv = false;
         boolean gzip = false;
         boolean header = false;
@@ -470,6 +475,7 @@ public final class CopyStatementParser {
         boolean seenDelimiter = false;
         boolean seenMaxFileSize = false;
 
+        Matcher parquetM = PARQUET_PATTERN.matcher(options);
         Matcher csvM = CSV_PATTERN.matcher(options);
         Matcher gzipM = GZIP_PATTERN.matcher(options);
         Matcher headerM = HEADER_PATTERN.matcher(options);
@@ -497,7 +503,13 @@ public final class CopyStatementParser {
             if (offset >= len) {
                 break;
             }
-            if (matchClause(extensionM, offset, len)) {
+            if (matchClause(parquetM, offset, len)) {
+                if (parquet) {
+                    return null;
+                }
+                parquet = true;
+                offset = parquetM.end();
+            } else if (matchClause(extensionM, offset, len)) {
                 if (seenExtension) {
                     return null;
                 }
@@ -626,6 +638,9 @@ public final class CopyStatementParser {
             return null;
         }
         String iamRoleArn = auth.iamRoleArn();
+        if (parquet && (csv || gzip || header || addQuotes || escape || seenDelimiter || seenNull)) {
+            return null;
+        }
         if (delimiter == null) {
             delimiter = csv ? "," : "|";
         }
@@ -646,7 +661,7 @@ public final class CopyStatementParser {
         }
         return new S3Unload(select, bucket, prefix, delimiter, header, gzip, csv,
                 addQuotes, nullAs, manifest, allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
-                escape, cleanPath, encrypted, kmsKeyId, auth.defaultIamRoleRequested);
+                escape, cleanPath, encrypted, kmsKeyId, auth.defaultIamRoleRequested, parquet);
     }
 
     private static S3CopyFrom parseCopy(String cleaned, String defaultIamRoleArn) {

@@ -860,9 +860,57 @@ class RequestResourcesTest {
                 Map.of("DomainName", "logs")));
     }
 
+    /**
+     * A REST request sent as a form, which a handler that does not refuse one still routes by its path, has the members
+     * the table locates read from its path and its query, as a JSON body has: {@code UpdateDomainConfig} names the
+     * domain its path gives, not the form's, and with no label given names nothing, a form giving nothing else naming
+     * nothing either; {@code GetCompatibleVersions} and {@code ListTags} name the one their query gives, not the form's.
+     */
+    @Test
+    void aRestRequestSentAsAFormIsReadWhereTheTableLocatesItsMembers() {
+        String domain = "arn:aws:es:us-east-1:111111111111:domain/logs";
+        String form = "application/x-www-form-urlencoded";
+        assertEquals(List.of(domain), RequestResources.of("es:UpdateDomainConfig",
+                rest("POST", form, "DomainName=other&EngineVersion=OpenSearch_2.11", Map.of()), "aws", "us-east-1",
+                "111111111111", null, Map.of("DomainName", "logs")));
+        assertEquals(List.of(), RequestResources.of("es:UpdateDomainConfig",
+                rest("POST", form, "DomainName=other&EngineVersion=OpenSearch_2.11", Map.of()), "aws", "us-east-1",
+                "111111111111", null, Map.of()));
+        assertEquals(List.of(), RequestResources.of("es:UpdateDomainConfig", rest("POST", form, "DomainName=other",
+                Map.of()), "aws", "us-east-1", "111111111111", null, Map.of()));
+        assertEquals(List.of(domain), RequestResources.of("es:GetCompatibleVersions",
+                rest("POST", form, "DomainName=other", Map.of("domainName", "logs")), "aws", "us-east-1",
+                "111111111111", null, Map.of()));
+        assertEquals(List.of(domain), RequestResources.of("es:ListTags",
+                rest("POST", form, "ARN=arn:aws:es:us-east-1:111111111111:domain/other", Map.of("arn", domain)),
+                "aws", "us-east-1", "111111111111", null, Map.of()));
+    }
+
+    /**
+     * An Access Analyzer request names its analyzer by the label of its path ({@code GetAnalyzer}) or by its body's
+     * {@code analyzerName} ({@code CreateAnalyzer}), and an archive rule by both, {@code CreateArchiveRule} taking the
+     * analyzer from its path, where a body's {@code analyzerName} names nothing, and the rule from its body.
+     */
+    @Test
+    void anAccessAnalyzerRequestNamesTheAnalyzerItsPathOrBodyGives() {
+        String analyzer = "arn:aws:access-analyzer:us-east-1:111111111111:analyzer/a";
+        assertEquals(List.of(analyzer), RequestResources.of("access-analyzer:GetAnalyzer", rest("GET", null, Map.of()),
+                "aws", "us-east-1", "111111111111", null, Map.of("analyzerName", "a")));
+        assertEquals(List.of(analyzer), RequestResources.of("access-analyzer:CreateAnalyzer",
+                rest("PUT", "{\"analyzerName\":\"a\",\"type\":\"ACCOUNT\"}", Map.of()), "aws", "us-east-1",
+                "111111111111", null, Map.of()));
+        assertEquals(List.of(analyzer + "/archive-rule/r"), RequestResources.of("access-analyzer:CreateArchiveRule",
+                rest("PUT", "{\"analyzerName\":\"other\",\"ruleName\":\"r\"}", Map.of()), "aws", "us-east-1",
+                "111111111111", null, Map.of("analyzerName", "a")));
+    }
+
     private static ContainerRequestContext rest(String method, String body, Map<String, String> query) {
-        ContainerRequestContext request = body == null ? mock(ContainerRequestContext.class)
-                : request("application/json", body);
+        return rest(method, "application/json", body, query);
+    }
+
+    private static ContainerRequestContext rest(String method, String mediaType, String body,
+                                                Map<String, String> query) {
+        ContainerRequestContext request = body == null ? mock(ContainerRequestContext.class) : request(mediaType, body);
         when(request.getMethod()).thenReturn(method);
         UriInfo uriInfo = mock(UriInfo.class);
         MultivaluedMap<String, String> parameters = new MultivaluedHashMap<>();

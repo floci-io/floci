@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -5230,13 +5229,15 @@ public class AslExecutor {
         }
     }
 
+    // Built field by field: binding a record through Jackson needs reflection metadata, and the native
+    // image has none for a private record, so valueToTree returned {} there.
     private JsonNode httpResultJson(HttpResponse<Buffer> response) {
-       HttpTaskResponse stepHttpResponse = new HttpTaskResponse(
-            response.statusCode(),
-            response.statusMessage(),
-            httpResponseHeaders(response),
-            httpResponseBody(response));
-        return objectMapper.valueToTree(stepHttpResponse);
+        ObjectNode result = objectMapper.createObjectNode();
+        result.put("StatusCode", response.statusCode());
+        result.put("StatusText", response.statusMessage());
+        result.set("Headers", objectMapper.valueToTree(httpResponseHeaders(response)));
+        result.set("ResponseBody", httpResponseBody(response));
+        return result;
     }
 
     private Map<String, List<String>> httpResponseHeaders(HttpResponse<Buffer> response) {
@@ -5315,13 +5316,6 @@ public class AslExecutor {
     }
 
     private record HttpRequestPayload(Buffer body, String contentType) {
-    }
-
-    private record HttpTaskResponse(
-            @JsonProperty("StatusCode") int statusCode,
-            @JsonProperty("StatusText") String statusText,
-            @JsonProperty("Headers") Map<String, List<String>> headers,
-            @JsonProperty("ResponseBody") JsonNode responseBody) {
     }
 
     private void validateHttpMethod(String method) {

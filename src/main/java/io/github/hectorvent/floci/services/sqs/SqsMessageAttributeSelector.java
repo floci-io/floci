@@ -26,7 +26,7 @@ final class SqsMessageAttributeSelector {
     }
 
     private static boolean includes(Set<String> requestedNames, String name) {
-        if (requestedNames.contains("All") || requestedNames.contains(".*") || requestedNames.contains(name)) {
+        if (requestedNames.contains("All") || requestedNames.contains("*") || requestedNames.contains(".*") || requestedNames.contains(name)) {
             return true;
         }
         for (String requestedName : requestedNames) {

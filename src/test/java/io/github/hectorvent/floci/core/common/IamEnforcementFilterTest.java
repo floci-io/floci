@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.s3.S3Controller;
+import io.github.hectorvent.floci.services.s3.S3ScratchSpace;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.scheduler.SchedulerController;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -1623,7 +1624,7 @@ class IamEnforcementFilterTest {
         when(iamService.resolveCallerContext(eq("ASIASESSION"), any()))
                 .thenReturn(CallerContext.of(List.of(identityPolicy)));
         when(iamService.resolveCallerArns("ASIASESSION")).thenReturn(Optional.of(callerArns));
-        when(iamService.spectrumScratchResourceArn("ASIASESSION")).thenReturn(Optional.of(SCRATCH_OBJECT));
+        when(iamService.scratchResourceArn("ASIASESSION")).thenReturn(Optional.of(SCRATCH_OBJECT));
         when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), anyString(), anyString(), anyString()))
                 .thenReturn(List.of(resource));
         UriInfo uriInfo = mock(UriInfo.class);
@@ -1645,7 +1646,7 @@ class IamEnforcementFilterTest {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(), NO_STATEMENTS);
 
-        newFilterWithRealEvaluator().filter(containerRequest);
+        scratchFilter(S3ScratchSpace.SPECTRUM, true).filter(containerRequest);
 
         verify(containerRequest, never()).abortWith(any());
     }
@@ -1657,7 +1658,7 @@ class IamEnforcementFilterTest {
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":\"s3:*\","
                         + "\"Resource\":\"*\"}]}");
 
-        newFilterWithRealEvaluator().filter(containerRequest);
+        scratchFilter(S3ScratchSpace.SPECTRUM, true).filter(containerRequest);
 
         verify(containerRequest, never()).abortWith(any());
     }
@@ -1669,7 +1670,7 @@ class IamEnforcementFilterTest {
         S3Service s3Service = mock(S3Service.class);
         when(s3ServiceProvider.isResolvable()).thenReturn(true);
         when(s3ServiceProvider.get()).thenReturn(s3Service);
-        when(s3Service.isSpectrumScratchBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)).thenReturn(false);
+        when(s3Service.isScratchBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)).thenReturn(false);
 
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(), NO_STATEMENTS);
@@ -1689,7 +1690,7 @@ class IamEnforcementFilterTest {
             ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
             stubSignedS3Request(containerRequest, attempt[0], attempt[1], assumedRoleArns(), NO_STATEMENTS);
 
-            newFilterWithRealEvaluator().filter(containerRequest);
+            scratchFilter(S3ScratchSpace.SPECTRUM, true).filter(containerRequest);
 
             verify(containerRequest).abortWith(any(Response.class));
         }
@@ -1703,7 +1704,7 @@ class IamEnforcementFilterTest {
                         "arn:aws:iam::222233334444:user/alice", IamService.CallerArns.TYPE_USER, null, "alice",
                         false), NO_STATEMENTS);
 
-        newFilterWithRealEvaluator().filter(containerRequest);
+        scratchFilter(S3ScratchSpace.SPECTRUM, true).filter(containerRequest);
 
         verify(containerRequest).abortWith(any(Response.class));
     }
@@ -1712,11 +1713,70 @@ class IamEnforcementFilterTest {
     void anUnrelatedRoleSessionCannotWriteTheSpectrumScratchBucket() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(), NO_STATEMENTS);
-        when(iamService.spectrumScratchResourceArn("ASIASESSION")).thenReturn(Optional.empty());
+        when(iamService.scratchResourceArn("ASIASESSION")).thenReturn(Optional.empty());
 
-        newFilterWithRealEvaluator().filter(containerRequest);
+        scratchFilter(S3ScratchSpace.SPECTRUM, true).filter(containerRequest);
 
         verify(containerRequest).abortWith(any(Response.class));
+    }
+
+    private static final String UNLOAD_PREFIX = "arn:aws:s3:::floci-internal-redshift-unload-staging/"
+            + "unload/123e4567-e89b-12d3-a456-426614174000/";
+
+    private IamEnforcementFilter scratchFilter(S3ScratchSpace space, boolean internalBucket) {
+        @SuppressWarnings("unchecked")
+        Instance<S3Service> provider = mock(Instance.class);
+        S3Service s3 = mock(S3Service.class);
+        when(provider.isResolvable()).thenReturn(true);
+        when(provider.get()).thenReturn(s3);
+        when(s3.isScratchBucket(space.bucketName())).thenReturn(internalBucket);
+        return newFilterWithRealEvaluator(provider);
+    }
+
+    @Test
+    void unloadScratchAccessIsScopedAheadOfRoleDenies() {
+        for (String action : List.of("s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload", "s3:DeleteObject")) {
+            ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+            stubSignedS3Request(ctx, action, UNLOAD_PREFIX + "output.parquet/data_0.parquet", assumedRoleArns(),
+                    "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":\"s3:*\",\"Resource\":\"*\"}]}");
+            when(iamService.scratchResourceArn("ASIASESSION")).thenReturn(Optional.of(UNLOAD_PREFIX));
+            scratchFilter(S3ScratchSpace.UNLOAD, true).filter(ctx);
+            verify(ctx, never()).abortWith(any());
+        }
+    }
+
+    @Test
+    void unloadScratchListingsCannotEscapeTheTransferPrefix() {
+        for (String prefix : List.of("unload/123e4567-e89b-12d3-a456-426614174000/output.parquet/", "", "unload/", "other/")) {
+            ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+            stubSignedS3Request(ctx, "s3:ListBucket", "arn:aws:s3:::floci-internal-redshift-unload-staging", assumedRoleArns(), NO_STATEMENTS);
+            when(iamService.scratchResourceArn("ASIASESSION")).thenReturn(Optional.of(UNLOAD_PREFIX));
+            ctx.getUriInfo().getQueryParameters().putSingle("prefix", prefix);
+            scratchFilter(S3ScratchSpace.UNLOAD, true).filter(ctx);
+            if (prefix.startsWith("unload/123e4567-e89b-12d3-a456-426614174000/")) {
+                verify(ctx, never()).abortWith(any());
+            } else {
+                verify(ctx).abortWith(any(Response.class));
+            }
+        }
+    }
+
+    @Test
+    void unloadScratchAllowanceRejectsOtherKeysSessionsAndBuckets() {
+        for (String resource : List.of("arn:aws:s3:::user-destination/file.parquet",
+                "arn:aws:s3:::floci-internal-redshift-unload-staging/unload/other/input.csv", UNLOAD_PREFIX + "input.csv")) {
+            ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+            stubSignedS3Request(ctx, "s3:GetObject", resource, assumedRoleArns(), NO_STATEMENTS);
+            when(iamService.scratchResourceArn("ASIASESSION"))
+                    .thenReturn(resource.equals(UNLOAD_PREFIX + "input.csv") ? Optional.empty() : Optional.of(UNLOAD_PREFIX));
+            scratchFilter(S3ScratchSpace.UNLOAD, true).filter(ctx);
+            verify(ctx).abortWith(any(Response.class));
+        }
+        ContainerRequestContext ctx = mock(ContainerRequestContext.class);
+        stubSignedS3Request(ctx, "s3:PutObject", UNLOAD_PREFIX + "input.csv", assumedRoleArns(), NO_STATEMENTS);
+        when(iamService.scratchResourceArn("ASIASESSION")).thenReturn(Optional.of(UNLOAD_PREFIX));
+        scratchFilter(S3ScratchSpace.UNLOAD, false).filter(ctx);
+        verify(ctx).abortWith(any(Response.class));
     }
 
     // FullAWSAccess baseline auto-attached to every OU/account when SCP enforcement is on.

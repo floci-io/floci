@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -65,6 +66,7 @@ class CloudFormationListIntrinsicsIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200);
 
+                CfnStackWaits.awaitStatus(name, tagged ? "CREATE_COMPLETE" : "UPDATE_COMPLETE");
                 given()
                     .contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "DescribeStacks")

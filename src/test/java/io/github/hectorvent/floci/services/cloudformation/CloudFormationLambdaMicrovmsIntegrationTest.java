@@ -84,6 +84,7 @@ class CloudFormationLambdaMicrovmsIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -263,6 +264,7 @@ class CloudFormationLambdaMicrovmsIntegrationTest {
     }
 
     private static String describeStacks(String stackName, String expectedStatus) {
+        CfnStackWaits.awaitStatus(stackName, expectedStatus, CFN_AUTH);
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

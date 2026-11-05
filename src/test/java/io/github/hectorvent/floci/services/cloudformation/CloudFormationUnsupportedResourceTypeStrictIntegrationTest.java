@@ -44,6 +44,7 @@ class CloudFormationUnsupportedResourceTypeStrictIntegrationTest {
                 }
                 """);
 
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

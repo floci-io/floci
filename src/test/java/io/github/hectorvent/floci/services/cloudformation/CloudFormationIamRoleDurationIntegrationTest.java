@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.AwsTestClients;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -92,14 +93,14 @@ class CloudFormationIamRoleDurationIntegrationTest {
         cfn.updateStack(request -> request.stackName(name).templateBody(template(43200, false))
                 .parameters(parameter -> parameter.parameterKey("Duration").parameterValue("43200"))
                 .capabilitiesWithStrings("CAPABILITY_NAMED_IAM"));
-        awaitStack("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, name, "UPDATE_COMPLETE");
         assertEquals(original.roleId(), role().roleId());
         assertEquals(43200, role().maxSessionDuration());
         assumeFor(43200);
 
         cfn.updateStack(request -> request.stackName(name).templateBody(template(null, false))
                 .capabilitiesWithStrings("CAPABILITY_NAMED_IAM"));
-        awaitStack("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, name, "UPDATE_COMPLETE");
         assertEquals(original.roleId(), role().roleId());
         assertEquals(3600, role().maxSessionDuration());
         assertRejected(3601);
@@ -114,7 +115,7 @@ class CloudFormationIamRoleDurationIntegrationTest {
         cfn.updateStack(request -> request.stackName(name).templateBody(template(14400, true))
                 .parameters(parameter -> parameter.parameterKey("Duration").parameterValue("14400"))
                 .capabilitiesWithStrings("CAPABILITY_NAMED_IAM"));
-        awaitStack("UPDATE_ROLLBACK_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, name, "UPDATE_ROLLBACK_COMPLETE");
         assertEquals(original.roleId(), role().roleId());
         assertEquals(7200, role().maxSessionDuration());
         assumeFor(7200);
@@ -133,7 +134,7 @@ class CloudFormationIamRoleDurationIntegrationTest {
         cfn.updateStack(request -> request.stackName(name).templateBody(updated.toString())
                 .parameters(parameter -> parameter.parameterKey("Duration").parameterValue("14400"))
                 .capabilitiesWithStrings("CAPABILITY_NAMED_IAM"));
-        awaitStack("UPDATE_ROLLBACK_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, name, "UPDATE_ROLLBACK_COMPLETE");
         assertEquals(original.roleId(), role().roleId());
         assertEquals(7200, role().maxSessionDuration());
         assumeFor(7200);
@@ -145,13 +146,7 @@ class CloudFormationIamRoleDurationIntegrationTest {
         cfn.createStack(request -> request.stackName(name).templateBody(template(duration, false))
                 .capabilitiesWithStrings("CAPABILITY_NAMED_IAM"));
         stackCreated = true;
-        awaitStack("CREATE_COMPLETE");
-    }
-
-    private void awaitStack(String status) {
-        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertEquals(status, cfn.describeStacks(request -> request.stackName(name))
-                        .stacks().getFirst().stackStatusAsString()));
+        CfnStackWaits.awaitStatus(cfn, name, "CREATE_COMPLETE");
     }
 
     private Role role() {

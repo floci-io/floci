@@ -1004,6 +1004,51 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Creates the bridge network {@code networkName} with {@code labels}, as {@link #ensureVolume(String, Map)} does a
+     * volume, when Docker has no network of that name; one that exists is used as it is. Containers on it reach each
+     * other, and containers on no other network reach them through it.
+     */
+    public void ensureNetwork(String networkName, Map<String, String> labels) {
+        try {
+            dockerClient.inspectNetworkCmd().withNetworkId(networkName).exec();
+            return;
+        } catch (NotFoundException e) {
+            // Made below.
+        }
+        dockerClient.createNetworkCmd()
+                .withName(networkName)
+                .withDriver("bridge")
+                .withLabels(mergedLabels(labels))
+                .exec();
+        LOG.debugv("Created network {0}", networkName);
+    }
+
+    /** Connects the created container {@code containerId} to {@code networkName} too, before it starts. */
+    public void connectToNetwork(String containerId, String networkName) {
+        dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(networkName)
+                .exec();
+    }
+
+    /**
+     * Removes the network {@code networkName}: true once it is gone, false when Docker kept it, as
+     * {@link #removeVolume} says of a volume.
+     */
+    public boolean removeNetwork(String networkName) {
+        try {
+            dockerClient.removeNetworkCmd(networkName).exec();
+            LOG.debugv("Removed network {0}", networkName);
+            return true;
+        } catch (NotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Error removing network {0}: {1}", networkName, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
      * Finds an existing container by name.
      *
      * @param name the container name to search for

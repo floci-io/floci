@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerExec;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerNetworks;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -871,21 +872,8 @@ public class EksClusterManager
 
     // Floci in a container reaches k3s over the Docker network; on the host it uses the published port.
     private boolean onAnotherNetwork(Container survivor) {
-        if (!containerDetector.isRunningInContainer()) {
-            return false;
-        }
-        Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().eks().dockerNetwork());
-        if (network.isEmpty() || survivor.getNetworkSettings() == null
-                || survivor.getNetworkSettings().getNetworks() == null
-                || survivor.getNetworkSettings().getNetworks().isEmpty()) {
-            return false;
-        }
-        boolean moved = !survivor.getNetworkSettings().getNetworks().containsKey(network.get());
-        if (moved) {
-            LOG.infov("Surviving k3s container {0} is not on Docker network {1}; replacing it (its data volume is kept)",
-                    survivor.getId(), network.get());
-        }
-        return moved;
+        return containerDetector.isRunningInContainer() && ContainerNetworks.onAnotherNetwork(
+                survivor, containerBuilder.resolveDockerNetwork(config.services().eks().dockerNetwork()).orElse(null));
     }
 
     /** An adopted container keeps advertising the host its certificate was created for. */

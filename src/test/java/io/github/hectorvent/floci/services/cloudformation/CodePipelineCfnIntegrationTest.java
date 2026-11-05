@@ -81,6 +81,7 @@ class CodePipelineCfnIntegrationTest {
             .formParam("TemplateBody", TEMPLATE)
         .when().post("/").then().statusCode(200);
 
+        CfnStackWaits.awaitStatus(STACK, "CREATE_COMPLETE");
         String stacks = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

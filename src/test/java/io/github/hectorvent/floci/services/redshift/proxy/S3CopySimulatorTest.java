@@ -57,6 +57,65 @@ import static org.mockito.Mockito.when;
 class S3CopySimulatorTest {
 
     @Test
+    void parquetSlicesWaitForCompleteCsvRecordsAndManifestUsesConvertedLengths() throws Exception {
+        long previous = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
+        S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 3;
+        try {
+            S3Service s3 = mock(S3Service.class);
+            RedshiftParquetWriter writer = mock(RedshiftParquetWriter.class);
+            List<RedshiftParquetWriter.Column> columns = List.of(new RedshiftParquetWriter.Column("v", "VARCHAR"));
+            byte[] parquet = "PAR1testPAR1".getBytes(StandardCharsets.UTF_8);
+            when(writer.convert(any(), eq(columns), eq("000000000000"), isNull(), eq(3L))).thenReturn(List.of(parquet));
+            CopyStatementParser.S3Unload spec = (CopyStatementParser.S3Unload) CopyStatementParser.parse(
+                    "UNLOAD ('select v from t') TO 's3://b/p/' PARQUET MANIFEST");
+            try (S3CopySimulator.UnloadCollector collector = S3CopySimulator.prepareUnload(
+                    spec, s3, null, "000000000000", null, writer)) {
+                collector.columns(columns);
+                collector.accept("\"first\n".getBytes(StandardCharsets.UTF_8));
+                verifyNoInteractions(writer);
+                collector.accept("second\"\n".getBytes(StandardCharsets.UTF_8));
+                collector.accept("last\n".getBytes(StandardCharsets.UTF_8));
+                collector.complete();
+            }
+            ArgumentCaptor<byte[]> slices = ArgumentCaptor.forClass(byte[].class);
+            verify(writer, times(2)).convert(slices.capture(), eq(columns), eq("000000000000"), isNull(), eq(3L));
+            assertEquals("\"first\nsecond\"\n", new String(slices.getAllValues().get(0), StandardCharsets.UTF_8));
+            verify(s3).putObject(eq("b"), eq("p/0000_part_00.parquet"), eq(parquet), eq("application/octet-stream"), any());
+            verify(s3).putObject(eq("b"), eq("p/0001_part_00.parquet"), eq(parquet), eq("application/octet-stream"), any());
+        } finally {
+            S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = previous;
+        }
+    }
+
+    @Test
+    void duckDbPartsUseExistingFlociNamesAndManifestLengths() throws Exception {
+        S3Service target = mock(S3Service.class);
+        RedshiftParquetWriter writer = mock(RedshiftParquetWriter.class);
+        List<RedshiftParquetWriter.Column> columns = List.of(new RedshiftParquetWriter.Column("v", "VARCHAR"));
+        byte[] first = new byte[30];
+        byte[] second = new byte[20];
+        when(writer.convert(any(), eq(columns), eq("000000000000"), isNull(), eq(1024L)))
+                .thenReturn(List.of(first, second));
+        CopyStatementParser.S3Unload spec = (CopyStatementParser.S3Unload) CopyStatementParser.parse(
+                "UNLOAD ('select v from t') TO 's3://b/p/' PARQUET MANIFEST MAXFILESIZE 1024");
+        try (S3CopySimulator.UnloadCollector collector = S3CopySimulator.prepareUnload(
+                spec, target, null, "000000000000", null, writer)) {
+            collector.columns(columns);
+            collector.accept("value\n".getBytes(StandardCharsets.UTF_8));
+            collector.complete();
+        }
+        verify(target).putObject(eq("b"), eq("p/0000_part_00.parquet"), eq(first), anyString(), any());
+        verify(target).putObject(eq("b"), eq("p/0001_part_00.parquet"), eq(second), anyString(), any());
+        ArgumentCaptor<byte[]> manifest = ArgumentCaptor.forClass(byte[].class);
+        verify(target).putObject(eq("b"), eq("p/manifest"), manifest.capture(), eq("application/json"), any());
+        String json = new String(manifest.getValue(), StandardCharsets.UTF_8);
+        assertTrue(json.contains("p/0000_part_00.parquet"));
+        assertTrue(json.contains("p/0001_part_00.parquet"));
+        assertTrue(json.contains("30"));
+        assertTrue(json.contains("20"));
+    }
+
+    @Test
     void quotedDefaultIsValidatedAsAnArnForCopyAndUnload() {
         IamService iamService = mock(IamService.class);
         for (String defaultRole : new String[]{null, ROLE_ARN}) {
@@ -69,7 +128,7 @@ class S3CopySimulatorTest {
                 S3CopySimulator.S3TransferException copyError = assertThrows(S3CopySimulator.S3TransferException.class,
                         () -> S3CopySimulator.prepareCopy(copy, s3, iamService, "000000000000", List.of(ROLE_ARN)));
                 S3CopySimulator.S3TransferException unloadError = assertThrows(S3CopySimulator.S3TransferException.class,
-                        () -> S3CopySimulator.prepareUnload(unload, s3, iamService, "000000000000", List.of(ROLE_ARN)));
+                        () -> S3CopySimulator.prepareUnload(unload, s3, iamService, "000000000000", List.of(ROLE_ARN), null));
                 assertEquals("42501", copyError.sqlState());
                 assertEquals("42501", unloadError.sqlState());
                 assertTrue(copyError.getMessage().contains("malformed ARN"), copyError.getMessage());
@@ -88,7 +147,7 @@ class S3CopySimulatorTest {
         S3CopySimulator.S3TransferException copyError = assertThrows(S3CopySimulator.S3TransferException.class,
                 () -> S3CopySimulator.prepareCopy(copy, s3, null, "000000000000", List.of()));
         S3CopySimulator.S3TransferException unloadError = assertThrows(S3CopySimulator.S3TransferException.class,
-                () -> S3CopySimulator.prepareUnload(unload, s3, null, "000000000000", List.of()));
+                () -> S3CopySimulator.prepareUnload(unload, s3, null, "000000000000", List.of(), null));
         assertEquals("42501", copyError.sqlState());
         assertEquals("42501", unloadError.sqlState());
         assertTrue(copyError.getMessage().contains("No default IAM role"));

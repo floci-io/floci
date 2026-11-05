@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.CfnRequests;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
@@ -41,6 +42,7 @@ class CloudFormationWafV2WebAclAssociationIntegrationTest {
         String stackName = "cfn-wafv2-assoc-" + suffix;
 
         cfn("CreateStack", stackName, template(suffix, "AclA"));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         String created = describeStack(stackName)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
             .extract().asString();
@@ -52,6 +54,7 @@ class CloudFormationWafV2WebAclAssociationIntegrationTest {
         webAclForResource(poolArn).body("WebACL.ARN", equalTo(aclAArn));
 
         cfn("UpdateStack", stackName, template(suffix, "AclB"));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
         String updated = describeStack(stackName)
             .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"))
             .body(not(containsString("ROLLBACK")))

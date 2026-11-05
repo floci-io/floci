@@ -104,6 +104,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         .then()
             .statusCode(200);
 
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -143,6 +144,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         .then()
             .statusCode(200);
 
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
         cognito("GetGroup", "{\"UserPoolId\": \"" + poolId + "\", \"GroupName\": \"admin\"}")
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
@@ -159,6 +161,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         String poolId = createStack(stackName, poolAndGroupsTemplate("admin", 0));
 
         updateStack(stackName, poolAndGroupsTemplate("operators", 0));
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
 
         String describeXml = describeStack(stackName);
         assertThat(describeXml, containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
@@ -182,6 +185,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         String original = output(describeXml, "GroupName");
 
         updateStack(stackName, twoPoolsAndUnnamedGroupTemplate("SecondPool"));
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
 
         describeXml = describeStack(stackName);
         assertThat(describeXml, containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
@@ -332,6 +336,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         .then()
             .statusCode(200);
 
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stackName, CFN_AUTH).status());
         String describeXml = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

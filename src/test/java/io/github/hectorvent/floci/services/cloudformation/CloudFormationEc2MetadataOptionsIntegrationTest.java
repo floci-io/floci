@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
@@ -529,6 +530,8 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
     }
 
     private static XmlPath describeStack(String stackName, String expectedStatus) {
+        CfnStackWaits.awaitStatus(stackName, expectedStatus,
+                EnforcementFixtures.auth(ACCOUNT, REGION, "cloudformation"));
         return cfnRequest("DescribeStacks").formParam("StackName", stackName)
                 .post("/").then().statusCode(200)
                 .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))

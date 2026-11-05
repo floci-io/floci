@@ -130,18 +130,8 @@ public class LambdaCodeSigningConfigFunctionsController {
                                             @PathParam("codeSigningConfigArn") String codeSigningConfigArn) {
         LambdaCodeSigningConfigService.validateArn(codeSigningConfigArn);
         String region = regionResolver.resolveRegion(headers);
-        String accountId = regionResolver.getAccountId();
-        return service.withConfigLock(codeSigningConfigArn, () -> {
-            service.get(region, accountId, codeSigningConfigArn);
-            PaginatedResult<String> attached = lambdaService.listFunctionsByCodeSigningConfig(
-                    region, accountId, codeSigningConfigArn, 1, null);
-            if (!attached.items().isEmpty()) {
-                throw new AwsException("ResourceConflictException",
-                        "The code signing configuration is still attached to a function.", 409);
-            }
-            service.delete(region, codeSigningConfigArn);
-            return Response.noContent().build();
-        });
+        lambdaService.deleteCodeSigningConfig(region, regionResolver.getAccountId(), codeSigningConfigArn);
+        return Response.noContent().build();
     }
 
     @GET

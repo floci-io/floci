@@ -270,6 +270,15 @@ final class BackendResponseCoordinator {
         }
     }
 
+    boolean isFirstPending(Ticket ticket) {
+        lock.lock();
+        try {
+            return !pending.isEmpty() && pending.getFirst().ticket().equals(ticket);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     private boolean canOwnExtendedExecute(Ticket ticket) {
         for (PendingOperation operation : pending) {
             if (operation.ticket().equals(ticket)) {

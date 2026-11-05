@@ -5,7 +5,9 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.StripedLocks;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
@@ -31,6 +33,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 
@@ -55,6 +59,7 @@ public class MemoryDbService {
     private static final String DEFAULT_ACL = "open-access";
     private static final String DEFAULT_USER = "default";
     private static final String ACTIVE = "active";
+    private static final String LEGACY_CLUSTER_BACKUP_PREFIX = "legacy-clusters/";
     private static final int REDIS_PORT = 6379;
 
     // Per the MemoryDB API: a user name must start with a letter and contain only
@@ -62,9 +67,9 @@ public class MemoryDbService {
     private static final Pattern USER_NAME_PATTERN =
             Pattern.compile("[a-zA-Z][a-zA-Z0-9\\-]*");
 
-    private final StorageBackend<String, Cluster> clusters;
-    private final StorageBackend<String, User> users;
-    private final StorageBackend<String, Acl> acls;
+    private final AccountAwareStorageBackend<Cluster> clusters;
+    private final AccountAwareStorageBackend<User> users;
+    private final AccountAwareStorageBackend<Acl> acls;
     private final MemoryDbContainerManager containerManager;
     private final MemoryDbProxyManager proxyManager;
     private final SigV4Validator sigV4Validator;
@@ -72,6 +77,8 @@ public class MemoryDbService {
     private final RegionResolver regionResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final Set<String> provisioningClusterNames = ConcurrentHashMap.newKeySet();
+    private final Map<String, Integer> ownedProxyPorts = new ConcurrentHashMap<>();
+    private final StripedLocks clusterLocks = new StripedLocks(256);
 
     @Inject
     public MemoryDbService(MemoryDbContainerManager containerManager,
@@ -104,7 +111,8 @@ public class MemoryDbService {
         // Claim the name for the whole provisioning attempt so a concurrent create can't race
         // ahead and be stopped by this request's handle-less rollback fallback. The existence
         // check follows the claim, so a create that ended before it is seen.
-        if (!provisioningClusterNames.add(resourceKey)) {
+        String claimKey = regionResolver.getAccountId() + "/" + resourceKey;
+        if (!provisioningClusterNames.add(claimKey)) {
             throw new AwsException("ClusterAlreadyExistsFault",
                     "Cluster " + name + " is already being created.", 400);
         }
@@ -136,21 +144,25 @@ public class MemoryDbService {
             cluster.setArn(buildArn(region, "cluster", name));
             cluster.setCreatedAt(Instant.now());
             cluster.setTags(spec.getTags());
+            if (!config.services().memorydb().mock() && config.storage() != null
+                    && !"memory".equals(config.storage().mode())) {
+                cluster.setVolumeId(UUID.randomUUID().toString());
+            }
 
             if (config.services().memorydb().mock()) {
                 LOG.infov("Creating MemoryDB cluster {0} in mock mode (no container)", name);
                 cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), REDIS_PORT));
+                clusters.putAllAtomicallyForAccount(cluster.getAccountId(), Map.of(resourceKey, cluster));
             } else {
                 startBackend(cluster, authRequired);
             }
 
-            clusters.put(resourceKey, cluster);
             LOG.infov("MemoryDB cluster {0} created (acl={1}, authRequired={2}), endpoint={3}:{4}",
                     name, aclName, String.valueOf(authRequired), cluster.getClusterEndpoint().address(),
                     String.valueOf(cluster.getClusterEndpoint().port()));
             return cluster;
         } finally {
-            provisioningClusterNames.remove(resourceKey);
+            provisioningClusterNames.remove(claimKey);
         }
     }
 
@@ -197,7 +209,14 @@ public class MemoryDbService {
 
     public Cluster deleteCluster(String name, String region) {
         Cluster cluster = getCluster(name, region);
-        cluster.setStatus(ClusterStatus.DELETING);
+        String ownerKey = cluster.getAccountId() + "/" + key(region, name);
+        boolean pendingBackend;
+        synchronized (clusterLocks.lockFor(ownerKey)) {
+            pendingBackend = cluster.getStatus() == ClusterStatus.CREATING
+                    || cluster.getStatus() == ClusterStatus.DELETING;
+            cluster.setStatus(ClusterStatus.DELETING);
+            clusters.putForAccount(cluster.getAccountId(), key(region, name), cluster);
+        }
         String identity = identityName(cluster.getAccountId(), region, name);
 
         proxyManager.stopProxy(identity);
@@ -205,12 +224,288 @@ public class MemoryDbService {
         if (cluster.getContainerId() != null) {
             containerManager.stop(new MemoryDbContainerHandle(
                     cluster.getContainerId(), identity, cluster.getContainerHost(), cluster.getContainerPort()));
+        } else if (pendingBackend && !config.services().memorydb().mock()) {
+            containerManager.stopByClusterName(identity, cluster.getAccountId(),
+                        cluster.getRegion(), cluster.getName());
         }
 
-        releaseProxyPort(cluster.getProxyPort());
-        clusters.delete(key(region, name));
+        containerManager.removeStorage(identity, cluster.getVolumeId());
+        synchronized (clusterLocks.lockFor(ownerKey)) {
+            releaseOwnedProxyPort(ownerKey, cluster.getProxyPort());
+            clusters.deleteForAccount(cluster.getAccountId(), key(region, name));
+        }
         LOG.infov("MemoryDB cluster {0} deleted", name);
         return cluster;
+    }
+
+    public CompletableFuture<Void> restorePersistedRuntime() {
+        if (config.services().memorydb().mock()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        List<RuntimeException> migrationFailures = new ArrayList<>();
+        List<AccountEntry<Cluster>> persisted = migratePersistedClusters(migrationFailures);
+        List<AccountEntry<Cluster>> pending = new ArrayList<>();
+        RuntimeException reservationFailure = null;
+        for (RuntimeException failure : migrationFailures) {
+            if (reservationFailure == null) {
+                reservationFailure = failure;
+            } else {
+                reservationFailure.addSuppressed(failure);
+            }
+        }
+        for (AccountEntry<Cluster> entry : persisted) {
+            Cluster cluster = entry.value();
+            String ownerKey = entry.accountId() + "/" + entry.key();
+            synchronized (clusterLocks.lockFor(ownerKey)) {
+                if (!provisioningClusterNames.add(ownerKey)) {
+                    continue;
+                }
+                try {
+                    cluster.setAccountId(entry.accountId());
+                    cluster.setRegion(restoredRegion(cluster));
+                    if (cluster.getStatus() == ClusterStatus.DELETING) {
+                        clusters.putAllAtomicallyForAccount(entry.accountId(), Map.of(entry.key(), cluster));
+                        provisioningClusterNames.remove(ownerKey);
+                        continue;
+                    }
+                    Integer ownedPort = ownedProxyPorts.get(ownerKey);
+                    int requested = cluster.getProxyPort();
+                    int port = ownedPort != null ? ownedPort
+                            : requested >= config.services().memorydb().proxyBasePort()
+                            && requested <= config.services().memorydb().proxyMaxPort()
+                            && usedPorts.add(requested) ? requested : allocateProxyPort();
+                    ownedProxyPorts.put(ownerKey, port);
+                    cluster.setProxyPort(port);
+                    cluster.setClusterEndpoint(null);
+                    cluster.setStatus(ClusterStatus.CREATING);
+                    if (cluster.getVolumeId() == null && config.storage() != null
+                            && !"memory".equals(config.storage().mode())) {
+                        cluster.setVolumeId(UUID.randomUUID().toString());
+                    }
+                    clusters.putAllAtomicallyForAccount(entry.accountId(), Map.of(entry.key(), cluster));
+                    pending.add(entry);
+                } catch (RuntimeException e) {
+                    releaseOwnedProxyPort(ownerKey, cluster.getProxyPort());
+                    provisioningClusterNames.remove(ownerKey);
+                    if (cluster.getStatus() != ClusterStatus.DELETING) {
+                        cluster.setStatus(ClusterStatus.CREATING);
+                    }
+                    cluster.setClusterEndpoint(null);
+                    try {
+                        clusters.putForAccount(entry.accountId(), entry.key(), cluster);
+                    } catch (RuntimeException persistFailure) {
+                        e.addSuppressed(persistFailure);
+                    }
+                    LOG.warnv(e, "Failed to reserve the MemoryDB runtime for {0}", ownerKey);
+                    if (reservationFailure == null) {
+                        reservationFailure = e;
+                    } else {
+                        reservationFailure.addSuppressed(e);
+                    }
+                }
+            }
+        }
+        RuntimeException initialFailure = reservationFailure;
+        return CompletableFuture.runAsync(() -> {
+            RuntimeException failure = initialFailure;
+            for (AccountEntry<Cluster> entry : pending) {
+                try {
+                    restoreCluster(entry);
+                } catch (RuntimeException e) {
+                    if (failure == null) {
+                        failure = e;
+                    } else {
+                        failure.addSuppressed(e);
+                    }
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        });
+    }
+
+    private List<AccountEntry<Cluster>> migratePersistedClusters(List<RuntimeException> failures) {
+        List<AccountEntry<Cluster>> normalized = new ArrayList<>();
+        Set<String> included = new HashSet<>();
+        for (AccountEntry<Cluster> entry : clusters.scanAllAccountEntries(
+                storedKey -> !storedKey.startsWith(LEGACY_CLUSTER_BACKUP_PREFIX))) {
+            Cluster cluster = entry.value();
+            try {
+                boolean prefixed = clusters.getForAccount(entry.accountId(), entry.key())
+                        .filter(current -> current == cluster).isPresent();
+                AwsArnUtils.Arn arn = cluster.getArn() == null || cluster.getArn().isBlank()
+                        ? null : AwsArnUtils.parse(cluster.getArn());
+                String account = prefixed ? entry.accountId() : cluster.getAccountId();
+                if (account == null || account.isBlank()) {
+                    account = arn != null ? arn.accountId() : regionResolver.getDefaultAccountId();
+                }
+                String region = restoredRegion(cluster);
+                if ((cluster.getAccountId() != null && !cluster.getAccountId().isBlank()
+                        && !account.equals(cluster.getAccountId()))
+                        || (arn != null && (!"memorydb".equals(arn.service())
+                        || !account.equals(arn.accountId()) || !region.equals(arn.region())))) {
+                    throw new IllegalStateException("MemoryDB persisted owner or region contradicts its storage key or ARN");
+                }
+                String name = cluster.getName();
+                if (name == null || name.isBlank()) {
+                    throw new IllegalStateException("MemoryDB persisted cluster has no name");
+                }
+                String logicalKey = key(region, name);
+                if (!entry.key().equals(name) && !entry.key().equals(logicalKey)) {
+                    throw new IllegalStateException("MemoryDB persisted cluster name contradicts its storage key");
+                }
+                String sourceKey = prefixed
+                        ? AccountAwareStorageBackend.rawKey(entry.accountId(), entry.key()) : entry.key();
+                String destinationKey = AccountAwareStorageBackend.rawKey(account, logicalKey);
+                Optional<Cluster> existing = clusters.getForAccount(account, logicalKey);
+                cluster.setAccountId(account);
+                cluster.setRegion(region);
+                if (existing.isPresent() && existing.get() != cluster) {
+                    String backupKey = LEGACY_CLUSTER_BACKUP_PREFIX + UUID.randomUUID();
+                    clusters.putAllAtomicallyForAccount(account, Map.of(backupKey, cluster));
+                    clusters.deleteRaw(sourceKey);
+                    LOG.warnv("MemoryDB legacy record at {0} conflicts with {1}; retained at {2}/{3} for recovery",
+                            sourceKey, destinationKey, account, backupKey);
+                    continue;
+                }
+                if (!sourceKey.equals(destinationKey)) {
+                    clusters.putAllAtomicallyForAccount(account, Map.of(logicalKey, cluster));
+                    clusters.deleteRaw(sourceKey);
+                }
+                if (included.add(destinationKey)) {
+                    normalized.add(new AccountEntry<>(account, logicalKey, cluster));
+                }
+            } catch (RuntimeException failure) {
+                failures.add(failure);
+                LOG.warnv(failure, "Failed to migrate MemoryDB metadata at {0}/{1}",
+                        entry.accountId(), entry.key());
+            }
+        }
+        return normalized;
+    }
+
+    private void restoreCluster(AccountEntry<Cluster> entry) {
+        Cluster cluster = entry.value();
+        String ownerKey = entry.accountId() + "/" + entry.key();
+        String identity = identityName(entry.accountId(), cluster.getRegion(), cluster.getName());
+        MemoryDbContainerHandle handle = null;
+        try {
+            boolean authRequired = isAuthRequired(cluster.getAclName(), cluster.getRegion(), entry.accountId());
+            String image = config.services().memorydb().defaultImage();
+            boolean unavailable = false;
+            if (cluster.getContainerId() != null) {
+                if (!containerManager.isDockerReachable()) {
+                    unavailable = true;
+                } else {
+                    handle = new MemoryDbContainerHandle(cluster.getContainerId(), identity,
+                            cluster.getContainerHost(), cluster.getContainerPort());
+                    containerManager.stop(handle);
+                    clearBackend(cluster);
+                    clusters.putAllAtomicallyForAccount(entry.accountId(), Map.of(entry.key(), cluster));
+                    handle = null;
+                }
+            }
+            if (!unavailable) {
+                handle = containerManager.tryStart(identity, image, cluster.getVolumeId(),
+                        entry.accountId(), cluster.getRegion(), cluster.getName());
+            }
+            boolean lost;
+            synchronized (clusterLocks.lockFor(ownerKey)) {
+                lost = restoreTargetLost(entry);
+                if (!lost) {
+                    if (handle != null) {
+                        cluster.setContainerId(handle.getContainerId());
+                        cluster.setContainerHost(handle.getHost());
+                        cluster.setContainerPort(handle.getPort());
+                        proxyManager.startProxy(identity, authRequired, cluster.getProxyPort(),
+                                handle.getHost(), handle.getPort(),
+                                (username, secret) -> authenticate(cluster.getName(), username, secret,
+                                        cluster.getRegion(), entry.accountId()));
+                    } else {
+                        LOG.warnv("MemoryDB cluster {0} restored as metadata only: no Docker daemon is reachable",
+                                ownerKey);
+                    }
+                    cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), cluster.getProxyPort()));
+                    cluster.setStatus(ClusterStatus.AVAILABLE);
+                    clusters.putAllAtomicallyForAccount(entry.accountId(), Map.of(entry.key(), cluster));
+                }
+            }
+            if (lost && handle != null) {
+                containerManager.stop(handle);
+            }
+        } catch (RuntimeException e) {
+            boolean cleaned = true;
+            try {
+                proxyManager.stopProxy(identity);
+            } catch (RuntimeException cleanupFailure) {
+                e.addSuppressed(cleanupFailure);
+                cleaned = false;
+            }
+            try {
+                if (handle != null) {
+                    containerManager.stop(handle);
+                } else {
+                    containerManager.stopByClusterName(identity, cluster.getAccountId(),
+                        cluster.getRegion(), cluster.getName());
+                }
+            } catch (RuntimeException cleanupFailure) {
+                e.addSuppressed(cleanupFailure);
+                cleaned = false;
+            }
+            synchronized (clusterLocks.lockFor(ownerKey)) {
+                Optional<Cluster> current = clusters.getForAccount(entry.accountId(), entry.key());
+                if (!restoreTargetLost(entry)
+                        || (!cleaned && (current.isEmpty() || current.get() == cluster))) {
+                    if (cluster.getStatus() != ClusterStatus.DELETING) {
+                        cluster.setStatus(ClusterStatus.CREATING);
+                    }
+                    cluster.setClusterEndpoint(null);
+                    if (cleaned) {
+                        clearBackend(cluster);
+                        releaseOwnedProxyPort(ownerKey, cluster.getProxyPort());
+                    } else if (handle != null) {
+                        cluster.setContainerId(handle.getContainerId());
+                        cluster.setContainerHost(handle.getHost());
+                        cluster.setContainerPort(handle.getPort());
+                    }
+                    try {
+                        clusters.putAllAtomicallyForAccount(entry.accountId(), Map.of(entry.key(), cluster));
+                    } catch (RuntimeException persistFailure) {
+                        e.addSuppressed(persistFailure);
+                    }
+                }
+            }
+            LOG.warnv(e, "Failed to restore MemoryDB runtime for {0}", ownerKey);
+            throw e;
+        } finally {
+            provisioningClusterNames.remove(ownerKey);
+        }
+    }
+
+    private boolean restoreTargetLost(AccountEntry<Cluster> entry) {
+        return clusters.getForAccount(entry.accountId(), entry.key())
+                .map(current -> current != entry.value() || current.getStatus() == ClusterStatus.DELETING)
+                .orElse(true);
+    }
+
+    private String restoredRegion(Cluster cluster) {
+        if (cluster.getRegion() != null && !cluster.getRegion().isBlank()) {
+            return cluster.getRegion();
+        }
+        if (AwsArnUtils.isArn(cluster.getArn())) {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(cluster.getArn());
+            if ("memorydb".equals(arn.service()) && !arn.region().isBlank()) {
+                return arn.region();
+            }
+        }
+        return regionResolver.getDefaultRegion();
+    }
+
+    private static void clearBackend(Cluster cluster) {
+        cluster.setContainerId(null);
+        cluster.setContainerHost(null);
+        cluster.setContainerPort(0);
     }
 
     // ──────────────────────────── Users ────────────────────────────
@@ -443,7 +738,12 @@ public class MemoryDbService {
     }
 
     public boolean authenticate(String clusterName, String username, String secret, String region) {
-        Cluster cluster = resourceGet(clusters, clusterName, region).orElse(null);
+        return authenticate(clusterName, username, secret, region, regionResolver.getAccountId());
+    }
+
+    private boolean authenticate(String clusterName, String username, String secret, String region,
+                                  String accountId) {
+        Cluster cluster = ownedResourceGet(clusters, accountId, clusterName, region).orElse(null);
         if (cluster == null) {
             return false;
         }
@@ -451,7 +751,7 @@ public class MemoryDbService {
         if (DEFAULT_ACL.equals(aclName)) {
             return true;
         }
-        Acl acl = resourceGet(acls, aclName, region).orElse(null);
+        Acl acl = ownedResourceGet(acls, accountId, aclName, region).orElse(null);
         if (acl == null) {
             return false;
         }
@@ -459,7 +759,7 @@ public class MemoryDbService {
         if (!acl.getUserNames().contains(target)) {
             return false;
         }
-        User user = resolveUser(target, region);
+        User user = resolveUser(target, region, accountId);
         if (user == null) {
             return false;
         }
@@ -472,15 +772,19 @@ public class MemoryDbService {
 
     /** True if the ACL has at least one user that requires a credential (password or IAM). */
     private boolean isAuthRequired(String aclName, String region) {
+        return isAuthRequired(aclName, region, regionResolver.getAccountId());
+    }
+
+    private boolean isAuthRequired(String aclName, String region, String accountId) {
         if (DEFAULT_ACL.equals(aclName)) {
             return false;
         }
-        Acl acl = resourceGet(acls, aclName, region).orElse(null);
+        Acl acl = ownedResourceGet(acls, accountId, aclName, region).orElse(null);
         if (acl == null) {
             return false;
         }
         return acl.getUserNames().stream()
-                .map(name -> resolveUser(name, region))
+                .map(name -> resolveUser(name, region, accountId))
                 .filter(Objects::nonNull)
                 .anyMatch(u -> u.getAuthMode() != AuthMode.NO_PASSWORD);
     }
@@ -495,9 +799,19 @@ public class MemoryDbService {
         return DEFAULT_USER.equals(name) || resourceGet(users, name, region).isPresent();
     }
 
-    private User resolveUser(String name, String region) {
-        return resourceGet(users, name, region)
+    private User resolveUser(String name, String region, String accountId) {
+        return ownedResourceGet(users, accountId, name, region)
                 .orElseGet(() -> DEFAULT_USER.equals(name) ? builtinDefaultUser(region) : null);
+    }
+
+    private <V> Optional<V> ownedResourceGet(AccountAwareStorageBackend<V> store, String accountId,
+                                            String name, String region) {
+        if (Objects.equals(accountId, regionResolver.getDefaultAccountId())
+                && Objects.equals(region, regionResolver.getDefaultRegion())) {
+            return store.getForAccountMigratingLegacyKeys(accountId, key(region, name), List.of(name),
+                    value -> true);
+        }
+        return store.getForAccount(accountId, key(region, name));
     }
 
     private User builtinDefaultUser(String region) {
@@ -551,6 +865,17 @@ public class MemoryDbService {
         String name = cluster.getName();
         String identity = identityName(cluster.getAccountId(), cluster.getRegion(), name);
         int proxyPort = allocateProxyPort();
+        String ownerKey = cluster.getAccountId() + "/" + key(cluster.getRegion(), name);
+        ownedProxyPorts.put(ownerKey, proxyPort);
+        cluster.setProxyPort(proxyPort);
+        cluster.setStatus(ClusterStatus.CREATING);
+        try {
+            clusters.putAllAtomicallyForAccount(cluster.getAccountId(),
+                    Map.of(key(cluster.getRegion(), name), cluster));
+        } catch (RuntimeException e) {
+            releaseOwnedProxyPort(ownerKey, proxyPort);
+            throw e;
+        }
         String image = config.services().memorydb().defaultImage();
         LOG.infov("Creating MemoryDB cluster {0} with authRequired={1} on proxy port {2}",
                 name, String.valueOf(authRequired), String.valueOf(proxyPort));
@@ -561,62 +886,90 @@ public class MemoryDbService {
             // from configuration and need no Docker, so the cluster is created and reaches
             // 'available' even when no daemon is reachable. Only connecting to the cache needs
             // the container.
-            handle = containerManager.tryStart(identity, image);
-            cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), proxyPort));
-            cluster.setProxyPort(proxyPort);
+            handle = containerManager.tryStart(identity, image, cluster.getVolumeId(),
+                    cluster.getAccountId(), cluster.getRegion(), cluster.getName());
+            synchronized (clusterLocks.lockFor(ownerKey)) {
+                if (clusters.getForAccount(cluster.getAccountId(), key(cluster.getRegion(), name))
+                        .filter(current -> current == cluster && current.getStatus() != ClusterStatus.DELETING)
+                        .isEmpty()) {
+                    throw new IllegalStateException("MemoryDB cluster was deleted while its backend was starting");
+                }
+                if (handle != null) {
+                    cluster.setContainerId(handle.getContainerId());
+                    cluster.setContainerHost(handle.getHost());
+                    cluster.setContainerPort(handle.getPort());
 
-            if (handle != null) {
-                cluster.setContainerId(handle.getContainerId());
-                cluster.setContainerHost(handle.getHost());
-                cluster.setContainerPort(handle.getPort());
-
-                proxyManager.startProxy(identity, authRequired, proxyPort,
-                        handle.getHost(), handle.getPort(),
-                        (username, secret) -> authenticate(name, username, secret, cluster.getRegion()));
-            } else {
-                LOG.warnv("MemoryDB cluster {0} created without a backing container: no Docker "
-                        + "daemon is reachable. Metadata operations work; connections to the "
-                        + "cluster do not until a daemon appears.", name);
+                    proxyManager.startProxy(identity, authRequired, proxyPort,
+                            handle.getHost(), handle.getPort(),
+                            (username, secret) -> authenticate(name, username, secret, cluster.getRegion(),
+                                    cluster.getAccountId()));
+                } else {
+                    LOG.warnv("MemoryDB cluster {0} created without a backing container: no Docker "
+                            + "daemon is reachable. Metadata operations work; connections to the "
+                            + "cluster do not until a daemon appears.", name);
+                }
+                cluster.setClusterEndpoint(new Endpoint(resolveEndpointHost(), proxyPort));
+                cluster.setStatus(ClusterStatus.AVAILABLE);
+                clusters.putAllAtomicallyForAccount(cluster.getAccountId(),
+                        Map.of(key(cluster.getRegion(), name), cluster));
             }
         } catch (RuntimeException e) {
-            LOG.warnv("MemoryDB cluster {0} provisioning failed, rolling back: {1}", name, e.getMessage());
-            rollbackBackend(identity, handle, proxyPort);
+            boolean cleaned = rollbackBackend(identity, handle, cluster, e);
+            synchronized (clusterLocks.lockFor(ownerKey)) {
+                try {
+                    if (cluster.getStatus() != ClusterStatus.DELETING) {
+                        cluster.setStatus(ClusterStatus.CREATING);
+                    }
+                    cluster.setClusterEndpoint(null);
+                    if (cleaned) {
+                        clearBackend(cluster);
+                        clusters.deleteAllAtomicallyForAccounts(
+                                Map.of(cluster.getAccountId(), Set.of(key(cluster.getRegion(), name))));
+                        releaseOwnedProxyPort(ownerKey, proxyPort);
+                    } else {
+                        clusters.putAllAtomicallyForAccount(cluster.getAccountId(),
+                                Map.of(key(cluster.getRegion(), name), cluster));
+                    }
+                } catch (RuntimeException persistenceFailure) {
+                    e.addSuppressed(persistenceFailure);
+                }
+            }
+            LOG.warnv(e, "MemoryDB cluster {0} provisioning failed; cleanup complete={1}", ownerKey, cleaned);
             throw e;
         }
     }
 
-    private void rollbackBackend(String name, MemoryDbContainerHandle handle, int proxyPort) {
+    private boolean rollbackBackend(String name, MemoryDbContainerHandle handle, Cluster cluster,
+                                    RuntimeException failure) {
+        boolean cleaned = true;
         try {
-            try {
-                // The proxy only starts after the container is ready, so a null handle means it
-                // never started — nothing to stop.
-                if (handle != null) {
-                    proxyManager.stopProxy(name);
-                }
-            } catch (RuntimeException e) {
-                LOG.warnv("Error stopping proxy for MemoryDB cluster {0}: {1}", name, e.getMessage());
+            if (handle != null) {
+                proxyManager.stopProxy(name);
             }
-            try {
-                if (handle != null) {
-                    // We have the exact handle from this request's start() call, so stop by it
-                    // directly. Falling back to stopByClusterName here instead would look up
-                    // whatever is currently registered for name, which could be a different
-                    // container if an overlapping create for the same name raced ahead of this
-                    // rollback.
-                    containerManager.stop(handle);
-                } else {
-                    // No handle: a readiness timeout in containerManager.start() throws after the
-                    // container was created and registered but before the handle is returned, so
-                    // cleaning up by handle here isn't possible. stopByClusterName is idempotent,
-                    // so it's safe when the container never started.
-                    containerManager.stopByClusterName(name);
-                }
-            } catch (RuntimeException e) {
-                LOG.warnv("Error stopping container for MemoryDB cluster {0}: {1}", name, e.getMessage());
-            }
-        } finally {
-            releaseProxyPort(proxyPort);
+        } catch (RuntimeException e) {
+            failure.addSuppressed(e);
+            cleaned = false;
         }
+        try {
+            if (handle != null) {
+                containerManager.stop(handle);
+            } else {
+                containerManager.stopByClusterName(name, cluster.getAccountId(),
+                        cluster.getRegion(), cluster.getName());
+            }
+        } catch (RuntimeException e) {
+            failure.addSuppressed(e);
+            cleaned = false;
+        }
+        if (cleaned) {
+            try {
+                containerManager.removeStorage(name, cluster.getVolumeId());
+            } catch (RuntimeException e) {
+                failure.addSuppressed(e);
+                cleaned = false;
+            }
+        }
+        return cleaned;
     }
 
     private String key(String region, String name) {
@@ -633,12 +986,6 @@ public class MemoryDbService {
     }
 
     private String identityName(String accountId, String region, String name) {
-        String defaultAccount = regionResolver.getDefaultAccountId();
-        String defaultRegion = regionResolver.getDefaultRegion();
-        if ((defaultAccount == null || Objects.equals(defaultAccount, accountId))
-                && (defaultRegion == null || Objects.equals(defaultRegion, region))) {
-            return name;
-        }
         return accountId + "-" + region + "-" + name;
     }
 
@@ -695,7 +1042,7 @@ public class MemoryDbService {
         // unscoped record to account/name without adding the new region component. Move those
         // intermediate keys as well so unfiltered operations cannot omit them.
         for (String legacyKey : aware.keysForAccount(accountId)) {
-            if (legacyKey.contains(":")) {
+            if (legacyKey.contains(":") || legacyKey.startsWith(LEGACY_CLUSTER_BACKUP_PREFIX)) {
                 continue;
             }
             aware.getForAccount(accountId, legacyKey)
@@ -767,5 +1114,11 @@ public class MemoryDbService {
 
     private void releaseProxyPort(int port) {
         usedPorts.remove(port);
+    }
+
+    private void releaseOwnedProxyPort(String ownerKey, int port) {
+        if (ownedProxyPorts.remove(ownerKey, port)) {
+            releaseProxyPort(port);
+        }
     }
 }

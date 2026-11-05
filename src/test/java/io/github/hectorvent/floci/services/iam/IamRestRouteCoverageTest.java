@@ -88,7 +88,8 @@ class IamRestRouteCoverageTest {
         assertFalse(model.isMissingNode(), "Access Analyzer's routes must be vendored from the AWS model");
         String scope = model.path("credentialScope").asText();
         List<DynamicTest> tests = new ArrayList<>();
-        for (String operation : Set.of("ValidatePolicy")) {
+        for (String operation : Set.of("ValidatePolicy", "ListAnalyzers", "CreateAnalyzer", "GetAnalyzer",
+                "DeleteAnalyzer")) {
             JsonNode http = model.path("operations").path(operation);
             assertFalse(http.isMissingNode(), "no model route for " + operation);
             Route route = new Route(scope, "accessanalyzer", operation,

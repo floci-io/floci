@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -73,6 +74,7 @@ class CloudFormationWafV2ConfigGetAttIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         String describeBody = given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -140,6 +142,7 @@ class CloudFormationWafV2ConfigGetAttIntegrationTest {
         .then()
             .statusCode(200);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)
@@ -186,6 +189,7 @@ class CloudFormationWafV2ConfigGetAttIntegrationTest {
 
         createStack(stackName, template);
 
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
         describeStackEvents(stackName)
             .body(containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"))
             .body(containsString(
@@ -211,6 +215,7 @@ class CloudFormationWafV2ConfigGetAttIntegrationTest {
 
         createStack(stackName, template);
 
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
         describeStackEvents(stackName)
             .body(containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"))
             .body(containsString(
@@ -239,6 +244,7 @@ class CloudFormationWafV2ConfigGetAttIntegrationTest {
 
         createStack(stackName, template);
 
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
         given()
             .contentType(CONFIG_JSON)
             .header("X-Amz-Target", CONFIG_TARGET_PREFIX + "DescribeConfigRules")

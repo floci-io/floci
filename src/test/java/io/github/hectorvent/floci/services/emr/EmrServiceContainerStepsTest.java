@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.emr;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.emr.model.EmrCluster;
 import io.github.hectorvent.floci.services.emr.model.EmrInstanceGroup;
@@ -19,6 +20,7 @@ import org.mockito.InOrder;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -100,7 +102,7 @@ class EmrServiceContainerStepsTest {
         assertNull(job.logFolder());
         assertNull(job.cloudWatchLogs());
         assertEquals(Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), job.environment());
-        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt"), job.storage());
+        assertEquals(hdfsStorage(cluster), job.storage());
         assertEquals(List.of(cluster.getId()), fixture.clusterStorage.created);
     }
 
@@ -316,6 +318,188 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aStepStartsItsClustersHdfsOnItsPrimaryNodeFromTheReleasesHiveImage() {
+        EmrCluster requested = cluster("hdfs", true, sparkStep("report", "CONTINUE"), sparkStep("next", "CONTINUE"));
+        // ListInstances lists the core group's two instances before the master's, which it numbers first.
+        requested.setInstanceGroups(new ArrayList<>(List.of(group("CORE", 2), group("MASTER", 1))));
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+        // The core group grows, which leaves the primary node as it is, and its HDFS's name with it.
+        String core = cluster.getInstanceGroups().get(0).getId();
+        service.modifyInstanceGroups(cluster.getId(), REGION,
+                List.of(new EmrService.InstanceGroupModification(core, 3, null)));
+        fixture.pass(Duration.ofMinutes(5));
+        assertEquals(3, service.listInstanceGroups(cluster.getId()).get(0).getRunningInstanceCount());
+        fixture.runStepThread();
+
+        List<String> started = Arrays.asList(cluster.getId(), "ip-10-0-0-1.ec2.internal",
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", null);
+        assertEquals(List.of(started, started), fixture.clusterStorage.hdfs);
+        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt",
+                "ip-10-0-0-1.ec2.internal", EmrServiceFixture.RecordingStorage.HDFS_ADDRESS,
+                EmrServiceFixture.RecordingStorage.HDFS_NETWORK), runner.jobs.get(0).storage());
+    }
+
+    @Test
+    void aClusterOfTheAwsRuntimeForSparkWhichHasNoHiveImageRunsItsHdfsInTheHiveImageOfEmr750() {
+        EmrCluster requested = cluster("spark-runtime", true, sparkStep("report", "CONTINUE"));
+        requested.setReleaseLabel("emr-spark-8.0.0");
+        service.runJobFlow(requested, REGION);
+        EmrService templated = fixture.withHiveImageTemplate("registry.internal/emr-serverless/hive/%s:20250425");
+        EmrCluster mirrored = cluster("mirrored", true, sparkStep("report", "CONTINUE"));
+        mirrored.setReleaseLabel("emr-spark-8.1.0");
+        templated.runJobFlow(mirrored, REGION);
+
+        fixture.runStepThread();
+        fixture.runStepThread();
+
+        assertEquals(List.of("public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest",
+                "registry.internal/emr-serverless/hive/emr-7.5.0:20250425"),
+                fixture.clusterStorage.hdfs.stream().map(hdfs -> hdfs.get(2)).toList());
+        // Its steps still run in the release's own image.
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals("public.ecr.aws/emr-serverless/spark4/emr-spark-8.0.0:latest",
+                EmrServerlessSparkRunner.image(job.imageTemplate(), job.releaseLabel(), job.engine()));
+    }
+
+    @Test
+    void aClustersHdfsThatCannotStartFailsTheStep() {
+        fixture.clusterStorage.hdfsFailure = new IllegalStateException(
+                "The HDFS of EMR cluster j-1 did not start within 120 seconds");
+        EmrCluster cluster = service.runJobFlow(cluster("no-hdfs", true, sparkStep("report", "CONTINUE")), REGION);
+
+        fixture.runStepThread();
+
+        EmrStep failed = service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId());
+        assertEquals("FAILED", failed.getState());
+        assertEquals("The step could not start: The HDFS of EMR cluster j-1 did not start within 120 seconds",
+                failed.getFailureMessage());
+        assertEquals(List.of(), runner.jobs);
+    }
+
+    @Test
+    void aStepWhoseHdfsATeardownStoppedBeforeItsDriverStartedIsLeftAsADriverFlociStoppedIs() {
+        // A reset's or a shutdown's teardown stops the HDFS the step was waiting for.
+        fixture.clusterStorage.hdfsFailure = new ClusterStorage.Stopped("Floci stopped the HDFS of EMR cluster j-1");
+        EmrCluster cluster = service.runJobFlow(
+                cluster("torn-down", true, sparkStep("cut", "CONTINUE"), sparkStep("next", "CONTINUE")), REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+
+        fixture.runStepThread();
+
+        // Taking CONTINUE now would start the next step after the teardown has passed.
+        assertEquals("RUNNING", service.describeStep(cluster.getId(), stepId).getState());
+        assertEquals(0, fixture.stepThreadsWaiting());
+        assertEquals(List.of(), runner.jobs);
+    }
+
+    @Test
+    void aTeardownWhileAStepsHdfsStartsStopsTheStepBeforeItsDriverStarts() {
+        List<Boolean> stoppedAsHdfsStarts = new ArrayList<>();
+        fixture.clusterStorage.whileStartingHdfs = stopped -> {
+            stoppedAsHdfsStarts.add(stopped.getAsBoolean());
+            // A reset's or a shutdown's teardown begins as the HDFS starts, before the runner knows of the driver.
+            service.stopManagedContainers();
+            stoppedAsHdfsStarts.add(stopped.getAsBoolean());
+        };
+        EmrCluster cluster = service.runJobFlow(
+                cluster("torn-down", true, sparkStep("cut", "CONTINUE"), sparkStep("next", "CONTINUE")), REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(false, true), stoppedAsHdfsStarts);
+        assertEquals(List.of(), runner.driversStarted);
+        assertEquals("RUNNING", service.describeStep(cluster.getId(), stepId).getState());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aStepWhoseStartATeardownCutShortIsLeftAsADriverFlociStoppedIs() {
+        // The teardown removes the HDFS as it starts, which Docker then refuses to start.
+        fixture.clusterStorage.whileStartingHdfs = stopped -> service.stopManagedContainers();
+        fixture.clusterStorage.hdfsFailure = new IllegalStateException("No such container: emr-j-1-hdfs");
+        EmrCluster cluster = service.runJobFlow(
+                cluster("cut-short", true, sparkStep("cut", "CONTINUE"), sparkStep("next", "CONTINUE")), REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+
+        fixture.runStepThread();
+
+        // Taking CONTINUE now would start the next step after the teardown has passed.
+        assertEquals("RUNNING", service.describeStep(cluster.getId(), stepId).getState());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aStepWhoseThreadIsInterruptedAsItStartsIsLeftAsADriverFlociStoppedIs() {
+        // Floci's shutdown interrupts the step's thread while it waits for its HDFS.
+        fixture.clusterStorage.whileStartingHdfs = stopped -> Thread.currentThread().interrupt();
+        fixture.clusterStorage.hdfsFailure = new IllegalStateException(
+                "Stopped waiting for the HDFS of EMR cluster j-1");
+        EmrCluster cluster = service.runJobFlow(
+                cluster("interrupted", true, sparkStep("cut", "CONTINUE"), sparkStep("next", "CONTINUE")), REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+
+        try {
+            fixture.runStepThread();
+        } finally {
+            Thread.interrupted();
+        }
+
+        assertEquals("RUNNING", service.describeStep(cluster.getId(), stepId).getState());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aStepHandedToItsThreadBeforeATeardownStartsNoHdfsAndNoDriver() {
+        EmrCluster cluster = service.runJobFlow(
+                cluster("torn-down", true, sparkStep("cut", "CONTINUE"), sparkStep("next", "CONTINUE")), REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+        service.stopManagedContainers();
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(), fixture.clusterStorage.hdfs);
+        assertEquals(List.of(), runner.driversStarted);
+        assertEquals("RUNNING", service.describeStep(cluster.getId(), stepId).getState());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aStepFlociDoesNotRunHandedOffBeforeATeardownEndsAsAStoppedDriverAndStartsNoOther() {
+        EmrStep pig = sparkStep("query", "CONTINUE");
+        pig.setArgs(List.of("pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/query.pig"));
+        EmrCluster cluster = service.runJobFlow(cluster("pig", true, pig, sparkStep("next", "CONTINUE")), REGION);
+        service.stopManagedContainers();
+
+        fixture.runStepThread();
+
+        assertEquals("RUNNING", service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId()).getState());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aDriverThatEndsAfterATeardownBeganEndsAsAStoppedOneAndStartsNoOtherStep() {
+        // The driver exits on its own as the teardown begins, so its run says it ended.
+        runner.whileRunning = service::stopManagedContainers;
+        EmrCluster cluster = service.runJobFlow(
+                cluster("ending", true, sparkStep("cut", "CONTINUE"), sparkStep("next", "CONTINUE")), REGION);
+
+        fixture.runStepThread();
+
+        assertEquals("RUNNING", service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId()).getState());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void theServicesTeardownRunsBeforeThoseThatStopContainers() {
+        ContainerTeardown drivers = () -> { };
+
+        assertTrue(service.teardownOrder() < drivers.teardownOrder());
+    }
+
+    @Test
     void aStepFlociDoesNotRunFailsWithoutRunning() {
         EmrStep pig = sparkStep("query", "CONTINUE");
         pig.setArgs(List.of("pig-script", "--run-pig-script", "--args", "-f", "s3://bucket/query.pig"));
@@ -342,7 +526,7 @@ class EmrServiceContainerStepsTest {
         assertEquals("COMPLETED", service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId()).getState());
         SparkJobRunner.Job job = runner.jobs.get(0);
         assertEquals(args, job.command());
-        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt"), job.storage());
+        assertEquals(hdfsStorage(cluster), job.storage());
     }
 
     @Test
@@ -359,7 +543,7 @@ class EmrServiceContainerStepsTest {
         assertEquals(List.of("s3-dist-cp", "--src=s3://bucket/logs/", "--dest=hdfs:///output"),
                 job.command().subList(3, job.command().size()));
         assertEquals(List.of(), job.application());
-        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt"), job.storage());
+        assertEquals(hdfsStorage(cluster), job.storage());
     }
 
     @Test
@@ -581,7 +765,7 @@ class EmrServiceContainerStepsTest {
                 "arn:aws:iam::" + ACCOUNT + ":role/emr-ec2", List.of(
                         new BootstrapRunner.Action("pandas", INSTALL, List.of("pandas", "2.2")),
                         new BootstrapRunner.Action("jars", "s3://bucket/bootstrap/jars.sh", List.of())),
-                "s3://logs/emr/" + cluster.getId() + "/node/i-00000000000000003/bootstrap-actions/"),
+                "s3://logs/emr/" + cluster.getId() + "/node/i-00000000000000001/bootstrap-actions/"),
                 bootstrap.bootstraps.get(0));
         assertEquals("RUNNING", bootstrapping.service.describeCluster(cluster.getId()).getState());
         assertEquals("RUNNING", bootstrapping.service.describeStep(cluster.getId(), stepId).getState());
@@ -640,7 +824,7 @@ class EmrServiceContainerStepsTest {
         // Its cluster's Spark settings are not Hive's.
         assertEquals(Map.of(), job.sparkDefaults());
         assertEquals(Map.of("HADOOP_HEAPSIZE", "2048"), job.environment());
-        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt"), job.storage());
+        assertEquals(hdfsStorage(cluster), job.storage());
         assertEquals("s3://logs/emr/" + cluster.getId() + "/steps/" + stepId + "/", job.logFolder());
         assertEquals(List.of(cluster.getId()), fixture.clusterStorage.created);
         assertEquals("COMPLETED", service.describeStep(cluster.getId(), stepId).getState());
@@ -770,6 +954,62 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aBootstrapHandedOffBeforeATeardownLeavesItsClusterBootstrappingAndStartsNoStep() {
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        EmrCluster cluster = bootstrapping.service.runJobFlow(
+                bootstrapped(cluster("torn-down", true, sparkStep("report", "CONTINUE"))), REGION);
+        List<String> ran = new ArrayList<>();
+        bootstrap.whileRunning = () -> ran.add("actions");
+        bootstrapping.service.stopManagedContainers();
+
+        bootstrapping.runStepThread();
+
+        // Its actions' container would start after the bootstrap runner's teardown had passed.
+        assertEquals(List.of(), ran);
+        assertEquals("BOOTSTRAPPING", bootstrapping.service.describeCluster(cluster.getId()).getState());
+        assertEquals(0, bootstrapping.stepThreadsWaiting());
+        assertTrue(runner.jobs.isEmpty());
+    }
+
+    @Test
+    void aBootstrapThatEndsAfterATeardownBeganLeavesItsClusterBootstrappingAndStartsNoStep() {
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        EmrCluster cluster = bootstrapping.service.runJobFlow(
+                bootstrapped(cluster("ending", true, sparkStep("report", "CONTINUE"))), REGION);
+        // Its actions succeed as the teardown begins, so its run says it ended, with the image it committed.
+        bootstrap.whileRunning = bootstrapping.service::stopManagedContainers;
+
+        bootstrapping.runStepThread();
+
+        assertEquals("BOOTSTRAPPING", bootstrapping.service.describeCluster(cluster.getId()).getState());
+        assertEquals(0, bootstrapping.stepThreadsWaiting());
+        assertTrue(runner.jobs.isEmpty());
+        // No cluster starts from that image, so it goes.
+        assertEquals(List.of(IMAGE), bootstrap.removed);
+    }
+
+    @Test
+    void fromATeardownUntilItsResetIsOverNoStepOrBootstrapIsHandedToAThread() {
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        bootstrapping.service.stopManagedContainers();
+
+        // A cluster moved on after the teardowns, as a wakeup of a delayed one would.
+        EmrCluster stepping = bootstrapping.service.runJobFlow(
+                cluster("after", true, sparkStep("report", "CONTINUE")), REGION);
+        EmrCluster bootstrapped = bootstrapping.service.runJobFlow(
+                bootstrapped(cluster("bootstrapped-after", true, sparkStep("report", "CONTINUE"))), REGION);
+
+        assertEquals(0, bootstrapping.stepThreadsWaiting());
+        assertEquals("BOOTSTRAPPING", bootstrapping.service.describeCluster(bootstrapped.getId()).getState());
+        assertEquals("RUNNING", bootstrapping.service.describeStep(stepping.getId(),
+                stepping.getSteps().get(0).getId()).getState());
+        // Once the reset is over, they are again.
+        bootstrapping.service.afterReset();
+        bootstrapping.service.runJobFlow(cluster("reset-over", true, sparkStep("report", "CONTINUE")), REGION);
+        assertEquals(1, bootstrapping.stepThreadsWaiting());
+    }
+
+    @Test
     void aClusterTerminatedWhileBootstrappingStopsItsBootstrapAndTheImageItLeftGoes() {
         EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
         EmrCluster cluster = bootstrapping.service.runJobFlow(
@@ -852,8 +1092,7 @@ class EmrServiceContainerStepsTest {
         assertTrue(service.describeCluster(cluster.getId()).isStorageCreated());
         fixture.runStepThread();
 
-        SparkJobRunner.Storage storage = new SparkJobRunner.Storage(cluster.getId() + "-home",
-                cluster.getId() + "-mnt");
+        SparkJobRunner.Storage storage = hdfsStorage(cluster);
         assertEquals(List.of(storage, storage), runner.jobs.stream().map(SparkJobRunner.Job::storage).toList());
         assertEquals(List.of(cluster.getId()), fixture.clusterStorage.removed);
         assertFalse(service.describeCluster(cluster.getId()).isStorageCreated());
@@ -986,6 +1225,13 @@ class EmrServiceContainerStepsTest {
     }
 
     // A spark-submit step through command-runner.jar, written for a cluster with YARN.
+    // A cluster's storage as a step gets it, its HDFS on the primary node of a cluster with no instance groups.
+    private static SparkJobRunner.Storage hdfsStorage(EmrCluster cluster) {
+        return new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt",
+                "ip-10-0-0-1.ec2.internal", EmrServiceFixture.RecordingStorage.HDFS_ADDRESS,
+                EmrServiceFixture.RecordingStorage.HDFS_NETWORK);
+    }
+
     // The AWS CLI's Hive step: command-runner.jar running hive-script with the step's arguments after its --args.
     private static EmrStep hiveStep(String name, String... args) {
         EmrStep step = new EmrStep();

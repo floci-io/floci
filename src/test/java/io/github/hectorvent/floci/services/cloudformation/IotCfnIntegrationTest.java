@@ -250,6 +250,7 @@ class IotCfnIntegrationTest {
     }
 
     private static String describeStacks(String expectedStatus) {
+        CfnStackWaits.awaitStatus(STACK, expectedStatus, CFN_AUTH);
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

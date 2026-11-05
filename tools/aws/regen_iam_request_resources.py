@@ -157,11 +157,12 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 
 # The namespaces read, in batches: each moves here from NOT_COVERED with the tests that show its ARNs
 # are the ones its handlers mint.
-NAMESPACES = ("acm", "application-autoscaling", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce",
-              "cloudtrail", "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "datasync", "ecr",
-              "elasticloadbalancing", "elasticmapreduce", "es", "events", "firehose", "globalaccelerator", "kinesisanalytics",
-              "payment-cryptography", "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso",
-              "states", "textract", "timestream-influxdb", "translate")
+NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bcm-data-exports",
+              "bcm-pricing-calculator", "budgets", "ce", "cloudtrail", "codebuild", "codepipeline", "cognito-identity",
+              "cognito-idp", "cur", "datasync", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
+              "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "redshift-data",
+              "rekognition", "servicediscovery", "servicequotas", "sso", "states", "textract", "timestream-influxdb",
+              "translate")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -191,11 +192,11 @@ READ_IN_HAND_BUILT: dict[str, str] = {
 }
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
-_REST = "REST: its requests name their resources in the path, which RequestResources does not read yet"
+_REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
+         "matched in the vendored REST routes (regen_rest_routes.MODELS), which do not have its model yet")
 
 # Namespaces Floci serves whose resources are not read yet, and why.
 NOT_COVERED: dict[str, str] = {
-    "access-analyzer": _REST,
     "account": _REST,
     "airflow": _REST,
     "app-integrations": _REST,

@@ -283,7 +283,7 @@ class RequestResourceMembersTest {
      * always names, such as a create's new resource (Cloud Map's {@code CreateService}), and those filled from the ARN
      * it is read from (a permission set made in an instance); one named through another resource of its service's
      * own, the ARN its service gives for that. A member the table locates in a REST request's path or query is given
-     * there, a body giving it naming nothing, and such a request is not checked as a form.
+     * there, and a body or a form giving it another value names nothing.
      */
     @TestFactory
     Stream<DynamicTest> everyResourceOfTheTableIsReadFromAJsonBodyAndAForm() {
@@ -313,20 +313,20 @@ class RequestResourceMembersTest {
                         }
                     });
                     // A member the table locates in a REST request's path or query goes there, where the reader takes it
-                    // from; a REST request has no form, so the form is checked for an operation locating none.
+                    // from, and the body and the form give it another value, which names nothing.
                     Map<String, String> located = table.located().getOrDefault(operation.getKey(), Map.of());
                     Map<String, String> labels = new LinkedHashMap<>();
                     MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
                     given.forEach((member, value) -> {
                         String where = member.field() == null && !member.list() ? located.get(member.name()) : null;
-                        if (where == null) {
-                            put(body, member, value);
-                        } else if (where.startsWith("{")) {
+                        if (where != null && where.startsWith("{")) {
                             labels.put(where.substring(1, where.length() - 1), value);
-                        } else {
+                        } else if (where != null) {
                             query.add(where.substring(1), value);
                         }
-                        form.append('&').append(parameter(member)).append('=').append(encoded(value));
+                        String sent = where == null ? value : "other";
+                        put(body, member, sent);
+                        form.append('&').append(parameter(member)).append('=').append(encoded(sent));
                     });
                     List<String> named = operation.getValue().stream()
                             .filter(other -> (other == resource || named(other) || fillsFromTheArn(other, resource)
@@ -339,17 +339,12 @@ class RequestResourceMembersTest {
                                     "000000000000"))
                             .distinct().toList();
                     StoredResourceArns stored = runningOn(namespace, arn);
-                    ContainerRequestContext request = servedBy(json(body.toString()), resource.endpoint());
-                    UriInfo uriInfo = mock(UriInfo.class);
-                    when(uriInfo.getQueryParameters()).thenReturn(query);
-                    when(request.getUriInfo()).thenReturn(uriInfo);
-                    assertEquals(named, RequestResources.of(operation.getKey(), request, "aws", "us-east-1",
+                    assertEquals(named, RequestResources.of(operation.getKey(),
+                            sentWith(servedBy(json(body.toString()), resource.endpoint()), query), "aws", "us-east-1",
                             "000000000000", stored, labels), body + " " + labels + " " + query);
-                    if (given.keySet().stream().noneMatch(member -> located.containsKey(member.name()))) {
-                        assertEquals(named, RequestResources.of(operation.getKey(),
-                                servedBy(form(form.toString()), resource.endpoint()), "aws", "us-east-1",
-                                "000000000000", stored), form.toString());
-                    }
+                    assertEquals(named, RequestResources.of(operation.getKey(),
+                            sentWith(servedBy(form(form.toString()), resource.endpoint()), query), "aws", "us-east-1",
+                            "000000000000", stored, labels), form + " " + labels + " " + query);
                 })));
     }
 
@@ -487,6 +482,15 @@ class RequestResourceMembersTest {
             when(request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
                     .thenReturn(new ProtocolClaim(WireProtocol.AWS_JSON_1_1, service, null, null));
         }
+        return request;
+    }
+
+    /** The request with the query it is sent with. */
+    private static ContainerRequestContext sentWith(ContainerRequestContext request,
+                                                    MultivaluedMap<String, String> query) {
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getQueryParameters()).thenReturn(query);
+        when(request.getUriInfo()).thenReturn(uriInfo);
         return request;
     }
 
