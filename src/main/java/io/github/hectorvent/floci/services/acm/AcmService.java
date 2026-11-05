@@ -719,7 +719,7 @@ public class AcmService implements ResourceProvider {
     // ============ Helper Methods ============
 
     private synchronized Certificate getCertificateByArn(String arn, String region) {
-        String certId = extractCertificateIdFromArn(arn);
+        String certId = Certificate.idFromArn(arn);
         String storageKey = regionKey(region, certId);
 
         Certificate cert = store.get(storageKey).orElseThrow(() ->
@@ -800,7 +800,7 @@ public class AcmService implements ResourceProvider {
                 "that used that token.", 400);
         }
 
-        String certId = extractCertificateIdFromArn(entry.arn());
+        String certId = Certificate.idFromArn(entry.arn());
         return store.get(regionKey(region, certId));
     }
 
@@ -969,11 +969,6 @@ public class AcmService implements ResourceProvider {
     private String buildCertificateArn(String region, String certId) {
         String accountId = regionResolver.getAccountId();
         return AwsArnUtils.Arn.of("acm", region, accountId, "certificate/" + certId).toString();
-    }
-
-    private String extractCertificateIdFromArn(String arn) {
-        int lastSlash = arn.lastIndexOf('/');
-        return lastSlash >= 0 ? arn.substring(lastSlash + 1) : arn;
     }
 
     private String regionKey(String region, String certId) {

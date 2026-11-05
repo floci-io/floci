@@ -48,7 +48,7 @@ public class ControlTowerControlService {
         String controlIdentifier = requireArn(request, "controlIdentifier");
         String targetIdentifier = requireArn(request, "targetIdentifier");
         JsonNode parameters = validateParameters(request.get("parameters"), false);
-        Map<String, String> tags = validateTags(request.get("tags"));
+        Map<String, String> tags = ControlTowerTags.fromRequest(request.get("tags"));
         String key = key(region, targetIdentifier, controlIdentifier);
         if (controls.get(key).isPresent()) {
             throw new AwsException("ConflictException", "The control is already enabled on the specified target.", 409);
@@ -95,6 +95,28 @@ public class ControlTowerControlService {
                 .filter(control -> identifier.equals(control.getArn()))
                 .findFirst()
                 .orElseThrow(() -> notFound("The request references an enabled control that does not exist."));
+    }
+
+    public synchronized Map<String, String> listTags(String region, String arn) {
+        Map<String, String> tags = get(region, arn).getTags();
+        return tags == null ? Map.of() : tags;
+    }
+
+    public synchronized void tagResource(String region, String arn, Map<String, String> tags) {
+        EnabledControl control = get(region, arn);
+        Map<String, String> merged = new LinkedHashMap<>(listTags(region, arn));
+        merged.putAll(tags);
+        ControlTowerTags.validate(merged);
+        control.setTags(merged);
+        controls.put(key(region, control.getTargetIdentifier(), control.getControlIdentifier()), control);
+    }
+
+    public synchronized void untagResource(String region, String arn, List<String> tagKeys) {
+        EnabledControl control = get(region, arn);
+        Map<String, String> remaining = new LinkedHashMap<>(listTags(region, arn));
+        tagKeys.forEach(remaining::remove);
+        control.setTags(remaining);
+        controls.put(key(region, control.getTargetIdentifier(), control.getControlIdentifier()), control);
     }
 
     public synchronized String update(String accountId, String region, JsonNode request) {
@@ -208,20 +230,6 @@ public class ControlTowerControlService {
             }
         }
         return parameters.deepCopy();
-    }
-
-    private static Map<String, String> validateTags(JsonNode tags) {
-        if (tags == null || tags.isNull()) return Map.of();
-        if (!tags.isObject() || tags.size() > 200) throw validation("tags must be an object with at most 200 entries.");
-        Map<String, String> result = new LinkedHashMap<>();
-        tags.fields().forEachRemaining(entry -> {
-            if (entry.getKey().isBlank() || entry.getKey().length() > 128 || !entry.getValue().isTextual()
-                    || entry.getValue().textValue().length() > 256) {
-                throw validation("tags contain an invalid key or value.");
-            }
-            result.put(entry.getKey(), entry.getValue().textValue());
-        });
-        return Map.copyOf(result);
     }
 
     private static Set<String> stringSet(JsonNode node) {

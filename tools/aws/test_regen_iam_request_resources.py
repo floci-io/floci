@@ -147,6 +147,25 @@ def test_a_create_naming_others_marks_what_it_makes():
     assert r.with_made([parent, webhook], "svc:PutWebhook", formats) == [parent, dict(webhook, made=True)]
 
 
+def test_a_type_made_in_another_takes_that_ones_id_from_the_arn_member_named_after_it():
+    formats = {"instance": "arn:${Partition}:svc:::instance/${InstanceId}",
+               "set": "arn:${Partition}:svc:::set/${InstanceId}/${SetId}",
+               "pool": FORMATS["pool"]}
+    made = {"type": "set", "fill": {}, "made": True}
+    instance = {"types": ["instance", "set"], "arn": "InstanceArn"}
+    assert r.with_parent_ids([instance, made], formats, ["instance", "set"], members("InstanceArn", "Name")) == [
+        instance, {"type": "set", "fill": {"InstanceId": "InstanceArn"}, "arnOf": {"InstanceArn": "instance"},
+                   "made": True}]
+    # Not from a type the action does not act on, a member in a structure, or with two ARN members to pick from,
+    # and not over a variable a member fills already.
+    assert r.with_parent_ids([made], formats, ["set"], members("InstanceArn")) == [made]
+    assert r.with_parent_ids([made], formats, ["instance", "set"], {"InstanceArn": "Config.InstanceArn"}) == [made]
+    assert r.with_parent_ids([made], formats, ["instance", "set"],
+                             members("InstanceArn", "SourceInstanceArn")) == [made]
+    filled = {"type": "set", "fill": {"InstanceId": "InstanceId"}}
+    assert r.with_parent_ids([filled], formats, ["instance", "set"], members("InstanceArn", "InstanceId")) == [filled]
+
+
 def test_stems_drop_the_suffixes_names_carry():
     assert r.stem("TargetGroupArns") == "targetgroup"
     assert r.stem("DBInstanceIdentifier") == "dbinstance"
@@ -181,6 +200,7 @@ def corrections(monkeypatch):
     monkeypatch.setattr(r, "HAND_BUILT", ("hand",))
     monkeypatch.setattr(r, "NOT_COVERED", {"later": "a later batch"})
     monkeypatch.setattr(r, "CORRECTIONS", {})
+    monkeypatch.setattr(r, "READ_IN_HAND_BUILT", {})
     monkeypatch.setattr(r, "UNQUALIFIED", {})
     monkeypatch.setattr(r, "MINTED_IDS", {})
     monkeypatch.setattr(r, "FOUND_BY", {})
@@ -227,6 +247,17 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
                           ["registryId"]) == [{"type": "catalog", "fill": {}}]
     # Two account members, either of which it could be, give none.
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
+
+
+def test_a_format_whose_account_is_an_account_id_variable_takes_the_account_every_other_format_does():
+    documents = [reference("svc", {}, {"agent": "arn:${Partition}:svc:${Region}:${AccountId}:agent/${AgentId}",
+                                       "account": "arn:${Partition}:svc:::account/${AccountId}",
+                                       "thing": FORMATS["thing"]})]
+    # An account id in the resource, past the account, stays a variable a member fills.
+    assert r.arn_formats(documents, {"svc"}) == {"svc": {
+        "account": "arn:${Partition}:svc:::account/${AccountId}",
+        "agent": "arn:${Partition}:svc:${Region}:${Account}:agent/${AgentId}",
+        "thing": FORMATS["thing"]}}
 
 
 def test_a_file_that_is_not_json_is_reported_and_not_read(corrections, tmp_path, capsys):
@@ -436,9 +467,12 @@ def test_a_well_formed_document_validates():
     document = good_document()
     document["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace", "Id"])
     assert r.validate(document) == []
-    # A resource named through a member naming another of its service's own, which it runs on.
+    # A resource named through a member naming another of its service's own, which it runs on, or through each
+    # value of a list's field when another member is absent.
     document = good_document()
-    document["operations"]["svc:A"]["resources"] = [{"types": ["thing"], "through": "SessionId"}]
+    document["operations"]["svc:A"]["resources"] = [{"types": ["thing"], "through": "SessionId"},
+                                                    {"types": ["thing"], "through": "Parts[].PartId",
+                                                     "when": {"ThingName": [None]}}]
     assert r.validate(document) == []
 
 
@@ -453,10 +487,14 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(types=["pool"]), "not resource types"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b.c"), "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a[][]"), "no member"),
-    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "Ids[]"}),
-     "no member of one value"),
-    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "a.b"}),
-     "no member of one value"),
+    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "Ids[][]"}),
+     "no member"),
+    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "a.b.c"}),
+     "no member"),
+    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "SessionId",
+                                                                     "when": {"Ids[]": ["a"]}}), "no member's values"),
+    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "SessionId",
+                                                                     "unless": {"Id": ["a"]}}), "neither an ARN member"),
     (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["pool"], "through": "SessionId"}),
      "not resource types"),
     (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "SessionId",
@@ -663,6 +701,58 @@ def test_callback_resources_are_resolved_from_the_token(operation):
     assert "no resource types" in reason
 
 
+def test_list_tables_correction_names_the_literal_collection_without_selectors():
+    resources, reason = r.CORRECTIONS["dynamodb:ListTables"]
+    assert resources == [{"type": "table", "fill": {}}]
+    assert "table/?" in reason
+    formats = {"table": "arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}"}
+    assert not r._resource_problems("dynamodb:ListTables", resources[0], [], formats)
+    assert r._resource_problems("dynamodb:OtherOperation", resources[0], [], formats)
+    assert r.reads("dynamodb:ListTables")
+    assert not r.reads("dynamodb:BatchWriteItem")
+    assert not r.reads("dynamodb:ExecuteStatement")
+
+
+def test_hand_built_correction_is_generated_without_claiming_other_operations(corrections, tmp_path):
+    corrections.setattr(r, "CORRECTIONS", {"hand:ListThings": ([{"type": "thing", "fill": {}}], "measured collection")})
+    documents = DOCUMENTS + [reference("hand", {"ListThings": [], "PutThing": ["thing"]},
+                                       {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"})]
+    hand = model({"ListThings": {}, "PutThing": {"ThingName": "String"}})
+    hand["metadata"]["endpointPrefix"] = "hand"
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "hand": hand})
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert document["operations"]["hand:ListThings"] == {
+        "action": "hand:ListThings", "types": [], "resources": [{"type": "thing", "fill": {}}]}
+    assert "hand:PutThing" not in document["operations"]
+    assert document["namespaces"]["hand"] == ["hand"]
+    assert document["handBuilt"] == ["hand"]
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+    assert r.verify_against(document, r.checked_actions(documents), document["arnFormats"]) == ([], [])
+
+
+def test_hand_built_operations_listed_to_read_follow_the_rule(corrections, tmp_path):
+    corrections.setattr(r, "READ_IN_HAND_BUILT", {"hand:GetThing": "a family the rule reads"})
+    documents = DOCUMENTS + [reference("hand", {"GetThing": ["thing"], "PutThing": ["thing"]},
+                                       {"thing": "arn:${Partition}:hand:${Region}:${Account}:thing/${ThingName}"})]
+    hand = model({"GetThing": {"ThingName": "String"}, "PutThing": {"ThingName": "String"}})
+    hand["metadata"]["endpointPrefix"] = "hand"
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}), "hand": hand})
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert document["operations"]["hand:GetThing"] == {
+        "action": "hand:GetThing", "types": ["thing"], "resources": [{"type": "thing", "fill": {"ThingName": "ThingName"}}]}
+    assert "hand:PutThing" not in document["operations"]
+    assert r.reads("hand:GetThing") and not r.reads("hand:PutThing")
+    assert r.validate(document) == []
+
+
+def test_operations_listed_to_read_must_exist_and_be_hand_built(corrections, tmp_path):
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
+    corrections.setattr(r, "READ_IN_HAND_BUILT", {"hand:Gone": "no longer there"})
+    with pytest.raises(ValueError, match="READ_IN_HAND_BUILT names hand:Gone, which the reference does not give"):
+        r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+
+
 def test_measured_callback_correction_retains_action_metadata_and_rejects_unlisted_resources():
     formats = {"activity": "arn:${Partition}:states:${Region}:${Account}:activity:${ActivityName}",
                "statemachine": "arn:${Partition}:states:${Region}:${Account}:stateMachine:${StateMachineName}"}
@@ -671,3 +761,99 @@ def test_measured_callback_correction_retains_action_metadata_and_rejects_unlist
     assert r._resource_problems("states:SendTaskSuccess", {**resource, "find": ["otherToken"]}, [], formats)
     assert r._resource_problems("states:OtherOperation", resource, [], formats)
     assert r._resource_problems("states:SendTaskSuccess", resource, [], {})
+
+
+# --------------------------------------------------------------------------- #
+# REST requests: members in the path and the query, and the REST models' operations
+# --------------------------------------------------------------------------- #
+def rest_model(operations: dict[str, dict[str, str]], located: dict[str, dict[str, str]]) -> dict:
+    """A rest-json model whose operations take the members given, `located` giving a member's `location` and
+    `locationName` as `uri:Name` or `querystring:name`."""
+    built = model(operations, protocol="rest-json")
+    for operation, members in located.items():
+        for member, where in members.items():
+            location, name = where.split(":", 1)
+            built["shapes"][operation + "In"]["members"][member].update(location=location, locationName=name)
+    return built
+
+
+def test_a_rest_request_reads_its_path_and_query_members_and_records_where_the_ones_it_reads_are(corrections, tmp_path):
+    svc = rest_model({"GetThing": {"ThingName": "String", "Marker": "String"}, "ListThings": {"Marker": "String"}},
+                     {"GetThing": {"ThingName": "uri:Name", "Marker": "querystring:marker"},
+                      "ListThings": {"Marker": "querystring:marker"}})
+    write_models(tmp_path, {"svc": svc})
+    document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    assert document["operations"]["svc:GetThing"] == {
+        "action": "svc:GetThing", "types": ["thing"], "resources": [{"type": "thing", "fill": {"ThingName": "ThingName"}}],
+        "located": {"ThingName": "{Name}"}}
+    assert "located" not in document["operations"]["svc:ListThings"]
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+
+
+def test_a_member_two_clients_locate_apart_is_an_error():
+    one = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "uri:ThingName"}})
+    two = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "querystring:thing"}})
+    with pytest.raises(ValueError, match="GetThing's ThingName is"):
+        r.located_members({"one": one, "two": two}, "GetThing")
+
+
+def test_a_located_member_must_be_a_path_label_or_a_query_parameter(corrections, tmp_path):
+    write_models(tmp_path, {"svc": rest_model({"GetThing": {"ThingName": "String"}, "ListThings": {}},
+                                              {"GetThing": {"ThingName": "uri:ThingName"}})})
+    document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    document["operations"]["svc:GetThing"]["located"] = {"ThingName": "header:x"}
+    assert any("does not give each member it locates" in problem for problem in r.validate(document))
+
+
+SPLIT = [reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing": FORMATS["thing"]}),
+         reference("other", {"Op": ["x"]}, {"x": "arn:${Partition}:other:::x"}),
+         reference("later", {"Op": ["y"]}, {"y": "arn:${Partition}:later:::y"})]
+# The reference lists svc's operations for its first client alone: DescribeThing is an action with no operation.
+SPLIT[0]["Actions"].append({"Name": "DescribeThing", "Resources": [{"Name": "thing"}]})
+
+
+def test_a_rest_models_operations_the_reference_lists_for_no_client_take_their_own_actions(corrections):
+    corrections.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
+    found = r.with_rest_operations(r.checked_actions(SPLIT), SPLIT, {"svc-v2": {"GetThing", "DescribeThing", "Gone"}})
+    assert found["svc:GetThing"]["clients"] == ["svc", "svc-v2"]
+    assert found["svc:DescribeThing"] == {"action": "svc:DescribeThing", "types": ["thing"], "clients": ["svc-v2"]}
+    # An operation whose action the reference does not have is left out, not given no types.
+    assert "svc:Gone" not in found
+
+
+def test_a_namespace_reads_the_operations_of_the_rest_models_floci_routes_under_it(corrections, tmp_path):
+    corrections.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
+                            "svc-v2": rest_model({"DescribeThing": {"ThingName": "String"}},
+                                                 {"DescribeThing": {"ThingName": "uri:ThingName"}})})
+    sources = tmp_path / "reference"
+    sources.mkdir()
+    for document in SPLIT:
+        (sources / f"{document['Name']}.json").write_text(json.dumps(document), encoding="utf-8")
+    output = tmp_path / "table.json"
+    assert r.main(["--source-dir", str(sources), "--botocore-data", str(tmp_path), "--output", str(output)]) == 0
+    document = json.loads(output.read_text())
+    assert document["namespaces"]["svc"] == ["svc", "svc-v2"]
+    assert document["operations"]["svc:DescribeThing"] == {
+        "action": "svc:DescribeThing", "types": ["thing"],
+        "resources": [{"type": "thing", "fill": {"ThingName": "ThingName"}}], "located": {"ThingName": "{ThingName}"}}
+    assert r.main(["--check", "--botocore-data", str(tmp_path), "--output", str(output)]) == 0
+    assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output)]) == 0
+
+
+def test_verify_reports_a_rest_models_operation_whose_action_aws_no_longer_has(corrections, tmp_path):
+    corrections.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
+                            "svc-v2": rest_model({"DescribeThing": {"ThingName": "String"}},
+                                                 {"DescribeThing": {"ThingName": "uri:ThingName"}})})
+    sources = tmp_path / "reference"
+    sources.mkdir()
+    for document in SPLIT:
+        (sources / f"{document['Name']}.json").write_text(json.dumps(document), encoding="utf-8")
+    output = tmp_path / "table.json"
+    assert r.main(["--source-dir", str(sources), "--botocore-data", str(tmp_path), "--output", str(output)]) == 0
+    gone = json.loads(json.dumps(SPLIT[0]))
+    gone["Actions"] = [action for action in gone["Actions"] if action["Name"] != "DescribeThing"]
+    (sources / "svc.json").write_text(json.dumps(gone), encoding="utf-8")
+    assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output)]) == 1

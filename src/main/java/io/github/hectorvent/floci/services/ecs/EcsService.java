@@ -137,6 +137,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final Clock clock;
     private final boolean dockerMode;
+    private final boolean publishAwsvpcPortsToHost;
+    private final boolean dynamicAwsvpcHostPorts;
     private final boolean sweepLeftoverContainers;
     private final String baseUrl;
     // Replaced by afterReset() after a state reset, whose container teardown shuts this scheduler down.
@@ -287,6 +289,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
         this.dockerMode = !config.services().ecs().mock();
+        this.publishAwsvpcPortsToHost = config.services().ecs().publishAwsvpcPortsToHost();
+        this.dynamicAwsvpcHostPorts = config.services().ecs().dynamicAwsvpcHostPorts();
         this.sweepLeftoverContainers = dockerMode && config.services().ecs().reconcileContainersOnStartup();
         this.leftoverTaskVolumesRemoved = !sweepLeftoverContainers;
         this.baseUrl = config.effectiveBaseUrl();
@@ -5706,6 +5710,34 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (currentDeploymentId.equals(svc.getFailedDeploymentId())) {
                 return;
             }
+            Map<String, Object> deploymentConfiguration = svc.getDeploymentConfiguration();
+            if (dockerMode && deploymentConfiguration != null
+                    && deploymentConfiguration.get("minimumHealthyPercent") instanceof Number minimum
+                    && minimum.doubleValue() == 0) {
+                Set<Integer> replacementPorts = fixedPublishedPorts(
+                        resolveTaskDefinitionOrThrow(currentTaskDefinitionArn, region));
+                List<EcsTask> draining = tasks.values().stream()
+                        .filter(task -> ownedBy(task, svc, cluster))
+                        .filter(task -> isStaleForDeployment(task, currentDeploymentId, currentTaskDefinitionArn))
+                        .filter(task -> !TaskStatus.STOPPED.name().equals(task.getLastStatus()))
+                        .filter(task -> !Collections.disjoint(replacementPorts,
+                                fixedPublishedPorts(resolveTaskDefinitionOrThrow(task.getTaskDefinitionArn(), region))))
+                        .toList();
+                if (!draining.isEmpty()) {
+                    for (EcsTask task : draining) {
+                        try {
+                            stopServiceTaskIfUnprotected(task,
+                                    "Service deployment replaced task definition " + task.getTaskDefinitionArn(), region);
+                        } catch (Exception e) {
+                            LOG.warnv(e, "Service reconciler failed to drain task {0}: {1}",
+                                    task.getTaskArn(), e.getMessage());
+                        }
+                    }
+                    svc.setRunningCount((int) runningTasks.stream()
+                            .filter(task -> TaskStatus.RUNNING.name().equals(task.getLastStatus())).count());
+                    return;
+                }
+            }
             deployment = deploymentRecordForCurrentWorkload(svc);
             int toStart = svc.getDesiredCount() - (int) current;
             List<EcsTask> currentTasks = runningTasks.stream()
@@ -5754,6 +5786,17 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (settled != null) {
             settleStatus(settled);
         }
+    }
+
+    private Set<Integer> fixedPublishedPorts(TaskDefinition definition) {
+        return definition.getContainerDefinitions().stream()
+                .filter(container -> container.getPortMappings() != null)
+                .flatMap(container -> container.getPortMappings().stream())
+                // ContainerLifecycleManager currently publishes every mapping as TCP.
+                .map(port -> EcsContainerManager.publishedHostPort(port, definition.getNetworkMode(),
+                        publishAwsvpcPortsToHost, dynamicAwsvpcHostPorts))
+                .filter(hostPort -> hostPort > 0)
+                .collect(Collectors.toSet());
     }
 
     private ServiceDeployment deploymentRecordForCurrentWorkload(EcsServiceModel svc) {

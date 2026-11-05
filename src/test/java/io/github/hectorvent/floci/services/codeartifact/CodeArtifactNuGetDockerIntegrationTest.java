@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static io.github.hectorvent.floci.testing.CodeArtifactRequests.putPackageOriginConfiguration;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -559,6 +560,53 @@ class CodeArtifactNuGetDockerIntegrationTest {
                 .then().statusCode(200)
                 .extract().asByteArray();
         assertArrayEquals(nupkg, fetchedAfterUnarchive);
+    }
+
+    /**
+     * Issue #7116: publish:BLOCK set through the real PutPackageOriginConfiguration route used to
+     * stop only the generic format's PublishPackageVersion, never a real dotnet nuget push. Set
+     * under the nuspec id's own mixed-case spelling (the push path lowercases it), it now refuses
+     * a byte-identical re-push and a new version alike before BaGetter sees either, and lifting it
+     * lets the new version through. Its own package, so no other ordered test is disturbed.
+     */
+    @Test
+    @Order(18)
+    void publishBlockedByOriginConfigurationRefusesARealPushUntilItIsLifted() {
+        String packageId = "Origin.Blocked.Package";
+        byte[] published = buildNupkg(packageId, VERSION, "Origin block throwaway.", null, null);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", published))
+                .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
+                .then().statusCode(201);
+
+        putPackageOriginConfiguration(AUTH, DOMAIN, REPO, "nuget", null, packageId, "BLOCK", "BLOCK");
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", published))
+                .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
+                .then().statusCode(409)
+                .body(containsString("blocks direct publish"));
+        byte[] nextVersion = buildNupkg(packageId, "2.0.0", "Origin block throwaway.", null, null);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", nextVersion))
+                .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
+                .then().statusCode(409);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/v3/package/"
+                        + packageId.toLowerCase(Locale.ROOT) + "/index.json")
+                .then().statusCode(200)
+                .body("versions", equalTo(List.of(VERSION)));
+
+        putPackageOriginConfiguration(AUTH, DOMAIN, REPO, "nuget", null, packageId, "ALLOW", "BLOCK");
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(pushBody("boundary123", nextVersion))
+                .put("/codeartifact/nuget/" + DOMAIN + "/" + REPO + "/api/v2/package")
+                .then().statusCode(201);
     }
 
     private static long describeDomainAssetSizeBytes() {

@@ -13,6 +13,9 @@ import io.github.hectorvent.floci.services.opensearch.model.DomainEndpointOption
 import io.github.hectorvent.floci.services.opensearch.model.EbsOptions;
 import io.github.hectorvent.floci.services.opensearch.model.EncryptionAtRestOptions;
 import io.github.hectorvent.floci.services.opensearch.model.NodeToNodeEncryptionOptions;
+import io.github.hectorvent.floci.services.opensearch.model.OffPeakWindowOptions;
+import io.github.hectorvent.floci.services.opensearch.model.OpenSearchVpcEndpoint;
+import io.github.hectorvent.floci.services.opensearch.model.SoftwareUpdateOptions;
 import io.github.hectorvent.floci.services.opensearch.model.VpcOptions;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -25,8 +28,10 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.UUID;
 
 @Path("/2021-01-01")
@@ -37,15 +42,22 @@ public class OpenSearchController {
     private static final Logger LOG = Logger.getLogger(OpenSearchController.class);
 
     private final OpenSearchService service;
+    private final OpenSearchVpcEndpointService vpcEndpoints;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public OpenSearchController(OpenSearchService service, RegionResolver regionResolver,
-                                 ObjectMapper objectMapper) {
+    public OpenSearchController(OpenSearchService service, OpenSearchVpcEndpointService vpcEndpoints,
+                                RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.service = service;
+        this.vpcEndpoints = vpcEndpoints;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+    }
+
+    /** For {@link ElasticsearchController}, which delegates the domain operations only. */
+    OpenSearchController(OpenSearchService service, RegionResolver regionResolver, ObjectMapper objectMapper) {
+        this(service, null, regionResolver, objectMapper);
     }
 
     @POST
@@ -66,7 +78,11 @@ public class OpenSearchController {
                     parseAdvancedSecurityOptions(req.path("AdvancedSecurityOptions")),
                     parseEncryptionAtRestOptions(req.path("EncryptionAtRestOptions")),
                     parseNodeToNodeEncryptionOptions(req.path("NodeToNodeEncryptionOptions")),
-                    parseDomainEndpointOptions(req.path("DomainEndpointOptions")));
+                    parseDomainEndpointOptions(req.path("DomainEndpointOptions")),
+                    parseAdvancedOptions(req.path("AdvancedOptions")),
+                    req.path("IPAddressType").asText(null),
+                    parseOffPeakWindowOptions(req.path("OffPeakWindowOptions")),
+                    parseSoftwareUpdateOptions(req.path("SoftwareUpdateOptions")));
 
             Domain domain = service.createDomain(domainName, engineVersion, clusterConfig,
                     ebsOptions, tags, accessPolicies, options, region);
@@ -172,7 +188,11 @@ public class OpenSearchController {
                     parseAdvancedSecurityOptions(req.path("AdvancedSecurityOptions")),
                     parseEncryptionAtRestOptions(req.path("EncryptionAtRestOptions")),
                     parseNodeToNodeEncryptionOptions(req.path("NodeToNodeEncryptionOptions")),
-                    parseDomainEndpointOptions(req.path("DomainEndpointOptions")));
+                    parseDomainEndpointOptions(req.path("DomainEndpointOptions")),
+                    parseAdvancedOptions(req.path("AdvancedOptions")),
+                    req.path("IPAddressType").asText(null),
+                    parseOffPeakWindowOptions(req.path("OffPeakWindowOptions")),
+                    parseSoftwareUpdateOptions(req.path("SoftwareUpdateOptions")));
 
             Domain domain = service.updateDomainConfig(domainName, engineVersion, clusterConfig,
                     ebsOptions, accessPolicies, options, regionResolver.resolveRegion(headers));
@@ -484,6 +504,125 @@ public class OpenSearchController {
         return Response.ok(response).build();
     }
 
+    // ── VPC endpoints ────────────────────────────────────────────────────────
+
+    @POST
+    @Path("/opensearch/vpcEndpoints")
+    public Response createVpcEndpoint(@Context HttpHeaders headers, String body) {
+        JsonNode req = readBody(body);
+        OpenSearchVpcEndpoint endpoint = vpcEndpoints.create(req.path("DomainArn").asText(null),
+                parseVpcOptions(req.path("VpcOptions")), egressEnabled(req), req.path("ClientToken").asText(null),
+                regionResolver.resolveRegion(headers));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("VpcEndpoint", toVpcEndpointNode(endpoint, "CREATING"));
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/opensearch/vpcEndpoints/describe")
+    public Response describeVpcEndpoints(@Context HttpHeaders headers, String body) {
+        JsonNode req = readBody(body);
+        List<String> ids = null;
+        if (req.path("VpcEndpointIds").isArray()) {
+            ids = new ArrayList<>();
+            for (JsonNode id : req.path("VpcEndpointIds")) {
+                ids.add(id.asText());
+            }
+        }
+        OpenSearchVpcEndpointService.DescribeResult result =
+                vpcEndpoints.describe(ids, regionResolver.resolveRegion(headers));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode found = response.putArray("VpcEndpoints");
+        result.endpoints().forEach(endpoint -> found.add(toVpcEndpointNode(endpoint, endpoint.getStatus())));
+        ArrayNode errors = response.putArray("VpcEndpointErrors");
+        for (OpenSearchVpcEndpointService.EndpointError error : result.errors()) {
+            errors.addObject()
+                    .put("VpcEndpointId", error.vpcEndpointId())
+                    .put("ErrorCode", error.errorCode())
+                    .put("ErrorMessage", error.errorMessage());
+        }
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/opensearch/vpcEndpoints/update")
+    public Response updateVpcEndpoint(@Context HttpHeaders headers, String body) {
+        JsonNode req = readBody(body);
+        OpenSearchVpcEndpoint endpoint = vpcEndpoints.update(req.path("VpcEndpointId").asText(null),
+                parseVpcOptions(req.path("VpcOptions")), egressEnabled(req), regionResolver.resolveRegion(headers));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("VpcEndpoint", toVpcEndpointNode(endpoint, "UPDATING"));
+        return Response.ok(response).build();
+    }
+
+    @DELETE
+    @Path("/opensearch/vpcEndpoints/{vpcEndpointId}")
+    public Response deleteVpcEndpoint(@Context HttpHeaders headers,
+                                      @PathParam("vpcEndpointId") String vpcEndpointId) {
+        OpenSearchVpcEndpoint endpoint = vpcEndpoints.delete(vpcEndpointId, regionResolver.resolveRegion(headers));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("VpcEndpointSummary", toVpcEndpointSummaryNode(endpoint, "DELETING"));
+        return Response.ok(response).build();
+    }
+
+    /** One page holds every endpoint, so no {@code NextToken} is returned. */
+    @GET
+    @Path("/opensearch/vpcEndpoints")
+    public Response listVpcEndpoints(@Context HttpHeaders headers) {
+        return vpcEndpointSummaries(vpcEndpoints.list(regionResolver.resolveRegion(headers)));
+    }
+
+    @GET
+    @Path("/opensearch/domain/{domainName}/vpcEndpoints")
+    public Response listVpcEndpointsForDomain(@Context HttpHeaders headers,
+                                              @PathParam("domainName") String domainName) {
+        return vpcEndpointSummaries(vpcEndpoints.listForDomain(domainName, regionResolver.resolveRegion(headers)));
+    }
+
+    private Response vpcEndpointSummaries(List<OpenSearchVpcEndpoint> endpoints) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode list = response.putArray("VpcEndpointSummaryList");
+        endpoints.forEach(endpoint -> list.add(toVpcEndpointSummaryNode(endpoint, endpoint.getStatus())));
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode toVpcEndpointNode(OpenSearchVpcEndpoint endpoint, String status) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("VpcEndpointId", endpoint.getVpcEndpointId());
+        node.put("VpcEndpointOwner", endpoint.getVpcEndpointOwner());
+        node.put("DomainArn", endpoint.getDomainArn());
+        ObjectNode options = toVpcOptionsNode(endpoint.getVpcOptions());
+        if (endpoint.getEgressEnabled() != null) {
+            options.put("EgressEnabled", endpoint.getEgressEnabled());
+        }
+        node.set("VpcOptions", options);
+        node.put("Status", status);
+        vpcEndpoints.endpointAddress(endpoint).ifPresent(address -> node.put("Endpoint", address));
+        return node;
+    }
+
+    private ObjectNode toVpcEndpointSummaryNode(OpenSearchVpcEndpoint endpoint, String status) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("VpcEndpointId", endpoint.getVpcEndpointId());
+        node.put("VpcEndpointOwner", endpoint.getVpcEndpointOwner());
+        node.put("DomainArn", endpoint.getDomainArn());
+        node.put("Status", status);
+        return node;
+    }
+
+    private static Boolean egressEnabled(JsonNode req) {
+        JsonNode egress = req.path("VpcOptions").path("EgressEnabled");
+        return egress.isBoolean() ? egress.asBoolean() : null;
+    }
+
+    private JsonNode readBody(String body) {
+        try {
+            return body == null || body.isBlank() ? objectMapper.createObjectNode() : objectMapper.readTree(body);
+        } catch (IOException e) {
+            throw new AwsException("ValidationException", e.getMessage(), 400);
+        }
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private ObjectNode toDomainStatusNode(Domain domain) {
@@ -495,7 +634,14 @@ public class OpenSearchController {
         node.put("Created", !domain.isProcessing());
         node.put("Processing", domain.isProcessing());
         node.put("Deleted", domain.isDeleted());
-        node.put("Endpoint", domain.getEndpoint() != null ? domain.getEndpoint() : "");
+        String endpoint = domain.getEndpoint() != null ? domain.getEndpoint() : "";
+        if (domain.getVpcOptions() == null) {
+            node.put("Endpoint", endpoint);
+        } else if (!endpoint.isEmpty()) {
+            // AWS reports a domain in a VPC under Endpoints.vpc and leaves Endpoint out; the Terraform
+            // AWS provider refuses a VPC domain that carries an Endpoint.
+            node.putObject("Endpoints").put("vpc", endpoint);
+        }
         if (domain.getAccessPolicies() != null) {
             node.put("AccessPolicies", domain.getAccessPolicies());
         }
@@ -516,6 +662,14 @@ public class OpenSearchController {
         }
         if (domain.getDomainEndpointOptions() != null) {
             node.set("DomainEndpointOptions", toDomainEndpointOptionsNode(domain.getDomainEndpointOptions()));
+        }
+        node.set("AdvancedOptions", toAdvancedOptionsNode(domain));
+        node.put("IPAddressType", ipAddressTypeOf(domain));
+        if (domain.getOffPeakWindowOptions() != null) {
+            node.set("OffPeakWindowOptions", toOffPeakWindowNode(domain.getOffPeakWindowOptions()));
+        }
+        if (domain.getSoftwareUpdateOptions() != null) {
+            node.set("SoftwareUpdateOptions", toSoftwareUpdateNode(domain.getSoftwareUpdateOptions()));
         }
         return node;
     }
@@ -557,6 +711,51 @@ public class OpenSearchController {
             section.set("Options", toDomainEndpointOptionsNode(domain.getDomainEndpointOptions()));
             section.set("Status", configStatusNode(epochSeconds));
         }
+        ObjectNode advanced = domainConfig.putObject("AdvancedOptions");
+        advanced.set("Options", toAdvancedOptionsNode(domain));
+        advanced.set("Status", configStatusNode(epochSeconds));
+        ObjectNode ipAddressType = domainConfig.putObject("IPAddressType");
+        ipAddressType.put("Options", ipAddressTypeOf(domain));
+        ipAddressType.set("Status", configStatusNode(epochSeconds));
+        if (domain.getOffPeakWindowOptions() != null) {
+            ObjectNode section = domainConfig.putObject("OffPeakWindowOptions");
+            section.set("Options", toOffPeakWindowNode(domain.getOffPeakWindowOptions()));
+            section.set("Status", configStatusNode(epochSeconds));
+        }
+        if (domain.getSoftwareUpdateOptions() != null) {
+            ObjectNode section = domainConfig.putObject("SoftwareUpdateOptions");
+            section.set("Options", toSoftwareUpdateNode(domain.getSoftwareUpdateOptions()));
+            section.set("Status", configStatusNode(epochSeconds));
+        }
+    }
+
+    private ObjectNode toAdvancedOptionsNode(Domain domain) {
+        ObjectNode node = objectMapper.createObjectNode();
+        new TreeMap<>(domain.getAdvancedOptions()).forEach(node::put);
+        return node;
+    }
+
+    /** Records written before the address type was stored are reported as {@code ipv4}. */
+    private static String ipAddressTypeOf(Domain domain) {
+        return domain.getIpAddressType() != null
+                ? domain.getIpAddressType() : OpenSearchService.DEFAULT_IP_ADDRESS_TYPE;
+    }
+
+    private ObjectNode toOffPeakWindowNode(OffPeakWindowOptions offPeak) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Enabled", Boolean.TRUE.equals(offPeak.getEnabled()));
+        if (offPeak.getStartHours() != null) {
+            ObjectNode start = node.putObject("OffPeakWindow").putObject("WindowStartTime");
+            start.put("Hours", offPeak.getStartHours());
+            start.put("Minutes", offPeak.getStartMinutes() != null ? offPeak.getStartMinutes() : 0L);
+        }
+        return node;
+    }
+
+    private ObjectNode toSoftwareUpdateNode(SoftwareUpdateOptions software) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("AutoSoftwareUpdateEnabled", Boolean.TRUE.equals(software.getAutoSoftwareUpdateEnabled()));
+        return node;
     }
 
     private ObjectNode toVpcOptionsNode(VpcOptions vpc) {
@@ -635,6 +834,15 @@ public class OpenSearchController {
             node.put("InstanceCount", cc.getInstanceCount());
             node.put("DedicatedMasterEnabled", cc.isDedicatedMasterEnabled());
             node.put("ZoneAwarenessEnabled", cc.isZoneAwarenessEnabled());
+            if (cc.getAvailabilityZoneCount() != null) {
+                node.putObject("ZoneAwarenessConfig").put("AvailabilityZoneCount", cc.getAvailabilityZoneCount());
+            }
+            if (cc.getDedicatedMasterType() != null) {
+                node.put("DedicatedMasterType", cc.getDedicatedMasterType());
+            }
+            if (cc.getDedicatedMasterCount() != null) {
+                node.put("DedicatedMasterCount", cc.getDedicatedMasterCount());
+            }
         }
         return node;
     }
@@ -649,6 +857,12 @@ public class OpenSearchController {
             node.put("EBSEnabled", ebs.isEbsEnabled());
             node.put("VolumeType", ebs.getVolumeType());
             node.put("VolumeSize", ebs.getVolumeSize());
+            if (ebs.getIops() != null) {
+                node.put("Iops", ebs.getIops());
+            }
+            if (ebs.getThroughput() != null) {
+                node.put("Throughput", ebs.getThroughput());
+            }
         }
         return node;
     }
@@ -673,6 +887,10 @@ public class OpenSearchController {
                 ? node.get("DedicatedMasterEnabled").asBoolean() : null);
         cc.setZoneAwarenessEnabled(node.has("ZoneAwarenessEnabled")
                 ? node.get("ZoneAwarenessEnabled").asBoolean() : null);
+        JsonNode azCount = node.path("ZoneAwarenessConfig").path("AvailabilityZoneCount");
+        cc.setAvailabilityZoneCount(azCount.isNumber() ? azCount.asInt() : null);
+        cc.setDedicatedMasterType(node.has("DedicatedMasterType") ? node.get("DedicatedMasterType").asText() : null);
+        cc.setDedicatedMasterCount(node.has("DedicatedMasterCount") ? node.get("DedicatedMasterCount").asInt() : null);
         return cc;
     }
 
@@ -685,7 +903,38 @@ public class OpenSearchController {
         ebs.setEbsEnabled(node.has("EBSEnabled") ? node.get("EBSEnabled").asBoolean() : null);
         ebs.setVolumeType(node.has("VolumeType") ? node.get("VolumeType").asText() : null);
         ebs.setVolumeSize(node.has("VolumeSize") ? node.get("VolumeSize").asInt() : null);
+        ebs.setIops(node.has("Iops") ? node.get("Iops").asInt() : null);
+        ebs.setThroughput(node.has("Throughput") ? node.get("Throughput").asInt() : null);
         return ebs;
+    }
+
+    /** {@code AdvancedOptions} as given; null when the request leaves it out. */
+    private static Map<String, String> parseAdvancedOptions(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        Map<String, String> options = new LinkedHashMap<>();
+        node.properties().forEach(entry -> options.put(entry.getKey(), entry.getValue().asText()));
+        return options;
+    }
+
+    private static OffPeakWindowOptions parseOffPeakWindowOptions(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        JsonNode start = node.path("OffPeakWindow").path("WindowStartTime");
+        return new OffPeakWindowOptions(
+                node.has("Enabled") ? node.get("Enabled").asBoolean() : null,
+                start.path("Hours").isNumber() ? start.get("Hours").asLong() : null,
+                start.path("Minutes").isNumber() ? start.get("Minutes").asLong() : null);
+    }
+
+    private static SoftwareUpdateOptions parseSoftwareUpdateOptions(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        return new SoftwareUpdateOptions(node.has("AutoSoftwareUpdateEnabled")
+                ? node.get("AutoSoftwareUpdateEnabled").asBoolean() : null);
     }
 
     private VpcOptions parseVpcOptions(JsonNode node) {

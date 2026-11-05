@@ -766,7 +766,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             assertTrue(listResourceRecordSets(oldZone).contains("192.0.2.1"), "the old record was touched");
             assertTrue(listResourceRecordSets(newZone).contains("192.0.2.2"), "the refused delete went through");
 
-            continueUpdateRollback(stackName);
+            CfnStackWaits.continueUpdateRollback(stackName, CFN_AUTH);
             CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
             assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
             assertFalse(listResourceRecordSets(newZone).contains(name), "the retry left the moved record");
@@ -797,7 +797,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             refuseFirstGroupDeleteIn(newZone);
             updateStack(stackName, groupTemplate(newZone, groupRecord(name, "192.0.2.2"), "", FAILS_AFTER_GROUP));
             assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stackName).status());
-            continueUpdateRollback(stackName, "Group");
+            CfnStackWaits.continueUpdateRollback(stackName, CFN_AUTH, "Group");
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
             // The skipped group names the old zone's record again, as the restored template does, so
@@ -844,7 +844,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             refuseFirstGroupDeleteIn(newZone);
             updateStack(stackName, groupTemplate(newZone, groupRecord(name, "192.0.2.2"), "", FAILS_AFTER_GROUP));
             assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stackName).status());
-            continueUpdateRollback(stackName, "Group");
+            CfnStackWaits.continueUpdateRollback(stackName, CFN_AUTH, "Group");
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
             // The record the failed update left is deleted by hand, and the move is applied again.
@@ -878,7 +878,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             refuseFirstGroupDeleteIn(newZone);
             updateStack(stackName, groupTemplate(newZone, groupRecord(name, "192.0.2.2"), "", FAILS_AFTER_GROUP));
             assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stackName).status());
-            continueUpdateRollback(stackName, "Group");
+            CfnStackWaits.continueUpdateRollback(stackName, CFN_AUTH, "Group");
             assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stackName).status());
 
             // The leftover is deleted by hand, and a record set of the same stack writes the same record.
@@ -1020,18 +1020,6 @@ class CloudFormationRoute53RecordSetIntegrationTest {
                 .when(route53Service).changeResourceRecordSets(eq(zoneId), anyList(), eq("CloudFormation delete Group"));
     }
 
-    private void continueUpdateRollback(String stackName, String... resourcesToSkip) {
-        RequestSpecification request = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "ContinueUpdateRollback")
-            .formParam("StackName", stackName);
-        for (int i = 0; i < resourcesToSkip.length; i++) {
-            request.formParam("ResourcesToSkip.member." + (i + 1), resourcesToSkip[i]);
-        }
-        request.when().post("/").then().statusCode(200);
-    }
-
     /**
      * One TCP health check; {@code failing} adds a record set in a zone that does not exist, created
      * after the check, so the update fails once the check has been replaced.
@@ -1110,6 +1098,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
     }
 
     private void assertStackStatus(String stackName, String status) {
+        CfnStackWaits.awaitStatus(stackName, status, CFN_AUTH);
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

@@ -122,7 +122,7 @@ public class AuthMiddleware {
                 identity, authType, authenticationType, deniedFields, api, accessKeyId, info.region(), info.accountId());
     }
 
-    static Set<AuthenticationType> configuredModes(GraphqlApi api) {
+    public static Set<AuthenticationType> configuredModes(GraphqlApi api) {
         Set<AuthenticationType> modes = new HashSet<>();
         if (api.getAuthenticationType() != null) {
             modes.add(api.getAuthenticationType());

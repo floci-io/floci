@@ -177,4 +177,52 @@ class EmrResizeIntegrationTest {
                 + "{\"InstanceFleetId\":\"" + coreFleetId + "\",\"TargetOnDemandCapacity\":1}}")
                 .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
     }
+
+    @Test
+    @Order(8)
+    void thePrimaryNodeKeepsItsIdAndAddressWhileAGroupListedBeforeItResizes() {
+        String id = emr("RunJobFlow", "{\"Name\":\"core-first\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceGroups\":[{\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":2},"
+                + "{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        String master = emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'MASTER' }.Id");
+        String core = emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'CORE' }.Id");
+        String primary = "Instances.find { it.InstanceGroupId == '" + master + "' }";
+
+        // Listed after the core group's two, numbered first, as DescribeCluster's MasterPublicDnsName names it.
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Instances[2].InstanceGroupId", equalTo(master))
+                .body(primary + ".Ec2InstanceId", equalTo("i-00000000000000001"))
+                .body(primary + ".PrivateIpAddress", equalTo("10.0.0.1"));
+        emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + id + "\",\"InstanceGroups\":["
+                + "{\"InstanceGroupId\":\"" + core + "\",\"InstanceCount\":3}]}").then().statusCode(200);
+
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Instances", hasSize(4))
+                .body(primary + ".Ec2InstanceId", equalTo("i-00000000000000001"))
+                .body(primary + ".PrivateDnsName", equalTo("ip-10-0-0-1.ec2.internal"))
+                .body("Instances.findAll { it.InstanceGroupId == '" + core + "' }.PrivateIpAddress",
+                        equalTo(List.of("10.0.0.2", "10.0.0.3", "10.0.0.4")));
+        emr("DescribeCluster", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Cluster.MasterPublicDnsName", equalTo("ip-10-0-0-1.ec2.internal"));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+    }
+
+    @Test
+    @Order(9)
+    void aSecondMasterGroupsInstanceIsNumberedAfterThePrimaryNodeAsAnyOtherGroupsIs() {
+        String id = emr("RunJobFlow", "{\"Name\":\"two-masters\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceGroups\":[{\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Instances.Ec2InstanceId", equalTo(List.of("i-00000000000000002", "i-00000000000000001",
+                        "i-00000000000000003")))
+                .body("Instances.PrivateIpAddress", equalTo(List.of("10.0.0.2", "10.0.0.1", "10.0.0.3")));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+    }
 }

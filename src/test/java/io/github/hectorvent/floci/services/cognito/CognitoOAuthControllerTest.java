@@ -154,13 +154,26 @@ class CognitoOAuthControllerTest {
     }
 
     @Test
-    void authorizeRejectsManagedLoginForAClientWithoutCognito() {
+    void authorizeRejectsExplicitNativeProviderForAClientWithoutCognito() {
         client.setSupportedIdentityProviders(List.of("ExampleOidc"));
 
         Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid", null,
-                null, null, null, null, null, null);
+                "COGNITO", null, null, null, null, null);
 
         assertOAuthError(response, "invalid_request");
+    }
+
+    @Test
+    void authorizeOffersProviderSelectionForAClientWithoutCognito() {
+        client.setSupportedIdentityProviders(List.of("ExampleOidc"));
+
+        Response response = controller.authorize(requestContext(null), CLIENT_ID, CALLBACK_URI, "code", "openid",
+                null, null, null, null, null, null, null);
+
+        assertEquals(302, response.getStatus());
+        assertEquals("/cognito-idp/login?response_type=code&client_id=" + CLIENT_ID
+                + "&redirect_uri=https%3A%2F%2Fapplication.example.test%2Fcallback&scope=openid",
+                response.getHeaderString("Location"));
     }
 
     @ParameterizedTest

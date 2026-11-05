@@ -81,10 +81,8 @@ public class CognitoOAuthController {
     }
 
     /**
-     * Without an {@code identity_provider}, or with {@code COGNITO}, signs in one of the pool's own
-     * users through managed login; any other value names an external provider to federate with.
-     * A client that does not list COGNITO cannot use managed login, even when it supports exactly
-     * one other provider: the caller names that provider instead.
+     * Without an {@code identity_provider}, offers the client's sign-in providers through managed
+     * login. An explicit provider selects native sign-in or external federation.
      */
     @GET
     @Path("/cognito-idp/oauth2/authorize")
@@ -104,7 +102,7 @@ public class CognitoOAuthController {
                 relyingPartyState, nonce, codeChallenge, codeChallengeMethod, loginHint);
         String provider = trimToNull(providerName);
         if (provider == null || COGNITO_PROVIDER.equals(provider)) {
-            return authorizeWithManagedLogin(requestContext, request, sessionId);
+            return authorizeWithManagedLogin(requestContext, request, sessionId, provider != null);
         }
 
         AuthorizationCheck check = checkAuthorizationRequest(requestContext, request);
@@ -127,12 +125,15 @@ public class CognitoOAuthController {
      * redirects to the login endpoint with the request's parameters.
      */
     private Response authorizeWithManagedLogin(ContainerRequestContext requestContext, AuthorizationRequest request,
-                                               String sessionId) {
-        AuthorizationCheck check = checkManagedLoginRequest(requestContext, request);
+                                               String sessionId, boolean nativeProvider) {
+        AuthorizationCheck check = nativeProvider
+                ? checkManagedLoginRequest(requestContext, request)
+                : checkAuthorizationRequest(requestContext, request);
         if (check.error() != null) {
             return check.error();
         }
-        Optional<String> code = issueAuthorizationCode(sessionId, check.client(), request);
+        Optional<String> code = check.client().getSupportedIdentityProviders().contains(COGNITO_PROVIDER)
+                ? issueAuthorizationCode(sessionId, check.client(), request) : Optional.empty();
         if (code.isPresent()) {
             return redirectWithCode(request, code.get());
         }
@@ -156,7 +157,7 @@ public class CognitoOAuthController {
                               @QueryParam("login_hint") String loginHint) {
         AuthorizationRequest request = new AuthorizationRequest(responseType, clientId, redirectUri, scope, state,
                 nonce, codeChallenge, codeChallengeMethod, loginHint);
-        AuthorizationCheck check = checkManagedLoginRequest(requestContext, request);
+        AuthorizationCheck check = checkAuthorizationRequest(requestContext, request);
         if (check.error() != null) {
             return check.error();
         }
@@ -946,6 +947,22 @@ public class CognitoOAuthController {
      */
     private Response signInPage(ContainerRequestContext requestContext, AuthorizationRequest request,
                                 Response.Status status, String error, List<String> fields) {
+        UserPoolClient client = cognitoService.findClientById(request.clientId());
+        if (client.getSupportedIdentityProviders().isEmpty() && error == null) {
+            error = "No sign-in providers are enabled for this application. Contact your administrator.";
+        }
+        String authorizePath = requestContext.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY) != null
+                ? "/oauth2/authorize" : "/cognito-idp/oauth2/authorize";
+        List<String> providerLinks = new ArrayList<>();
+        for (String provider : client.getSupportedIdentityProviders()) {
+            if (COGNITO_PROVIDER.equals(provider)) {
+                continue;
+            }
+            Map<String, String> parameters = new LinkedHashMap<>(request.parameters());
+            parameters.put("identity_provider", provider);
+            providerLinks.add("    <p><a href=\"" + escapeHtml(authorizePath + "?" + formEncode(parameters))
+                    + "\">Sign in with " + escapeHtml(provider) + "</a></p>");
+        }
         String csrfToken = stateStore.generateOpaqueKey();
         List<String> formFields = new ArrayList<>();
         for (Map.Entry<String, String> parameter : request.parameters().entrySet()) {
@@ -954,6 +971,13 @@ public class CognitoOAuthController {
         for (String field : fields) {
             formFields.add("      " + field);
         }
+        String form = client.getSupportedIdentityProviders().contains(COGNITO_PROVIDER) ? """
+                    <form method="post" action="%s">
+                      <input type="hidden" name="%s" value="%s">
+                %s
+                    </form>
+                """.formatted(escapeHtml(loginPath(requestContext)), CSRF_FIELD, escapeHtml(csrfToken),
+                String.join("\n", formFields)) : "";
         String page = """
                 <!doctype html>
                 <html lang="en">
@@ -966,16 +990,13 @@ public class CognitoOAuthController {
                   <main>
                     <h1>Sign in</h1>
                 %s
-                    <form method="post" action="%s">
-                      <input type="hidden" name="%s" value="%s">
                 %s
-                    </form>
+                %s
                   </main>
                 </body>
                 </html>
                 """.formatted(error == null ? "" : "    <p role=\"alert\">" + escapeHtml(error) + "</p>",
-                escapeHtml(loginPath(requestContext)), CSRF_FIELD, escapeHtml(csrfToken),
-                String.join("\n", formFields));
+                String.join("\n", providerLinks), form);
         // No form-action directive: browsers apply it to the redirect after the form is submitted,
         // which goes to the client's callback on another origin.
         return Response.status(status)

@@ -38,14 +38,19 @@ public class ResolverCallbackSessions {
         private final String apiId;
         private final Object identity;
         private final String authType;
+        private final String accountId;
+        private final String region;
         private final List<AppSyncResolverError> appendedErrors = new CopyOnWriteArrayList<>();
 
-        private Session(Map<String, Session> owner, String token, String apiId, Object identity, String authType) {
+        private Session(Map<String, Session> owner, String token, String apiId, Object identity, String authType,
+                        String accountId, String region) {
             this.owner = owner;
             this.token = token;
             this.apiId = apiId;
             this.identity = identity;
             this.authType = authType;
+            this.accountId = accountId;
+            this.region = region;
         }
 
         public String token() {
@@ -62,6 +67,14 @@ public class ResolverCallbackSessions {
 
         public String authType() {
             return authType;
+        }
+
+        public String accountId() {
+            return accountId;
+        }
+
+        public String region() {
+            return region;
         }
 
         /** Errors from {@code util.appendError}, which are reported beside the data rather than instead of it. */
@@ -81,11 +94,11 @@ public class ResolverCallbackSessions {
         }
     }
 
-    public Session open(String apiId, Object identity, String authType) {
+    public Session open(String apiId, Object identity, String authType, String accountId, String region) {
         byte[] bytes = new byte[TOKEN_BYTES];
         random.nextBytes(bytes);
         String token = Base64Url.encode(bytes);
-        Session session = new Session(sessions, token, apiId, identity, authType);
+        Session session = new Session(sessions, token, apiId, identity, authType, accountId, region);
         sessions.put(token, session);
         return session;
     }

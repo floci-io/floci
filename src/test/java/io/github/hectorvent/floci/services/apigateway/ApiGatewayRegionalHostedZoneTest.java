@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -22,8 +23,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * The Route 53 hosted zone a regional custom domain reports. The GovCloud user guide states it for
- * its two regions; every other region has no source and keeps the value it always reported.
+ * The Route 53 hosted zone a regional custom domain reports: the General Reference row for its
+ * region, or the invented placeholder in a region the table does not list.
  */
 class ApiGatewayRegionalHostedZoneTest {
 
@@ -42,16 +43,23 @@ class ApiGatewayRegionalHostedZoneTest {
 
     @ParameterizedTest
     @CsvSource({
+            "us-east-1,      Z1UJRXOUMOOFQ8",
+            "eu-west-1,      ZLY8HYME6SFDD",
             "us-gov-west-1,  Z1K6XKP9SAGWDV",
-            "us-gov-east-1,  Z3SE9ATJYCRCZJ",
-            "us-east-1,      Z2FDTNDATAQYL2",
-            "cn-north-1,     Z2FDTNDATAQYL2",
-            "eusc-de-east-1, Z2FDTNDATAQYL2"})
+            "us-gov-east-1,  Z3SE9ATJYCRCZJ"})
     void regionalDomainReportsTheRegionsPublishedZone(String region, String hostedZoneId) {
-        CustomDomain domain = service.createDomainName(region, Map.of(
+        assertEquals(hostedZoneId, createRegionalDomain(region).getRegionalHostedZoneId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ap-southeast-6", "cn-north-1", "eusc-de-east-1", "us-iso-east-1"})
+    void regionalDomainReportsThePlaceholderWhereNoZoneIsPublished(String region) {
+        assertEquals("Z2FDTNDATAQYL2", createRegionalDomain(region).getRegionalHostedZoneId());
+    }
+
+    private CustomDomain createRegionalDomain(String region) {
+        return service.createDomainName(region, Map.of(
                 "domainName", "api." + region + ".example.com",
                 "endpointConfiguration", Map.of("types", List.of("REGIONAL"))));
-
-        assertEquals(hostedZoneId, domain.getRegionalHostedZoneId());
     }
 }

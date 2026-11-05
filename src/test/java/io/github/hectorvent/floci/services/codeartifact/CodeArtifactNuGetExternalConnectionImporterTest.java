@@ -93,8 +93,8 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
         verify(service).retainAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY), eq("nuget"),
                 isNull(), eq(PACKAGE_ID), eq(VERSION), eq(99L), eq(42L), eq(EPISODE_ID), eq(REPO_ID),
                 eq("widget.1.0.0.nupkg"), eq(NUPKG_CONTENT), any());
-        verify(service).ensureRetainedPackageOriginDefault(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
-                PACKAGE_ID, 42L);
+        verify(service).ensureRetainedPackageOriginDefaultIfCurrentRepository(REGION, DOMAIN, OWNER, REPOSITORY,
+                "nuget", null, PACKAGE_ID, 42L, REPO_ID);
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
                 PACKAGE_ID, VERSION, EPISODE_ID, true);
     }
@@ -174,8 +174,8 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(externalConnectionClient, never()).fetchPackage(anyString(), anyString(), anyString());
-        verify(service, never()).ensureRetainedPackageOriginDefault(anyString(), anyString(), anyString(),
-                anyString(), anyString(), any(), anyString(), anyLong());
+        verify(service, never()).ensureRetainedPackageOriginDefaultIfCurrentRepository(anyString(), anyString(),
+                anyString(), anyString(), anyString(), any(), anyString(), anyLong(), anyString());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
                 PACKAGE_ID, VERSION, EPISODE_ID, false);
     }
@@ -218,8 +218,8 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);
 
         assertFalse(imported);
-        verify(service, never()).ensureRetainedPackageOriginDefault(anyString(), anyString(), anyString(),
-                anyString(), anyString(), any(), anyString(), anyLong());
+        verify(service, never()).ensureRetainedPackageOriginDefaultIfCurrentRepository(anyString(), anyString(),
+                anyString(), anyString(), anyString(), any(), anyString(), anyLong(), anyString());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
                 PACKAGE_ID, VERSION, EPISODE_ID, false);
     }

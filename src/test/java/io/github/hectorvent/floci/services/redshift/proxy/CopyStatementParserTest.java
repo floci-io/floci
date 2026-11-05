@@ -365,8 +365,25 @@ class CopyStatementParserTest {
     }
 
     @Test
+    void unloadAcceptsParquetFormatsAndRejectsTextOptions() {
+        for (String format : List.of("PARQUET", "FORMAT PARQUET", "FORMAT AS PARQUET", "format as parquet")) {
+            CopyStatementParser.S3Unload spec = unload("UNLOAD ('select 1') TO 's3://b/p/' "
+                    + format + " MANIFEST ALLOWOVERWRITE PARALLEL OFF EXTENSION 'pq'");
+            assertNotNull(spec);
+            assertTrue(spec.parquet());
+            assertTrue(spec.manifest());
+            assertFalse(spec.parallel());
+            assertEquals("pq", spec.extension());
+        }
+        for (String option : List.of("CSV", "FORMAT CSV", "GZIP", "HEADER", "ADDQUOTES", "ESCAPE",
+                "DELIMITER ','", "NULL AS 'nil'", "PARQUET")) {
+            assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/p/' PARQUET " + option), option);
+        }
+        assertFalse(unload("UNLOAD ('select 1') TO 's3://b/p/' EXTENSION 'parquet'").parquet());
+    }
+
+    @Test
     void unloadRejectsUnsupportedOptions() {
-        assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/p/' PARQUET"));
         assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/p/' ENCRYPTED"));
         assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/p/' MASTER_SYMMETRIC_KEY 'k'"));
         assertNull(CopyStatementParser.parse("UNLOAD ('select 1') TO 's3://b/p/' KMS_KEY_ID 'k'"));
@@ -417,6 +434,42 @@ class CopyStatementParserTest {
                 "COPY t FROM 's3://b/k' CREDENTIALS 'aws_access_key_id=test;aws_secret_access_key=test'");
         assertNotNull(c);
         assertNull(c.iamRoleArn());
+    }
+
+    @Test
+    void copyKeepsTheKeysAndTokenOfACredentialsString() {
+        CopyStatementParser.S3CopyFrom c = copyFrom("COPY t FROM 's3://b/k' CREDENTIALS "
+                + "'aws_access_key_id=ASIAEXAMPLE;aws_secret_access_key=s3cr3t/+x;token=tok/+en=='");
+
+        assertEquals("ASIAEXAMPLE", c.accessKeys().accessKeyId());
+        assertEquals("s3cr3t/+x", c.accessKeys().secretAccessKey());
+        assertEquals("tok/+en==", c.accessKeys().sessionToken());
+    }
+
+    @Test
+    void copyKeepsTheKeysOfSeparateClauses() {
+        CopyStatementParser.S3CopyFrom c = copyFrom(
+                "COPY t FROM 's3://b/k' ACCESS_KEY_ID 'AKIAEXAMPLE' SECRET_ACCESS_KEY 'secret'");
+
+        assertEquals("AKIAEXAMPLE", c.accessKeys().accessKeyId());
+        assertEquals("secret", c.accessKeys().secretAccessKey());
+        assertNull(c.accessKeys().sessionToken());
+    }
+
+    @Test
+    void copyWithoutKeysHasNoAccessKeys() {
+        assertNull(copyFrom("COPY t FROM 's3://b/k' IAM_ROLE 'arn:aws:iam::000000000000:role/r'").accessKeys());
+    }
+
+    @Test
+    void accessKeysStringFormHidesTheSecretAndToken() {
+        CopyStatementParser.S3CopyFrom c = copyFrom("COPY t FROM 's3://b/k' CREDENTIALS "
+                + "'aws_access_key_id=ASIAEXAMPLE;aws_secret_access_key=s3cr3t;token=tok'");
+
+        String text = c.toString();
+        assertTrue(text.contains("ASIAEXAMPLE"));
+        assertFalse(text.contains("s3cr3t"));
+        assertFalse(text.contains("tok'") || text.contains("token=tok"));
     }
 
     @Test

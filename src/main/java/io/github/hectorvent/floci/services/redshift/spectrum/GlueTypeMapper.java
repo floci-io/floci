@@ -106,6 +106,11 @@ public final class GlueTypeMapper {
         return "COALESCE(CAST(" + expression + " AS VARCHAR), " + NULL_MARKER + ") AS " + column;
     }
 
+    /** A column the data files do not carry reads as NULL, the same marker a NULL value takes. */
+    public static String nullProjection(String columnName) {
+        return "COALESCE(CAST(NULL AS VARCHAR), " + NULL_MARKER + ") AS " + quote(columnName);
+    }
+
     private static boolean isTypeOrSized(String type, String base) {
         return type.equals(base) || type.startsWith(base + "(");
     }

@@ -662,6 +662,9 @@ public class VpcNetworkManager {
     /** @return the network name, or null when creation failed */
     private String materialise(VpcBinding vpc) {
         synchronized (vpc) {
+            if (bindings.get(key(vpc.region, vpc.vpcId)) != vpc) {
+                return null;
+            }
             if (vpc.created) {
                 attachCurrentContainer(vpc, null);
                 return vpc.networkName;
@@ -848,8 +851,12 @@ public class VpcNetworkManager {
         // An upgrade can leave both spellings behind, so every one noted is removed.
         Set<String> previousRunNetworks = networksFromPreviousRun.remove(key(region, vpcId));
         Set<String> networkNames = new LinkedHashSet<>();
-        if (vpc.created) {
-            networkNames.add(vpc.networkName);
+        synchronized (vpc) {
+            // An in-flight Docker create must finish before its network is collected for removal.
+            // The retired binding cannot create another network.
+            if (vpc.created) {
+                networkNames.add(vpc.networkName);
+            }
         }
         if (previousRunNetworks != null) {
             networkNames.addAll(previousRunNetworks);

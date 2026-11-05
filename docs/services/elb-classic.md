@@ -68,6 +68,10 @@ opened and no traffic is forwarded. Only the control plane and health checking a
   `TCP` for TCP/SSL listeners. Explicit backend protocols remain unchanged.
   Creation, listener additions, persisted readback and identical listener retries
   use the same effective value.
+- A load balancer created in subnets without `SecurityGroups` gets the VPC's `default` security
+  group, reported in `SecurityGroups` and `SourceSecurityGroup`. Floci uses the VPC's `default`
+  group in the default VPC too, rather than a dedicated `default_elb_<id>` group. A load balancer
+  created with only `AvailabilityZones` gets no security group.
 - Load balancer state is persisted through Floci storage, and on startup health checking is
   restarted for the load balancers of every account.
 - A new load balancer gets AWS's default health check (`TCP:80`, interval 30, timeout 5,

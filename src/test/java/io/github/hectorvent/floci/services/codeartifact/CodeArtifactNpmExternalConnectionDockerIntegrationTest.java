@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.codeartifact;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
@@ -12,8 +14,14 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.util.Base64;
+
+import static io.github.hectorvent.floci.testing.CodeArtifactRequests.putPackageOriginConfiguration;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
@@ -38,6 +46,7 @@ class CodeArtifactNpmExternalConnectionDockerIntegrationTest {
     private static final String DOMAIN = "npm-external-connection-domain";
     private static final String REPO = "npm-external-connection-repo";
     private static final String BLOCKED_REPO = "npm-external-connection-blocked-repo";
+    private static final String LATEST_REPO = "npm-external-connection-latest-repo";
     private static final String PACKAGE_NAME = "is-even";
     private static final String VERSION = "1.0.0";
 
@@ -62,11 +71,18 @@ class CodeArtifactNpmExternalConnectionDockerIntegrationTest {
                 .post("/v1/repository?domain=" + DOMAIN + "&repository=" + BLOCKED_REPO)
                 .then().statusCode(200);
         given().contentType("application/json").header("Authorization", AUTH).body("{}")
+                .post("/v1/repository?domain=" + DOMAIN + "&repository=" + LATEST_REPO)
+                .then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH).body("{}")
                 .post("/v1/repository/external-connection?domain=" + DOMAIN + "&repository=" + REPO
                         + "&external-connection=public:npmjs")
                 .then().statusCode(200);
         given().contentType("application/json").header("Authorization", AUTH).body("{}")
                 .post("/v1/repository/external-connection?domain=" + DOMAIN + "&repository=" + BLOCKED_REPO
+                        + "&external-connection=public:npmjs")
+                .then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+                .post("/v1/repository/external-connection?domain=" + DOMAIN + "&repository=" + LATEST_REPO
                         + "&external-connection=public:npmjs")
                 .then().statusCode(200);
 
@@ -139,11 +155,7 @@ class CodeArtifactNpmExternalConnectionDockerIntegrationTest {
     @Test
     @Order(4)
     void upstreamBlockPreventsBothTheMergeAndTheRetention() {
-        given().contentType("application/json").header("Authorization", AUTH)
-                .body("{\"restrictions\":{\"publish\":\"ALLOW\",\"upstream\":\"BLOCK\"}}")
-                .post("/v1/package?domain=" + DOMAIN + "&repository=" + BLOCKED_REPO + "&format=npm"
-                        + "&package=" + PACKAGE_NAME)
-                .then().statusCode(200);
+        putPackageOriginConfiguration(AUTH, DOMAIN, BLOCKED_REPO, "npm", null, PACKAGE_NAME, "ALLOW", "BLOCK");
 
         given().header("Authorization", "Bearer " + bearerToken)
                 .get("/codeartifact/npm/" + DOMAIN + "/" + BLOCKED_REPO + "/" + PACKAGE_NAME)
@@ -239,6 +251,69 @@ class CodeArtifactNpmExternalConnectionDockerIntegrationTest {
         JsonNode packument = new ObjectMapper().readTree(body);
         assertThat(packument.path("versions").has(disposedVersion), equalTo(false));
         assertThat(packument.path("versions").has(VERSION), equalTo(true));
+    }
+
+    /**
+     * Found by hectorvent's review: the retention write used to send its own {@code dist-tags.
+     * latest}, so retaining any real external version at all, even an old one, would clobber a
+     * genuine local {@code latest} a direct publish had already set. {@code is-even}'s own real
+     * {@code 0.1.2} (older than the real registry's own actual latest, {@link #VERSION}) is
+     * retained here specifically, into a repository whose own local publish already claims {@code
+     * latest} for a version number ({@code 9.9.9}) the real registry could never have, so there is
+     * no ambiguity about which one is the genuine local choice. A separate repository from {@link
+     * #REPO}: this one's own local publish must not interact with the other ordered tests there.
+     */
+    @Test
+    @Order(9)
+    void retainingAnOlderRealVersionNeverClobbersAGenuineLocalLatest() throws Exception {
+        byte[] localContent = "a-genuine-local-publish".getBytes(StandardCharsets.UTF_8);
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode localVersionDoc = mapper.createObjectNode();
+        localVersionDoc.put("name", PACKAGE_NAME);
+        localVersionDoc.put("version", "9.9.9");
+        ObjectNode localDist = localVersionDoc.putObject("dist");
+        localDist.put("shasum", Digests.sha1Hex(localContent));
+        localDist.put("integrity", "sha512-" + Base64.getEncoder().encodeToString(
+                MessageDigest.getInstance("SHA-512").digest(localContent)));
+        ObjectNode publishBody = mapper.createObjectNode();
+        publishBody.put("_id", PACKAGE_NAME);
+        publishBody.put("name", PACKAGE_NAME);
+        publishBody.put("description", "");
+        publishBody.putObject("dist-tags").put("latest", "9.9.9");
+        publishBody.putObject("versions").set("9.9.9", localVersionDoc);
+        ObjectNode attachment = publishBody.putObject("_attachments").putObject(PACKAGE_NAME + "-9.9.9.tgz");
+        attachment.put("content_type", "application/octet-stream");
+        attachment.put("data", Base64.getEncoder().encodeToString(localContent));
+        attachment.put("length", localContent.length);
+
+        given().header("Authorization", "Bearer " + bearerToken).contentType("application/json")
+                .body(mapper.writeValueAsString(publishBody))
+                .put("/codeartifact/npm/" + DOMAIN + "/" + LATEST_REPO + "/" + PACKAGE_NAME)
+                .then().statusCode(anyOf(equalTo(200), equalTo(201)));
+
+        // AWS's own documented default: a package that already has a real, directly-published
+        // version defaults to upstream: BLOCK unless a caller explicitly sets ALLOW, exactly the
+        // scenario hectorvent's own finding names ("with upstream: ALLOW on a locally published
+        // package, retention can lose a real local latest"). Without this, the retention attempt
+        // below would simply be refused rather than exercising the dist-tags bug at all.
+        putPackageOriginConfiguration(AUTH, DOMAIN, LATEST_REPO, "npm", null, PACKAGE_NAME, "ALLOW", "ALLOW");
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/" + LATEST_REPO + "/" + PACKAGE_NAME)
+                .then().statusCode(200)
+                .body("dist-tags.latest", equalTo("9.9.9"));
+
+        String olderRealVersion = "0.1.2";
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/" + LATEST_REPO + "/" + PACKAGE_NAME + "/-/" + PACKAGE_NAME
+                        + "-" + olderRealVersion + ".tgz")
+                .then().statusCode(200);
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/npm/" + DOMAIN + "/" + LATEST_REPO + "/" + PACKAGE_NAME)
+                .then().statusCode(200)
+                .body("dist-tags.latest", equalTo("9.9.9"))
+                .body("versions['" + olderRealVersion + "'].version", equalTo(olderRealVersion));
     }
 
     private static long describeDomainAssetSizeBytes() {

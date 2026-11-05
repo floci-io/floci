@@ -9,9 +9,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -535,5 +537,191 @@ class ServiceQuotasIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("UnknownOperationException"));
+    }
+
+    @Test
+    void listServiceQuotas_filterByQuotaAppliedAtLevelResource() {
+        // EC2 quotas are ACCOUNT-level; RESOURCE filter should return empty
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListServiceQuotas")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"ec2\",\"QuotaAppliedAtLevel\":\"RESOURCE\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Quotas.size()", equalTo(0));
+    }
+
+    @Test
+    void listServiceQuotas_filterByQuotaAppliedAtLevelAll() {
+        // ALL should return all quotas (4 for EC2)
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListServiceQuotas")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"ec2\",\"QuotaAppliedAtLevel\":\"ALL\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Quotas.size()", equalTo(4))
+            .body("Quotas.find { it.QuotaCode == 'L-1216C47A' }.QuotaAppliedAtLevel", equalTo("ACCOUNT"));
+    }
+
+    @Test
+    void listServiceQuotas_filterByQuotaAppliedAtLevelAccount() {
+        // ACCOUNT (default) should return ACCOUNT-level quotas
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListServiceQuotas")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"ec2\",\"QuotaAppliedAtLevel\":\"ACCOUNT\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Quotas.size()", equalTo(4));
+    }
+
+    @Test
+    void listAwsDefaultServiceQuotas_noQuotaAppliedAtLevelFilter() {
+        // ListAWSDefaultServiceQuotas does not have QuotaAppliedAtLevel parameter
+        // Should return same as default (all quotas for EC2)
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListAWSDefaultServiceQuotas")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"ec2\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Quotas.size()", equalTo(4));
+    }
+
+    @Test
+    void listServiceQuotas_filterByQuotaAppliedAtLevelInvalid() {
+        // Invalid value should return IllegalArgumentException
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListServiceQuotas")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ServiceCode\":\"ec2\",\"QuotaAppliedAtLevel\":\"ACOUNT\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("IllegalArgumentException"))
+            .body("message", containsString("Invalid value for QuotaAppliedAtLevel"));
+    }
+
+    @Test
+    void listServices_returnsKnownServicesWithServiceCodeAndName() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListServices")
+            .header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Services.size()", greaterThanOrEqualTo(10))
+            .body("Services.find { it.ServiceCode == 'ec2' }.ServiceName", equalTo("Amazon Elastic Compute Cloud (Amazon EC2)"))
+            .body("Services.find { it.ServiceCode == 'lambda' }.ServiceName", equalTo("AWS Lambda"))
+            .body("Services.find { it.ServiceCode == 's3' }.ServiceName", equalTo("Amazon Simple Storage Service (Amazon S3)"))
+            .body("Services.find { it.ServiceCode == 'sqs' }.ServiceName", equalTo("Amazon Simple Queue Service (Amazon SQS)"))
+            .body("Services.find { it.ServiceCode == 'sns' }.ServiceName", equalTo("Amazon Simple Notification Service (Amazon SNS)"));
+    }
+
+    @Test
+    void listServices_paginatesWithMaxResultsAndNextToken() {
+        Response first = given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "ServiceQuotasV20190624.ListServices")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"MaxResults\":2}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("Services.size()", equalTo(2))
+                .body("NextToken", notNullValue())
+                .extract().response();
+        String firstCode = first.path("Services[0].ServiceCode");
+        String nextToken = first.path("NextToken");
+        assertNotNull(firstCode);
+        assertNotNull(nextToken);
+
+        Response second = given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "ServiceQuotasV20190624.ListServices")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"NextToken\":\"" + nextToken + "\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("Services.size()", greaterThanOrEqualTo(1))
+                .extract().response();
+        assertNull(second.path("NextToken"));
+    }
+
+    @Test
+    void listServices_invalidMaxResults_returnsIllegalArgument() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListServices")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"MaxResults\":101}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("IllegalArgumentException"));
+    }
+
+    @Test
+    void listServices_invalidNextToken_returnsInvalidPaginationToken() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListServices")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"NextToken\":\"not_a_token!\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidPaginationTokenException"));
+    }
+
+    @Test
+    void listServices_servicesAreSortedByCode() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "ServiceQuotasV20190624.ListServices")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"MaxResults\":100}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Services.ServiceCode", notNullValue());
+        // Services should be sorted alphabetically by ServiceCode (case-insensitive)
+        List<String> codes = given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "ServiceQuotasV20190624.ListServices")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"MaxResults\":100}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract().path("Services.ServiceCode");
+        List<String> sortedCodes = new ArrayList<>(codes);
+        sortedCodes.sort(String::compareToIgnoreCase);
+        assertEquals(sortedCodes, codes, "Services must be sorted by ServiceCode (case-insensitive)");
     }
 }

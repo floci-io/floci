@@ -25,10 +25,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -133,6 +135,43 @@ class CloudFormationEc2KeyPairIntegrationTest {
         assertKeyPairMissing(name);
         assertParameterMissing(parameterName.getValue());
         deleteStack(stack);
+    }
+
+    @Test
+    void aConcurrentParameterWriterSurvivesTheFailedKeyCreation() throws Exception {
+        String stack = unique("cfn-key-parameter-race");
+        String name = stack + "-key";
+        String outsideValue = "another-client-value";
+        AtomicReference<String> outsideParameter = new AtomicReference<>();
+        doAnswer(invocation -> {
+            String parameterName = invocation.getArgument(0);
+            assertEquals("/ec2/keypair/" + keyPairId(name), parameterName,
+                    "the newly generated key ID is already visible through DescribeKeyPairs");
+            ssm("PutParameter", Map.of("Name", parameterName, "Value", outsideValue,
+                    "Type", "SecureString", "Overwrite", false)).then().statusCode(200);
+            outsideParameter.set(parameterName);
+            return invocation.callRealMethod();
+        }).when(ssmService).putParameter(startsWith("/ec2/keypair/"), anyString(),
+                eq("SecureString"), isNull(), eq(false), eq(REGION));
+
+        deploy("CreateStack", stack, template(Key.named(name), false));
+        try {
+            assertStatus(stack, "ROLLBACK_COMPLETE");
+            assertEquals("The parameter already exists. To overwrite this value, set the overwrite option "
+                    + "in the request to true.", CfnStackWaits.failedResourceReason(stack));
+            assertKeyPairMissing(name);
+            String parameterName = outsideParameter.get();
+            assertNotNull(parameterName, "the other client's write completed before the stack's write");
+            assertEquals(outsideValue, parameter(parameterName).getString("Parameter.Value"));
+            assertEquals(List.of(outsideValue),
+                    ssm("GetParameterHistory", Map.of("Name", parameterName, "WithDecryption", true))
+                            .then().statusCode(200).extract().jsonPath().getList("Parameters.Value", String.class));
+        } finally {
+            deleteStack(stack);
+            if (outsideParameter.get() != null) {
+                ssm("DeleteParameter", Map.of("Name", outsideParameter.get()));
+            }
+        }
     }
 
     @Test

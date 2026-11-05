@@ -65,7 +65,6 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -118,6 +117,8 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String INTERNAL_BUCKET_PREFIX = "floci-internal-";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_BUCKET =
             INTERNAL_BUCKET_PREFIX + "redshift-spectrum-scratch";
+    public static final String REDSHIFT_UNLOAD_STAGING_BUCKET = INTERNAL_BUCKET_PREFIX + "redshift-unload-staging";
+    public static final String REDSHIFT_UNLOAD_STAGING_TAG_VALUE = "redshift-unload-staging";
     public static final String INTERNAL_BUCKET_TAG_KEY = "floci:internal";
     public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
@@ -140,6 +141,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final Logger LOG = Logger.getLogger(S3Service.class);
     /** Last {@code s3.object.sequencer} handed out, in microseconds since the epoch. */
     private final AtomicLong lastEventSequencer = new AtomicLong();
+    private final AtomicLong dataGenerations = new AtomicLong();
 
     record RequestAuthorization(boolean signed, String accessKeyId, String sessionToken) {
         static RequestAuthorization unsigned() {
@@ -614,26 +616,16 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public List<Bucket> listBuckets() {
         return bucketStore.scan(key -> true).stream()
-                .filter(bucket -> !isSpectrumScratchBucket(bucket))
+                .filter(bucket -> !isScratchBucket(bucket))
                 .toList();
     }
 
-    /**
-     * The Spectrum scratch bucket is told apart from a user bucket of the same name by the tag the
-     * materializer puts on it, so a user's own bucket is never hidden or treated as scratch space.
-     */
-    private static boolean isSpectrumScratchBucket(Bucket bucket) {
-        return REDSHIFT_SPECTRUM_SCRATCH_BUCKET.equals(bucket.getName())
-                && bucket.getTags() != null
-                && REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE.equals(bucket.getTags().get(INTERNAL_BUCKET_TAG_KEY));
+    private static boolean isScratchBucket(Bucket bucket) {
+        return Arrays.stream(S3ScratchSpace.values()).anyMatch(space -> space.matchesBucket(bucket));
     }
 
-    /**
-     * Returns true if the named bucket is Floci's internal Redshift Spectrum scratch bucket,
-     * verified by its name and internal tag.
-     */
-    public boolean isSpectrumScratchBucket(String bucketName) {
-        return resolveBucket(bucketName).filter(S3Service::isSpectrumScratchBucket).isPresent();
+    public boolean isScratchBucket(String bucketName) {
+        return resolveBucket(bucketName).filter(S3Service::isScratchBucket).isPresent();
     }
 
     public String getBucketOwnerAccountId(String bucketName) {
@@ -746,6 +738,12 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     S3Object putObject(String bucketName, String key, InputStream body, UploadChecksums checksums,
                        String contentType, Map<String, String> metadata, PutObjectOptions options) {
+        return putObject(bucketName, key, body, checksums, contentType, metadata, options, -1);
+    }
+
+    S3Object putObject(String bucketName, String key, InputStream body, UploadChecksums checksums,
+                       String contentType, Map<String, String> metadata, PutObjectOptions options,
+                       long declaredSize) {
         requirePublicObjectKey(key);
         PutObjectOptions effectiveOptions = options != null ? options : new PutObjectOptions();
         checksums.requireWellFormedContentMd5();
@@ -761,31 +759,27 @@ public class S3Service implements Resettable, ResourceProvider {
         ChecksumAlgorithm declared = ChecksumAlgorithm.fromWireValue(effectiveOptions.getChecksumAlgorithm());
         // Checked again under the bucket lock when the object is stored; this only spares a transfer.
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
+        // A checksum the client sent is stored as sent; otherwise the declared algorithm's, or CRC64NVME.
+        ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
+                : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
         if (inMemory) {
-            byte[] data = readVerified(body, checksums, "PutObject of " + bucketName + "/" + key);
-            S3Object object = storeObject(checkedBucket, bucketName, key, new BytesBody(data),
-                    contentType, metadata, null, null, effectiveOptions, null);
+            VerifiedBody verified = readVerified(body, checksums, "PutObject of " + bucketName + "/" + key,
+                    declaredSize, computed);
+            S3Object object = storeObject(checkedBucket, bucketName, key, new BytesBody(verified.data()),
+                    contentType, metadata, verified.checksum(), null, effectiveOptions, verified.eTag());
             fireNotifications(bucketName, key, "ObjectCreated:Put", object);
             return object;
         }
 
-        // A checksum the client sent is stored as sent; otherwise the declared algorithm's, or CRC64NVME.
-        ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
-                : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
         DigestingInputStream digests = new DigestingInputStream(body,
                 digestAlgorithms(checksums, computed), MAX_PUT_OBJECT_SIZE);
         Path staged = stageBody(digests);
         try {
             checksums.verify(digests.md5(), digests::checksum);
             verifyChunkedTrailers(body, digests, checksums);
-            S3Checksum checksum = null;
-            if (computed != null) {
-                checksum = new S3Checksum();
-                checksum.setValueFor(computed, digests.checksum(computed));
-                checksum.setChecksumType(ChecksumType.FULL_OBJECT);
-            }
             S3Object object = storeObject(checkedBucket, bucketName, key, new AssembledBody(staged, digests.size()),
-                    contentType, metadata, checksum, null, effectiveOptions, digests.eTag());
+                    contentType, metadata, computedChecksum(digests, computed), null, effectiveOptions,
+                    digests.eTag());
             fireNotifications(bucketName, key, "ObjectCreated:Put", object);
             return object;
         } finally {
@@ -944,7 +938,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 : effectiveOptions.getClientChecksum() != null ? copyChecksum(effectiveOptions.getClientChecksum())
                 : S3Checksum.fullObject(validatedChecksumAlgorithm, data);
         object.setChecksum(resolvedChecksum);
-        object.setParts(copyParts(parts));
+        object.setParts(Part.copyAll(parts));
         object.setContentEncoding(effectiveOptions.getContentEncoding());
         object.setContentDisposition(effectiveOptions.getContentDisposition());
         object.setCacheControl(effectiveOptions.getCacheControl());
@@ -1077,7 +1071,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // A fresh per-write token, compared by getObject's optimistic read against a
             // later re-read of this same field to detect a concurrent overwrite - see the
             // dataGeneration javadoc on S3Object.
-            object.setDataGeneration(UUID.randomUUID().toString());
+            object.setDataGeneration(nextDataGeneration());
 
             // Write the body before publishing metadata - see the comment in the versioned
             // branch above; the same ordering requirement applies here.
@@ -1106,7 +1100,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // Annotation readers share this bucket monitor, so they cannot observe the
             // replacement with the old annotations while cleanup is pending.
             deleteArchivedNullVersion(bucketOwnerAccount, bucketName, key, false);
-            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            deleteAllAnnotationsFor(bucketName, key, null);
             LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, body.size());
         }
         return object;
@@ -1236,6 +1230,16 @@ public class S3Service implements Resettable, ResourceProvider {
         authorizeListBucket(bucketName, new RequestAuthorization(true, accessKeyId, sessionToken));
     }
 
+    /**
+     * Authorize a signed {@code s3:ListBucket} that lists under {@code prefix}. The bucket policy sees
+     * {@code s3:prefix} as a real listing offers it, so a statement conditioned on the prefix matches
+     * instead of failing on the absent key.
+     */
+    public void authorizeSignedListBucket(String accessKeyId, String sessionToken, String bucketName, String prefix) {
+        authorizeBucketRead(bucketName, "s3:ListBucket", new RequestAuthorization(true, accessKeyId, sessionToken),
+                Map.of("s3:prefix", List.of(prefix == null ? "" : prefix)));
+    }
+
     /** Authorize a signed {@code s3:DeleteObject}; see {@link #authorizeSignedGetObject}. */
     public void authorizeSignedDeleteObject(String accessKeyId, String sessionToken, String bucketName, String key) {
         authorizeDeleteObject(bucketName, key, null, new RequestAuthorization(true, accessKeyId, sessionToken));
@@ -1307,8 +1311,13 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization) {
+        authorizeBucketRead(bucketName, action, authorization, null);
+    }
+
+    void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization,
+                             Map<String, List<String>> requestConditions) {
         String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
-        authorizeS3Read(bucketName, null, null, action, bucketArn, authorization);
+        authorizeS3Read(bucketName, null, null, action, bucketArn, authorization, requestConditions);
     }
 
     /**
@@ -1369,7 +1378,7 @@ public class S3Service implements Resettable, ResourceProvider {
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
         String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
         authorizeS3Read(bucketName, key, versionId, S3ObjectActions.forVersion(action, versionId), objectArn,
-                authorization);
+                authorization, null);
     }
 
     void authorizePutObject(String bucketName, String key, RequestAuthorization authorization) {
@@ -1488,7 +1497,8 @@ public class S3Service implements Resettable, ResourceProvider {
         return enforceAuth;
     }
 
-    private void authorizeS3Read(String bucketName, String key, String versionId, String action, String resourceArn, RequestAuthorization authorization) {
+    private void authorizeS3Read(String bucketName, String key, String versionId, String action, String resourceArn,
+                                 RequestAuthorization authorization, Map<String, List<String>> requestConditions) {
         if (!enforceAuth) {
             return;
         }
@@ -1498,7 +1508,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 : RequestAuthorization.unsigned();
 
         if (requestAuthorization.signed()) {
-            authorizeSignedBucketPolicy(bucketName, key, action, resourceArn, requestAuthorization, null);
+            authorizeSignedBucketPolicy(bucketName, key, action, resourceArn, requestAuthorization, requestConditions);
             return;
         }
 
@@ -2000,7 +2010,7 @@ public class S3Service implements Resettable, ResourceProvider {
         // (the recheck disagreeing with getObjectMetadata about where this key lives) fails loudly
         // with a clear error instead of spinning forever re-reading the file and exhausting the heap.
         for (int attempt = 0; attempt < 10_000; attempt++) {
-            S3Object obj = getObjectMetadata(bucketName, key, versionId);
+            S3Object obj = copyObject(requireStoredObject(ownedBucket, bucketName, key, versionId));
             if (obj.getVersionId() == null && bucket.getVersioningStatus() != null) {
                 synchronized (bucket) {
                     S3Object current = resolveObjectForAccount(bucketOwnerAccount, storeKey).orElse(null);
@@ -2044,7 +2054,10 @@ public class S3Service implements Resettable, ResourceProvider {
                         + "metadata/data resolution paths disagree about where this key lives");
     }
 
-    /** An object's metadata and an open stream over the body that matches it. */
+    /**
+     * An object's metadata and an open stream over the body that matches it. In memory mode the
+     * object also holds the whole body.
+     */
     public record ObjectRead(S3Object object, InputStream body) implements Closeable {
         @Override
         public void close() throws IOException {
@@ -2227,12 +2240,18 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
 
+        return new AccountAwareStorageBackend.OwnedEntry<>(ownedBucket.account(),
+                requireStoredObject(ownedBucket, bucketName, key, versionId));
+    }
+
+    private S3Object requireStoredObject(AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket,
+                                         String bucketName, String key, String versionId) {
         S3Object object = findStoredObject(ownedBucket, bucketName, key, versionId)
                 .orElseThrow(() -> versionId != null ? noSuchVersion(key, versionId) : noSuchKey(key));
         if (object.isDeleteMarker()) {
             throw new S3DeleteMarkerException(object);
         }
-        return new AccountAwareStorageBackend.OwnedEntry<>(ownedBucket.account(), object);
+        return object;
     }
 
     private static AwsException noSuchKey(String key) {
@@ -2303,7 +2322,7 @@ public class S3Service implements Resettable, ResourceProvider {
     // AWS lists part-level checksums only for composite objects; a full-object multipart object
     // reports its part count alone.
     private GetObjectAttributesParts buildObjectParts(S3Object object, Integer maxParts, Integer partNumberMarker) {
-        List<Part> sortedParts = new ArrayList<>(copyParts(object.getParts()));
+        List<Part> sortedParts = new ArrayList<>(Part.copyAll(object.getParts()));
         sortedParts.sort(Comparator.comparingInt(Part::getPartNumber));
         if (object.getChecksum() == null || object.getChecksum().getChecksumType() != ChecksumType.COMPOSITE) {
             GetObjectAttributesParts countOnly = new GetObjectAttributesParts();
@@ -2362,12 +2381,17 @@ public class S3Service implements Resettable, ResourceProvider {
         // annotation subresource writes, which hold the same monitor (storeObjectInternal
         // already runs under it via storeObject). The precondition is checked under it too,
         // so a concurrent overwrite cannot land between the check and the delete.
-        return RequestScopes.callAs(ownedBucket.account(), () -> {
+        Supplier<S3Object> locked = () -> {
             synchronized (bucket) {
                 checkDeletePrecondition(bucketName, key, ifMatch);
                 return deleteObjectLocked(bucket, bucketName, key, versionId, bypassGovernance, OBJECT_REMOVED_EVENT);
             }
-        });
+        };
+        if (objectStore instanceof AccountAwareStorageBackend<?> aware
+                && ownedBucket.account().equals(aware.accountId())) {
+            return locked.get();
+        }
+        return RequestScopes.callAs(ownedBucket.account(), locked);
     }
 
     /**
@@ -2484,7 +2508,7 @@ public class S3Service implements Resettable, ResourceProvider {
             deleteArchivedNullVersion(ownerId(), bucketName, key, true);
             objectStore.put(objectKey(bucketName, key), deleteMarker);
             deleteFile(bucketName, key);
-            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            deleteAllAnnotationsFor(bucketName, key, null);
             LOG.debugv("Created null delete marker: {0}/{1}", bucketName, key);
             fireNotifications(bucketName, key, removalEvent + ":DeleteMarkerCreated", deleteMarker);
             return deleteMarker;
@@ -2510,8 +2534,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // Permanently delete a specific version (metadata + file data)
             objectStore.delete(historyKey);
             deleteVersionedFile(bucketName, key, versionId);
-            deleteAllAnnotationsFor(annotationParentKey(
-                    bucketName, key, "null".equals(versionId) ? null : versionId));
+            deleteAllAnnotationsFor(bucketName, key, normalizeNullVersionId(versionId));
             LOG.debugv("Permanently deleted version: {0}/{1} v={2}", bucketName, key, versionId);
             // Promote the next most-recent version when the deleted one was the latest
             String latestKey = objectKey(bucketName, key);
@@ -2531,7 +2554,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                 .max(WRITE_ORDER)
                                 .orElseThrow());
                         if (newLatest.getVersionId() == null) {
-                            newLatest.setDataGeneration(UUID.randomUUID().toString());
+                            newLatest.setDataGeneration(nextDataGeneration());
                         }
                         // The promoted version's body becomes current before its metadata is
                         // published, the order storeObjectInternal writes in, so a concurrent GET
@@ -2564,7 +2587,7 @@ public class S3Service implements Resettable, ResourceProvider {
             deleteArchivedNullVersion(ownerId(), bucketName, key, true);
             objectStore.delete(objectKey(bucketName, key));
             deleteFile(bucketName, key);
-            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            deleteAllAnnotationsFor(bucketName, key, null);
             LOG.debugv("Deleted object: {0}/{1}", bucketName, key);
             fireNotifications(bucketName, key, removalEvent + ":Delete", null);
             return null;
@@ -2599,6 +2622,8 @@ public class S3Service implements Resettable, ResourceProvider {
         return listObjectsWithPrefixes(bucketName, prefix, delimiter, maxKeys, null, null);
     }
 
+    private static final Comparator<S3Object> BY_KEY = Comparator.comparing(S3Object::getKey);
+
     public ListObjectsResult listObjectsWithPrefixes(String bucketName, String prefix, String delimiter, int maxKeys,
                                                      String continuationToken, String startAfter) {
         String bucketOwnerAccount = resolveBucketEntry(bucketName)
@@ -2608,17 +2633,16 @@ public class S3Service implements Resettable, ResourceProvider {
 
         String keyPrefix = bucketName + "/";
         String fullPrefix = prefix != null ? keyPrefix + prefix : keyPrefix;
+        List<S3Object> storedObjects = scanCurrentObjects(bucketOwnerAccount, bucketName, fullPrefix);
 
-        // Filter out versioned entries (contain #v#) and delete markers
-        Predicate<String> keyFilter = key -> key.startsWith(fullPrefix)
-                && !key.contains("#v#")
-                && !key.startsWith(nullVersionPrefix(bucketName));
-        List<S3Object> storedObjects = scanObjectsForAccount(bucketOwnerAccount, keyFilter);
-        List<S3Object> allObjects = storedObjects
-                .stream()
-                .filter(obj -> !obj.isDeleteMarker())
-                .toList();
-        allObjects = new ArrayList<>(allObjects);
+        // continuation-token takes precedence; it encodes the last key seen on a previous page.
+        String filterKey = continuationToken != null ? continuationToken : startAfter;
+        List<S3Object> allObjects = new ArrayList<>(storedObjects.size());
+        for (S3Object obj : storedObjects) {
+            if (!obj.isDeleteMarker() && (filterKey == null || obj.getKey().compareTo(filterKey) > 0)) {
+                allObjects.add(obj);
+            }
+        }
 
         // see https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-prefixes.html
         List<String> commonPrefixes = List.of();
@@ -2627,22 +2651,12 @@ public class S3Service implements Resettable, ResourceProvider {
             DelimiterGroups<S3Object> groups = groupByDelimiter(allObjects, prefix, delimiter, S3Object::getKey);
             allObjects = groups.direct();
             commonPrefixes = groups.commonPrefixes();
+            if (filterKey != null) {
+                commonPrefixes.removeIf(cp -> cp.compareTo(filterKey) <= 0);
+            }
         }
 
-        allObjects.sort(Comparator.comparing(S3Object::getKey));
-
-        // Apply continuation-token / start-after filter.
-        // continuation-token takes precedence; it encodes the last key seen on a previous page.
-        String filterKey = continuationToken != null ? continuationToken : startAfter;
-        if (filterKey != null) {
-            final String fk = filterKey;
-            allObjects = allObjects.stream()
-                    .filter(o -> o.getKey().compareTo(fk) > 0)
-                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
-            commonPrefixes = commonPrefixes.stream()
-                    .filter(cp -> cp.compareTo(fk) > 0)
-                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
-        }
+        allObjects.sort(BY_KEY);
 
         // S3 counts both direct objects and common prefixes.
         // Each common prefix group (e.g. "docs/") uses one entry regardless of
@@ -2652,8 +2666,8 @@ public class S3Service implements Resettable, ResourceProvider {
         boolean isTruncated = false;
         String nextContinuationToken = null;
         if (maxKeys >= 0) {
-            List<S3Object> limitedObjects = new ArrayList<>();
-            List<String> limitedPrefixes = new ArrayList<>();
+            List<S3Object> limitedObjects = new ArrayList<>(Math.min(maxKeys, allObjects.size()));
+            List<String> limitedPrefixes = new ArrayList<>(Math.min(maxKeys, commonPrefixes.size()));
             int count = 0;
             int directObjectCount = 0;
             int commonPrefixCount = 0;
@@ -2682,6 +2696,25 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         return new ListObjectsResult(allObjects, commonPrefixes, isTruncated, nextContinuationToken);
+    }
+
+    /** The current versions under {@code fullPrefix}: no version history entries and no archived null versions. */
+    private List<S3Object> scanCurrentObjects(String bucketOwnerAccount, String bucketName, String fullPrefix) {
+        String nullPrefix = nullVersionPrefix(bucketName);
+        if (objectStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
+            String account = globalBucketNamespace ? bucketOwnerAccount : typed.accountId();
+            String rawPrefix = AccountAwareStorageBackend.rawKey(account, fullPrefix);
+            String rawNullPrefix = AccountAwareStorageBackend.rawKey(account, nullPrefix);
+            int keyStart = account.length() + 1;
+            return typed.scanRaw(raw -> raw.startsWith(rawPrefix)
+                    && raw.indexOf("#v#", keyStart) < 0
+                    && !raw.startsWith(rawNullPrefix));
+        }
+        return objectStore.scan(key -> key.startsWith(fullPrefix)
+                && !key.contains("#v#")
+                && !key.startsWith(nullPrefix));
     }
 
     private record DelimiterGroups<T>(List<T> direct, List<String> commonPrefixes) {}
@@ -2959,7 +2992,7 @@ public class S3Service implements Resettable, ResourceProvider {
     /** Reads {@code file} once, feeding {@code checksum} if given; returns its MD5 ETag when {@code md5}. */
     private static String hashFile(Path file, boolean md5, S3Checksum.Calculator checksum) {
         try {
-            MessageDigest digest = md5 ? MessageDigest.getInstance("MD5") : null;
+            MessageDigest digest = md5 ? Digests.md5Digest() : null;
             byte[] buffer = new byte[1 << 20];
             try (InputStream in = Files.newInputStream(file)) {
                 for (int read = in.read(buffer); read >= 0; read = in.read(buffer)) {
@@ -2974,8 +3007,6 @@ public class S3Service implements Resettable, ResourceProvider {
             return digest == null ? null : "\"" + bytesToHex(digest.digest()) + "\"";
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to read the copy source", e);
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("MD5 algorithm not available", e);
         }
     }
 
@@ -3576,7 +3607,11 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /** Removes every annotation attached to one object version (metadata + payload). */
-    private void deleteAllAnnotationsFor(String parentKey) {
+    private void deleteAllAnnotationsFor(String bucketName, String key, String versionId) {
+        if (annotationStore.isEmpty()) {
+            return;
+        }
+        String parentKey = annotationParentKey(bucketName, key, versionId);
         for (ObjectAnnotation annotation : annotationStore.scan(k -> k.startsWith(parentKey + ANNOTATION_SEPARATOR))) {
             annotationStore.delete(annotationStoreKey(parentKey, annotation.getAnnotationName()));
             deleteAnnotationPayload(annotation);
@@ -4805,7 +4840,7 @@ public class S3Service implements Resettable, ResourceProvider {
             return upload.getChecksumAlgorithm();
         });
         if (inMemory) {
-            byte[] data = readVerified(body, checksums, "Multipart upload " + uploadId);
+            byte[] data = readVerified(body, checksums, "Multipart upload " + uploadId, -1, null).data();
             return storePart(bucket, key, uploadId, partNumber, data,
                     sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
         }
@@ -4846,15 +4881,30 @@ public class S3Service implements Resettable, ResourceProvider {
      * Reads a memory-mode upload body into one array, checked against {@code checksums}, failing
      * with EntityTooLarge once it outgrows the largest array the JDK allocates.
      */
-    private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload) {
+    /** A body read whole, with its ETag and stored checksum taken from the same pass over the bytes. */
+    private record VerifiedBody(byte[] data, String eTag, S3Checksum checksum) { }
+
+    private static VerifiedBody readVerified(InputStream body, UploadChecksums checksums, String upload,
+                                             long declaredSize, ChecksumAlgorithm computed) {
         // The memory cap is lower than the most S3 takes in one body, so it is the limit here.
-        DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(checksums, null),
+        DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(checksums, computed),
                 Long.MAX_VALUE);
-        byte[] data = readWithin(digests, MAX_IN_MEMORY_OBJECT_SIZE,
+        byte[] data = readWithin(digests, MAX_IN_MEMORY_OBJECT_SIZE, declaredSize,
                 readSoFar -> warnTooLargeForMemory(upload, readSoFar));
         checksums.verify(digests.md5(), digests::checksum);
         verifyChunkedTrailers(body, digests, checksums);
-        return data;
+        return new VerifiedBody(data, digests.eTag(), computedChecksum(digests, computed));
+    }
+
+    /** The full object checksum of {@code computed} from the stream, or null when the client's is stored. */
+    private static S3Checksum computedChecksum(DigestingInputStream digests, ChecksumAlgorithm computed) {
+        if (computed == null) {
+            return null;
+        }
+        S3Checksum checksum = new S3Checksum();
+        checksum.setValueFor(computed, digests.checksum(computed));
+        checksum.setChecksumType(ChecksumType.FULL_OBJECT);
+        return checksum;
     }
 
     /**
@@ -4862,7 +4912,46 @@ public class S3Service implements Resettable, ResourceProvider {
      * {@code maxSize}, after telling {@code tooLarge} how many bytes it had read by then.
      */
     static byte[] readWithin(InputStream body, long maxSize, LongConsumer tooLarge) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        return readWithin(body, maxSize, -1, tooLarge);
+    }
+
+    private static final long MAX_EXACT_READ = 64L * 1024 * 1024;
+
+    /**
+     * Like {@link #readWithin(InputStream, long, LongConsumer)}, sizing the array from the length the
+     * request declared. A body shorter or longer than declared is still read in full.
+     */
+    static byte[] readWithin(InputStream body, long maxSize, long declaredSize, LongConsumer tooLarge) {
+        if (declaredSize < 0 || declaredSize > maxSize || declaredSize > MAX_EXACT_READ) {
+            return readGrowing(body, maxSize, declaredSize, new byte[0], tooLarge);
+        }
+        byte[] exact = new byte[(int) declaredSize];
+        try {
+            int filled = body.readNBytes(exact, 0, exact.length);
+            if (filled < exact.length) {
+                return Arrays.copyOf(exact, filled);
+            }
+            int extra = body.read();
+            if (extra < 0) {
+                return exact;
+            }
+            byte[] prefix = Arrays.copyOf(exact, exact.length + 1);
+            prefix[exact.length] = (byte) extra;
+            return readGrowing(body, maxSize, declaredSize, prefix, tooLarge);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read the upload body", e);
+        }
+    }
+
+    private static byte[] readGrowing(InputStream body, long maxSize, long declaredSize, byte[] prefix,
+                                      LongConsumer tooLarge) {
+        if (prefix.length > maxSize) {
+            tooLarge.accept(prefix.length);
+            throw entityTooLarge(maxSize);
+        }
+        int initial = declaredSize >= 0 ? (int) Math.min(declaredSize, 1024 * 1024) : 32;
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(initial, prefix.length));
+        out.write(prefix, 0, prefix.length);
         byte[] buffer = new byte[64 * 1024];
         try {
             for (int read = body.read(buffer); read >= 0; read = body.read(buffer)) {
@@ -5119,7 +5208,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
             // Concatenate parts in order
             try {
-                MessageDigest md = MessageDigest.getInstance("MD5");
+                MessageDigest md = Digests.md5Digest();
                 for (Part part : parts) {
                     // A part ETag is the MD5 of that part, so the composite hashes it without rehashing the data
                     String partETag = stripSurroundingQuotes(part.getETag());
@@ -5131,9 +5220,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
                 // Both checksum types come from the stored part checksums, so a mismatch is rejected
                 // before any part is read.
-                List<Part> completedParts = parts.stream()
-                        .map(S3Service::copyPart)
-                        .toList();
+                List<Part> completedParts = Part.copyAll(parts);
                 S3Checksum checksum = storedChecksumType == ChecksumType.COMPOSITE
                         ? S3Checksum.composite(algorithm, completedParts.stream()
                                 .map(part -> part.getChecksum().valueFor(algorithm)).toList())
@@ -5202,8 +5289,6 @@ public class S3Service implements Resettable, ResourceProvider {
                 return object;
             } catch (IOException e) {
                 throw new UncheckedIOException("Failed to read multipart parts", e);
-            } catch (NoSuchAlgorithmException e) {
-                throw new RuntimeException("MD5 algorithm not available", e);
             }
         });
         fireNotifications(bucket, key, "ObjectCreated:CompleteMultipartUpload", completed);
@@ -5423,6 +5508,22 @@ public class S3Service implements Resettable, ResourceProvider {
 
     public MultipartUpload listParts(String bucket, String key, String uploadId) {
         return getMultipartUpload(bucket, key, uploadId);
+    }
+
+    /** The encryption condition keys of an upload's parts and completion: what it recorded when created. */
+    public Map<String, List<String>> multipartEncryptionConditions(String bucket, String key, String uploadId) {
+        MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
+        return S3ObjectActions.encryptionConditions(upload.getServerSideEncryption(), upload.getSseKmsKeyId());
+    }
+
+    /** Checks a part or a completion against the bucket policy by the encryption its upload recorded. */
+    void authorizeMultipartWrite(String bucket, String key, String uploadId, RequestAuthorization authorization) {
+        if (!enforceAuth) {
+            return;
+        }
+        authorizeSignedRequest(authorization);
+        authorizeObjectWrite(bucket, key, null, "s3:PutObject", authorization,
+                multipartEncryptionConditions(bucket, key, uploadId));
     }
 
     public MultipartUpload getMultipartUpload(String bucket, String key, String uploadId) {
@@ -6271,16 +6372,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static boolean ownershipIsEnforced(Bucket bucket) {
-        return XmlParser.containsValue(bucket.getOwnershipControlsConfiguration(),
-                "ObjectOwnership", "BucketOwnerEnforced");
+        return bucket.isObjectOwnershipEnforced();
     }
 
     private static String objectOwnerAccount(Bucket bucket, String bucketOwnerAccount,
                                              String writerAccount, String cannedAcl) {
         String controls = bucket.getOwnershipControlsConfiguration();
         if (ownershipIsEnforced(bucket)
-                || (XmlParser.containsValue(controls, "ObjectOwnership", "BucketOwnerPreferred")
-                        && "bucket-owner-full-control".equals(cannedAcl))) {
+                || ("bucket-owner-full-control".equals(cannedAcl)
+                        && XmlParser.containsValue(controls, "ObjectOwnership", "BucketOwnerPreferred"))) {
             return bucketOwnerAccount;
         }
         return writerAccount;
@@ -6935,15 +7035,11 @@ public class S3Service implements Resettable, ResourceProvider {
                 throw new AwsException("InvalidArgument",
                         "The x-amz-server-side-encryption-customer-key must be a 256-bit key.", 400);
             }
-            byte[] md5 = MessageDigest.getInstance("MD5").digest(decodedKey);
-            return Base64.getEncoder().encodeToString(md5);
+            return Base64.getEncoder().encodeToString(Digests.md5(decodedKey));
         }
         catch (IllegalArgumentException e) {
             throw new AwsException("InvalidArgument",
                     "The x-amz-server-side-encryption-customer-key value is not valid base64.", 400);
-        }
-        catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("MD5 is not available", e);
         }
     }
 
@@ -7293,7 +7389,15 @@ public class S3Service implements Resettable, ResourceProvider {
     private String nextEventSequencer() {
         long nowMicros = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now());
         long value = lastEventSequencer.updateAndGet(last -> Math.max(last + 1, nowMicros));
-        return String.format(Locale.ROOT, "%018X", value);
+        return toSequencer(value);
+    }
+
+    private String nextDataGeneration() {
+        return Long.toString(dataGenerations.incrementAndGet());
+    }
+
+    static String toSequencer(long value) {
+        return "00" + HexFormat.of().withUpperCase().toHexDigits(value);
     }
 
     private void cleanupMultipart(String uploadId) {
@@ -7377,81 +7481,19 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static S3Object copyObject(S3Object source) {
-        S3Object copy = new S3Object();
-        copy.setBucketName(source.getBucketName());
-        copy.setKey(source.getKey());
-        copy.setData(source.getData() != null ? Arrays.copyOf(source.getData(), source.getData().length) : null);
-        copy.setMetadata(new HashMap<>(source.getMetadata()));
-        copy.setContentType(source.getContentType());
-        copy.setContentEncoding(source.getContentEncoding());
-        copy.setContentDisposition(source.getContentDisposition());
-        copy.setCacheControl(source.getCacheControl());
-        copy.setServerSideEncryption(source.getServerSideEncryption());
-        copy.setSseKmsKeyId(source.getSseKmsKeyId());
-        copy.setSseCustomerAlgorithm(source.getSseCustomerAlgorithm());
-        copy.setSseCustomerKeyMd5(source.getSseCustomerKeyMd5());
-        copy.setSize(source.getSize());
-        copy.setLastModified(source.getLastModified());
-        copy.setETag(source.getETag());
-        copy.setStorageClass(source.getStorageClass());
-        copy.setChecksum(copyChecksum(source.getChecksum()));
-        copy.setParts(copyParts(source.getParts()));
-        copy.setVersionId(source.getVersionId());
-        copy.setDeleteMarker(source.isDeleteMarker());
-        copy.setLatest(source.isLatest());
-        copy.setTags(new HashMap<>(source.getTags()));
-        copy.setObjectLockMode(source.getObjectLockMode());
-        copy.setRetainUntilDate(source.getRetainUntilDate());
-        copy.setLegalHoldStatus(source.getLegalHoldStatus());
-        copy.setAcl(source.getAcl());
-        copy.setOwnerAccountId(source.getOwnerAccountId());
-        copy.setDataGeneration(source.getDataGeneration());
-        copy.setEventSequencer(source.getEventSequencer());
-        return copy;
+        return new S3Object(source);
     }
 
     private static S3Checksum copyChecksum(S3Checksum source) {
         return source == null ? null : source.copy();
     }
 
-    private static List<Part> copyParts(List<Part> sourceParts) {
-        if (sourceParts == null) {
-            return new ArrayList<>();
-        }
-        return sourceParts.stream().map(S3Service::copyPart).toList();
-    }
-
-    private static Part copyPart(Part source) {
-        if (source == null) {
-            return null;
-        }
-        Part copy = new Part();
-        copy.setPartNumber(source.getPartNumber());
-        copy.setETag(source.getETag());
-        copy.setSize(source.getSize());
-        copy.setChecksum(copyChecksum(source.getChecksum()));
-        copy.setLastModified(source.getLastModified());
-        return copy;
-    }
-
     private static String computeETag(byte[] data) {
-        return "\"" + bytesToHex(computeETagBytes(data)) + "\"";
-    }
-
-    private static byte[] computeETagBytes(byte[] data) {
-        try {
-            return MessageDigest.getInstance("MD5").digest(data);
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("MD5 algorithm not available", e);
-        }
+        return "\"" + Digests.md5Hex(data) + "\"";
     }
 
     private static String bytesToHex(byte[] bytes) {
-        var sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
+        return HexFormat.of().formatHex(bytes);
     }
 
     private void ensureBucketExists(String bucketName) {
@@ -7489,7 +7531,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * partition can still reach the bucket, and a policy naming it must match as written. A
      * bucket that does not exist yet takes the request's partition, where it would be created.
      */
-    String bucketPartition(String bucketName) {
+    public String bucketPartition(String bucketName) {
         return resolveBucket(bucketName)
                 .map(Bucket::getRegion)
                 .map(AwsRegions::partitionFor)
@@ -7563,15 +7605,6 @@ public class S3Service implements Resettable, ResourceProvider {
                     .or(() -> typed.getLegacyForAccount(accountId, storeKey));
         }
         return objectStore.get(storeKey);
-    }
-
-    private List<S3Object> scanObjectsForAccount(String accountId, Predicate<String> keyFilter) {
-        if (globalBucketNamespace && objectStore instanceof AccountAwareStorageBackend<?> aware) {
-            @SuppressWarnings("unchecked")
-            AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
-            return typed.scanForAccount(accountId, keyFilter);
-        }
-        return objectStore.scan(keyFilter);
     }
 
     private void putObjectForAccount(String accountId, String storeKey, S3Object object) {
@@ -7972,7 +8005,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         resolveObjectPath(accountId, bucketName, key));
             }
             S3Object restored = copyObject(previous);
-            restored.setDataGeneration(UUID.randomUUID().toString());
+            restored.setDataGeneration(nextDataGeneration());
             putObjectForAccount(accountId, objectKey(bucketName, key), restored);
             deleteObjectForAccount(accountId, versionedKey(bucketName, key, failedVersionId));
             if (priorHistory != null) {
@@ -8003,7 +8036,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         resolveObjectPath(accountId, bucketName, key));
             }
             S3Object restored = copyObject(previous);
-            restored.setDataGeneration(UUID.randomUUID().toString());
+            restored.setDataGeneration(nextDataGeneration());
             putObjectForAccount(accountId, versionedKey(bucketName, key, storedVersionId(restored)), restored);
             putObjectForAccount(accountId, objectKey(bucketName, key), restored);
         } catch (RuntimeException recoveryFailure) {
@@ -8035,7 +8068,7 @@ public class S3Service implements Resettable, ResourceProvider {
         deleteObjectForAccount(accountId, storeKey);
         deleteVersionedFile(accountId, bucketName, key, "null");
         if (deleteAnnotations) {
-            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            deleteAllAnnotationsFor(bucketName, key, null);
         }
     }
 

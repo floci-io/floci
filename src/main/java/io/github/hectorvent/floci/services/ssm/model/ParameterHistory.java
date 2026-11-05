@@ -21,6 +21,9 @@ public class ParameterHistory {
     @JsonProperty("Value")
     private String value;
 
+    @JsonProperty("EncryptedValue")
+    private String encryptedValue;
+
     @JsonProperty("Type")
     private String type;
 
@@ -42,6 +45,7 @@ public class ParameterHistory {
         this.name = parameter.getName();
         this.version = parameter.getVersion();
         this.value = parameter.getValue();
+        this.encryptedValue = parameter.getEncryptedValue();
         this.type = parameter.getType();
         this.keyId = parameter.getKeyId();
         this.lastModifiedDate = parameter.getLastModifiedDate();
@@ -52,6 +56,7 @@ public class ParameterHistory {
         this.name = other.name;
         this.version = other.version;
         this.value = other.value;
+        this.encryptedValue = other.encryptedValue;
         this.type = other.type;
         this.keyId = other.keyId;
         this.lastModifiedDate = other.lastModifiedDate;
@@ -67,6 +72,9 @@ public class ParameterHistory {
 
     public String getValue() { return value; }
     public void setValue(String value) { this.value = value; }
+
+    public String getEncryptedValue() { return encryptedValue; }
+    public void setEncryptedValue(String encryptedValue) { this.encryptedValue = encryptedValue; }
 
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }

@@ -2,9 +2,8 @@ package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
+import io.github.hectorvent.floci.core.common.TaggingApiOnly;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -26,47 +25,30 @@ import java.util.Map;
  * TagResource:   POST   /2017-03-31/tags/{ARN}
  * ListTags:      GET    /2017-03-31/tags/{ARN}
  * UntagResource: DELETE /2017-03-31/tags/{ARN}?tagKeys=...
+ *
+ * MicroVM-family ARNs share this route with classic Lambda resources; {@link LambdaTagHandler}
+ * dispatches between them.
  */
 @Path("/2017-03-31")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class LambdaTagController {
 
-    private final LambdaService lambdaService;
-    private final LambdaMicrovmsService microvmsService;
+    private final LambdaTagHandler tagHandler;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public LambdaTagController(LambdaService lambdaService,
-                               LambdaMicrovmsService microvmsService,
-                               ObjectMapper objectMapper) {
-        this.lambdaService = lambdaService;
-        this.microvmsService = microvmsService;
+    public LambdaTagController(@TaggingApiOnly LambdaTagHandler tagHandler, ObjectMapper objectMapper) {
+        this.tagHandler = tagHandler;
         this.objectMapper = objectMapper;
-    }
-
-    /**
-     * MicroVM-family ARNs (microvm-image, microvm, network-connector) share
-     * the /2017-03-31/tags route with classic Lambda resources; dispatch on
-     * the ARN's resource type. The region comes from the ARN itself.
-     */
-    private static String arnRegion(String arn) {
-        return AwsArnUtils.parse(arn).region();
     }
 
     @GET
     @Path("/tags/{arn}")
     public Response listTags(@PathParam("arn") String arn) {
-        if (LambdaMicrovmsService.ownsArn(arn)) {
-            ObjectNode mvRoot = objectMapper.createObjectNode();
-            ObjectNode mvTags = mvRoot.putObject("Tags");
-            microvmsService.listTags(arnRegion(arn), arn).forEach(mvTags::put);
-            return Response.ok(mvRoot).build();
-        }
-        Map<String, String> tags = lambdaService.listTags(arn);
         ObjectNode root = objectMapper.createObjectNode();
         ObjectNode tagsNode = root.putObject("Tags");
-        tags.forEach(tagsNode::put);
+        tagHandler.listTags(null, arn).forEach(tagsNode::put);
         return Response.ok(root).build();
     }
 
@@ -80,11 +62,7 @@ public class LambdaTagController {
             if (tags == null) {
                 throw new AwsException("InvalidParameterValueException", "Tags is required", 400);
             }
-            if (LambdaMicrovmsService.ownsArn(arn)) {
-                microvmsService.tagResource(arnRegion(arn), arn, tags);
-            } else {
-                lambdaService.tagResource(arn, tags);
-            }
+            tagHandler.tagResource(null, arn, tags);
             return Response.noContent().build();
         } catch (AwsException e) {
             throw e;
@@ -97,11 +75,7 @@ public class LambdaTagController {
     @Path("/tags/{arn}")
     public Response untagResource(@PathParam("arn") String arn,
                                   @QueryParam("tagKeys") List<String> tagKeys) {
-        if (LambdaMicrovmsService.ownsArn(arn)) {
-            microvmsService.untagResource(arnRegion(arn), arn, tagKeys);
-        } else {
-            lambdaService.untagResource(arn, tagKeys);
-        }
+        tagHandler.untagResource(null, arn, tagKeys);
         return Response.noContent().build();
     }
 }

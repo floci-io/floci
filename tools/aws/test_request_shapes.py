@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ import regen_ecs_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
 import regen_payment_cryptography_shapes
+import regen_logs_delivery_shapes
 import regen_resource_groups_shapes
 import regen_sesv2_shapes
 import regen_sts_shapes
@@ -354,7 +356,7 @@ def vendored(script) -> tuple[str, ...]:
 
 
 @pytest.mark.parametrize("script", [
-    regen_ecr_shapes, regen_iam_shapes, regen_payment_cryptography_shapes,
+    regen_ecr_shapes, regen_iam_shapes, regen_logs_delivery_shapes, regen_payment_cryptography_shapes,
     regen_resource_groups_shapes, regen_sts_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
@@ -390,6 +392,45 @@ def test_payment_cryptography_shapes_widen_the_partition_the_model_writes():
     assert regen_payment_cryptography_shapes.COMMERCIAL not in doc["shapes"]["KeyArn"]["pattern"]
     assert regen_payment_cryptography_shapes.EVERY_PARTITION in doc["shapes"]["KeyArn"]["pattern"]
     assert regen_payment_cryptography_shapes.EVERY_PARTITION in doc["shapes"]["ResourceArn"]["pattern"]
+
+
+def test_payment_cryptography_shapes_widen_the_region_on_every_pattern_the_model_writes_it():
+    doc = json.loads(regen_payment_cryptography_shapes.OUTPUT.read_text(encoding="utf-8"))
+
+    patterns = [shape["pattern"] for shape in doc["shapes"].values() if "pattern" in shape]
+    assert not [p for p in patterns if regen_payment_cryptography_shapes.COMMERCIAL_REGION in p]
+    assert doc["shapes"]["Region"]["pattern"] == regen_payment_cryptography_shapes.EVERY_REGION
+    for name in ("KeyArn", "KeyArnOrKeyAliasType", "ResourceArn"):
+        assert regen_payment_cryptography_shapes.EVERY_REGION in doc["shapes"][name]["pattern"]
+
+
+def test_payment_cryptography_shapes_take_every_published_region_of_its_partition():
+    shapes = json.loads(regen_payment_cryptography_shapes.OUTPUT.read_text(encoding="utf-8"))["shapes"]
+    partitions = json.loads(
+        (regen_payment_cryptography_shapes.OUTPUT.parent / "partitions.json").read_text(encoding="utf-8"))["partitions"]
+    regions = [(partition["id"], region["id"]) for partition in partitions for region in partition["regions"]]
+
+    assert len(regions) >= 46
+    for partition, region in regions:
+        assert re.fullmatch(shapes["Region"]["pattern"], region), region
+        key = f"arn:{partition}:payment-cryptography:{region}:000000000000:key/0123456789abcdef"
+        alias = f"arn:{partition}:payment-cryptography:{region}:000000000000:alias/team/card-key"
+        assert re.fullmatch(shapes["KeyArn"]["pattern"], key), key
+        assert re.fullmatch(shapes["ResourceArn"]["pattern"], key), key
+        assert re.fullmatch(shapes["KeyArnOrKeyAliasType"]["pattern"], key), key
+        assert re.fullmatch(shapes["KeyArnOrKeyAliasType"]["pattern"], alias), alias
+
+
+@pytest.mark.parametrize("region", [
+    "us-gov", "us-gov-west-", "-gov-west-1", "u-gov-west-1", "europe-de-east-1", "US-GOV-WEST-1", "us_gov_west_1",
+])
+def test_payment_cryptography_shapes_refuse_what_is_not_a_region(region):
+    shapes = json.loads(regen_payment_cryptography_shapes.OUTPUT.read_text(encoding="utf-8"))["shapes"]
+
+    assert not re.fullmatch(shapes["Region"]["pattern"], region)
+    key = f"arn:aws:payment-cryptography:{region}:000000000000:key/0123456789abcdef"
+    for name in ("KeyArn", "KeyArnOrKeyAliasType", "ResourceArn"):
+        assert not re.fullmatch(shapes[name]["pattern"], key), name
 
 
 def test_payment_cryptography_shapes_take_the_key_an_arn_only_member_names():

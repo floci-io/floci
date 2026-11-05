@@ -96,6 +96,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -123,6 +124,7 @@ import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.ED25519
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_FINGERPRINT;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.RSA_KEY;
 import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.TRUNCATED_RSA_KEY;
+import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -141,6 +143,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
@@ -233,6 +236,58 @@ class Ec2ServiceTest {
         assertEquals(List.of(userTag), service.resourceTags("us-east-1", ids.getFirst()));
     }
 
+
+    @Test
+    void defaultSecurityGroupOfReturnsTheGroupNamedDefaultInThatVpc() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        service.createSecurityGroup(region, "web", "not the default", vpcId);
+        SecurityGroup expected = service.describeSecurityGroups(region, List.of(), List.of(),
+                Map.of("vpc-id", List.of(vpcId), "group-name", List.of("default"))).getFirst();
+
+        SecurityGroup found = service.defaultSecurityGroupOf(region, vpcId).orElseThrow();
+
+        assertEquals(expected.getGroupId(), found.getGroupId());
+        assertEquals(vpcId, found.getVpcId());
+        assertEquals("default", found.getGroupName());
+        assertNotEquals(service.defaultSecurityGroupOf(region, service.resolveDefaultVpcId(region))
+                .orElseThrow().getGroupId(), found.getGroupId());
+    }
+
+    @Test
+    void createNetworkInterfaceWithoutGroupsGetsItsVpcsDefaultGroup() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        Subnet subnet = service.createSubnet(region, vpcId, "10.94.1.0/24", region + "a");
+
+        NetworkInterface eni = service.createNetworkInterface(region, subnet.getSubnetId(), null, null,
+                List.of(), List.of(), List.of());
+
+        assertEquals(List.of(service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId()),
+                eni.getGroups().stream().map(GroupIdentifier::getGroupId).toList());
+    }
+
+    @Test
+    void defaultSecurityGroupOfIsEmptyOnceTheDefaultGroupIsGone() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        service.deleteSecurityGroup(region, service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
+
+        assertTrue(service.defaultSecurityGroupOf(region, vpcId).isEmpty());
+    }
+
+    @Test
+    void defaultSecurityGroupOfRejectsAnUnknownVpc() {
+        Ec2Service service = mockModeService();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.defaultSecurityGroupOf("us-east-1", "vpc-0123456789abcdef0"));
+
+        assertEquals("InvalidVpcID.NotFound", error.getErrorCode());
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
@@ -2547,6 +2602,65 @@ class Ec2ServiceTest {
                 .getFirst().getAssociationId(), "a failed gateway must not claim the allocation");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void deletingAnInterfaceSerializesWithAddressAssociation(boolean associateFirst) throws Exception {
+        ParkingStore<NetworkInterface> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<NetworkInterface> interfaceStore =
+                new AccountAwareStorageBackend<>(parking, null, "000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-network-interfaces.json", interfaceStore)));
+        String region = "us-east-1";
+        String subnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String interfaceId = service.createNetworkInterface(region, subnetId, null, null,
+                List.of(), List.of(), List.of()).getNetworkInterfaceId();
+        String allocationId = service.allocateAddress(region).getAllocationId();
+        Runnable associate = () -> service.associateAddress(region, allocationId, null, interfaceId, null);
+        Runnable delete = () -> service.deleteNetworkInterface(region, interfaceId);
+        AtomicReference<Thread> firstWorker = new AtomicReference<>();
+        AtomicReference<Thread> secondWorker = new AtomicReference<>();
+        parking.parkNextRead();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> first = workers.submit(() -> {
+                firstWorker.set(Thread.currentThread());
+                (associateFirst ? associate : delete).run();
+            });
+            assertTrue(parking.awaitParked(), "the first request never read the interface");
+            Future<?> second = workers.submit(() -> {
+                secondWorker.set(Thread.currentThread());
+                (associateFirst ? delete : associate).run();
+            });
+            String secondMethod = associateFirst ? "deleteNetworkInterface" : "associateAddress";
+            Awaitility.await().atMost(Duration.ofSeconds(10)).until(() -> second.isDone()
+                    || isBlockedIn(secondWorker.get(), secondMethod, firstWorker.get()));
+            parking.release();
+            first.get(10, TimeUnit.SECONDS);
+            if (associateFirst) {
+                second.get(10, TimeUnit.SECONDS);
+            } else {
+                ExecutionException refusal = assertThrows(ExecutionException.class,
+                        () -> second.get(10, TimeUnit.SECONDS));
+                AwsException missing = assertInstanceOf(AwsException.class, refusal.getCause());
+                assertEquals("InvalidNetworkInterfaceID.NotFound", missing.getErrorCode());
+                assertEquals(400, missing.getHttpStatus());
+            }
+            AwsException missing = assertThrows(AwsException.class,
+                    () -> service.describeNetworkInterfaces(region, List.of(interfaceId), Map.of()));
+            assertEquals("InvalidNetworkInterfaceID.NotFound", missing.getErrorCode());
+            Address address = service.describeAddresses(region, List.of(allocationId), Map.of()).getFirst();
+            assertNull(address.getAssociationId(), "the allocation must not remain associated with a deleted interface");
+            assertNull(address.getNetworkInterfaceId());
+            assertNull(address.getPrivateIpAddress());
+        } finally {
+            parking.release();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
     /** AssociateAddress refuses an allocation a NAT gateway holds; the gateway keeps it. */
     @Test
     void associateAddressRefusesANatGatewaysElasticIp() {
@@ -2568,6 +2682,278 @@ class Ec2ServiceTest {
         service.deleteNatGateway("us-east-1", nat.getNatGatewayId());
         assertNull(service.describeAddresses("us-east-1", List.of(allocationId), Map.of())
                 .getFirst().getAssociationId(), "delete must still release the gateway's Elastic IP");
+    }
+
+    /**
+     * A secondary-address update that read the gateway before a delete finished must not write it
+     * back: the delete runs while the update waits for the allocation lock, and another gateway
+     * takes the released primary Elastic IP meanwhile.
+     */
+    @Test
+    void aSecondaryAddressUpdateDoesNotBringBackAGatewayDeletedUnderIt() throws Exception {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String subnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String primary = service.allocateAddress(region).getAllocationId();
+        String secondary = service.allocateAddress(region).getAllocationId();
+        String added = service.allocateAddress(region).getAllocationId();
+        String natId = service.createNatGateway(region, subnetId, primary, "public", null, List.of(secondary),
+                List.of(), null, List.of()).getNatGatewayId();
+        Field lockField = Ec2Service.class.getDeclaredField("privateIpAllocationLock");
+        lockField.setAccessible(true);
+        Object lock = lockField.get(service);
+        AtomicReference<Thread> updater = new AtomicReference<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> updating;
+            String other;
+            synchronized (lock) {
+                updating = worker.submit(() -> {
+                    updater.set(Thread.currentThread());
+                    service.updateNatGatewaySecondaryAddresses(region, natId, List.of(added), List.of(), null);
+                });
+                awaitBlockedOrDone(updater, updating);
+                assertFalse(updating.isDone(), "the update must wait for the allocation lock");
+                service.deleteNatGateway(region, natId);
+                other = service.createNatGateway(region, subnetId, primary, "public", List.of()).getNatGatewayId();
+            }
+            ExecutionException e = assertThrows(ExecutionException.class, () -> updating.get(5, TimeUnit.SECONDS));
+            assertEquals("NatGatewayNotFound", ((AwsException) e.getCause()).getErrorCode());
+
+            assertTrue(service.describeNatGateways(region, List.of(), Map.of()).stream()
+                    .noneMatch(g -> natId.equals(g.getNatGatewayId())), "the deleted gateway stays deleted");
+            NatGateway taker = service.describeNatGateways(region, List.of(other), Map.of()).getFirst();
+            assertEquals(taker.getNatGatewayAddresses().getFirst().getAssociationId(),
+                    service.describeAddresses(region, List.of(primary), Map.of()).getFirst().getAssociationId(),
+                    "the primary Elastic IP stays with the gateway that took it");
+            for (String free : List.of(secondary, added)) {
+                assertNull(service.describeAddresses(region, List.of(free), Map.of()).getFirst().getAssociationId(),
+                        free + " is not held again");
+            }
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * A NAT gateway whose addresses run out part way gives back the lease it took on the VPC
+     * network. The subnet is a /28, eleven assignable addresses, and 31 more are asked for.
+     */
+    @Test
+    void aNatGatewayCreateThatRunsOutOfAddressesGivesBackTheLeaseItTook() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.60.0.0/28", "10.60.0.5");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> privateNatGateway(fixture.service(), fixture.subnetId(), "31"));
+        assertEquals("InsufficientFreeAddressesInSubnet", e.getErrorCode());
+        verify(fixture.vpcNetworks()).releasePrivateIp("us-east-1", fixture.subnetId(), "10.60.0.5");
+        assertTrue(fixture.service().describeNatGateways("us-east-1", List.of(), Map.of()).isEmpty());
+    }
+
+    /** The same on a secondary-address update, which also leaves the gateway as it was. */
+    @Test
+    void aNatGatewayUpdateThatRunsOutOfAddressesGivesBackTheLeaseItTook() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.60.0.0/28", "10.60.0.6", "10.60.0.7");
+        NatGateway nat = privateNatGateway(fixture.service(), fixture.subnetId(), null);
+        assertEquals("10.60.0.6", nat.getNatGatewayAddresses().getFirst().getPrivateIp());
+
+        AwsException e = assertThrows(AwsException.class, () -> fixture.service().updateNatGatewaySecondaryAddresses(
+                "us-east-1", nat.getNatGatewayId(), List.of(), List.of(), "31"));
+        assertEquals("InsufficientFreeAddressesInSubnet", e.getErrorCode());
+        verify(fixture.vpcNetworks()).releasePrivateIp("us-east-1", fixture.subnetId(), "10.60.0.7");
+        assertEquals(List.of("10.60.0.6"), natGatewayPrivateIps(fixture.service().describeNatGateways("us-east-1",
+                List.of(nat.getNatGatewayId()), Map.of()).getFirst()), "the gateway keeps only its primary address");
+    }
+
+    /** DeleteNatGateway gives back the lease of every address the subnet picked, primary and secondary. */
+    @Test
+    void deletingANatGatewayGivesBackTheLeasesOfItsAddresses() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.60.0.0/28", "10.60.0.6", "10.60.0.7");
+        String natId = privateNatGateway(fixture.service(), fixture.subnetId(), "1").getNatGatewayId();
+        assertEquals(List.of(), fixture.released());
+
+        fixture.service().deleteNatGateway("us-east-1", natId);
+
+        assertEquals(List.of("10.60.0.6", "10.60.0.7"), fixture.released());
+    }
+
+    /**
+     * The same against the real allocator, which sweeps forward and comes back for a given-back
+     * address only once it has walked the whole range. A /28 has five addresses to hand out, .10 to
+     * .14, and the gateway takes all of them. The launch in between finds the network dry and gets
+     * a synthesised address, which moves the fallback past .10, so the launch after the delete gets
+     * .10 only if the network offers it again.
+     */
+    @Test
+    void anAddressADeletedNatGatewayHeldIsHandedOutAgainOnceTheWalkWrapsAround() {
+        Ec2Service service = realVpcNetworkService(new RequestContext());
+        String subnetId = privateSubnet(service, "us-east-1", "10.60.0.0/28");
+        NatGateway nat = privateNatGateway(service, subnetId, "4");
+        assertEquals(List.of("10.60.0.10", "10.60.0.11", "10.60.0.12", "10.60.0.13", "10.60.0.14"),
+                natGatewayPrivateIps(nat));
+        assertEquals(List.of("10.60.0.4"), launchAddresses(service, subnetId, 1));
+
+        service.deleteNatGateway("us-east-1", nat.getNatGatewayId());
+
+        assertEquals(List.of("10.60.0.10"), launchAddresses(service, subnetId, 1));
+    }
+
+    /** A secondary an update drops gives back its lease; the addresses the gateway keeps do not. */
+    @Test
+    void aSecondaryAddressAnUpdateDropsGivesBackItsLease() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.60.0.0/28", "10.60.0.6", "10.60.0.7", "10.60.0.8");
+        String natId = privateNatGateway(fixture.service(), fixture.subnetId(), "2").getNatGatewayId();
+
+        NatGateway updated = fixture.service().updateNatGatewaySecondaryAddresses("us-east-1", natId, List.of(),
+                List.of(), "1");
+
+        assertEquals(List.of("10.60.0.6", "10.60.0.8"), natGatewayPrivateIps(updated));
+        assertEquals(List.of("10.60.0.7"), fixture.released());
+    }
+
+    /**
+     * A secondary moved to another Elastic IP is dropped and built again, and when the new slot names
+     * the same address the gateway still holds it, so its lease stays.
+     */
+    @Test
+    void aDroppedSecondaryAddressTheSameUpdateNamesAgainKeepsItsLease() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.60.0.0/28", "10.60.0.6", "10.60.0.7");
+        String primary = fixture.service().allocateAddress("us-east-1").getAllocationId();
+        String first = fixture.service().allocateAddress("us-east-1").getAllocationId();
+        String second = fixture.service().allocateAddress("us-east-1").getAllocationId();
+        String natId = fixture.service().createNatGateway("us-east-1", fixture.subnetId(), primary, "public", null,
+                List.of(first), List.of(), null, List.of()).getNatGatewayId();
+
+        NatGateway updated = fixture.service().updateNatGatewaySecondaryAddresses("us-east-1", natId,
+                List.of(second), List.of("10.60.0.7"), null);
+
+        NatGatewayAddress secondary = updated.getNatGatewayAddresses().get(1);
+        assertEquals(Map.entry(second, "10.60.0.7"), Map.entry(secondary.getAllocationId(), secondary.getPrivateIp()));
+        assertEquals(List.of(), fixture.released());
+    }
+
+    /**
+     * A tag write that read the gateway before a delete can store it back marked deleted. The delete
+     * already gave its addresses back, and the network may have leased them to something else since,
+     * so deleting that record again gives nothing back.
+     */
+    @Test
+    void deletingAGatewayStoredAsDeletedDoesNotGiveItsLeasesBackAgain() {
+        AccountAwareStorageBackend<NatGateway> natGatewayStore = AccountAwareStorageBackend.inMemory("000000000000");
+        MockedNetworkFixture fixture = mockedNetworkFixture(Map.of("ec2-nat-gateways.json", natGatewayStore),
+                "10.60.0.0/28", "10.60.0.6");
+        String natId = privateNatGateway(fixture.service(), fixture.subnetId(), null).getNatGatewayId();
+        NatGateway deleted = fixture.service().deleteNatGateway("us-east-1", natId);
+        natGatewayStore.putForAccount("000000000000", "us-east-1::" + natId, deleted);
+
+        fixture.service().deleteNatGateway("us-east-1", natId);
+
+        assertEquals(List.of("10.60.0.6"), fixture.released());
+    }
+
+    /**
+     * A subnet of {@code cidr} in mock mode, over a mocked VPC network that picks {@code picked} in
+     * order and then runs dry, and that reports no Docker-backed range until told to.
+     */
+    private static MockedNetworkFixture mockedNetworkFixture(String cidr, String... picked) {
+        return mockedNetworkFixture(Map.of(), cidr, picked);
+    }
+
+    /** {@link #mockedNetworkFixture(String, String...)}, with {@code stores} in place of the stores they name. */
+    private static MockedNetworkFixture mockedNetworkFixture(Map<String, AccountAwareStorageBackend<?>> stores,
+                                                             String cidr, String... picked) {
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(stores, vpcNetworks);
+        String subnetId = privateSubnet(service, "us-east-1", cidr);
+        Iterator<String> next = List.of(picked).iterator();
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenAnswer(invocation -> next.hasNext() ? Optional.of(next.next()) : Optional.empty());
+        return new MockedNetworkFixture(vpcNetworks, service, subnetId, cidr);
+    }
+
+    private record MockedNetworkFixture(VpcNetworkManager vpcNetworks, Ec2Service service, String subnetId,
+                                        String cidr) {
+
+        /** Has the network report the whole subnet as its Docker-backed range, where addresses are leased. */
+        MockedNetworkFixture withDockerBackedRange() {
+            when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of(cidr));
+            return this;
+        }
+
+        /** Every address whose lease was given back to the VPC network, in the order it was. */
+        List<String> released() {
+            ArgumentCaptor<String> addresses = ArgumentCaptor.forClass(String.class);
+            verify(vpcNetworks, atLeast(0)).releasePrivateIp(eq("us-east-1"), eq(subnetId), addresses.capture());
+            return addresses.getAllValues();
+        }
+    }
+
+    /** A private NAT gateway with {@code secondaryCount} more addresses the subnet picks, or none when null. */
+    private static NatGateway privateNatGateway(Ec2Service service, String subnetId, String secondaryCount) {
+        return service.createNatGateway("us-east-1", subnetId, null, "private", null, List.of(), List.of(),
+                secondaryCount, List.of());
+    }
+
+    private static List<String> natGatewayPrivateIps(NatGateway natGateway) {
+        return natGateway.getNatGatewayAddresses().stream().map(NatGatewayAddress::getPrivateIp).toList();
+    }
+
+    /**
+     * CreateTags writes a NAT gateway back under the gateway's tag lock, which DeleteNatGateway
+     * does not take, so a tag write that read the gateway before a delete stores the record the
+     * delete marked deleted. A secondary-address update must refuse that record rather than hold
+     * Elastic IPs for it.
+     */
+    @Test
+    void aSecondaryAddressUpdateRefusesAGatewayStoredAsDeleted() throws Exception {
+        CountDownLatch putReached = new CountDownLatch(1);
+        CountDownLatch deleteDone = new CountDownLatch(1);
+        AtomicReference<Boolean> pausePut = new AtomicReference<>(false);
+        InMemoryStorage<String, NatGateway> rawGateways = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, NatGateway value) {
+                if (pausePut.getAndSet(false)) {
+                    putReached.countDown();
+                    try {
+                        assertTrue(deleteDone.await(5, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                super.put(key, value);
+            }
+        };
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-nat-gateways.json",
+                        new AccountAwareStorageBackend<>(rawGateways, null, "000000000000"))));
+        String region = "us-east-1";
+        String subnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String primary = service.allocateAddress(region).getAllocationId();
+        String added = service.allocateAddress(region).getAllocationId();
+        String natId = service.createNatGateway(region, subnetId, primary, "public", List.of()).getNatGatewayId();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            pausePut.set(true);
+            Future<?> tagging = worker.submit(() -> service.createTags(region, List.of(natId),
+                    List.of(new Tag("k", "v"))));
+            assertTrue(putReached.await(5, TimeUnit.SECONDS), "the tag write reaches its put");
+            service.deleteNatGateway(region, natId);
+            deleteDone.countDown();
+            tagging.get(5, TimeUnit.SECONDS);
+            assertEquals("deleted", rawGateways.scan(k -> true).getFirst().getState(),
+                    "the tag write stored the deleted gateway");
+
+            AwsException e = assertThrows(AwsException.class, () -> service.updateNatGatewaySecondaryAddresses(
+                    region, natId, List.of(added), List.of(), null));
+            assertEquals("NatGatewayNotFound", e.getErrorCode());
+            assertNull(service.describeAddresses(region, List.of(added), Map.of()).getFirst().getAssociationId(),
+                    "the requested Elastic IP is not held for the deleted gateway");
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     /**
@@ -4380,18 +4766,15 @@ class Ec2ServiceTest {
 
     @Test
     void aRequestedPrivateIpIsLeasedOnTheVpcNetworkInsteadOfTheNextFreeAddress() {
-        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
-        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
-        String subnetId = privateIpSubnet(service);
-        when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.0/24"));
-        when(vpcNetworks.claimPrivateIp("us-east-1", subnetId, "10.50.1.50")).thenReturn(true);
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24").withDockerBackedRange();
+        when(fixture.vpcNetworks().claimPrivateIp("us-east-1", fixture.subnetId(), "10.50.1.50")).thenReturn(true);
 
-        assertEquals("10.50.1.50", launchWithPrivateIp(service, subnetId, 1, "10.50.1.50")
+        assertEquals("10.50.1.50", launchWithPrivateIp(fixture.service(), fixture.subnetId(), 1, "10.50.1.50")
                 .getInstances().getFirst().getPrivateIpAddress());
 
-        verify(vpcNetworks).claimPrivateIp("us-east-1", subnetId, "10.50.1.50");
-        verify(vpcNetworks, never()).reservePrivateIp(anyString(), anyString(), anyString());
-        verify(vpcNetworks, never()).allocatePrivateIp(anyString(), anyString());
+        verify(fixture.vpcNetworks()).claimPrivateIp("us-east-1", fixture.subnetId(), "10.50.1.50");
+        verify(fixture.vpcNetworks(), never()).reservePrivateIp(anyString(), anyString(), anyString());
+        verify(fixture.vpcNetworks(), never()).allocatePrivateIp(anyString(), anyString());
     }
 
     @Test
@@ -4532,18 +4915,16 @@ class Ec2ServiceTest {
 
     @Test
     void aDryRunWithARequestedPrivateIpLeasesNothing() {
-        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
-        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
-        String subnetId = privateIpSubnet(service);
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24");
 
         AwsException dryRun = assertThrows(AwsException.class,
-                () -> service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, 1, null,
-                        List.of(), subnetId, null, List.of(), null, null, null, null, 0, null, null, null, null,
-                        true, null, null, null, false, "10.50.1.50"));
+                () -> fixture.service().runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 1, 1,
+                        null, List.of(), fixture.subnetId(), null, List.of(), null, null, null, null, 0, null, null,
+                        null, null, true, null, null, null, false, "10.50.1.50"));
 
         assertEquals("DryRunOperation", dryRun.getErrorCode());
-        verify(vpcNetworks, never()).claimPrivateIp(anyString(), anyString(), anyString());
-        assertTrue(instancesIn(service, subnetId).isEmpty());
+        verify(fixture.vpcNetworks(), never()).claimPrivateIp(anyString(), anyString(), anyString());
+        assertTrue(instancesIn(fixture.service(), fixture.subnetId()).isEmpty());
     }
 
     @Test
@@ -4561,22 +4942,17 @@ class Ec2ServiceTest {
 
     @Test
     void aNatGatewaysRequestedPrivateIpTakesNoLeaseAndIsStillNotHandedOut() {
-        // DeleteNatGateway returns no lease, so one taken for the gateway's PrivateIpAddress would
-        // keep the address from the network's allocator after the gateway is gone. The walk steps
-        // around it while the stored gateway holds it.
-        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
-        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
-        String subnetId = privateIpSubnet(service);
-        when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.0/24"));
+        // A NAT gateway has no container to hold its PrivateIpAddress on the network, so it takes no
+        // lease for it. The walk steps around it while the stored gateway holds it.
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.10", "10.50.1.11")
+                .withDockerBackedRange();
 
-        assertEquals("10.50.1.10", service.createNatGateway("us-east-1", subnetId, null, "private",
-                "10.50.1.10", List.of()).getNatGatewayAddresses().getFirst().getPrivateIp());
-        verify(vpcNetworks, never()).claimPrivateIp(anyString(), anyString(), anyString());
-        verify(vpcNetworks, never()).reservePrivateIp(anyString(), anyString(), anyString());
+        assertEquals("10.50.1.10", fixture.service().createNatGateway("us-east-1", fixture.subnetId(), null,
+                "private", "10.50.1.10", List.of()).getNatGatewayAddresses().getFirst().getPrivateIp());
+        verify(fixture.vpcNetworks(), never()).claimPrivateIp(anyString(), anyString(), anyString());
+        verify(fixture.vpcNetworks(), never()).reservePrivateIp(anyString(), anyString(), anyString());
 
-        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
-                .thenReturn(Optional.of("10.50.1.10"), Optional.of("10.50.1.11"), Optional.empty());
-        assertEquals(List.of("10.50.1.11"), launchAddresses(service, subnetId, 1));
+        assertEquals(List.of("10.50.1.11"), launchAddresses(fixture.service(), fixture.subnetId(), 1));
     }
 
     @Test
@@ -4598,33 +4974,26 @@ class Ec2ServiceTest {
 
     @Test
     void anAddressTheWalkSkipsIsGivenBackToTheVpcNetwork() {
-        // Its holder took no lease, and deleting an interface or NAT gateway returns none, so a
-        // lease the walk kept would outlive the holder.
-        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
-        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
-        String subnetId = privateIpSubnet(service);
-        service.createNetworkInterface("us-east-1", subnetId, "holder", "10.50.1.10",
+        // Its holder took no lease, and deleting an interface returns none, so a lease the walk
+        // kept would outlive the holder.
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.10", "10.50.1.11");
+        fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), "holder", "10.50.1.10",
                 List.of(), List.of(), List.of());
-        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
-                .thenReturn(Optional.of("10.50.1.10"), Optional.of("10.50.1.11"), Optional.empty());
 
-        assertEquals(List.of("10.50.1.11"), launchAddresses(service, subnetId, 1));
-        verify(vpcNetworks).releasePrivateIp("us-east-1", subnetId, "10.50.1.10");
-        verify(vpcNetworks, never()).releasePrivateIp("us-east-1", subnetId, "10.50.1.11");
+        assertEquals(List.of("10.50.1.11"), launchAddresses(fixture.service(), fixture.subnetId(), 1));
+        assertEquals(List.of("10.50.1.10"), fixture.released());
     }
 
     @Test
     void anInterfaceRefusedForAHeldSecondaryLeasesNoPrimaryOnTheVpcNetwork() {
-        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
-        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
-        String subnetId = privateIpSubnet(service);
-        service.createNetworkInterface("us-east-1", subnetId, "holder", "10.50.1.70",
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.10");
+        fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), "holder", "10.50.1.70",
                 List.of(), List.of(), List.of());
-        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.10"));
 
-        assertEquals("InvalidIPAddress.InUse", assertThrows(AwsException.class, () -> service.createNetworkInterface(
-                "us-east-1", subnetId, "clash", null, List.of("10.50.1.70"), List.of(), List.of())).getErrorCode());
-        verify(vpcNetworks, never()).allocatePrivateIp(anyString(), anyString());
+        assertEquals("InvalidIPAddress.InUse", assertThrows(AwsException.class, () -> fixture.service()
+                .createNetworkInterface("us-east-1", fixture.subnetId(), "clash", null, List.of("10.50.1.70"),
+                        List.of(), List.of())).getErrorCode());
+        verify(fixture.vpcNetworks(), never()).allocatePrivateIp(anyString(), anyString());
     }
 
     @Test
@@ -4652,15 +5021,12 @@ class Ec2ServiceTest {
     void anAutoAssignedPrimaryEqualToARequestedSecondaryIsListedOnceAsPrimary() {
         // The secondary is free and not stored yet, so the network may hand the same address out
         // as the primary; the interface must not then list it a second time as a secondary.
-        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
-        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
-        String subnetId = privateIpSubnet(service);
-        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.10"));
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.10");
 
-        String eniId = service.createNetworkInterface("us-east-1", subnetId, "overlap", null,
+        String eniId = fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), "overlap", null,
                 List.of("10.50.1.10"), List.of(), List.of()).getNetworkInterfaceId();
 
-        NetworkInterface stored = service.describeNetworkInterfaces("us-east-1", List.of(eniId), Map.of())
+        NetworkInterface stored = fixture.service().describeNetworkInterfaces("us-east-1", List.of(eniId), Map.of())
                 .networkInterfaces().getFirst();
         assertEquals("10.50.1.10", stored.getPrivateIpAddress());
         assertEquals(List.of(Map.entry("10.50.1.10", true)), stored.getPrivateIpAddresses().stream()
@@ -4693,16 +5059,12 @@ class Ec2ServiceTest {
         // back. A launch that names the address in between finds nothing holding it and keeps it
         // although the lease is refused, and the late release then leaves the network offering an
         // address that launch's instance holds.
-        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
-        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
-        String subnetId = privateIpSubnet(service);
-        when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.0/24"));
-        when(vpcNetworks.claimPrivateIp("us-east-1", subnetId, "10.50.1.50")).thenReturn(false);
-        launchWithPrivateIp(service, subnetId, 1, "10.50.1.50");
-        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
-                .thenReturn(Optional.of("10.50.1.50"), Optional.of("10.50.1.51"), Optional.empty());
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.50", "10.50.1.51")
+                .withDockerBackedRange();
+        when(fixture.vpcNetworks().claimPrivateIp("us-east-1", fixture.subnetId(), "10.50.1.50")).thenReturn(false);
+        launchWithPrivateIp(fixture.service(), fixture.subnetId(), 1, "10.50.1.50");
 
-        assertEquals(List.of("10.50.1.51"), launchAddresses(service, subnetId, 1));
+        assertEquals(List.of("10.50.1.51"), launchAddresses(fixture.service(), fixture.subnetId(), 1));
     }
 
     private static String privateIpSubnet(Ec2Service service) {
@@ -4785,12 +5147,10 @@ class Ec2ServiceTest {
                 contexts, new VpcNetworkManager(config, docker, null), null, null, null);
     }
 
-    /** Ec2Service in mock mode over {@code vpcNetworks}, called as the default account. */
-    private static Ec2Service mockedVpcNetworkService(VpcNetworkManager vpcNetworks) {
-        return mockedVpcNetworkService(Map.of(), vpcNetworks);
-    }
-
-    /** {@link #mockedVpcNetworkService(VpcNetworkManager)}, with {@code stores} in place of the stores they name. */
+    /**
+     * Ec2Service in mock mode over {@code vpcNetworks}, called as the default account, with
+     * {@code stores} in place of the stores they name.
+     */
     private static Ec2Service mockedVpcNetworkService(Map<String, AccountAwareStorageBackend<?>> stores,
                                                       VpcNetworkManager vpcNetworks) {
         return mockedVpcNetworkService(new RequestContext(), stores, vpcNetworks);
@@ -6666,6 +7026,35 @@ class Ec2ServiceTest {
         service.revokeSecurityGroupIngress("us-east-1", groupId, List.of(cidrPermission("6", 22, 22)));
         assertTrue(service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
                 .getFirst().getIpPermissions().isEmpty(), "protocol 6 is tcp");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void revokingAStoredPermissionKeepsLaterSources(boolean egress, boolean repeatedRemoval) {
+        Ec2Service service = sgService();
+        String groupId = service.createSecurityGroup("us-east-1", "web", "web", null).getGroupId();
+        IpPermission retired = basePermission();
+        retired.getIpRanges().add(new IpRange("192.0.2.1/32", null));
+        IpPermission current = basePermission();
+        current.getIpRanges().add(new IpRange("192.0.2.2/32", null));
+        IpPermission otherOwner = basePermission();
+        otherOwner.getIpRanges().add(new IpRange("192.0.2.3/32", null));
+        List<IpPermission> permissions = List.of(retired, current, otherOwner);
+        List<IpPermission> removals = repeatedRemoval ? List.of(retired, retired) : List.of(retired);
+        if (egress) {
+            service.revokeSecurityGroupEgress("us-east-1", groupId, List.of(cidrPermission("-1", 0, 0)));
+            service.authorizeSecurityGroupEgress("us-east-1", groupId, permissions);
+            service.revokeSecurityGroupEgress("us-east-1", groupId, removals);
+        } else {
+            service.authorizeSecurityGroupIngress("us-east-1", groupId, permissions);
+            service.revokeSecurityGroupIngress("us-east-1", groupId, removals);
+        }
+        SecurityGroup group = service.describeSecurityGroups("us-east-1", List.of(groupId), List.of(), Map.of())
+                .getFirst();
+        List<IpPermission> remaining = egress ? group.getIpPermissionsEgress() : group.getIpPermissions();
+        assertEquals(List.of("192.0.2.2/32", "192.0.2.3/32"),
+                remaining.stream().flatMap(permission -> permission.getIpRanges().stream())
+                        .map(IpRange::getCidrIp).toList());
     }
 
     /** Ingress only: createSecurityGroup seeds a default allow-all egress rule. */

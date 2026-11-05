@@ -5,8 +5,6 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
@@ -277,11 +275,6 @@ public final class SshPublicKeys {
 
     /** MD5 of the given bytes as colon-delimited lowercase hex. */
     public static String md5ColonHex(byte[] bytes) {
-        try {
-            return HexFormat.of().withDelimiter(":")
-                    .formatHex(MessageDigest.getInstance("MD5").digest(bytes));
-        } catch (NoSuchAlgorithmException e) {
-            throw new SshPublicKeyException("MD5 is unavailable", e);
-        }
+        return HexFormat.of().withDelimiter(":").formatHex(Digests.md5(bytes));
     }
 }

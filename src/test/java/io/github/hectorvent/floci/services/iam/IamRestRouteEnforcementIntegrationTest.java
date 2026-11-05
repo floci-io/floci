@@ -264,6 +264,30 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
+    void controlTowerTaggingIsChecked() {
+        // Control Tower requests name their resources in the path, and its routes are not vendored, so the request
+        // resources read none of them and its tagging is checked on *.
+        String user = user("route-controltower-tags");
+        String landingZone = "arn:aws:controltower:us-east-1:" + ACCOUNT + ":landingzone/ROUTE" + suffix();
+
+        refused(as(user, "controltower").get("/tags/" + landingZone).then(), "controltower:ListTagsForResource");
+        refused(as(user, "controltower").body("{\"tags\":{\"team\":\"a\"}}").post("/tags/" + landingZone).then(),
+                "controltower:TagResource");
+        refused(as(user, "controltower").queryParam("tagKeys", "team").delete("/tags/" + landingZone).then(),
+                "controltower:UntagResource");
+        // The shared controller also serves the bare /tags path, naming the ARN in the query or the body.
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).get("/tags").then(),
+                "controltower:ListTagsForResource");
+        refused(as(user, "controltower").body("{\"resourceArn\":\"" + landingZone + "\",\"tags\":{\"team\":\"a\"}}")
+                .post("/tags").then(), "controltower:TagResource");
+        refused(as(user, "controltower").queryParam("resourceArn", landingZone).queryParam("tagKeys", "team")
+                .delete("/tags").then(), "controltower:UntagResource");
+
+        policy(user, allow("controltower:ListTagsForResource", "*"));
+        as(user, "controltower").get("/tags/" + landingZone).then().statusCode(not(403));
+    }
+
+    @Test
     void aTrailingSlashDoesNotLetARouteThroughUnchecked() {
         // The router matches /clusters/ as /clusters, so the request is checked as the route it reaches.
         String user = user("route-trailing-slash");
@@ -468,6 +492,114 @@ class IamRestRouteEnforcementIntegrationTest {
         admin().get("/2017-03-31/tags/" + image).then().statusCode(200).body("Tags.size()", equalTo(0));
     }
 
+    /**
+     * A route no rule maps is checked as the operation of its vendored route when AWS authorizes that operation's
+     * action on no resource type, in both OpenSearch API versions and for Access Analyzer.
+     */
+    @Test
+    void aVendoredRouteIsCheckedWhenAwsAuthorizesItsActionOnNoResourceType() {
+        String user = user("route-vendored");
+
+        policy(user, allow("es:ListVpcEndpoints", "*"));
+        refused(as(user, "es").get("/2021-01-01/domain").then(), "es:ListDomainNames");
+        refused(as(user, "es").get("/2015-01-01/domain").then(), "es:ListDomainNames");
+        refused(as(user, "es").get("/2021-01-01/opensearch/versions").then(), "es:ListVersions");
+        refused(as(user, "access-analyzer").get("/analyzer").then(), "access-analyzer:ListAnalyzers");
+
+        policy(user, allow("es:ListDomainNames", "*"));
+        as(user, "es").get("/2021-01-01/domain").then().statusCode(200);
+        as(user, "es").get("/2015-01-01/domain").then().statusCode(200);
+    }
+
+    /**
+     * An OpenSearch request naming its domain in its path, or its ARN in its query, is checked on that domain, in
+     * both API versions: a grant scoped to the domain lets the request reach OpenSearch, which has no such domain, a
+     * request naming another domain is refused, and a deny on the domain holds under an allow on everything. A domain
+     * a request's body gives where OpenSearch reads it from the query names nothing: {@code GetCompatibleVersions}
+     * with the domain in its body alone, which OpenSearch answers with every version, is checked on {@code *}.
+     */
+    @Test
+    void anOpenSearchRequestIsCheckedOnTheDomainItsPathOrQueryNames() {
+        String user = user("route-domain");
+        String domain = "route-domain-" + suffix();
+        String arn = "arn:aws:es:us-east-1:" + ACCOUNT + ":domain/" + domain;
+        policy(user, allow("es:DescribeDomain", arn) + "," + allow("es:DescribeElasticsearchDomain", arn) + ","
+                + allow("es:ListTags", arn) + "," + allow("es:GetCompatibleVersions", arn));
+        as(user, "es").queryParam("domainName", domain).get("/2021-01-01/opensearch/compatibleVersions").then()
+                .statusCode(409);
+        refused(as(user, "es").body("{\"DomainName\":\"" + domain + "\"}").get("/2021-01-01/opensearch/compatibleVersions")
+                .then(), "es:GetCompatibleVersions");
+        as(user, "es").get("/2021-01-01/opensearch/domain/" + domain).then().statusCode(409);
+        as(user, "es").get("/2015-01-01/es/domain/" + domain).then().statusCode(409);
+        as(user, "es").queryParam("arn", arn).get("/2021-01-01/tags/").then().statusCode(not(403));
+        refused(as(user, "es").get("/2021-01-01/opensearch/domain/other-" + domain).then(), "es:DescribeDomain");
+        refused(as(user, "es").get("/2015-01-01/es/domain/other-" + domain).then(), "es:DescribeElasticsearchDomain");
+        refused(as(user, "es").queryParam("arn", arn + "-other").get("/2021-01-01/tags/").then(), "es:ListTags");
+
+        policy(user, allow("es:*", "*") + "," + deny("es:DescribeDomain", arn));
+        refused(as(user, "es").get("/2021-01-01/opensearch/domain/" + domain).then(), "es:DescribeDomain");
+        as(user, "es").get("/2021-01-01/opensearch/domain/other-" + domain).then().statusCode(409);
+    }
+
+    /**
+     * An Access Analyzer request naming its analyzer, in its path or its body, is checked on that analyzer, the ARN
+     * Access Analyzer gives it: a caller with no grant is refused, a grant scoped to the analyzer lets
+     * {@code GetAnalyzer} read it and {@code CreateAnalyzer} reach its validation of the type, a request naming
+     * another analyzer is refused, a deny on the analyzer holds under an allow on everything, and that allow lets
+     * {@code DeleteAnalyzer} delete it.
+     */
+    @Test
+    void anAccessAnalyzerRequestIsCheckedOnTheAnalyzerItsPathOrBodyNames() {
+        String user = user("route-analyzer");
+        String analyzer = "route-analyzer-" + suffix();
+        String arn = "arn:aws:access-analyzer:us-east-1:" + ACCOUNT + ":analyzer/" + analyzer;
+        refused(as(user, "access-analyzer").get("/analyzer/" + analyzer).then(), "access-analyzer:GetAnalyzer");
+        accessAnalyzer().body("{\"analyzerName\":\"" + analyzer + "\",\"type\":\"ORGANIZATION\"}").put("/analyzer")
+                .then().statusCode(200).body("arn", equalTo(arn));
+        cleanup.register(() -> accessAnalyzer().delete("/analyzer/" + analyzer));
+
+        policy(user, allow("access-analyzer:GetAnalyzer", arn) + "," + allow("access-analyzer:DeleteAnalyzer", arn)
+                + "," + allow("access-analyzer:CreateAnalyzer", arn));
+        as(user, "access-analyzer").get("/analyzer/" + analyzer).then().statusCode(200)
+                .body("analyzer.arn", equalTo(arn));
+        as(user, "access-analyzer").body(createAnalyzer(analyzer)).put("/analyzer").then().statusCode(400)
+                .body(containsString("ValidationException"));
+        refused(as(user, "access-analyzer").get("/analyzer/other-" + analyzer).then(), "access-analyzer:GetAnalyzer");
+        refused(as(user, "access-analyzer").delete("/analyzer/other-" + analyzer).then(),
+                "access-analyzer:DeleteAnalyzer");
+        refused(as(user, "access-analyzer").body(createAnalyzer("other-" + analyzer)).put("/analyzer").then(),
+                "access-analyzer:CreateAnalyzer");
+
+        policy(user, allow("access-analyzer:*", "*") + "," + deny("access-analyzer:GetAnalyzer", arn));
+        refused(as(user, "access-analyzer").get("/analyzer/" + analyzer).then(), "access-analyzer:GetAnalyzer");
+        as(user, "access-analyzer").get("/analyzer/other-" + analyzer).then().statusCode(404);
+        as(user, "access-analyzer").delete("/analyzer/" + analyzer).then().statusCode(200);
+    }
+
+    /**
+     * A segment ending in a matrix parameter, which the router ignores, is checked as the route it reaches, on the
+     * resource its path names: the routed path carries no matrix parameter, so the rule matches and the ARN is the
+     * named resource's, and a grant scoped to it lets the request through while a caller with none is refused.
+     */
+    @Test
+    void aMatrixParameterLeavesARouteCheckedOnTheResourceItNames() {
+        String scheduler = user("route-matrix-scheduler");
+        String lambda = user("route-matrix-lambda");
+        String nobody = user("route-matrix-nobody");
+        policy(scheduler, allow("scheduler:GetScheduleGroup",
+                "arn:aws:scheduler:us-east-1:" + ACCOUNT + ":schedule-group/default"));
+        policy(lambda, allow("lambda:GetFunction", "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:route-matrix-fn"));
+        for (String path : new String[]{"/schedule-groups;ignored=yes/default", "/schedule-groups/default;ignored=yes"}) {
+            as(scheduler, "scheduler").urlEncodingEnabled(false).get(path).then().statusCode(200);
+            refused(as(nobody, "scheduler").urlEncodingEnabled(false).get(path).then(), "scheduler:GetScheduleGroup");
+        }
+        for (String path : new String[]{"/2015-03-31/functions;ignored=yes/route-matrix-fn",
+                "/2015-03-31/functions/route-matrix-fn;ignored=yes"}) {
+            as(lambda, "lambda").urlEncodingEnabled(false).get(path).then().statusCode(404);
+            refused(as(nobody, "lambda").urlEncodingEnabled(false).get(path).then(), "lambda:GetFunction");
+        }
+    }
+
     /** Creates a MicroVM image as the account's admin, removed afterwards, and returns its ARN. */
     private String microvmImage(String name) {
         admin().body("""
@@ -476,6 +608,16 @@ class IamRestRouteEnforcementIntegrationTest {
                 .formatted(name, ACCOUNT)).post("/2025-09-09/microvm-images").then().statusCode(201);
         cleanup.register(() -> admin().delete("/2025-09-09/microvm-images/" + name));
         return "arn:aws:lambda:us-east-1:" + ACCOUNT + ":microvm-image:" + name;
+    }
+
+    /** A {@code CreateAnalyzer} body of a type Access Analyzer refuses, so a request let through creates nothing. */
+    private static String createAnalyzer(String analyzer) {
+        return "{\"analyzerName\":\"" + analyzer + "\",\"type\":\"NONE\"}";
+    }
+
+    /** An Access Analyzer request as the account's admin. */
+    private static RequestSpecification accessAnalyzer() {
+        return given().header("Authorization", auth(ADMIN, "access-analyzer")).contentType("application/json");
     }
 
     private static RequestSpecification admin() {

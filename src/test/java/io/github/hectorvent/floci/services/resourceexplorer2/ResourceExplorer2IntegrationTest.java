@@ -47,6 +47,7 @@ class ResourceExplorer2IntegrationTest {
     private static final String BOUNDED_SCOPE = "service:s3,dynamodb";
 
     private static boolean fixturesProvisioned = false;
+    private static String fixtureTableArn;
 
     private record IndexRef(String auth, String arn) {}
 
@@ -103,7 +104,7 @@ class ResourceExplorer2IntegrationTest {
             .statusCode(200);
 
         // Create DynamoDB table with tags used by ListResources, DataProvenance, and FilterSemantics groups
-        given()
+        fixtureTableArn = given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
             .contentType(DYNAMO_TYPE)
             .body("""
@@ -119,7 +120,8 @@ class ResourceExplorer2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("TableDescription.TableName", equalTo("re2-test-table"));
+            .body("TableDescription.TableName", equalTo("re2-test-table"))
+            .extract().path("TableDescription.TableArn");
 
         // Lambda function (Resource Explorer 2 provider coverage)
         given()
@@ -986,17 +988,12 @@ class ResourceExplorer2IntegrationTest {
 
         @Test
         void propertiesPopulatedWhenViewIncludesTags() {
-            // Target the known-tagged fixture table by ARN. A positional Resources[0] is
-            // unsafe: the full test suite shares one emulator instance, so other classes'
-            // untagged DynamoDB tables land in this same service:dynamodb result set and any
-            // of them may sort ahead of the tagged fixture.
+            // Filter before pagination so unrelated tables cannot push the fixture off the first page.
             String table = "Resources.find { it.Arn.contains('re2-test-table') }";
             given()
                 .header("Authorization", AUTH)
                 .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:dynamodb"}}
-                    """)
+                .body(Map.of("Filters", Map.of("FilterString", "id:" + fixtureTableArn)))
             .when()
                 .post("/ListResources")
             .then()

@@ -20,6 +20,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
@@ -97,7 +98,7 @@ class EksTokenValidator {
                     + parameters.get("X-Amz-Date") + "\n"
                     + scope.value() + "\n"
                     + Digests.sha256Hex(canonicalRequest);
-            String expectedSignature = hexEncode(hmacSha256(
+            String expectedSignature = HexFormat.of().formatHex(hmacSha256(
                     deriveSigningKey(secretKey, scope.date(), scope.region(), scope.service()), stringToSign));
             boolean valid = MessageDigest.isEqual(
                     expectedSignature.getBytes(StandardCharsets.UTF_8),
@@ -230,14 +231,6 @@ class EksTokenValidator {
         Mac mac = Mac.getInstance("HmacSHA256");
         mac.init(new SecretKeySpec(key, "HmacSHA256"));
         return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String hexEncode(byte[] bytes) {
-        StringBuilder encoded = new StringBuilder(bytes.length * 2);
-        for (byte value : bytes) {
-            encoded.append(String.format("%02x", value));
-        }
-        return encoded.toString();
     }
 
     private record CredentialScope(String accessKeyId, String date, String region, String service) {

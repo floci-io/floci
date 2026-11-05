@@ -1390,7 +1390,10 @@ class EcrServiceTest {
 
     @Test
     void lifecyclePolicy_roundTrip() {
-        String policy = "{\"rules\":[]}";
+        String policy = """
+                {"rules":[{"rulePriority":1,"selection":{"tagStatus":"any",
+                "countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}
+                """;
         service.createRepository(REPO, null, null, null, null, null, null, REGION);
         service.putLifecyclePolicy(REPO, null, policy, REGION);
         Repository fetched = service.getLifecyclePolicy(REPO, null, REGION);

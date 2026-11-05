@@ -323,11 +323,20 @@ public class EmrHandler {
                 || (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now()))) {
             return Response.ok(response).build();
         }
-        int n = 1;
+        // Listed in their groups' order, the first MASTER group's instances numbered first, so the primary node keeps
+        // its id and address, DescribeCluster's MasterPublicDnsName, while the other groups resize, as an instance
+        // does; any other group's follow, each after those before it.
+        EmrInstanceGroup primary = cluster.getInstanceGroups().stream().filter(EmrService::isMasterGroup)
+                .findFirst().orElse(null);
+        int next = primary == null ? 1 : 1 + listedInstanceCount(primary, terminated);
         for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
             int count = listedInstanceCount(group, terminated);
+            int first = group == primary ? 1 : next;
             for (int i = 0; i < count; i++) {
-                arr.add(syntheticInstanceNode(cluster, group, n++, terminated));
+                arr.add(syntheticInstanceNode(cluster, group, first + i, terminated));
+            }
+            if (group != primary) {
+                next += count;
             }
         }
         return Response.ok(response).build();
@@ -462,13 +471,18 @@ public class EmrHandler {
 
     private Response handleModifyInstanceGroups(JsonNode request, String region) {
         List<EmrService.InstanceGroupModification> modifications = new ArrayList<>();
-        for (JsonNode g : request.path("InstanceGroups")) {
-            JsonNode count = g.path("InstanceCount");
-            JsonNode configurations = g.path("Configurations");
-            modifications.add(new EmrService.InstanceGroupModification(
-                    g.path("InstanceGroupId").asText(null),
-                    count.isMissingNode() || count.isNull() ? null : count.asInt(),
-                    configurations.isArray() ? configurations.toString() : null));
+        // Only a list names groups, as the other list members here and the IAM check read one: any other
+        // InstanceGroups names none, which the service refuses.
+        JsonNode groups = request.path("InstanceGroups");
+        if (groups.isArray()) {
+            for (JsonNode g : groups) {
+                JsonNode count = g.path("InstanceCount");
+                JsonNode configurations = g.path("Configurations");
+                modifications.add(new EmrService.InstanceGroupModification(
+                        g.path("InstanceGroupId").asText(null),
+                        count.isMissingNode() || count.isNull() ? null : count.asInt(),
+                        configurations.isArray() ? configurations.toString() : null));
+            }
         }
         service.modifyInstanceGroups(text(request, "ClusterId"), region, modifications);
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -744,7 +758,7 @@ public class EmrHandler {
         node.put("Id", "ci-" + index + cluster.getId());
         node.put("Ec2InstanceId", EmrService.ec2InstanceId(index));
         node.put("PublicDnsName", AwsEndpoints.ec2PublicDns("203.0.113." + index, cluster.getRegion()));
-        String privateIp = "10.0.0." + index;
+        String privateIp = EmrService.privateIpAddress(index);
         node.put("PrivateDnsName", AwsRegions.ec2PrivateIpDnsName(privateIp, cluster.getRegion()));
         node.put("PrivateIpAddress", privateIp);
         node.put("InstanceGroupId", group.getId());

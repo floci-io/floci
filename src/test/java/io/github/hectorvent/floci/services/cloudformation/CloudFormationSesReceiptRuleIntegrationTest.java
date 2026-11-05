@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.ses.SesReceiptRuleService;
 import io.github.hectorvent.floci.services.ses.model.ReceiptRule;
 import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.testing.AwsTestClients;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
@@ -76,14 +77,14 @@ class CloudFormationSesReceiptRuleIntegrationTest {
             initial.withObject("/Resources/Rule").put("UpdateReplacePolicy", "Retain");
         }
         cfn.createStack(r -> r.stackName(stackName).templateBody(initial.toString()));
-        awaitStatus("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         ObjectNode updated = (ObjectNode) mapper.readTree(template("store", false));
         updated.withObject("/Resources/Rule/Properties").put("RuleSetName", ruleSet + "-next");
         if (retain) {
             updated.withObject("/Resources/Rule").put("UpdateReplacePolicy", "Retain");
         }
         cfn.updateStack(r -> r.stackName(stackName).templateBody(updated.toString()));
-        awaitStatus("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
         assertFalse(ses.describeReceiptRule(ruleSet + "-next", "store", "us-east-1").isEnabled());
         if (retain) {
             assertTrue(ses.describeReceiptRule(ruleSet, "store", "us-east-1").isEnabled());
@@ -101,11 +102,11 @@ class CloudFormationSesReceiptRuleIntegrationTest {
         ObjectNode initial = (ObjectNode) mapper.readTree(template("store", true));
         initial.withObject("/Resources/Rule/Properties").put("After", "anchor");
         cfn.createStack(r -> r.stackName(stackName).templateBody(initial.toString()));
-        awaitStatus("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         ObjectNode updated = (ObjectNode) mapper.readTree(template("store", false));
         updated.withObject("/Resources/Rule/Properties").put("After", "missing");
         cfn.updateStack(r -> r.stackName(stackName).templateBody(updated.toString()));
-        awaitStatus("UPDATE_ROLLBACK_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_ROLLBACK_COMPLETE");
         assertTrue(ses.describeReceiptRule(ruleSet, "store", "us-east-1").isEnabled());
         assertEquals(List.of("anchor", "store"), ses.describeReceiptRuleSet(ruleSet, "us-east-1")
                 .getRules().stream().map(ReceiptRule::getName).toList());
@@ -127,7 +128,7 @@ class CloudFormationSesReceiptRuleIntegrationTest {
             secondProperties.put("After", "anchor");
         }
         cfn.createStack(r -> r.stackName(stackName).templateBody(template.toString()));
-        awaitStatus("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         List<String> expected = explicitAfter ? List.of("anchor", "second", "first")
                 : List.of("second", "first", "anchor");
         assertEquals(expected, ruleNames());
@@ -137,14 +138,14 @@ class CloudFormationSesReceiptRuleIntegrationTest {
         }
         template.withObject("/Resources/Rule/Properties/Rule").put("Enabled", false);
         cfn.updateStack(r -> r.stackName(stackName).templateBody(template.toString()));
-        awaitStatus("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
         List<String> migratedOrder = explicitAfter ? List.of("anchor", "first", "second")
                 : List.of("first", "second", "anchor");
         assertEquals(legacy ? migratedOrder : expected, ruleNames());
         assertFalse(ses.describeReceiptRule(ruleSet, "first", "us-east-1").isEnabled());
         template.withObject("/Resources/Rule/Properties/Rule").put("Enabled", true);
         cfn.updateStack(r -> r.stackName(stackName).templateBody(template.toString()));
-        awaitStatus("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
         assertEquals(legacy ? migratedOrder : expected, ruleNames());
     }
 
@@ -161,7 +162,7 @@ class CloudFormationSesReceiptRuleIntegrationTest {
         template.withObject("/Resources/Rule/Properties").putObject("After").put("Ref", "AfterAnchor");
         cfn.createStack(r -> r.stackName(stackName).templateBody(template.toString()).parameters(
                 Parameter.builder().parameterKey("AfterAnchor").parameterValue("anchor").build()));
-        awaitStatus("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         assertEquals(List.of("other", "anchor", "store"), ruleNames());
         if (legacy) {
             cloudFormation.describeStacks(stackName, "us-east-1", "000000000000").getFirst()
@@ -169,7 +170,7 @@ class CloudFormationSesReceiptRuleIntegrationTest {
         }
         cfn.updateStack(r -> r.stackName(stackName).templateBody(template.toString()).parameters(
                 Parameter.builder().parameterKey("AfterAnchor").parameterValue("other").build()));
-        awaitStatus("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
         assertEquals(List.of("other", "store", "anchor"), ruleNames());
     }
 
@@ -194,11 +195,11 @@ class CloudFormationSesReceiptRuleIntegrationTest {
                 .put("After", "management");
         second.putObject("Rule").put("Name", "between");
         cfn.createStack(r -> r.stackName(stackName).templateBody(template.toString()));
-        awaitStatus("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         assertEquals(List.of("management", "between", "store"), ruleNames());
         template.withObject("/Resources/Rule/Properties/Rule").put("Enabled", false);
         cfn.updateStack(r -> r.stackName(stackName).templateBody(template.toString()));
-        awaitStatus("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
         assertEquals(List.of("management", "between", "store"), ruleNames());
     }
 
@@ -223,7 +224,7 @@ class CloudFormationSesReceiptRuleIntegrationTest {
                 properties.put("After", reference);
             }
             cfn.createStack(r -> r.stackName(stackName).templateBody(template.toString()));
-            awaitStatus("CREATE_COMPLETE");
+            CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
             assertEquals(List.of("other", "anchor", "store"), ruleNames());
             if (legacy) {
                 cloudFormation.describeStacks(stackName, "us-east-1", "000000000000").getFirst()
@@ -232,7 +233,7 @@ class CloudFormationSesReceiptRuleIntegrationTest {
             ssm.putParameter(parameter, indexReference ? "0" : "other", "String", null, true, "us-east-1");
             template.withObject("/Resources/Rule/Properties/Rule").put("Enabled", false);
             cfn.updateStack(r -> r.stackName(stackName).templateBody(template.toString()));
-            awaitStatus("UPDATE_COMPLETE");
+            CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
             assertEquals(List.of("other", "store", "anchor"), ruleNames());
             assertFalse(ses.describeReceiptRule(ruleSet, "store", "us-east-1").isEnabled());
         } finally {
@@ -251,15 +252,15 @@ class CloudFormationSesReceiptRuleIntegrationTest {
         second.put("Type", "AWS::SES::ReceiptRule").put("DependsOn", "Rule");
         second.putObject("Properties").put("RuleSetName", ruleSet).putObject("Rule").put("Name", "second");
         cfn.createStack(r -> r.stackName(stackName).templateBody(template.toString()));
-        awaitStatus("CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         assertEquals(List.of("second", "anchor", "first"), ruleNames());
         template.withObject("/Resources/Rule/Properties").put("After", "second");
         cfn.updateStack(r -> r.stackName(stackName).templateBody(template.toString()));
-        awaitStatus("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
         assertEquals(List.of("second", "first", "anchor"), ruleNames());
         template.withObject("/Resources/Rule/Properties").remove("After");
         cfn.updateStack(r -> r.stackName(stackName).templateBody(template.toString()));
-        awaitStatus("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
         assertEquals(List.of("first", "second", "anchor"), ruleNames());
     }
 
@@ -275,7 +276,7 @@ class CloudFormationSesReceiptRuleIntegrationTest {
                 .addObject().putObject("S3Action").putObject("BucketName").put("Ref", "Bucket");
         template.withObject("/Outputs").putObject("BucketName").putObject("Value").put("Ref", "Bucket");
         cfn.createStack(r -> r.stackName(stackName).templateBody(template.toString()));
-        Stack created = awaitStatus("CREATE_COMPLETE");
+        Stack created = CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         String bucket = created.outputs().stream().filter(o -> "BucketName".equals(o.outputKey()))
                 .findFirst().orElseThrow().outputValue();
         ReceiptRule rule = ses.describeReceiptRule(ruleSet, "store", "us-east-1");
@@ -287,25 +288,19 @@ class CloudFormationSesReceiptRuleIntegrationTest {
     void provisionsUpdatesAndDeletesRealReceiptRules() throws Exception {
         String initial = template("store", true);
         cfn.createStack(r -> r.stackName(stackName).templateBody(initial));
-        Stack created = awaitStatus("CREATE_COMPLETE");
+        Stack created = CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
         assertTrue(ses.describeReceiptRule(ruleSet, "store", "us-east-1").isEnabled());
         assertTrue(created.outputs().stream().allMatch(o -> "store".equals(o.outputValue())));
 
         String updated = template("store", false);
         cfn.updateStack(r -> r.stackName(stackName).templateBody(updated));
-        awaitStatus("UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
         assertFalse(ses.describeReceiptRule(ruleSet, "store", "us-east-1").isEnabled());
 
         cfn.deleteStack(r -> r.stackName(stackName));
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() ->
                 assertEquals("RuleDoesNotExist", assertThrows(AwsException.class,
                         () -> ses.describeReceiptRule(ruleSet, "store", "us-east-1")).getErrorCode()));
-    }
-
-    private Stack awaitStatus(String expected) {
-        return await().atMost(Duration.ofSeconds(15)).until(
-                () -> cfn.describeStacks(r -> r.stackName(stackName)).stacks().getFirst(),
-                s -> expected.equals(s.stackStatusAsString()));
     }
 
     private String template(String name, boolean enabled) throws Exception {

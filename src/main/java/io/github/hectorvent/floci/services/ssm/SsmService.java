@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2ImageCatalog;
+import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -105,11 +106,12 @@ public class SsmService implements ResourceProvider {
     private final Ec2ImageCatalog imageCatalog;
     private final SecretsManagerService secretsManager;
     private final SsmEventPublisher eventPublisher;
+    private final KmsService kmsService;
 
     @Inject
     public SsmService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                       Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager,
-                      SsmEventPublisher eventPublisher) {
+                      SsmEventPublisher eventPublisher, KmsService kmsService) {
         this(
                 storageFactory.create("ssm", "ssm-parameters.json",
                         new TypeReference<>() {
@@ -133,7 +135,8 @@ public class SsmService implements ResourceProvider {
                 regionResolver,
                 imageCatalog,
                 secretsManager,
-                eventPublisher
+                eventPublisher,
+                kmsService
         );
     }
 
@@ -207,6 +210,21 @@ public class SsmService implements ResourceProvider {
                int maxParameterHistory, RegionResolver regionResolver,
                Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager,
                SsmEventPublisher eventPublisher) {
+        this(parameterStore, historyStore, documentPermissionStore, documentStore, serviceSettingStore,
+                associationStore, maxParameterHistory, regionResolver, imageCatalog, secretsManager,
+                eventPublisher, null);
+    }
+
+    /** A null KMS service stores SecureString values without a ciphertext. */
+    SsmService(StorageBackend<String, Parameter> parameterStore,
+               StorageBackend<String, List<ParameterHistory>> historyStore,
+               StorageBackend<String, List<String>> documentPermissionStore,
+               StorageBackend<String, SsmDocument> documentStore,
+               StorageBackend<String, ServiceSetting> serviceSettingStore,
+               StorageBackend<String, SsmAssociation> associationStore,
+               int maxParameterHistory, RegionResolver regionResolver,
+               Ec2ImageCatalog imageCatalog, SecretsManagerService secretsManager,
+               SsmEventPublisher eventPublisher, KmsService kmsService) {
         this.parameterStore = parameterStore;
         this.historyStore = historyStore;
         this.documentPermissionStore = documentPermissionStore;
@@ -218,6 +236,7 @@ public class SsmService implements ResourceProvider {
         this.imageCatalog = imageCatalog;
         this.secretsManager = secretsManager;
         this.eventPublisher = eventPublisher;
+        this.kmsService = kmsService;
     }
 
     /**
@@ -332,6 +351,7 @@ public class SsmService implements ResourceProvider {
         // or asks for Intelligent-Tiering.
         parameter.setTier(tier != null ? tier : existing != null ? tierOf(existing) : "Standard");
         parameter.setArn(regionResolver.buildArn("ssm", region, parameterResource(name)));
+        parameter.setEncryptedValue(encryptedValueOf(parameter, region));
         parameter.setLastModifiedDate(Instant.now());
 
         if (existing != null && existing.getTags() != null) {
@@ -349,6 +369,27 @@ public class SsmService implements ResourceProvider {
 
         LOG.infov("Put parameter: {0} in region {1} (version {2})", name, region, version);
         return parameter;
+    }
+
+    /**
+     * AWS encrypts a SecureString under its KMS key with the {@code PARAMETER_ARN} encryption context
+     * and returns that ciphertext to a read without decryption. A key KMS cannot use, which AWS refuses
+     * on PutParameter, leaves the parameter without one.
+     */
+    private String encryptedValueOf(Parameter parameter, String region) {
+        if (kmsService == null || !"SecureString".equals(parameter.getType())) {
+            return null;
+        }
+        try {
+            byte[] ciphertext = kmsService.encrypt(parameter.getKeyId(),
+                    parameter.getValue().getBytes(StandardCharsets.UTF_8),
+                    Map.of("PARAMETER_ARN", parameter.getArn()), region);
+            return Base64.getEncoder().encodeToString(ciphertext);
+        } catch (AwsException e) {
+            LOG.warnv("Storing SecureString {0} without a ciphertext: KMS cannot encrypt under {1}: {2}",
+                    parameter.getArn(), parameter.getKeyId(), e.getMessage());
+            return null;
+        }
     }
 
     /** AWS's form is {@code parameter/<name>} whether or not the name starts with a slash. */
@@ -554,6 +595,7 @@ public class SsmService implements ResourceProvider {
 
     private static Parameter historicalParameter(Parameter current, ParameterHistory history) {
         Parameter parameter = new Parameter(current.getName(), history.getValue(), history.getType());
+        parameter.setEncryptedValue(history.getEncryptedValue());
         parameter.setVersion(history.getVersion());
         parameter.setDescription(history.getDescription());
         parameter.setLastModifiedDate(history.getLastModifiedDate());

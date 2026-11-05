@@ -149,8 +149,8 @@ public class CodeArtifactNuGetExternalConnectionImporter {
             // this bookkeeping run instead of leaving the claim held (or released) without ever
             // recording what this attempt actually wrote.
             if (imported) {
-                service.ensureRetainedPackageOriginDefault(region, domain, owner, repository, "nuget", null,
-                        packageId, packageFenceSnapshot);
+                service.ensureRetainedPackageOriginDefaultIfCurrentRepository(region, domain, owner, repository,
+                        "nuget", null, packageId, packageFenceSnapshot, repoId);
             }
             // Matches the claim taken above, exactly once, regardless of what this attempt actually
             // wrote: see finishRetainedVersionOriginAttempt's own javadoc for why this must run even

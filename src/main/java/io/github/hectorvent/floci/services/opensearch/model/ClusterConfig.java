@@ -20,6 +20,16 @@ public class ClusterConfig {
     @JsonProperty("ZoneAwarenessEnabled")
     private Boolean zoneAwarenessEnabled = false;
 
+    /** {@code ZoneAwarenessConfig.AvailabilityZoneCount}; null when the domain was given none. */
+    @JsonProperty("AvailabilityZoneCount")
+    private Integer availabilityZoneCount;
+
+    @JsonProperty("DedicatedMasterType")
+    private String dedicatedMasterType;
+
+    @JsonProperty("DedicatedMasterCount")
+    private Integer dedicatedMasterCount;
+
     public ClusterConfig() {}
 
     public String getInstanceType() {
@@ -44,6 +54,30 @@ public class ClusterConfig {
 
     public void setDedicatedMasterEnabled(Boolean dedicatedMasterEnabled) {
         this.dedicatedMasterEnabled = dedicatedMasterEnabled;
+    }
+
+    public Integer getAvailabilityZoneCount() {
+        return availabilityZoneCount;
+    }
+
+    public void setAvailabilityZoneCount(Integer availabilityZoneCount) {
+        this.availabilityZoneCount = availabilityZoneCount;
+    }
+
+    public String getDedicatedMasterType() {
+        return dedicatedMasterType;
+    }
+
+    public void setDedicatedMasterType(String dedicatedMasterType) {
+        this.dedicatedMasterType = dedicatedMasterType;
+    }
+
+    public Integer getDedicatedMasterCount() {
+        return dedicatedMasterCount;
+    }
+
+    public void setDedicatedMasterCount(Integer dedicatedMasterCount) {
+        this.dedicatedMasterCount = dedicatedMasterCount;
     }
 
     public Boolean isZoneAwarenessEnabled() {

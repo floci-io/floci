@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -54,7 +55,6 @@ public class SesTenantService implements SesTaggable {
 
     private static final int TENANT_NAME_MAX = 64;
     private static final Pattern TENANT_NAME_CHARS = Pattern.compile("[A-Za-z0-9_-]+");
-    private static final char[] HEX = "0123456789abcdef".toCharArray();
 
     // The wire values for ResourceType — the ARN segment, not the SDK enum spelling. Real AWS both
     // returns these and requires them as Filter values; the SDK's EMAIL_IDENTITY-style enum constants
@@ -712,11 +712,7 @@ public class SesTenantService implements SesTaggable {
         // AWS tenant ids look like "tn-" followed by 30 lowercase hex characters.
         byte[] bytes = new byte[15];
         random.nextBytes(bytes);
-        StringBuilder sb = new StringBuilder("tn-");
-        for (byte b : bytes) {
-            sb.append(HEX[(b >> 4) & 0xF]).append(HEX[b & 0xF]);
-        }
-        return sb.toString();
+        return "tn-" + HexFormat.of().formatHex(bytes);
     }
 
     // The store is account-scoped transparently by AccountAwareStorageBackend (StorageFactory wraps

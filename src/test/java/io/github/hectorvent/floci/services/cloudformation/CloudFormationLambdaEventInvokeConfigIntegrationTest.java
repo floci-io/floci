@@ -270,6 +270,7 @@ class CloudFormationLambdaEventInvokeConfigIntegrationTest {
     }
 
     private static String describeStacks(String stack, String expectedStatus) {
+        assertEquals(expectedStatus, CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", CFN_AUTH)

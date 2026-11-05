@@ -181,6 +181,12 @@ public class RuntimeApiServer {
     protected void beforeNextPathDispatchGuard() { }
 
     /**
+     * Test-only: signals that a stopped guard suppressed a runtime dispatch or INVOKE fan-out.
+     * May run under the server lock, so overrides must not block.
+     */
+    protected void onStoppedDispatchSkipped() { }
+
+    /**
      * Test-only: called inside quiesce() immediately after the lock has been
      * released, before any outside-lock work runs. Test subclasses override
      * to freeze quiesce at that point and drive a dispatch through the guard
@@ -447,6 +453,8 @@ public class RuntimeApiServer {
                 }
                 if (!alreadyHandled) {
                     sendInvocation(ctx, toDispatch);
+                } else {
+                    onStoppedDispatchSkipped();
                 }
             }
             // else: parked — enqueue() or the httpServer close will dispatch/end this ctx.
@@ -807,7 +815,11 @@ public class RuntimeApiServer {
     private void notifyExtensionsOfInvoke(PendingInvocation invocation) {
         List<Runnable> dispatches = new ArrayList<>();
         synchronized (lock) {
-            if (stopped || extensions.isEmpty()) {
+            if (stopped) {
+                onStoppedDispatchSkipped();
+                return;
+            }
+            if (extensions.isEmpty()) {
                 return;
             }
             ExtensionEvent event = ExtensionEvent.invoke(
@@ -897,6 +909,7 @@ public class RuntimeApiServer {
                 boolean shouldDispatch;
                 synchronized (lock) {
                     if (stopped) {
+                        onStoppedDispatchSkipped();
                         return;
                     }
                     if (waitingCtx.response().ended()) {

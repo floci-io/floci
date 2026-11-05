@@ -88,6 +88,21 @@ public final class GlueTableResolver {
         return new ReadPlan(fromClause, false, columns);
     }
 
+    /** Whether {@link #readPlan(Table, List)} reads this table's objects with {@code read_parquet}. */
+    public static boolean readsParquet(Table table) {
+        return !isIcebergTable(table) && "read_parquet".equals(inferReadFunction(table));
+    }
+
+    /**
+     * Lists the field names each given Parquet object carries, one row per object and field, nested
+     * fields and the schema root included. The object is named as it was passed in.
+     */
+    public static String parquetSchemaSql(List<String> objectUris) {
+        String fileList = "[" + objectUris.stream().map(GlueTableResolver::sqlLiteral)
+                .collect(Collectors.joining(", ")) + "]";
+        return "SELECT file_name, name FROM parquet_schema(" + fileList + ")";
+    }
+
     /**
      * A table that declares CSV options (header lines to skip, a delimiter) is read with exactly
      * those options and its declared columns rather than sniffed: a headerless file otherwise gets

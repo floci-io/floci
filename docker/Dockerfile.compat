@@ -34,6 +34,10 @@ ENV AWS_SECRET_ACCESS_KEY=test
 ENV AWS_ENDPOINT_URL="http://localhost:4566"
 ENV AWS_CONFIG_FILE=/etc/floci/aws/config
 ENV AWS_PAGER=""
+# The image starts as root so the entrypoint can read the mounted Docker socket's group before it
+# drops to uid 1001, and that drop keeps the environment. Without this, hooks would run as uid 1001
+# with HOME=/root, which they cannot write to, and `pip install` would have nowhere to put a package.
+ENV HOME=/app
 
 # AWS CLI v2. v1 (the only version pip3 install awscli can give you) resolves
 # a fixed set of services (SQS, RDS, DocDB, Neptune, EMR, Health) through
@@ -125,5 +129,3 @@ HEALTHCHECK --interval=5s --timeout=3s --retries=5 --start-period=10s --start-in
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 # A published port needs 0.0.0.0 inside the container, which Floci only accepts with explicit consent.
 CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0"]
-
-USER 1001

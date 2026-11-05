@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Certificate;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.DescribeListenerCertificatesResponse;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.InvalidConfigurationRequestException;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.Listener;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.OperationNotPermittedException;
@@ -19,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @DisplayName("ELBv2 default listener certificates")
 class ElbV2DefaultCertificateTest {
+
+    private static final String SSL_POLICY = "ELBSecurityPolicy-2016-08";
 
     @Test
     @DisplayName("HTTPS needs a default before listener creation or protocol replacement")
@@ -43,13 +46,17 @@ class ElbV2DefaultCertificateTest {
                 assertThat(certificates(elb, https)).containsExactly(certificate);
                 String http = createListener(elb, lbArn, "HTTP", 8080, null);
                 InvalidConfigurationRequestException modification = assertThrows(InvalidConfigurationRequestException.class,
-                        () -> elb.modifyListener(b -> b.listenerArn(http).protocol("HTTPS").port(8443)));
+                        () -> elb.modifyListener(b -> b.listenerArn(http).protocol("HTTPS").port(8443)
+                                .sslPolicy(SSL_POLICY)));
                 assertThat(modification.statusCode()).isEqualTo(400);
+                assertThat(modification.getMessage()).contains("default certificate");
                 Listener unchanged = elb.describeListeners(b -> b.listenerArns(http)).listeners().get(0);
                 assertThat(unchanged.protocolAsString()).isEqualTo("HTTP");
                 assertThat(unchanged.port()).isEqualTo(8080);
                 assertThat(unchanged.certificates()).isEmpty();
+                assertThat(unchanged.hasCertificates()).isFalse();
                 elb.modifyListener(b -> b.listenerArn(http).protocol("HTTPS").port(8443)
+                        .sslPolicy(SSL_POLICY)
                         .certificates(Certificate.builder().certificateArn(certificate).build()));
                 assertThat(certificates(elb, http)).containsExactly(certificate);
             } finally {
@@ -144,7 +151,9 @@ class ElbV2DefaultCertificateTest {
     }
 
     private static List<String> certificates(ElasticLoadBalancingV2Client client, String listener) {
-        return client.describeListenerCertificates(b -> b.listenerArn(listener)).certificates().stream()
+        DescribeListenerCertificatesResponse response = client.describeListenerCertificates(b -> b.listenerArn(listener));
+        assertThat(response.nextMarker()).isNull();
+        return response.certificates().stream()
                 .map(Certificate::certificateArn).toList();
     }
 }

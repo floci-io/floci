@@ -2,8 +2,11 @@ package io.github.hectorvent.floci.services.efs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.efs.model.AccessPointDescription;
@@ -13,6 +16,7 @@ import io.github.hectorvent.floci.services.efs.model.CreateFileSystemRequest;
 import io.github.hectorvent.floci.services.efs.model.CreateMountTargetRequest;
 import io.github.hectorvent.floci.services.efs.model.CreateTagsRequest;
 import io.github.hectorvent.floci.services.efs.model.DeleteTagsRequest;
+import io.github.hectorvent.floci.services.efs.model.DescribeAccessPointsResponse;
 import io.github.hectorvent.floci.services.efs.model.DescribeFileSystemsRequest;
 import io.github.hectorvent.floci.services.efs.model.DescribeFileSystemsResponse;
 import io.github.hectorvent.floci.services.efs.model.DescribeMountTargetSecurityGroupsResponse;
@@ -42,6 +46,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -57,6 +62,7 @@ public class EfsService implements Resettable {
     private final StorageBackend<String, List<LifecyclePolicy>> lifecycleConfigurationStore;
     private final ConcurrentHashMap<String, Object> syncLocks = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
+    private final SignedMarkers pageMarkers = new SignedMarkers(128);
 
     private Object lockFor(String key) {
         return syncLocks.computeIfAbsent(key, k -> new Object());
@@ -343,10 +349,14 @@ public class EfsService implements Resettable {
         }
     }
 
-    public ListTagsForResourceResponse listTagsForResource(String region, String resourceId) {
-        List<Tag> tags = getResourceTags(region, resourceId);
+    public ListTagsForResourceResponse listTagsForResource(String region, String resourceId,
+                                                           Integer maxResults, String nextToken) {
+        String scope = "efs:tags:" + regionResolver.getAccountId() + ":" + region + ":" + resourceId;
+        PaginatedResult<Tag> page = page(getResourceTags(region, resourceId), Tag::getKey,
+                maxResults, nextToken, scope);
         ListTagsForResourceResponse res = new ListTagsForResourceResponse();
-        res.setTags(tags);
+        res.setTags(page.items());
+        res.setNextToken(page.nextToken());
         return res;
     }
 
@@ -570,6 +580,20 @@ public class EfsService implements Resettable {
                 .collect(Collectors.toList());
     }
 
+    public DescribeAccessPointsResponse describeAccessPointsPage(String region, String fileSystemId,
+                                                                 String accessPointId, Integer maxResults,
+                                                                 String nextToken) {
+        String scope = "efs:access-points:" + regionResolver.getAccountId() + ":" + region
+                + ":" + fileSystemId + ":" + accessPointId;
+        PaginatedResult<AccessPointDescription> page = page(
+                describeAccessPoints(region, fileSystemId, accessPointId), AccessPointDescription::getAccessPointId,
+                maxResults, nextToken, scope);
+        DescribeAccessPointsResponse res = new DescribeAccessPointsResponse();
+        res.setAccessPoints(page.items());
+        res.setNextToken(page.nextToken());
+        return res;
+    }
+
     public void deleteAccessPoint(String region, String accessPointId) {
         String key = regionKey(region, accessPointId);
         AccessPointDescription ap = accessPointStore.get(key).orElse(null);
@@ -632,6 +656,19 @@ public class EfsService implements Resettable {
         getFileSystem(region, fileSystemId);
         List<LifecyclePolicy> policies = lifecycleConfigurationStore.get(regionKey(region, fileSystemId)).orElse(null);
         return policies == null ? new ArrayList<>() : policies;
+    }
+
+    private <T> PaginatedResult<T> page(List<T> items, Function<T, String> cursorOf,
+                                        Integer maxResults, String nextToken, String scope) {
+        if (maxResults != null && maxResults < 1) {
+            throw EfsException.badRequest("MaxResults must be at least 1.");
+        }
+        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 128)) {
+            throw EfsException.badRequest("NextToken must be between 1 and 128 characters.");
+        }
+        int limit = maxResults == null ? 100 : maxResults;
+        return Pagination.slice(items, cursorOf, limit, nextToken, pageMarkers, scope,
+                token -> EfsException.badRequest("Invalid NextToken."));
     }
 
     private String regionKey(String region, String id) {

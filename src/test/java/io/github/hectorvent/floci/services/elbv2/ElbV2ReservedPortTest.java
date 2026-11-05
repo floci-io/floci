@@ -408,7 +408,7 @@ class ElbV2ReservedPortTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"factory", "handler", "listen", "failed-future"})
-    void identicalStartRecoversFromServerAcquisitionFailure(String stage) {
+    void listenerRecoversFromServerAcquisitionFailure(String stage) {
         ElbV2DataPlane dataPlane = dataPlaneWith(4566, false, 0);
         EmulatorConfig.ElbV2ServiceConfig elb = mock(EmulatorConfig.ElbV2ServiceConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -454,6 +454,13 @@ class ElbV2ReservedPortTest {
                 verify(failed).close();
             }
             publishRuntime(dataPlane, listener, "us-west-2", listener.getPort(), List.of(fixedRule("recovered")));
+            if ("failed-future".equals(stage)) {
+                verify(replacement, never()).listen();
+                @SuppressWarnings("unchecked")
+                ArgumentCaptor<Handler<Long>> retry = ArgumentCaptor.forClass(Handler.class);
+                verify(dataPlane.vertx).setTimer(eq(100L), retry.capture());
+                retry.getValue().handle(0L);
+            }
             verify(replacement).listen();
             assertFixedResponse(replacement, "retry.example.test", "recovered");
             removeRuntime(dataPlane, listener.getListenerArn(), listener.getPort());

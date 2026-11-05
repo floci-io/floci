@@ -790,23 +790,105 @@ class CognitoManagedLoginIntegrationTest {
     }
 
     @Test
-    void clientWithoutCognitoAmongItsProvidersCannotUseManagedLogin() throws Exception {
-        String poolId = cognitoJson("CreateUserPool", "{\"PoolName\":\"FederatedOnlyPool\"}").path("UserPool").path("Id").asText();
+    void federatedOnlyClientOffersItsProviderWithoutNativeCredentials() throws Exception {
+        Pool pool = federatedPool(false);
+        Map<String, String> query = authorizeRequest(pool.clientId());
+        Response page = loginPage(null, "/cognito-idp/oauth2/authorize", query);
+        assertFalse(page.asString().contains("<form"));
+        assertFalse(page.asString().contains("type=\"password\""));
+        String link = providerLink(page);
+        assertEquals("/cognito-idp/oauth2/authorize", URI.create(link).getPath());
+        assertEquals(withField(query, "identity_provider", "ExampleOidc"), queryOf(link));
+        follow(null, link).then().statusCode(302).header("Location", startsWith("https://idp.example.test/authorize"));
+        given().redirects().follow(false).queryParams(query).formParam("username", "untrusted")
+                .formParam("password", PASSWORD).post("/cognito-idp/login")
+                .then().statusCode(400).body("error", equalTo("invalid_request"));
+    }
+
+    @Test
+    void removedProvidersShowAnActionableErrorWithoutNativeFallback() throws Exception {
+        Pool pool = federatedPool(true);
+        cognitoJson("UpdateUserPoolClient", """
+                {"UserPoolId":"%s","ClientId":"%s","AllowedOAuthFlowsUserPoolClient":true,
+                 "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":["openid","email"],"CallbackURLs":["%s"],
+                 "SupportedIdentityProviders":[]}
+                """.formatted(pool.poolId(), pool.clientId(), CALLBACK));
+        Response page = loginPage(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId()));
+        assertTrue(page.asString().contains("<p role=\"alert\">No sign-in providers are enabled for this application."
+                + " Contact your administrator.</p>"), page.asString());
+        assertFalse(page.asString().contains("<form"));
+        assertFalse(page.asString().contains("Sign in with"));
+        given().redirects().follow(false).queryParams(authorizeRequest(pool.clientId()))
+                .formParam("username", "untrusted").formParam("password", PASSWORD).post("/cognito-idp/login")
+                .then().statusCode(400).body("error", equalTo("invalid_request"));
+    }
+
+    @Test
+    void mixedClientKeepsItsNativeFormAndOffersFederation() throws Exception {
+        Pool pool = federatedPool(true);
+        Response page = loginPage(null, "/cognito-idp/oauth2/authorize", authorizeRequest(pool.clientId()));
+        assertTrue(page.asString().contains("type=\"password\""));
+        assertEquals("/cognito-idp/login", formAction(page.asString()));
+        assertEquals("ExampleOidc", queryOf(providerLink(page)).get("identity_provider"));
+        assertFalse(page.asString().contains("Sign in with COGNITO"));
+    }
+
+    @Test
+    void federatedProviderLinkUsesCustomDomainRootAndEscapesRequestValues() throws Exception {
+        Pool pool = federatedPool(false);
+        String domain = "federated-login.example.test";
+        cognitoJson("CreateUserPoolDomain", customDomain(domain, pool.poolId(), requestCertificate(domain)));
+        Map<String, String> query = withField(authorizeRequest(pool.clientId()), "state", "<script> & \"quoted\"");
+        Response page = loginPage(domain, "/oauth2/authorize", query);
+        String link = providerLink(page);
+        assertEquals("/oauth2/authorize", URI.create(link).getPath());
+        assertEquals(withField(query, "identity_provider", "ExampleOidc"), queryOf(link));
+        assertFalse(page.asString().contains("<script>"));
+        assertTrue(page.asString().contains("&amp;"));
+        follow(domain, link).then().statusCode(302).header("Location", startsWith("https://idp.example.test/authorize"));
+    }
+
+    @Test
+    void federatedOnlyClientStillRejectsExplicitNativeProvider() throws Exception {
+        Pool pool = federatedPool(false);
+        browserGet(null, "/cognito-idp/oauth2/authorize",
+                withField(authorizeRequest(pool.clientId()), "identity_provider", "COGNITO"), null)
+                .then().statusCode(400).body("error", equalTo("invalid_request"));
+    }
+
+    @Test
+    void nativeSessionCannotBypassFederatedOnlyClientProviders() throws Exception {
+        Pool federated = federatedPool(false);
+        Pool nativePool = withUser(federated.poolId(), codeClient(federated.poolId()), "native-user");
+        String cookie = signIn(null, nativePool, authorizeRequest(nativePool.clientId())).getCookie("cognito");
+        Response response = browserGet(null, "/cognito-idp/oauth2/authorize",
+                authorizeRequest(federated.clientId()), cookie);
+        response.then().statusCode(302);
+        assertEquals("/cognito-idp/login", URI.create(response.getHeader("Location")).getPath());
+        assertFalse(queryOf(response.getHeader("Location")).containsKey("code"));
+    }
+
+    private static Pool federatedPool(boolean nativeProvider) throws Exception {
+        String poolId = cognitoJson("CreateUserPool", "{\"PoolName\":\"FederatedLoginPool\"}")
+                .path("UserPool").path("Id").asText();
         cognitoJson("CreateIdentityProvider", """
                 {"UserPoolId":"%s","ProviderName":"ExampleOidc","ProviderType":"OIDC",
                  "ProviderDetails":{"authorize_url":"https://idp.example.test/authorize","client_id":"idp-client","attributes_request_method":"GET","oidc_issuer":"https://idp.example.test"}}
                 """.formatted(poolId));
+        String providers = nativeProvider ? "\"COGNITO\",\"ExampleOidc\"" : "\"ExampleOidc\"";
         String clientId = cognitoJson("CreateUserPoolClient", """
-                {"UserPoolId":"%s","ClientName":"federated-only","AllowedOAuthFlowsUserPoolClient":true,
+                {"UserPoolId":"%s","ClientName":"federated-login","AllowedOAuthFlowsUserPoolClient":true,
                  "AllowedOAuthFlows":["code"],"AllowedOAuthScopes":["openid","email"],"CallbackURLs":["%s"],
-                 "SupportedIdentityProviders":["ExampleOidc"]}
-                """.formatted(poolId, CALLBACK)).path("UserPoolClient").path("ClientId").asText();
-        Map<String, String> query = authorizeRequest(clientId);
+                 "SupportedIdentityProviders":[%s]}
+                """.formatted(poolId, CALLBACK, providers)).path("UserPoolClient").path("ClientId").asText();
+        return new Pool(poolId, clientId, null, null);
+    }
 
-        browserGet(null, "/cognito-idp/oauth2/authorize", query, null)
-                .then().statusCode(400).body("error", equalTo("invalid_request"));
-        browserGet(null, "/cognito-idp/login", query, null)
-                .then().statusCode(400).body("error", equalTo("invalid_request"));
+    private static String providerLink(Response page) {
+        Matcher link = Pattern.compile("<a href=\"([^\"]*)\">Sign in with ExampleOidc</a>")
+                .matcher(page.asString());
+        assertTrue(link.find(), page.asString());
+        return link.group(1).replace("&amp;", "&");
     }
 
     @Test

@@ -9,6 +9,18 @@ Table and partition column-statistics reads fill omitted required numeric member
 string, binary, long, double, decimal, date, and boolean statistics. Supplied values and stored
 records are preserved; optional minimum and maximum values remain absent when omitted.
 
+Table and partition reads (`GetTable`, `GetTables`, `SearchTables`, `GetTableVersion`, `GetTableVersions`,
+`GetPartition`, `GetPartitions`, `BatchGetPartition`) return a table's `Retention` as `0`, and a storage
+descriptor's `Compressed`, `NumberOfBuckets`, `SortColumns` and `StoredAsSubDirectories` as `false`, `0`, `[]`
+and `false`, when they were written without them, as Glue does. A table's `IsRegisteredWithLakeFormation` is
+`false`: Floci does not tie a table to a location registered with Lake Formation. The Glue Data Catalog client
+that Hive and Spark use on EMR reads each of them. Stored records keep what was written, and a storage
+descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `SkewedInfo` and
+`StoredAsSubDirectories` it was given. A `SortColumns` entry that is null, lacks its required `Column` or
+`SortOrder`, or has a `SortOrder` other than `0` or `1` fails the whole `CreateTable`, `UpdateTable`,
+`CreatePartition`, `UpdatePartition`, `BatchCreatePartition` or `BatchUpdatePartition` with a
+`ValidationException`, before anything is stored.
+
 ## Supported Actions
 
 ### Data Catalog
@@ -43,7 +55,7 @@ records are preserved; optional minimum and maximum values remain absent when om
 | Action | Description |
 |--------|-------------|
 | CreatePartition | Creates a partition for a Data Catalog table. |
-| GetPartitions | Lists partitions stored for a Data Catalog table. |
+| GetPartitions | Lists partitions stored for a Data Catalog table. With a `Segment`, returns that segment's share of them: each partition is in exactly one of `TotalSegments` (1 to 10) segments; a `Segment` member that is not an integer is a `SerializationException`. AWS documents `SegmentNumber` values from 0 through `TotalSegments` minus 1 and not what a larger one returns, so a `SegmentNumber` of `TotalSegments` or more returning no partitions is Floci's reading. |
 | BatchDeletePartition | Deletes up to 25 partitions, reporting the ones not found in `Errors`. |
 | CreatePartitionIndex | Registers a partition index on a table. Keys must name partition columns, and a table holds at most 3 indexes. The index reports `CREATING` before `ACTIVE`. |
 | GetPartitionIndexes | Lists a table's partition indexes, each with its keys resolved to name and type. |

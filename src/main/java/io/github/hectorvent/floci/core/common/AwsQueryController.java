@@ -492,7 +492,9 @@ public class AwsQueryController {
             Map.entry("DescribeAccountLimits", "elasticloadbalancing"),
             Map.entry("CreateIntegration", "redshift"),
             Map.entry("DeleteIntegration", "redshift"),
-            Map.entry("DescribeIntegrations", "redshift"));
+            Map.entry("DescribeIntegrations", "redshift"),
+            // Elastic Load Balancing v2 defines it too, but Floci's ELB does not serve it.
+            Map.entry("GetResourcePolicy", "redshift"));
 
     /**
      * The service a Query request goes to when its credential scope does not name one.

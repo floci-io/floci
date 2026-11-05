@@ -10,6 +10,8 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
+import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
+import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvFileSource;
@@ -17,11 +19,13 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,6 +44,147 @@ import static org.mockito.Mockito.when;
 class IamActionRegistryTest {
 
     private final IamActionRegistry registry = new IamActionRegistry();
+
+    /**
+     * A REST request no rule maps is checked as the operation whose vendored route it matches, as that operation's
+     * action, when Floci checks it on the resources AWS does: built by hand for its namespace ({@code Invoke} as
+     * {@code lambda:InvokeFunction}), read by the vendored request resources ({@code DescribeRepositories}, and
+     * {@code DescribeDomain} and {@code GetAnalyzer} from their paths), or none, AWS authorizing its action on no
+     * resource type ({@code ListDomainNames}). One AWS checks on a resource Floci does not read stays unmapped
+     * ({@code GetBackupPlan}), as does a request matching no route, and a rule still decides a route it maps.
+     */
+    @Test
+    void aRouteNoRuleMapsIsCheckedAsItsOperationWhenFlociChecksItAsAwsDoes() throws IOException {
+        IamRestRoutes routes = IamRestRoutes.parse(new ByteArrayInputStream("""
+                {"handRouted": {},
+                 "models": {
+                   "opensearch": {"credentialScope": "es", "operations": {
+                     "ListDomainNames": {"method": "GET", "requestUri": "/unmapped/domain"},
+                     "DescribeDomain": {"method": "GET", "requestUri": "/unmapped/domain/{DomainName}"}
+                   }},
+                   "accessanalyzer": {"credentialScope": "access-analyzer", "operations": {
+                     "GetAnalyzer": {"method": "GET", "requestUri": "/unmapped/analyzer/{analyzerName}"}
+                   }},
+                   "backup": {"credentialScope": "backup", "operations": {
+                     "GetBackupPlan": {"method": "GET", "requestUri": "/unmapped/backup/plans/{backupPlanId}"}
+                   }},
+                   "ecr": {"credentialScope": "ecr", "operations": {
+                     "DescribeRepositories": {"method": "GET", "requestUri": "/unmapped/repositories"}
+                   }},
+                   "lambda": {"credentialScope": "lambda", "operations": {
+                     "Invoke": {"method": "POST", "requestUri": "/unmapped/{FunctionName}/invocations"},
+                     "ListFunctions": {"method": "GET", "requestUri": "/2015-03-31/functions/{FunctionName}"}
+                   }}
+                 }}""".getBytes(StandardCharsets.UTF_8)));
+        IamActionRegistry routed = new IamActionRegistry(routes);
+        MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
+        assertEquals("es:ListDomainNames", routed.resolveRoute("es", mockCtx("GET", "/unmapped/domain", none, null, "")));
+        assertEquals("es:DescribeDomain", routed.resolveRoute("es", mockCtx("GET", "/unmapped/domain/logs", none, null, "")));
+        assertEquals("access-analyzer:GetAnalyzer", routed.resolveRoute("access-analyzer",
+                mockCtx("GET", "/unmapped/analyzer/a", none, null, "")));
+        assertNull(routed.resolveRoute("backup", mockCtx("GET", "/unmapped/backup/plans/p", none, null, "")));
+        assertNull(routed.resolveRoute("es", mockCtx("GET", "/other/domain", none, null, "")));
+        assertNull(routed.resolveRoute("other", mockCtx("GET", "/unmapped/domain", none, null, "")));
+        assertEquals("lambda:InvokeFunction", routed.resolveRoute("lambda",
+                mockCtx("POST", "/unmapped/fn/invocations", none, null, "")));
+        assertEquals("ecr:DescribeRepositories", routed.resolveRoute("ecr",
+                mockCtx("GET", "/unmapped/repositories", none, null, "")));
+        assertEquals("lambda:GetFunction", routed.resolveRoute("lambda",
+                mockCtx("GET", "/2015-03-31/functions/fn", none, null, "")));
+    }
+
+    /**
+     * With the vendored routes, OpenSearch's and Access Analyzer's requests whose actions act on no resource type
+     * are checked as their operations, the OpenSearch VPC endpoint operations among them, in both API versions.
+     */
+    @ParameterizedTest
+    @CsvSource({"es,GET,/2021-01-01/domain,es:ListDomainNames",
+            "es,GET,/2015-01-01/domain,es:ListDomainNames",
+            "es,GET,/2021-01-01/opensearch/versions,es:ListVersions",
+            "es,POST,/2021-01-01/opensearch/vpcEndpoints,es:CreateVpcEndpoint",
+            "es,GET,/2021-01-01/opensearch/vpcEndpoints,es:ListVpcEndpoints",
+            "es,POST,/2021-01-01/opensearch/vpcEndpoints/describe,es:DescribeVpcEndpoints",
+            "es,POST,/2021-01-01/opensearch/vpcEndpoints/update,es:UpdateVpcEndpoint",
+            "es,DELETE,/2021-01-01/opensearch/vpcEndpoints/aos-123,es:DeleteVpcEndpoint",
+            "es,GET,/2021-01-01/opensearch/domain/logs/vpcEndpoints,es:ListVpcEndpointsForDomain",
+            "es,GET,/2015-01-01/es/vpcEndpoints,es:ListVpcEndpoints",
+            "access-analyzer,GET,/analyzer,access-analyzer:ListAnalyzers",
+            "access-analyzer,POST,/policy/validation,access-analyzer:ValidatePolicy"})
+    void aVendoredRouteOfNoResourceTypeIsCheckedAsItsOperation(String scope, String method, String path,
+                                                                 String action) {
+        assertEquals(action, registry.resolveRoute(scope, mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
+    }
+
+    /**
+     * Access Analyzer's analyzer routes are checked as their operations, the vendored request resources reading the
+     * analyzer from the path or the body, and so are those of its archive rules, findings and access previews, which
+     * Floci does not serve.
+     */
+    @ParameterizedTest
+    @CsvSource({"PUT,/analyzer,access-analyzer:CreateAnalyzer",
+            "GET,/analyzer/default,access-analyzer:GetAnalyzer",
+            "DELETE,/analyzer/default,access-analyzer:DeleteAnalyzer",
+            "PUT,/analyzer/default/archive-rule,access-analyzer:CreateArchiveRule",
+            "GET,/analyzer/default/archive-rule/rule,access-analyzer:GetArchiveRule",
+            "POST,/finding,access-analyzer:ListFindings",
+            "GET,/access-preview/preview,access-analyzer:GetAccessPreview"})
+    void anAccessAnalyzerAnalyzerRouteIsCheckedAsItsOperation(String method, String path, String action) {
+        assertEquals(action, registry.resolveRoute("access-analyzer",
+                mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
+    }
+
+    /**
+     * OpenSearch's domain routes, in both API versions, are checked as their operations, the vendored request
+     * resources reading the domain from the path, the body or the query, and the labels the routed path gives the
+     * route are the ones the request resources read.
+     */
+    @ParameterizedTest
+    @CsvSource({"GET,/2021-01-01/opensearch/domain/logs,es:DescribeDomain",
+            "POST,/2021-01-01/opensearch/domain,es:CreateDomain",
+            "DELETE,/2021-01-01/opensearch/domain/logs,es:DeleteDomain",
+            "GET,/2021-01-01/opensearch/domain/logs/config,es:DescribeDomainConfig",
+            "GET,/2015-01-01/es/domain/logs,es:DescribeElasticsearchDomain",
+            "POST,/2015-01-01/es/domain/logs/config,es:UpdateElasticsearchDomainConfig"})
+    void anOpenSearchDomainRouteIsCheckedAsItsOperation(String method, String path, String action) {
+        assertEquals(action, registry.resolveRoute("es", mockCtx(method, path, new MultivaluedHashMap<>(), null, "")));
+    }
+
+    @Test
+    void theLabelsOfTheVendoredRouteARequestMatchesAreItsPathsValuesDecoded() {
+        MultivaluedMap<String, String> none = new MultivaluedHashMap<>();
+        assertEquals(Map.of("DomainName", "logs"),
+                IamActionRegistry.pathLabels("es", mockCtx("GET", "/2021-01-01/opensearch/domain/logs", none, null, "")));
+        assertEquals(Map.of("DomainName", "logs", "IndexName", "a b"), IamActionRegistry.pathLabels("es",
+                mockCtx("GET", "/2021-01-01/opensearch/domain/logs/index/a%20b", none, null, "")));
+        assertEquals(Map.of(), IamActionRegistry.pathLabels("es", mockCtx("GET", "/nothing", none, null, "")));
+        assertEquals(Map.of(), IamActionRegistry.pathLabels("sqs", mockCtx("GET", "/queue", none, null, "")));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"/policy/validation", "/%70olicy/validation", "/policy/%76alidation",
+            "/policy;ignored=yes/validation", "/policy/validation;ignored=yes",
+            "/%70olicy;ignored=yes/%76alidation;ignored=yes/", "/policy/%2e/validation",
+            "/x/%2e%2e/policy/validation", "//policy//validation"})
+    void validatePolicyResolvesThroughTheRouteTable(String path) {
+        ContainerRequestContext sent = mockCtx("POST", path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        UriInfo uriInfo = sent.getUriInfo();
+        ResteasyReactiveContainerRequestContext ctx = Mockito.mock(ResteasyReactiveContainerRequestContext.class);
+        ResteasyReactiveRequestContext routed = Mockito.mock(ResteasyReactiveRequestContext.class);
+        when(ctx.getMethod()).thenReturn("POST");
+        when(ctx.getUriInfo()).thenReturn(uriInfo);
+        when(ctx.getServerRequestContext()).thenReturn(routed);
+        when(routed.getPathWithoutPrefix()).thenReturn("/policy/validation");
+        assertEquals("access-analyzer:ValidatePolicy", registry.resolveRoute("access-analyzer", ctx));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"/policy%2Fvalidation", "/policy%253Bignored/validation", "/policy/validation/extra"})
+    void policyRouteDoesNotTurnEncodedDelimitersIntoStructure(String path) {
+        ContainerRequestContext ctx = mockCtx("POST", path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertNull(registry.resolveRoute("access-analyzer", ctx));
+    }
 
     @ParameterizedTest
     @CsvSource({"createReusableDelegationSet,CreateReusableDelegationSet",
@@ -87,6 +232,19 @@ class IamActionRegistryTest {
                 new MultivaluedHashMap<>(), null, "")));
         assertNull(registry.resolveRoute("resource-groups", mockCtx("POST", "/_rg/" + path + "/extra",
                 new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"POST,/2021-01-01/opensearch/vpcEndpoints,CreateVpcEndpoint",
+            "GET,/2021-01-01/opensearch/vpcEndpoints,ListVpcEndpoints",
+            "POST,/2021-01-01/opensearch/vpcEndpoints/describe,DescribeVpcEndpoints",
+            "POST,/2021-01-01/opensearch/vpcEndpoints/update,UpdateVpcEndpoint",
+            "DELETE,/2021-01-01/opensearch/vpcEndpoints/aos-0123456789ab,DeleteVpcEndpoint",
+            "GET,/2021-01-01/opensearch/domain/orders/vpcEndpoints,ListVpcEndpointsForDomain"})
+    void openSearchVpcEndpointRoutesResolveTheirOwnActions(String method, String path, String operation) {
+        ContainerRequestContext ctx = mockCtx(method, path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("es:" + operation, registry.resolveRoute("es", ctx));
     }
 
     @Test

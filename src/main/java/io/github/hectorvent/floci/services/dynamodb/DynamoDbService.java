@@ -54,8 +54,6 @@ import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -1521,12 +1519,13 @@ public class DynamoDbService {
             // and resolving the account inside the lambda would fall back to the default account,
             // which is the ambient-account bug this commit exists to remove.
             String ownerAccountId = regionResolver.getAccountId();
+            String eventName = existing == null ? "INSERT" : "MODIFY";
             Runnable streamEvent = () -> {
                 if (streamService != null) {
-                    streamService.captureEvent("MODIFY", existing, item, table, region);
+                    streamService.captureEvent(eventName, existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
-                    kinesisForwarder.forward("MODIFY", existing, item, table, region, ownerAccountId);
+                    kinesisForwarder.forward(eventName, existing, item, table, region, ownerAccountId);
                 }
             };
             if (deferredStreamEvents != null) {
@@ -4861,17 +4860,12 @@ public class DynamoDbService {
         if (scalar == null) {
             return 0;
         }
-        try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
-            byte[] digest = md.digest(scalar.getBytes(StandardCharsets.UTF_8));
-            long val = ((long) (digest[0] & 0xFF) << 24)
-                    | ((long) (digest[1] & 0xFF) << 16)
-                    | ((long) (digest[2] & 0xFF) << 8)
-                    | ((long) (digest[3] & 0xFF));
-            return (int) (val % totalSegments);
-        } catch (NoSuchAlgorithmException e) {
-            return Math.floorMod(scalar.hashCode(), totalSegments);
-        }
+        byte[] digest = Digests.md5(scalar.getBytes(StandardCharsets.UTF_8));
+        long val = ((long) (digest[0] & 0xFF) << 24)
+                | ((long) (digest[1] & 0xFF) << 16)
+                | ((long) (digest[2] & 0xFF) << 8)
+                | ((long) (digest[3] & 0xFF));
+        return (int) (val % totalSegments);
     }
 
     private String extractScalarValue(JsonNode attrValue) {

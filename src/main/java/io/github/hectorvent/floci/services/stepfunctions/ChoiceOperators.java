@@ -10,6 +10,7 @@ import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -34,6 +35,9 @@ import java.util.regex.Pattern;
  * @see <a href="https://docs.aws.amazon.com/step-functions/latest/dg/amazon-states-language-choice-state.html">ASL Choice state</a>
  */
 public final class ChoiceOperators {
+
+    private static final Pattern VARIABLE_REFERENCE =
+            Pattern.compile("^\\$([_\\p{javaUnicodeIdentifierStart}][\\p{javaUnicodeIdentifierPart}]*)((?:[.\\[].*)?)$");
 
     private ChoiceOperators() {
     }
@@ -457,6 +461,10 @@ public final class ChoiceOperators {
         }
     }
 
+    static Matcher variableReferenceMatcher(String path) {
+        return VARIABLE_REFERENCE.matcher(path);
+    }
+
     /**
      * Pragmatic ASL reference-path syntax check: must start with {@code $} or {@code $$}; either root
      * alone is valid; a longer path must be a sequence of non-empty {@code .segment} steps and balanced
@@ -466,6 +474,11 @@ public final class ChoiceOperators {
     static boolean isReferencePath(String p) {
         if (p == null || p.isEmpty() || p.charAt(0) != '$') {
             return false;
+        }
+        // A JSONPath workflow variable ($name, $name.field, $name[0]) is a valid reference on AWS.
+        Matcher variable = variableReferenceMatcher(p);
+        if (variable.matches()) {
+            return variable.group(2).isEmpty() || isReferencePath("$" + variable.group(2));
         }
         if (p.startsWith("$$")) {
             p = "$" + p.substring(2);

@@ -5,14 +5,18 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SqsTestQueue;
+import io.github.hectorvent.floci.testing.StepFunctionsTestClient;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -29,7 +33,6 @@ import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -55,6 +58,9 @@ class StepFunctionsTaskCredentialsIntegrationTest {
 
     @InjectSpy
     JsonataEvaluator jsonataEvaluator;
+
+    @Inject
+    SqsService sqsService;
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
@@ -209,6 +215,46 @@ class StepFunctionsTaskCredentialsIntegrationTest {
         verify(lambdaExecutor).invoke(argThat(fn -> fn != null && function.equals(fn.getFunctionArn())), any(), any());
     }
 
+    /** The execution role does not exist, and neither does the Credentials role: nothing evaluates either. */
+    @ParameterizedTest
+    @ValueSource(strings = {"sqs:sendMessage", "aws-sdk:sqs:sendMessage"})
+    void sqsCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
+        SqsTestQueue queue = SqsTestQueue.create(sqsService, SOURCE, "us-east-1", "credentials-");
+        cleanup.register(queue::delete);
+        String taskRole = "arn:aws:iam::" + TARGET + ":role/no-such-role";
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
+                "Type", "Task", "Resource", "arn:aws:states:::" + integration,
+                "Credentials", Map.of("RoleArn", taskRole),
+                "Parameters", Map.of("QueueUrl", queue.url(), "MessageBody", "hello"), "End", true))));
+
+        String execution = start(machine(SOURCE, definition, "STANDARD"), "{}");
+        Response done = terminal(SOURCE, execution);
+
+        assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
+        assertEquals("hello", queue.receive().getFirst().getBody());
+        assertEquals(taskRole, taskScheduled(execution).path("taskCredentials").path("roleArn").asText());
+    }
+
+    @Test
+    void credentialsThatDoNotResolveStillPassWithEnforcementOff() throws Exception {
+        SqsTestQueue queue = SqsTestQueue.create(sqsService, SOURCE, "us-east-1", "credentials-");
+        cleanup.register(queue::delete);
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
+                "Type", "Task", "Resource", "arn:aws:states:::sqs:sendMessage",
+                "Credentials", Map.of("RoleArn.$", "$.missing"),
+                "Parameters", Map.of("QueueUrl", queue.url(), "MessageBody", "hello"), "End", true))));
+
+        String execution = start(machine(SOURCE, definition, "STANDARD"), "{}");
+        Response done = terminal(SOURCE, execution);
+
+        assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
+        assertTrue(taskScheduled(execution).path("taskCredentials").isMissingNode(), done.asString());
+    }
+
+    private JsonNode taskScheduled(String execution) throws Exception {
+        return sfn().eventsOfType(SOURCE, execution, "TaskScheduled").getFirst().path("taskScheduledEventDetails");
+    }
+
     @Test
     void childFailureIsCaughtInParentAccount() throws Exception {
         String child = machine(TARGET, """
@@ -288,50 +334,23 @@ class StepFunctionsTaskCredentialsIntegrationTest {
     }
 
     private String machine(String account, String definition, String type) throws Exception {
-        String name = "credentials-" + UUID.randomUUID();
-        String arn = "arn:aws:states:us-east-1:" + account + ":stateMachine:" + name;
-        cleanup.register(() -> removeMachine(account, arn));
-        Response response = request(account, "CreateStateMachine", Map.of(
-                "name", name, "definition", definition,
-                "type", type, "roleArn", "arn:aws:iam::" + account + ":role/execution"));
-        response.then().statusCode(200);
-        return response.jsonPath().getString("stateMachineArn");
-    }
-
-    private void removeMachine(String account, String arn) {
-        Response executions = request(account, "ListExecutions", Map.of("stateMachineArn", arn));
-        executions.then().statusCode(200);
-        for (Map<String, String> execution : executions.jsonPath().<Map<String, String>>getList("executions")) {
-            if ("RUNNING".equals(execution.get("status"))) {
-                request(account, "StopExecution", Map.of("executionArn", execution.get("executionArn")))
-                        .then().statusCode(200);
-            }
-        }
-        request(account, "DeleteStateMachine", Map.of("stateMachineArn", arn)).then().statusCode(200);
+        return sfn().createMachine(account, "credentials-", definition, type,
+                "arn:aws:iam::" + account + ":role/execution");
     }
 
     private String start(String machine, String input) throws Exception {
-        Response response = request(SOURCE, "StartExecution", Map.of("stateMachineArn", machine, "input", input));
-        response.then().statusCode(200);
-        return response.jsonPath().getString("executionArn");
+        return sfn().start(SOURCE, machine, input);
     }
 
     private Response terminal(String account, String execution) throws Exception {
-        for (int i = 0; i < 100; i++) {
-            Response response = request(account, "DescribeExecution", Map.of("executionArn", execution));
-            response.then().statusCode(200);
-            if (!"RUNNING".equals(response.jsonPath().getString("status"))) {
-                return response;
-            }
-            Thread.sleep(50);
-        }
-        fail("Execution did not terminate: " + execution);
-        return null;
+        return sfn().terminal(account, execution, 5);
     }
 
     private Response request(String account, String action, Map<String, ?> input) {
-        return given().port(baseUri.getPort()).header("Authorization", auth(account, "states"))
-                .header("X-Amz-Target", "AWSStepFunctions." + action)
-                .contentType("application/x-amz-json-1.0").body(MAPPER.valueToTree(input).toString()).post("/");
+        return sfn().request(account, action, input);
+    }
+
+    private StepFunctionsTestClient sfn() {
+        return new StepFunctionsTestClient(baseUri.getPort(), cleanup);
     }
 }

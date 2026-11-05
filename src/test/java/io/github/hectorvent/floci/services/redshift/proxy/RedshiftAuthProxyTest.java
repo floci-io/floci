@@ -46,7 +46,7 @@ class RedshiftAuthProxyTest {
         int port = FreePorts.anyInterfacePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", 1, "admin", "password", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, password) -> PasswordValidator.AuthResult.REJECT,
-                mock(S3Service.class), mock(IamService.class), "111111111111", List.of(), 5000, 5000, 10, null, audit);
+                mock(S3Service.class), mock(IamService.class), "111111111111", List.of(), 5000, 5000, 10, null, audit, null);
         proxy.start(port);
         try (Socket client = new Socket("localhost", port)) {
             client.setSoTimeout(5000);
@@ -79,7 +79,7 @@ class RedshiftAuthProxyTest {
         int port = FreePorts.anyInterfacePort();
         proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(), "admin", "password", "dev",
                 mock(RdsSigV4Validator.class), realTls(), (user, password) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
-                mock(S3Service.class), mock(IamService.class), "111111111111", List.of(), 5000, 5000, 10, null, audit);
+                mock(S3Service.class), mock(IamService.class), "111111111111", List.of(), 5000, 5000, 10, null, audit, null);
         proxy.start(port);
         try (Socket client = new Socket("localhost", port)) {
             client.setSoTimeout(5000);

@@ -234,8 +234,9 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
 
     /** The cluster or workgroup the caller's open session runs on, named by its {@code SessionId}, as it reads it. */
     @Override
-    public Optional<String> through(String member, String value, String region) {
-        return "SessionId".equals(member) ? sessions.targetArn(sessionScope(region, null), value) : Optional.empty();
+    public List<String> through(String member, String value, String region) {
+        return "SessionId".equals(member) ? sessions.targetArn(sessionScope(region, null), value).stream().toList()
+                : List.of();
     }
 
     private Admission replay(RedshiftDataIdempotencyStore.Receipt receipt, RedshiftDataIdempotencyStore.Scope scope,

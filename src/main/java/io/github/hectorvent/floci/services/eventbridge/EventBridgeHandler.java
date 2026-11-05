@@ -118,10 +118,16 @@ public class EventBridgeHandler {
     private Response handleCreateEventBus(JsonNode request, String region) {
         String name = request.path("Name").asText(null);
         String description = request.path("Description").asText(null);
+        String kmsKey = request.path("KmsKeyIdentifier").asText(null);
         Map<String, String> tags = parseTagsArray(request.path("Tags"));
-        EventBus bus = eventBridgeService.createEventBus(name, description, tags, region);
+        EventBus bus = eventBridgeService.createEventBus(name, description, kmsKey,
+                configJson(request.path("DeadLetterConfig")), configJson(request.path("LogConfig")), tags, region);
+        // CreateEventBus answers with the bus's ARN and the configuration it was given.
+        ObjectNode configuration = buildBusNode(bus);
+        configuration.remove(List.of("Name", "Arn", "CreationTime", "Policy"));
         ObjectNode response = objectMapper.createObjectNode();
         response.put("EventBusArn", bus.getArn());
+        response.setAll(configuration);
         return Response.ok(response).build();
     }
 
@@ -143,13 +149,14 @@ public class EventBridgeHandler {
         String kmsKey = request.path("KmsKeyIdentifier").asText(null);
         // Empty {} is treated as "no change", matching how omitted/null inputs flow.
         // Only a populated object triggers a write to the bus's nested config field.
-        JsonNode dlqNode = request.path("DeadLetterConfig");
-        String dlq = (dlqNode.isObject() && !dlqNode.isEmpty()) ? dlqNode.toString() : null;
-        JsonNode logNode = request.path("LogConfig");
-        String logCfg = (logNode.isObject() && !logNode.isEmpty()) ? logNode.toString() : null;
-        EventBus bus = eventBridgeService.updateEventBus(
-                name, description, kmsKey, dlq, logCfg, region);
+        EventBus bus = eventBridgeService.updateEventBus(name, description, kmsKey,
+                configJson(request.path("DeadLetterConfig")), configJson(request.path("LogConfig")), region);
         return Response.ok(buildBusNode(bus)).build();
+    }
+
+    /** A nested configuration object as its JSON; empty {} or absent means not given. */
+    private static String configJson(JsonNode node) {
+        return node.isObject() && !node.isEmpty() ? node.toString() : null;
     }
 
     private Response handleListEventBuses(JsonNode request, String region) {
@@ -295,6 +302,10 @@ public class EventBridgeHandler {
                 if (!httpParamsNode.isMissingNode() && httpParamsNode.isObject()) {
                     target.setHttpParameters(objectMapper.convertValue(httpParamsNode, HttpParameters.class));
                 }
+                JsonNode appSyncParamsNode = t.path("AppSyncParameters");
+                if (appSyncParamsNode.isObject()) {
+                    target.setAppSyncParameters(objectMapper.convertValue(appSyncParamsNode, Target.AppSyncParameters.class));
+                }
                 targets.add(target);
             }
         }
@@ -372,6 +383,9 @@ public class EventBridgeHandler {
             }
             if (t.getHttpParameters() != null) {
                 node.set("HttpParameters", objectMapper.valueToTree(t.getHttpParameters()));
+            }
+            if (t.getAppSyncParameters() != null) {
+                node.set("AppSyncParameters", objectMapper.valueToTree(t.getAppSyncParameters()));
             }
             targetsArray.add(node);
         }

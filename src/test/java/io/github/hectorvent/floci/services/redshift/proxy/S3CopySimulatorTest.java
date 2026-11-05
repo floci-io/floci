@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
@@ -39,8 +40,10 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -52,6 +55,65 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class S3CopySimulatorTest {
+
+    @Test
+    void parquetSlicesWaitForCompleteCsvRecordsAndManifestUsesConvertedLengths() throws Exception {
+        long previous = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
+        S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 3;
+        try {
+            S3Service s3 = mock(S3Service.class);
+            RedshiftParquetWriter writer = mock(RedshiftParquetWriter.class);
+            List<RedshiftParquetWriter.Column> columns = List.of(new RedshiftParquetWriter.Column("v", "VARCHAR"));
+            byte[] parquet = "PAR1testPAR1".getBytes(StandardCharsets.UTF_8);
+            when(writer.convert(any(), eq(columns), eq("000000000000"), isNull(), eq(3L))).thenReturn(List.of(parquet));
+            CopyStatementParser.S3Unload spec = (CopyStatementParser.S3Unload) CopyStatementParser.parse(
+                    "UNLOAD ('select v from t') TO 's3://b/p/' PARQUET MANIFEST");
+            try (S3CopySimulator.UnloadCollector collector = S3CopySimulator.prepareUnload(
+                    spec, s3, null, "000000000000", null, writer)) {
+                collector.columns(columns);
+                collector.accept("\"first\n".getBytes(StandardCharsets.UTF_8));
+                verifyNoInteractions(writer);
+                collector.accept("second\"\n".getBytes(StandardCharsets.UTF_8));
+                collector.accept("last\n".getBytes(StandardCharsets.UTF_8));
+                collector.complete();
+            }
+            ArgumentCaptor<byte[]> slices = ArgumentCaptor.forClass(byte[].class);
+            verify(writer, times(2)).convert(slices.capture(), eq(columns), eq("000000000000"), isNull(), eq(3L));
+            assertEquals("\"first\nsecond\"\n", new String(slices.getAllValues().get(0), StandardCharsets.UTF_8));
+            verify(s3).putObject(eq("b"), eq("p/0000_part_00.parquet"), eq(parquet), eq("application/octet-stream"), any());
+            verify(s3).putObject(eq("b"), eq("p/0001_part_00.parquet"), eq(parquet), eq("application/octet-stream"), any());
+        } finally {
+            S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = previous;
+        }
+    }
+
+    @Test
+    void duckDbPartsUseExistingFlociNamesAndManifestLengths() throws Exception {
+        S3Service target = mock(S3Service.class);
+        RedshiftParquetWriter writer = mock(RedshiftParquetWriter.class);
+        List<RedshiftParquetWriter.Column> columns = List.of(new RedshiftParquetWriter.Column("v", "VARCHAR"));
+        byte[] first = new byte[30];
+        byte[] second = new byte[20];
+        when(writer.convert(any(), eq(columns), eq("000000000000"), isNull(), eq(1024L)))
+                .thenReturn(List.of(first, second));
+        CopyStatementParser.S3Unload spec = (CopyStatementParser.S3Unload) CopyStatementParser.parse(
+                "UNLOAD ('select v from t') TO 's3://b/p/' PARQUET MANIFEST MAXFILESIZE 1024");
+        try (S3CopySimulator.UnloadCollector collector = S3CopySimulator.prepareUnload(
+                spec, target, null, "000000000000", null, writer)) {
+            collector.columns(columns);
+            collector.accept("value\n".getBytes(StandardCharsets.UTF_8));
+            collector.complete();
+        }
+        verify(target).putObject(eq("b"), eq("p/0000_part_00.parquet"), eq(first), anyString(), any());
+        verify(target).putObject(eq("b"), eq("p/0001_part_00.parquet"), eq(second), anyString(), any());
+        ArgumentCaptor<byte[]> manifest = ArgumentCaptor.forClass(byte[].class);
+        verify(target).putObject(eq("b"), eq("p/manifest"), manifest.capture(), eq("application/json"), any());
+        String json = new String(manifest.getValue(), StandardCharsets.UTF_8);
+        assertTrue(json.contains("p/0000_part_00.parquet"));
+        assertTrue(json.contains("p/0001_part_00.parquet"));
+        assertTrue(json.contains("30"));
+        assertTrue(json.contains("20"));
+    }
 
     @Test
     void quotedDefaultIsValidatedAsAnArnForCopyAndUnload() {
@@ -66,7 +128,7 @@ class S3CopySimulatorTest {
                 S3CopySimulator.S3TransferException copyError = assertThrows(S3CopySimulator.S3TransferException.class,
                         () -> S3CopySimulator.prepareCopy(copy, s3, iamService, "000000000000", List.of(ROLE_ARN)));
                 S3CopySimulator.S3TransferException unloadError = assertThrows(S3CopySimulator.S3TransferException.class,
-                        () -> S3CopySimulator.prepareUnload(unload, s3, iamService, "000000000000", List.of(ROLE_ARN)));
+                        () -> S3CopySimulator.prepareUnload(unload, s3, iamService, "000000000000", List.of(ROLE_ARN), null));
                 assertEquals("42501", copyError.sqlState());
                 assertEquals("42501", unloadError.sqlState());
                 assertTrue(copyError.getMessage().contains("malformed ARN"), copyError.getMessage());
@@ -85,12 +147,181 @@ class S3CopySimulatorTest {
         S3CopySimulator.S3TransferException copyError = assertThrows(S3CopySimulator.S3TransferException.class,
                 () -> S3CopySimulator.prepareCopy(copy, s3, null, "000000000000", List.of()));
         S3CopySimulator.S3TransferException unloadError = assertThrows(S3CopySimulator.S3TransferException.class,
-                () -> S3CopySimulator.prepareUnload(unload, s3, null, "000000000000", List.of()));
+                () -> S3CopySimulator.prepareUnload(unload, s3, null, "000000000000", List.of(), null));
         assertEquals("42501", copyError.sqlState());
         assertEquals("42501", unloadError.sqlState());
         assertTrue(copyError.getMessage().contains("No default IAM role"));
         assertTrue(unloadError.getMessage().contains("No default IAM role"));
         verifyNoInteractions(s3);
+    }
+
+    private static final String KEY_COPY = "COPY people FROM 's3://bucket/data.csv' CREDENTIALS "
+            + "'aws_access_key_id=ASIAEXAMPLE;aws_secret_access_key=secret;token=tok'";
+
+    private static CopyStatementParser.S3CopyFrom keyCopy() {
+        return (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(KEY_COPY);
+    }
+
+    @Test
+    void copyWithKnownKeysReadsS3AsThoseKeys() {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.of("secret"));
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}]}")));
+        when(s3.objectExists("bucket", "data.csv")).thenReturn(true);
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
+
+        assertEquals(List.of("data.csv"), input.keys());
+        verify(s3).authorizeSignedListBucket("ASIAEXAMPLE", "tok", "bucket", "data.csv");
+        verify(s3).authorizeSignedGetObject("ASIAEXAMPLE", "tok", "bucket", "data.csv");
+        verify(s3, never()).authorizeAnonymousGetObject(any(), any());
+    }
+
+    @Test
+    void copyWithAnUnknownOrExpiredKeyFailsInsteadOfReadingAnonymously() {
+        IamService iamService = mock(IamService.class);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.empty());
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("XX000", error.sqlState());
+        assertTrue(error.getMessage().contains("does not exist in our records"), error.getMessage());
+        assertFalse(error.getMessage().contains("secret"), error.getMessage());
+        verify(s3, never()).authorizeAnonymousListBucket(any());
+        verify(s3, never()).authorizeAnonymousGetObject(any(), any());
+    }
+
+    @Test
+    void copyWithAWrongSecretFails() {
+        IamService iamService = mock(IamService.class);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.of("another-secret"));
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("XX000", error.sqlState());
+        assertTrue(error.getMessage().contains("signature"), error.getMessage());
+    }
+
+    @Test
+    void copyWithKeysDeniedByTheirIdentityPolicyFails() {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.of("secret"));
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of()));
+        when(s3.isAuthEnforced()).thenReturn(true);
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("42501", error.sqlState());
+        assertTrue(error.getMessage().contains("ASIAEXAMPLE"), error.getMessage());
+        assertFalse(error.getMessage().contains("tok"), error.getMessage());
+        verify(s3, never()).authorizeSignedListBucket(any(), any(), any());
+    }
+
+    private static String policy(String statements) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[" + statements + "]}";
+    }
+
+    private IamService knownKey() {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.of("secret"));
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(s3.objectExists("bucket", "data.csv")).thenReturn(true);
+        return iamService;
+    }
+
+    @Test
+    void anOrganizationPolicyDenyStillAppliesToTheKeysCopy() {
+        IamService iamService = knownKey();
+        when(iamService.findAccountForAccessKeyId("ASIAEXAMPLE")).thenReturn(Optional.of("222222222222"));
+        when(iamService.effectiveScpLevels("222222222222")).thenReturn(List.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"},"
+                        + "{\"Effect\":\"Deny\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}"))));
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}"))));
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("42501", error.sqlState());
+    }
+
+    @Test
+    void aConditionalDenyOnThePrincipalArnStillAppliesToTheKeysCopy() {
+        IamService iamService = knownKey();
+        String arn = "arn:aws:iam::111111111111:user/alice";
+        when(iamService.resolveCallerArns("ASIAEXAMPLE")).thenReturn(Optional.of(
+                new IamService.CallerArns(arn, arn)));
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"},"
+                        + "{\"Effect\":\"Deny\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\","
+                        + "\"Condition\":{\"ArnEquals\":{\"aws:PrincipalArn\":\"" + arn + "\"}}}"))));
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("42501", error.sqlState());
+    }
+
+    @Test
+    void anAllowThatRequiresTheListedPrefixMatchesTheCopyPrefix() {
+        IamService iamService = knownKey();
+        when(s3.objectExists("bucket", "data.csv")).thenReturn(false);
+        when(s3.listObjectsWithPrefixes(eq("bucket"), eq("data.csv"), any(), anyInt(), any(), any()))
+                .thenReturn(null);
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:ListBucket\",\"Resource\":\"*\","
+                        + "\"Condition\":{\"StringLike\":{\"s3:prefix\":\"data*\"}}},"
+                        + "{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}"))));
+
+        // The listing is authorized (no 42501); the empty prefix then finds no object.
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertTrue(error.getMessage().contains("not found"), error.getMessage());
+    }
+
+    @Test
+    void keysAuthorizeAgainstTheArnsOfTheBucketsPartition() {
+        IamService iamService = knownKey();
+        when(s3.bucketPartition("bucket")).thenReturn("aws-cn");
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:*\","
+                        + "\"Resource\":[\"arn:aws-cn:s3:::bucket\",\"arn:aws-cn:s3:::bucket/*\"]}"))));
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
+
+        assertEquals(List.of("data.csv"), input.keys());
+    }
+
+    @Test
+    void theOwnerOfTheKeyIsLookedUpAcrossAccounts() {
+        IamService iamService = knownKey();
+        when(iamService.findAccountForAccessKeyId("ASIAEXAMPLE")).thenReturn(Optional.of("222222222222"));
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(policy(
+                "{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}"))));
+
+        S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
+
+        verify(iamService, atLeastOnce()).findAccountForAccessKeyId("ASIAEXAMPLE");
+    }
+
+    @Test
+    void copyIgnoresPlaceholderKeysWhenS3AuthorizationIsOff() {
+        IamService iamService = mock(IamService.class);
+        when(s3.isAuthEnforced()).thenReturn(false);
+        when(s3.objectExists("bucket", "data.csv")).thenReturn(true);
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
+
+        assertEquals(List.of("data.csv"), input.keys());
+        verifyNoInteractions(iamService);
     }
 
     private ServerSocket listener;
@@ -114,6 +345,7 @@ class S3CopySimulatorTest {
         backendListener.close();
 
         s3 = mock(S3Service.class);
+        when(s3.bucketPartition(anyString())).thenReturn("aws");
     }
 
     @AfterEach
@@ -336,7 +568,7 @@ class S3CopySimulatorTest {
 
         verify(s3, never()).authorizeAnonymousGetObject(any(), any());
         verify(s3, never()).authorizeAnonymousListBucket(any());
-        verify(s3).authorizeSignedListBucket(any(), any(), eq("b"));
+        verify(s3).authorizeSignedListBucket(any(), any(), eq("b"), any());
         verify(s3).authorizeSignedGetObject(any(), any(), eq("b"), eq("k"));
         verify(iamService).registerSessionForAccount(
                 eq("000000000000"), any(), any(), any(), eq(ROLE_ARN), any(), isNull());

@@ -324,7 +324,7 @@ public class IamAuthValidator {
         return appsyncArn(region, accountId, "apis/" + apiId + "/*");
     }
 
-    static String fieldArn(String region, String accountId, String apiId, String typeName, String fieldName) {
+    public static String fieldArn(String region, String accountId, String apiId, String typeName, String fieldName) {
         return appsyncArn(region, accountId, "apis/" + apiId + "/types/" + typeName + "/fields/" + fieldName);
     }
 

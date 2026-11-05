@@ -63,13 +63,15 @@ public class RedshiftQueryHandler {
     private final RegionResolver regionResolver;
     private final RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer;
     private final IamEnforcementFilter iamEnforcementFilter;
+    private final RedshiftResourcePolicies resourcePolicies;
 
     @Inject
     public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                                 EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                                 RegionResolver regionResolver,
                                 RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer,
-                                IamEnforcementFilter iamEnforcementFilter) {
+                                IamEnforcementFilter iamEnforcementFilter,
+                                RedshiftResourcePolicies resourcePolicies) {
         this.service = service;
         this.credentialBroker = credentialBroker;
         this.config = config;
@@ -77,12 +79,13 @@ public class RedshiftQueryHandler {
         this.regionResolver = regionResolver;
         this.zeroEtlConsumer = zeroEtlConsumer;
         this.iamEnforcementFilter = iamEnforcementFilter;
+        this.resourcePolicies = resourcePolicies;
     }
 
     RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                          EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                          RegionResolver regionResolver) {
-        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null);
+        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, null, null, null);
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -225,7 +228,7 @@ public class RedshiftQueryHandler {
         }
         case "DeleteClusterSnapshot" -> {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
-            Snapshot snapshot = service.deleteSnapshot(snapshotIdentifier);
+            Snapshot snapshot = service.deleteSnapshot(snapshotIdentifier, params.getFirst("SnapshotClusterIdentifier"));
             String xml = new XmlBuilder()
                     .start("DeleteClusterSnapshotResponse")
                       .start("DeleteClusterSnapshotResult")
@@ -243,8 +246,10 @@ public class RedshiftQueryHandler {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String snapshotArn = params.getFirst("SnapshotArn");
             String nodeType = params.getFirst("NodeType");
-            Cluster cluster = service.restoreFromClusterSnapshot(
-                    clusterIdentifier, resolveSnapshotIdentifier(snapshotIdentifier, snapshotArn, authorizationHeader), nodeType);
+            RestoredSnapshot snapshot = resolveSnapshot(snapshotIdentifier,
+                    params.getFirst("SnapshotClusterIdentifier"), snapshotArn, authorizationHeader);
+            Cluster cluster = service.restoreFromClusterSnapshot(clusterIdentifier, snapshot.name(),
+                    snapshot.cluster(), nodeType);
             String xml = new XmlBuilder()
                     .start("RestoreFromClusterSnapshotResponse")
                       .start("RestoreFromClusterSnapshotResult")
@@ -519,6 +524,25 @@ public class RedshiftQueryHandler {
                         .elem("RequestId", "test-req-id")
                       .end("ResponseMetadata")
                     .end("DeleteIntegrationResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "PutResourcePolicy" -> {
+            RedshiftResourcePolicies.ResourcePolicy stored = resourcePolicies.put(
+                    params.getFirst("ResourceArn"), params.getFirst("Policy"));
+            return resourcePolicyResponse("PutResourcePolicy", stored);
+        }
+        case "GetResourcePolicy" -> {
+            return resourcePolicyResponse("GetResourcePolicy", resourcePolicies.get(params.getFirst("ResourceArn")));
+        }
+        case "DeleteResourcePolicy" -> {
+            resourcePolicies.delete(params.getFirst("ResourceArn"));
+            String xml = new XmlBuilder()
+                    .start("DeleteResourcePolicyResponse")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("DeleteResourcePolicyResponse")
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
@@ -991,10 +1015,28 @@ public class RedshiftQueryHandler {
         }
     }
 
+    private static Response resourcePolicyResponse(String operation, RedshiftResourcePolicies.ResourcePolicy policy) {
+        String xml = new XmlBuilder()
+                .start(operation + "Response")
+                  .start(operation + "Result")
+                    .start("ResourcePolicy")
+                      .elem("ResourceArn", policy.resourceArn())
+                      .elem("Policy", policy.policy())
+                    .end("ResourcePolicy")
+                  .end(operation + "Result")
+                  .start("ResponseMetadata")
+                    .elem("RequestId", "test-req-id")
+                  .end("ResponseMetadata")
+                .end(operation + "Response")
+                .build();
+        return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+    }
+
     /**
      * Authorizes the actions GetClusterCredentials needs besides redshift:GetClusterCredentials, which
      * the API reference lists for its options: redshift:JoinGroup on each group in {@code DbGroups},
-     * and redshift:CreateClusterUser on the database user when {@code AutoCreate} is true. It runs
+     * and redshift:CreateClusterUser on the database user when {@code AutoCreate} is true, with that
+     * user as {@code redshift:DbUser}, which the Service Reference lists for CreateClusterUser. It runs
      * before the cluster lookup, so a denied caller learns nothing about the cluster.
      */
     private void authorizeCredentialOptions(String authorizationHeader, String clusterId, String dbUser,
@@ -1009,7 +1051,8 @@ public class RedshiftQueryHandler {
         }
         if (autoCreate) {
             iamEnforcementFilter.authorizeAdditionalResource(authorizationHeader, "redshift:CreateClusterUser",
-                    regionResolver.buildArn("redshift", region, "dbuser:" + clusterId + "/" + dbUser));
+                    regionResolver.buildArn("redshift", region, "dbuser:" + clusterId + "/" + dbUser),
+                    Map.of("redshift:DbUser", List.of(dbUser)));
         }
     }
 
@@ -1176,8 +1219,16 @@ public class RedshiftQueryHandler {
         };
     }
 
-    // RestoreFromClusterSnapshot accepts SnapshotIdentifier or SnapshotArn.
-    private String resolveSnapshotIdentifier(String snapshotIdentifier, String snapshotArn, String authorizationHeader) {
+    /** The snapshot a restore names: its name, and the cluster it was taken from, which the request is checked on. */
+    private record RestoredSnapshot(String cluster, String name) {
+    }
+
+    /**
+     * RestoreFromClusterSnapshot accepts SnapshotIdentifier, with SnapshotClusterIdentifier, or SnapshotArn. An ARN
+     * naming no cluster, or another cluster than SnapshotClusterIdentifier, names no snapshot.
+     */
+    private RestoredSnapshot resolveSnapshot(String snapshotIdentifier, String snapshotClusterIdentifier,
+            String snapshotArn, String authorizationHeader) {
         boolean hasIdentifier = snapshotIdentifier != null && !snapshotIdentifier.isBlank();
         boolean hasArn = snapshotArn != null && !snapshotArn.isBlank();
         if (hasIdentifier && hasArn) {
@@ -1185,7 +1236,7 @@ public class RedshiftQueryHandler {
                     "You must specify either SnapshotIdentifier or SnapshotArn, but not both.", 400);
         }
         if (hasIdentifier) {
-            return snapshotIdentifier;
+            return new RestoredSnapshot(snapshotClusterIdentifier, snapshotIdentifier);
         }
         if (!hasArn) {
             throw new AwsException("InvalidParameterValue", "SnapshotIdentifier or SnapshotArn is required", 400);
@@ -1208,7 +1259,12 @@ public class RedshiftQueryHandler {
                 || !arn.region().equals(regionResolver.resolveRegionFromAuth(authorizationHeader))) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
         }
-        return resource.substring(slash + 1);
+        String cluster = resource.substring("snapshot:".length(), slash);
+        if (cluster.isBlank() || snapshotClusterIdentifier != null && !snapshotClusterIdentifier.isBlank()
+                && !snapshotClusterIdentifier.equals(cluster)) {
+            throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
+        }
+        return new RestoredSnapshot(cluster, resource.substring(slash + 1));
     }
 
     private String buildSnapshotXml(Snapshot snapshot) {

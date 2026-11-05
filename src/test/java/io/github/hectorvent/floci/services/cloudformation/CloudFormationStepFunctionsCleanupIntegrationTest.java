@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
@@ -288,6 +289,7 @@ class CloudFormationStepFunctionsCleanupIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
     }
 
     private static void updateStack(String stackName, String templateBody) {
@@ -300,6 +302,7 @@ class CloudFormationStepFunctionsCleanupIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
     }
 
     private static void deleteStack(String stackName) {

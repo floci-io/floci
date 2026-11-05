@@ -210,6 +210,60 @@ final class DynamoDbAttributeValueValidator {
         return true;
     }
 
+    static final String EMPTY_ATTRIBUTE_NAME = "Empty attribute name";
+
+    static void requireNonEmptyNames(JsonNode attributes) {
+        if (attributes != null && attributes.has("")) {
+            throw validationEx(EMPTY_ATTRIBUTE_NAME);
+        }
+    }
+
+    static void requireNonEmptyMemberNames(JsonNode values) {
+        if (values == null) {
+            return;
+        }
+        for (JsonNode value : values) {
+            if (hasEmptyMemberName(value)) {
+                throw validationEx(EMPTY_ATTRIBUTE_NAME);
+            }
+        }
+    }
+
+    private static boolean hasEmptyMemberName(JsonNode value) {
+        JsonNode members = value.path("M");
+        if (members.has("")) {
+            return true;
+        }
+        for (JsonNode member : members) {
+            if (hasEmptyMemberName(member)) {
+                return true;
+            }
+        }
+        for (JsonNode element : value.path("L")) {
+            if (hasEmptyMemberName(element)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static boolean hasUnknownMember(JsonNode value) {
+        if (value.properties().stream().anyMatch(member -> !TYPES.contains(member.getKey()))) {
+            return true;
+        }
+        for (JsonNode member : value.path("M")) {
+            if (hasUnknownMember(member)) {
+                return true;
+            }
+        }
+        for (JsonNode element : value.path("L")) {
+            if (hasUnknownMember(element)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static int depthOf(JsonNode value) {
         if (!value.isObject()) {
             return 1;

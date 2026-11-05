@@ -131,6 +131,66 @@ class MySqlProtocolHandlerTest {
     }
 
     @Test
+    void closesTheBackendWhenTheClientDropsWithoutQuitting() throws Exception {
+        byte[] nonce = fixedNonce();
+        AtomicReference<Integer> backendReadAfterDrop = new AtomicReference<>();
+
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try (Socket socket = backendServer.accept()) {
+                    OutputStream out = socket.getOutputStream();
+                    InputStream in = socket.getInputStream();
+                    out.write(buildHandshakeV10(nonce));
+                    out.flush();
+                    readMysqlPacketRaw(in);
+                    writeMysqlPacket(out, 2, OK_PAYLOAD);
+                    out.flush();
+                    // Stays connected and silent, as an idle MySQL server does.
+                    socket.setSoTimeout(5_000);
+                    backendReadAfterDrop.set(in.read());
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+            });
+
+            Socket proxyClient;
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendServer.getLocalPort());
+
+                Thread authThread = Thread.ofVirtual().start(() -> {
+                    try {
+                        MySqlProtocolHandler.handleAuth(
+                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
+                                false, testSigV4Validator(), testTlsCertificates(),
+                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
+                                username -> true, testBinding());
+                    } catch (IOException e) {
+                        throw new UncheckedIOException(e);
+                    }
+                });
+
+                InputStream clientIn = ourClient.getInputStream();
+                OutputStream clientOut = ourClient.getOutputStream();
+                assertNotNull(readMysqlPacketRaw(clientIn));
+                clientOut.write(buildHandshakeResponse41("admin", scrambleNativePassword("secret", nonce), (byte) 1));
+                clientOut.flush();
+                assertNotNull(readMysqlPacketRaw(clientIn));
+
+                // No COM_QUIT: the client just goes away.
+                ourClient.close();
+
+                joinAll(backendThread, authThread);
+            }
+            assertTrue(proxyClient.isClosed(), "the proxy must close its side of the dropped client");
+        }
+
+        assertEquals(-1, backendReadAfterDrop.get(), "the proxy must close the backend once the client drops");
+    }
+
+    @Test
     void validatesCachingSha2MasterScrambleAndForwardsResponse() throws Exception {
         byte[] nonce = fixedNonce();
         AtomicReference<Byte> backendResponseSeq = new AtomicReference<>();

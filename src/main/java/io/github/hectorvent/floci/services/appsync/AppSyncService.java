@@ -30,6 +30,11 @@ import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+/**
+ * Writers hold the service monitor across each read, change and save, as startSchemaCreation
+ * does, so two writers never lose each other's changes. Readers do not take it, and the schema
+ * worker's own writes to the schema and schema-status stores are outside it.
+ */
 @ApplicationScoped
 public class AppSyncService {
     private static final Logger LOG = Logger.getLogger(AppSyncService.class);
@@ -97,7 +102,7 @@ public class AppSyncService {
 
     // ──────────────────────────── GraphQL API ────────────────────────────
 
-    public GraphqlApi createGraphqlApi(Map<String, Object> request, String region) {
+    public synchronized GraphqlApi createGraphqlApi(Map<String, Object> request, String region) {
         assertNoSchemaBusyAnywhere();
         String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
@@ -168,15 +173,17 @@ public class AppSyncService {
     }
 
     public Page<GraphqlApi> listGraphqlApis(Integer maxResults, String nextToken) {
-        List<GraphqlApi> apis = apiStore.scan(k -> true);
-        apis.forEach(this::refreshGraphqlApiUris);
+        List<GraphqlApi> apis = new ArrayList<>();
+        for (GraphqlApi stored : apiStore.scan(k -> true)) {
+            apis.add(refreshGraphqlApiUris(stored));
+        }
         return paginate(apis, nextToken, maxResults);
     }
 
     @SuppressWarnings("unchecked")
-    public GraphqlApi updateGraphqlApi(String apiId, Map<String, Object> request, String region) {
+    public synchronized GraphqlApi updateGraphqlApi(String apiId, Map<String, Object> request, String region) {
         assertSchemaNotBusy(apiId);
-        GraphqlApi existing = getGraphqlApi(apiId);
+        GraphqlApi existing = copyOf(getGraphqlApi(apiId), GraphqlApi.class);
         if (request.containsKey("name")) existing.setName((String) request.get("name"));
         if (request.containsKey("authenticationType")) existing.setAuthenticationType(parseEnum(AuthenticationType.class, request.get("authenticationType")));
         if (request.containsKey("xrayEnabled")) {
@@ -223,7 +230,7 @@ public class AppSyncService {
         return existing;
     }
 
-    public void deleteGraphqlApi(String apiId) {
+    public synchronized void deleteGraphqlApi(String apiId) {
         assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         apiStore.delete(apiId);
@@ -244,10 +251,11 @@ public class AppSyncService {
     // ──────────────────────────── Schema ────────────────────────────
 
     public SchemaCreationStatus startSchemaCreation(String apiId, String definition) {
-        getGraphqlApi(apiId);
-        String accountId = currentAccountId();
         SchemaCreationStatus status;
+        String accountId;
         synchronized (this) {
+            getGraphqlApi(apiId);
+            accountId = currentAccountId();
             assertSchemaNotBusy(apiId);
             status = new SchemaCreationStatus();
             status.setStatus(SchemaCreationStatusType.PROCESSING);
@@ -312,7 +320,7 @@ public class AppSyncService {
 
     // ──────────────────────────── Data Sources ────────────────────────────
 
-    public DataSource createDataSource(String apiId, Map<String, Object> request, String region) {
+    public synchronized DataSource createDataSource(String apiId, Map<String, Object> request, String region) {
         assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         String name = (String) request.get("name");
@@ -355,9 +363,9 @@ public class AppSyncService {
     }
 
     @SuppressWarnings("unchecked")
-    public DataSource updateDataSource(String apiId, String dataSourceName, Map<String, Object> request) {
+    public synchronized DataSource updateDataSource(String apiId, String dataSourceName, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        DataSource existing = getDataSource(apiId, dataSourceName);
+        DataSource existing = copyOf(getDataSource(apiId, dataSourceName), DataSource.class);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
         if (request.containsKey("type")) existing.setType(parseEnum(DataSourceType.class, request.get("type")));
         if (request.containsKey("serviceRoleArn")) existing.setServiceRoleArn((String) request.get("serviceRoleArn"));
@@ -372,7 +380,7 @@ public class AppSyncService {
         return existing;
     }
 
-    public void deleteDataSource(String apiId, String dataSourceName) {
+    public synchronized void deleteDataSource(String apiId, String dataSourceName) {
         assertSchemaNotBusy(apiId);
         getDataSource(apiId, dataSourceName);
         dataSourceStore.delete(apiKey(apiId, dataSourceName));
@@ -396,7 +404,7 @@ public class AppSyncService {
         return rt;
     }
 
-    public Resolver createResolver(String apiId, Map<String, Object> request, String region) {
+    public synchronized Resolver createResolver(String apiId, Map<String, Object> request, String region) {
         assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         String fieldName = (String) request.get("fieldName");
@@ -476,9 +484,9 @@ public class AppSyncService {
     }
 
     @SuppressWarnings("unchecked")
-    public Resolver updateResolver(String apiId, String typeName, String fieldName, Map<String, Object> request) {
+    public synchronized Resolver updateResolver(String apiId, String typeName, String fieldName, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        Resolver existing = getResolver(apiId, typeName, fieldName);
+        Resolver existing = copyOf(getResolver(apiId, typeName, fieldName), Resolver.class);
         if (request.containsKey("dataSourceName")) existing.setDataSourceName((String) request.get("dataSourceName"));
         if (request.containsKey("functionId")) existing.setFunctionId((String) request.get("functionId"));
         if (request.containsKey("requestMappingTemplate")) existing.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
@@ -495,7 +503,7 @@ public class AppSyncService {
         return existing;
     }
 
-    public void deleteResolver(String apiId, String typeName, String fieldName) {
+    public synchronized void deleteResolver(String apiId, String typeName, String fieldName) {
         assertSchemaNotBusy(apiId);
         getResolver(apiId, typeName, fieldName);
         resolverStore.delete(resolverKey(apiId, typeName, fieldName));
@@ -503,7 +511,7 @@ public class AppSyncService {
 
     // ──────────────────────────── Functions ────────────────────────────
 
-    public FunctionConfiguration createFunction(String apiId, Map<String, Object> request, String region) {
+    public synchronized FunctionConfiguration createFunction(String apiId, Map<String, Object> request, String region) {
         assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         String name = (String) request.get("name");
@@ -541,9 +549,9 @@ public class AppSyncService {
         return paginate(functionStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
-    public FunctionConfiguration updateFunction(String apiId, String functionId, Map<String, Object> request) {
+    public synchronized FunctionConfiguration updateFunction(String apiId, String functionId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        FunctionConfiguration existing = getFunction(apiId, functionId);
+        FunctionConfiguration existing = copyOf(getFunction(apiId, functionId), FunctionConfiguration.class);
         // UpdateFunction takes a new name on AWS, and CloudFormation drives FunctionConfiguration
         // renames through it. Leaving the name alone let a stack complete while GetFunction still
         // reported the old one.
@@ -560,7 +568,7 @@ public class AppSyncService {
         return existing;
     }
 
-    public void deleteFunction(String apiId, String functionId) {
+    public synchronized void deleteFunction(String apiId, String functionId) {
         assertSchemaNotBusy(apiId);
         getFunction(apiId, functionId);
         functionStore.delete(apiKey(apiId, functionId));
@@ -568,7 +576,7 @@ public class AppSyncService {
 
     // ──────────────────────────── Types ────────────────────────────
 
-    public AppSyncType createType(String apiId, Map<String, Object> request) {
+    public synchronized AppSyncType createType(String apiId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         String name = (String) request.get("name");
@@ -605,7 +613,7 @@ public class AppSyncService {
         return paginate(typeStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
-    public AppSyncType updateType(String apiId, String typeName, Map<String, Object> request) {
+    public synchronized AppSyncType updateType(String apiId, String typeName, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         AppSyncType existing = getType(apiId, typeName);
         if (request.containsKey("definition")) existing.setDefinition((String) request.get("definition"));
@@ -615,7 +623,7 @@ public class AppSyncService {
         return existing;
     }
 
-    public void deleteType(String apiId, String typeName) {
+    public synchronized void deleteType(String apiId, String typeName) {
         assertSchemaNotBusy(apiId);
         getType(apiId, typeName);
         typeStore.delete(apiKey(apiId, typeName));
@@ -623,7 +631,7 @@ public class AppSyncService {
 
     // ──────────────────────────── API Keys ────────────────────────────
 
-    public ApiKey createApiKey(String apiId, Map<String, Object> request) {
+    public synchronized ApiKey createApiKey(String apiId, Map<String, Object> request) {
         getGraphqlApi(apiId);
         long existingCount = apiKeyStore.scan(k -> k.startsWith(apiId + "::")).size();
         if (existingCount >= 2) {
@@ -671,19 +679,21 @@ public class AppSyncService {
         return Optional.empty();
     }
 
-    public ApiKey updateApiKey(String apiId, String keyId, Map<String, Object> request) {
-        ApiKey existing = getApiKey(apiId, keyId);
-        if (request.containsKey("description")) {
-            existing.setDescription((String) request.get("description"));
-        }
+    public synchronized ApiKey updateApiKey(String apiId, String keyId, Map<String, Object> request) {
+        ApiKey existing = copyOf(getApiKey(apiId, keyId), ApiKey.class);
+        // Applied to a copy and stored last, so a refused expiry or a description of the wrong
+        // type leaves the stored key as it was.
         if (request.containsKey("expires")) {
             applyApiKeyExpires(existing, parseExpires(request.get("expires")));
+        }
+        if (request.containsKey("description")) {
+            existing.setDescription((String) request.get("description"));
         }
         apiKeyStore.put(apiKey(apiId, keyId), existing);
         return existing;
     }
 
-    public void deleteApiKey(String apiId, String keyId) {
+    public synchronized void deleteApiKey(String apiId, String keyId) {
         getApiKey(apiId, keyId);
         apiKeyStore.delete(apiKey(apiId, keyId));
     }
@@ -695,14 +705,14 @@ public class AppSyncService {
         return getGraphqlApi(apiId).getTags();
     }
 
-    public void tagResource(String resourceArn, Map<String, String> tags) {
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
         String apiId = extractApiIdFromArn(resourceArn);
         GraphqlApi api = getGraphqlApi(apiId);
         api.getTags().putAll(tags);
         apiStore.put(apiId, api);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys) {
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
         String apiId = extractApiIdFromArn(resourceArn);
         GraphqlApi api = getGraphqlApi(apiId);
         tagKeys.forEach(api.getTags()::remove);
@@ -717,7 +727,7 @@ public class AppSyncService {
         return envVars != null ? envVars : Map.of();
     }
 
-    public Map<String, String> putEnvironmentVariables(String apiId, Map<String, String> environmentVariables) {
+    public synchronized Map<String, String> putEnvironmentVariables(String apiId, Map<String, String> environmentVariables) {
         assertSchemaNotBusy(apiId);
         GraphqlApi api = getGraphqlApi(apiId);
         api.setEnvironmentVariables(new HashMap<>(environmentVariables));
@@ -727,7 +737,7 @@ public class AppSyncService {
 
     // ──────────────────────────── Domain Names ────────────────────────────
 
-    public DomainName createDomainName(Map<String, Object> request) {
+    public synchronized DomainName createDomainName(Map<String, Object> request) {
         String domainName = (String) request.get("domainName");
         if (domainName == null || domainName.isBlank()) {
             throw new AwsException("BadRequestException", "A domain name is required", 400);
@@ -777,7 +787,7 @@ public class AppSyncService {
         return paginate(domainStore.scan(k -> true), nextToken, maxResults);
     }
 
-    public DomainName updateDomainName(String domainName, Map<String, Object> request) {
+    public synchronized DomainName updateDomainName(String domainName, Map<String, Object> request) {
         DomainName existing = getDomainName(domainName);
         associationStore.get(domainName).ifPresent(apiId -> assertSchemaNotBusy(apiId));
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
@@ -785,14 +795,14 @@ public class AppSyncService {
         return existing;
     }
 
-    public void deleteDomainName(String domainName) {
+    public synchronized void deleteDomainName(String domainName) {
         getDomainName(domainName);
         associationStore.get(domainName).ifPresent(apiId -> assertSchemaNotBusy(apiId));
         associationStore.delete(domainName);
         domainStore.delete(domainName);
     }
 
-    public ApiAssociation associateApi(String domainName, String apiId) {
+    public synchronized ApiAssociation associateApi(String domainName, String apiId) {
         getDomainName(domainName);
         getGraphqlApi(apiId);
         if (associationStore.get(domainName).isPresent()) {
@@ -820,7 +830,7 @@ public class AppSyncService {
         return assoc;
     }
 
-    public void disassociateApi(String domainName) {
+    public synchronized void disassociateApi(String domainName) {
         getDomainName(domainName);
         associationStore.get(domainName).ifPresent(apiId -> assertSchemaNotBusy(apiId));
         associationStore.delete(domainName);
@@ -828,7 +838,7 @@ public class AppSyncService {
 
     // ──────────────────────────── Channel Namespaces ────────────────────────────
 
-    public ChannelNamespace createChannelNamespace(String apiId, Map<String, Object> request) {
+    public synchronized ChannelNamespace createChannelNamespace(String apiId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         GraphqlApi api = getGraphqlApi(apiId);
         String name = (String) request.get("name");
@@ -859,7 +869,7 @@ public class AppSyncService {
                         "Channel namespace not found: " + name, 404));
     }
 
-    public ChannelNamespace updateChannelNamespace(String apiId, String name, Map<String, Object> request) {
+    public synchronized ChannelNamespace updateChannelNamespace(String apiId, String name, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         ChannelNamespace existing = getChannelNamespace(apiId, name);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
@@ -869,7 +879,7 @@ public class AppSyncService {
         return existing;
     }
 
-    public void deleteChannelNamespace(String apiId, String name) {
+    public synchronized void deleteChannelNamespace(String apiId, String name) {
         assertSchemaNotBusy(apiId);
         getChannelNamespace(apiId, name);
         channelNamespaceStore.delete(apiKey(apiId, name));
@@ -881,7 +891,7 @@ public class AppSyncService {
 
     // ──────────────────────────── Merged API Associations ─────────────────
 
-    public SourceApiAssociation createMergedApiAssociation(String sourceApiIdentifier, Map<String, Object> request, String region) {
+    public synchronized SourceApiAssociation createMergedApiAssociation(String sourceApiIdentifier, Map<String, Object> request, String region) {
         getGraphqlApi(sourceApiIdentifier);
         String mergedApiIdentifier = (String) request.getOrDefault("mergedApiIdentifier", request.get("mergedApiId"));
         if (mergedApiIdentifier == null || mergedApiIdentifier.isBlank()) {
@@ -909,7 +919,7 @@ public class AppSyncService {
         return assoc;
     }
 
-    public SourceApiAssociation createSourceApiAssociation(String mergedApiIdentifier, Map<String, Object> request, String region) {
+    public synchronized SourceApiAssociation createSourceApiAssociation(String mergedApiIdentifier, Map<String, Object> request, String region) {
         getGraphqlApi(mergedApiIdentifier);
         String sourceApiId = (String) request.getOrDefault("sourceApiId", request.get("sourceApiIdentifier"));
         if (sourceApiId == null || sourceApiId.isBlank()) {
@@ -948,7 +958,7 @@ public class AppSyncService {
         return assoc;
     }
 
-    public SourceApiAssociation updateSourceApiAssociation(String mergedApiIdentifier, String associationId,
+    public synchronized SourceApiAssociation updateSourceApiAssociation(String mergedApiIdentifier, String associationId,
                                                           Map<String, Object> request) {
         assertSchemaNotBusy(mergedApiIdentifier);
         SourceApiAssociation assoc = getSourceApiAssociation(mergedApiIdentifier, associationId);
@@ -979,7 +989,7 @@ public class AppSyncService {
         return paginate(summaries, nextToken, maxResults);
     }
 
-    public void deleteSourceApiAssociation(String mergedApiIdentifier, String associationId) {
+    public synchronized void deleteSourceApiAssociation(String mergedApiIdentifier, String associationId) {
         assertSchemaNotBusy(mergedApiIdentifier);
         getSourceApiAssociation(mergedApiIdentifier, associationId);
         mergedApiAssociationStore.delete(associationId);
@@ -997,7 +1007,7 @@ public class AppSyncService {
         }
     }
 
-    public SourceApiAssociation deleteMergedApiAssociation(String sourceApiIdentifier, String associationId) {
+    public synchronized SourceApiAssociation deleteMergedApiAssociation(String sourceApiIdentifier, String associationId) {
         assertSchemaNotBusy(sourceApiIdentifier);
         SourceApiAssociation assoc = mergedApiAssociationStore.get(associationId)
                 .orElseThrow(() -> new AwsException("NotFoundException",
@@ -1103,6 +1113,15 @@ public class AppSyncService {
             case AWS_LAMBDA -> provider.getLambdaAuthorizerConfig();
             default -> Map.of();
         };
+    }
+
+    /**
+     * An update is applied to a copy and stored only once every member has been read and checked,
+     * so a request the service refuses leaves the stored entity untouched. The stores hand out
+     * their own instances, which a half-applied update would otherwise have changed in place.
+     */
+    private <T> T copyOf(T entity, Class<T> type) {
+        return objectMapper.convertValue(entity, type);
     }
 
     private long parseExpires(Object expiresValue) {
@@ -1246,11 +1265,23 @@ public class AppSyncService {
 
     private GraphqlApi refreshGraphqlApiUris(GraphqlApi api) {
         Map<String, String> expectedUris = graphqlApiUris(api.getApiId());
-        if (!expectedUris.equals(api.getUris())) {
-            api.setUris(expectedUris);
-            apiStore.put(api.getApiId(), api);
+        if (expectedUris.equals(api.getUris())) {
+            return api;
         }
-        return api;
+        synchronized (this) {
+            // Refresh what is stored now, never the instance read before the lock: a concurrent
+            // update may have saved a newer one in between.
+            GraphqlApi current = apiStore.get(api.getApiId()).orElse(null);
+            if (current == null) {
+                api.setUris(expectedUris);
+                return api;
+            }
+            if (!expectedUris.equals(current.getUris())) {
+                current.setUris(expectedUris);
+                apiStore.put(current.getApiId(), current);
+            }
+            return current;
+        }
     }
 
     private Integer castInt(Object value) {

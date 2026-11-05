@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-10-31",
+    "retrieved": "2026-11-03",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -326,5 +326,109 @@
     "vpc-lattice": {
       "BatchUpdateRule": "vpc-lattice:UpdateRule"
     }
+  },
+  "actionsWithoutResourceTypes": {
+    "access-analyzer": [
+      "CancelPolicyGeneration",
+      "CheckAccessNotGranted",
+      "CheckNoNewAccess",
+      "CheckNoPublicAccess",
+      "GetGeneratedPolicy",
+      "ListAnalyzers",
+      "ListPolicyGenerations",
+      "StartPolicyGeneration",
+      "ValidatePolicy"
+    ],
+    "dsql": [
+      "InjectError",
+      "ListClusters"
+    ],
+    "eks": [
+      "CreateCluster",
+      "CreateEksAnywhereSubscription",
+      "DescribeAddonConfiguration",
+      "DescribeAddonVersions",
+      "DescribeClusterVersions",
+      "ListAccessPolicies",
+      "ListClusters",
+      "ListEksAnywhereSubscriptions",
+      "RegisterCluster"
+    ],
+    "es": [
+      "AcceptInboundConnection",
+      "AcceptInboundCrossClusterSearchConnection",
+      "AuthorizeVpcEndpointAccess",
+      "CreateApplication",
+      "CreateElasticsearchServiceRole",
+      "CreatePackage",
+      "CreateServiceRole",
+      "CreateVpcEndpoint",
+      "DeleteElasticsearchServiceRole",
+      "DeleteInboundConnection",
+      "DeleteInboundCrossClusterSearchConnection",
+      "DeleteOutboundConnection",
+      "DeleteOutboundCrossClusterSearchConnection",
+      "DeletePackage",
+      "DeleteVpcEndpoint",
+      "DescribeElasticsearchInstanceTypeLimits",
+      "DescribeInboundConnections",
+      "DescribeInboundCrossClusterSearchConnections",
+      "DescribeInstanceTypeLimits",
+      "DescribeOutboundConnections",
+      "DescribeOutboundCrossClusterSearchConnections",
+      "DescribePackages",
+      "DescribeReservedElasticsearchInstanceOfferings",
+      "DescribeReservedElasticsearchInstances",
+      "DescribeReservedInstanceOfferings",
+      "DescribeReservedInstances",
+      "DescribeVpcEndpoints",
+      "GetPackageVersionHistory",
+      "ListDomainNames",
+      "ListDomainsForPackage",
+      "ListElasticsearchInstanceTypeDetails",
+      "ListElasticsearchInstanceTypes",
+      "ListElasticsearchVersions",
+      "ListInstanceTypeDetails",
+      "ListVersions",
+      "ListVpcEndpointAccess",
+      "ListVpcEndpoints",
+      "ListVpcEndpointsForDomain",
+      "PurchaseReservedElasticsearchInstanceOffering",
+      "PurchaseReservedInstanceOffering",
+      "RejectInboundConnection",
+      "RejectInboundCrossClusterSearchConnection",
+      "RevokeVpcEndpointAccess",
+      "UpdatePackage",
+      "UpdatePackageScope",
+      "UpdateVpcEndpoint"
+    ],
+    "lambda": [
+      "ConnectMicrovm",
+      "CreateCodeSigningConfig",
+      "CreateEventSourceMapping",
+      "CreateMicrovmImage",
+      "GetAccountSettings",
+      "GetWebAccountSettings",
+      "ListCapacityProviders",
+      "ListCodeSigningConfigs",
+      "ListEventSourceMappings",
+      "ListFunctions",
+      "ListLayerVersions",
+      "ListLayers",
+      "ListManagedMicrovmImages",
+      "ListMicrovmImages",
+      "ListMicrovms",
+      "ListNetworkConnectors",
+      "ListWebFunctions",
+      "PassNetworkConnector"
+    ],
+    "pipes": [
+      "ListPipes"
+    ],
+    "scheduler": [
+      "ListScheduleGroups",
+      "ListSchedules",
+      "ListSchedulesByTarget"
+    ]
   }
 }

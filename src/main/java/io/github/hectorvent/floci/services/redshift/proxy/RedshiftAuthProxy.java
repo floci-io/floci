@@ -40,6 +40,7 @@ public class RedshiftAuthProxy {
     private final RdsProxyTlsCertificates tlsCertificates;
     private final PasswordValidator passwordValidator;
     private final S3Service s3Service;
+    private final RedshiftParquetWriter parquetWriter;
     private final IamService iamService;
     private final SpectrumInterceptor spectrumInterceptor;
     private final RedshiftAuditLogPublisher auditLogPublisher;
@@ -97,7 +98,7 @@ public class RedshiftAuthProxy {
                              int maxConnections, SpectrumInterceptor spectrumInterceptor) {
         this(clusterKey, backendHost, backendPort, masterUsername, masterPassword, dbName, sigV4,
                 tlsCertificates, passwordValidator, s3Service, iamService, clusterAccountId, iamRoleArns,
-                handshakeTimeoutMillis, backendConnectTimeoutMillis, maxConnections, spectrumInterceptor, null);
+                handshakeTimeoutMillis, backendConnectTimeoutMillis, maxConnections, spectrumInterceptor, null, null);
     }
 
     public RedshiftAuthProxy(String clusterKey, String backendHost, int backendPort,
@@ -109,7 +110,7 @@ public class RedshiftAuthProxy {
                              List<String> iamRoleArns,
                              int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
                              int maxConnections, SpectrumInterceptor spectrumInterceptor,
-                             RedshiftAuditLogPublisher auditLogPublisher) {
+                             RedshiftAuditLogPublisher auditLogPublisher, RedshiftParquetWriter parquetWriter) {
         this.clusterKey = clusterKey;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
@@ -120,6 +121,7 @@ public class RedshiftAuthProxy {
         this.tlsCertificates = tlsCertificates;
         this.passwordValidator = passwordValidator;
         this.s3Service = s3Service;
+        this.parquetWriter = parquetWriter;
         this.iamService = iamService;
         this.spectrumInterceptor = spectrumInterceptor;
         this.auditLogPublisher = auditLogPublisher;
@@ -276,7 +278,7 @@ public class RedshiftAuthProxy {
                 RoleConfiguration roles = roleConfiguration;
                 new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
                         clusterAccountId, roles.iamRoleArns(), spectrumInterceptor, clusterKey, login.database,
-                        roles.defaultIamRoleArn(), auditLogPublisher, login.username).run();
+                        roles.defaultIamRoleArn(), auditLogPublisher, login.username, parquetWriter).run();
                 publishConnection(client, login, "disconnection");
             } else {
                 publishConnection(client, login, login.backendUnavailable ? "connection_error" : "authentication failure");

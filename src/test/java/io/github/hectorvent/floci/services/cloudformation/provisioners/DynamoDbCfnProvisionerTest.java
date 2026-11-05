@@ -41,7 +41,8 @@ import static org.mockito.Mockito.when;
  * {@code TimeToLiveSpecification} reconcile, and the snapshot a failed table update rolls back
  * from. The stream and replica
  * behaviour keeps its own coverage in {@code DynamoDbStreamSpecificationCfnProvisionerTest} and
- * {@code DynamoDbReplicaCfnProvisionerTest}, which reach this class through the fixture.
+ * {@code DynamoDbReplicaCfnProvisionerTest}, which reach this class through the fixture, and
+ * {@code KinesisStreamSpecification} in {@code DynamoDbKinesisStreamSpecificationCfnProvisionerTest}.
  */
 class DynamoDbCfnProvisionerTest {
 
@@ -54,7 +55,7 @@ class DynamoDbCfnProvisionerTest {
 
     private final DynamoDbService dynamoDb = mock(DynamoDbService.class);
     private final ObjectMapper mapper = new ObjectMapper();
-    private final NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDb, null, null, mapper);
+    private final NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, null, dynamoDb, null, null, mapper);
     private final DynamoDbCfnProvisioner provisioner = new DynamoDbCfnProvisioner(
             new DynamoDbFacade(backend, backend, new RegionResolver("us-east-1", "000000000000")));
 

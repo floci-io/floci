@@ -24,7 +24,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.Future;
 
 /**
  * Handles CloudFormation Query-protocol API calls (form-encoded POST, XML response).
@@ -66,8 +65,8 @@ public class CloudFormationQueryHandler {
             case "ValidateTemplate" -> validateTemplate(params);
             case "ListStacks" -> listStacks(params, region);
             case "ListExports" -> listExports(params, region);
-            case "SetStackPolicy" -> Response.ok(emptyResult("SetStackPolicyResponse")).build();
-            case "GetStackPolicy" -> Response.ok(emptyResult("GetStackPolicyResponse")).build();
+            case "SetStackPolicy" -> setStackPolicy(params, region);
+            case "GetStackPolicy" -> getStackPolicy(params, region);
             case "DescribeStackResource" -> describeStackResource(params, region);
             case "DescribeOrganizationsAccess" -> describeOrganizationsAccess();
             case "ActivateOrganizationsAccess" -> activateOrganizationsAccess();
@@ -118,21 +117,26 @@ public class CloudFormationQueryHandler {
         Map<String, String> parameters = extractParameters(params);
         List<String> capabilities = extractList(params, "Capabilities.member.");
         Map<String, String> tags = extractTags(params);
+        String stackPolicy = cfnService.resolveStackPolicy(params.getFirst("StackPolicyBody"),
+                params.getFirst("StackPolicyURL"), " to be applied after stack creation");
 
-        cfnService.createChangeSet(stackName, "initial-create", "CREATE",
-                templateBody, templateUrl, parameters, capabilities, tags, region);
-        awaitExecution(cfnService.executeChangeSet(stackName, "initial-create", region));
-
-        if (Boolean.parseBoolean(params.getFirst("EnableTerminationProtection"))) {
-            // CreateStackInput carries the same member; honor it so the stack is created protected.
-            cfnService.updateTerminationProtection(stackName, true, region);
+        boolean terminationProtection = Boolean.parseBoolean(params.getFirst("EnableTerminationProtection"));
+        ChangeSet initial = cfnService.createChangeSetForCreateStack(stackName, "initial-create",
+                templateBody, templateUrl, parameters, capabilities, tags, region,
+                terminationProtection, stackPolicy);
+        try {
+            cfnService.executeChangeSet(initial.getStackId(), initial.getChangeSetId(), region);
+        } catch (AwsException e) {
+            if (terminationProtection) {
+                cfnService.clearProtectionAfterRejectedCreate(stackName, initial, region);
+            }
+            throw e;
         }
 
-        Stack stack = cfnService.describeStacks(stackName, region).get(0);
         String xml = new XmlBuilder()
                 .start("CreateStackResponse", CF_NS)
                 .start("CreateStackResult")
-                .elem("StackId", stack.getStackId())
+                .elem("StackId", initial.getStackId())
                 .end("CreateStackResult")
                 .raw(AwsQueryResponse.responseMetadata())
                 .end("CreateStackResponse")
@@ -152,26 +156,27 @@ public class CloudFormationQueryHandler {
                 extractParameters(params, cfnService.currentParameters(stackName, region));
         List<String> capabilities = extractList(params, "Capabilities.member.");
         Map<String, String> tags = extractTags(params);
+        String stackPolicy = cfnService.resolveStackPolicy(params.getFirst("StackPolicyBody"),
+                params.getFirst("StackPolicyURL"), " to be applied after stack update");
 
         String changeSetName = "update-" + UUID.randomUUID().toString().substring(0, 8);
         ChangeSet cs = usePreviousTemplate
                 ? cfnService.createChangeSetFromPreviousTemplate(stackName, changeSetName,
-                        parameters, capabilities, tags, region)
-                : cfnService.createChangeSet(stackName, changeSetName,
-                        "UPDATE", templateBody, templateUrl, parameters, capabilities, tags, region);
+                        parameters, capabilities, tags, region, stackPolicy)
+                : cfnService.createChangeSetForUpdateStack(stackName, changeSetName,
+                        templateBody, templateUrl, parameters, capabilities, tags, region, stackPolicy);
         // An update that submits what the stack already has is refused, and leaves no change set
         // behind, as UpdateStack does on AWS.
         if (CloudFormationService.NO_CHANGES_REASON.equals(cs.getStatusReason())) {
             cfnService.deleteChangeSet(stackName, cs.getChangeSetName(), region);
             return xmlError("ValidationError", "No updates are to be performed.", 400);
         }
-        awaitExecution(cfnService.executeChangeSet(stackName, cs.getChangeSetName(), region));
+        cfnService.executeChangeSet(cs.getStackId(), cs.getChangeSetId(), region);
 
-        Stack stack = cfnService.describeStacks(stackName, region).get(0);
         String xml = new XmlBuilder()
                 .start("UpdateStackResponse", CF_NS)
                 .start("UpdateStackResult")
-                .elem("StackId", stack.getStackId())
+                .elem("StackId", cs.getStackId())
                 .end("UpdateStackResult")
                 .raw(AwsQueryResponse.responseMetadata())
                 .end("UpdateStackResponse")
@@ -240,6 +245,35 @@ public class CloudFormationQueryHandler {
         }
     }
 
+    // ── SetStackPolicy / GetStackPolicy ─────────────────────────────────────────
+
+    private Response setStackPolicy(MultivaluedMap<String, String> params, String region) {
+        try {
+            cfnService.setStackPolicy(params.getFirst("StackName"), params.getFirst("StackPolicyBody"),
+                    params.getFirst("StackPolicyURL"), region);
+            return Response.ok(emptyResult("SetStackPolicyResponse")).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response getStackPolicy(MultivaluedMap<String, String> params, String region) {
+        try {
+            String policy = cfnService.getStackPolicy(params.getFirst("StackName"), region);
+            String xml = new XmlBuilder()
+                    .start("GetStackPolicyResponse", CF_NS)
+                    .start("GetStackPolicyResult")
+                    .elem("StackPolicyBody", policy)
+                    .end("GetStackPolicyResult")
+                    .raw(AwsQueryResponse.responseMetadata())
+                    .end("GetStackPolicyResponse")
+                    .build();
+            return Response.ok(xml).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
     // ── CreateChangeSet ───────────────────────────────────────────────────────
 
     private Response createChangeSet(MultivaluedMap<String, String> params, String region) {
@@ -263,7 +297,7 @@ public class CloudFormationQueryHandler {
         // internally, may attach a CREATE change set to a stack still in REVIEW_IN_PROGRESS.
         ChangeSet cs = usePreviousTemplate
                 ? cfnService.createChangeSetFromPreviousTemplate(stackName, changeSetName,
-                        parameters, capabilities, tags, region)
+                        parameters, capabilities, tags, region, null)
                 : cfnService.createChangeSetForRequest(stackName, changeSetName, changeSetType,
                         templateBody, templateUrl, parameters, capabilities, tags, region);
 
@@ -886,6 +920,15 @@ public class CloudFormationQueryHandler {
                     .end("ManagedExecution");
             appendCapabilities(xml, ss.getCapabilities());
             appendParameters(xml, ss.getParameters());
+            appendStackSetTags(xml, ss.getTags());
+            if ("SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+                List<String> targets = stackSetService.organizationalUnitIds(ss.getStackSetName());
+                if (!targets.isEmpty()) {
+                    xml.start("OrganizationalUnitIds");
+                    targets.forEach(target -> xml.elem("member", target));
+                    xml.end("OrganizationalUnitIds");
+                }
+            }
             xml.end("StackSet").end("DescribeStackSetResult")
                .raw(AwsQueryResponse.responseMetadata())
                .end("DescribeStackSetResponse");
@@ -1134,12 +1177,16 @@ public class CloudFormationQueryHandler {
         xml.end("Parameters");
     }
 
-    private void awaitExecution(Future<?> future) {
-        try {
-            future.get();
-        } catch (Exception e) {
-            LOG.warnv("Stack execution failed: {0}", e.getMessage());
+    private void appendStackSetTags(XmlBuilder xml, Map<String, String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return;
         }
+        xml.start("Tags");
+        tags.forEach((key, value) -> xml.start("member")
+                .elem("Key", key)
+                .elem("Value", value)
+                .end("member"));
+        xml.end("Tags");
     }
 
     private Response xmlError(String code, String message, int status) {

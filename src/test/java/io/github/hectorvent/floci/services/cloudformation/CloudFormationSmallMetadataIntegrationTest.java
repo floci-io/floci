@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
@@ -82,13 +83,14 @@ class CloudFormationSmallMetadataIntegrationTest {
                         "ResourceType": "VPC",
                         "TrafficType": "ALL",
                         "LogDestinationType": "cloud-watch-logs",
-                        "LogDestination": "arn:aws:logs:us-east-1:000000000000:log-group:/flow/meta"
+                        "LogDestination": "arn:aws:logs:us-east-1:000000000000:log-group:/flow/meta",
+                        "Tags": [{"Key": "flow-tag", "Value": "%s"}]
                       }
                     }
                   },
                   "Outputs": {"FlowId": {"Value": {"Ref": "Flow"}}}
                 }
-                """.formatted(asgName, hookName, roleArn);
+                """.formatted(asgName, hookName, roleArn, suffix);
 
         createStack(stackName, template);
 
@@ -116,7 +118,7 @@ class CloudFormationSmallMetadataIntegrationTest {
             .statusCode(200)
             .body(containsString(hookName));
 
-        // The flow log is live in FlowLogService.
+        // The flow log is live in FlowLogService, carrying the template's Tags.
         given()
             .formParam("Action", "DescribeFlowLogs")
             .header("Authorization", EC2_AUTH)
@@ -124,7 +126,8 @@ class CloudFormationSmallMetadataIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("/flow/meta"));
+            .body(containsString("/flow/meta"))
+            .body(containsString("<key>flow-tag</key><value>" + suffix + "</value>"));
 
         // The account-level CloudWatch role reached the API Gateway account settings.
         given()
@@ -252,6 +255,7 @@ class CloudFormationSmallMetadataIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
     }
 
     private static String describeFlowLogs() {

@@ -1675,10 +1675,34 @@ public class EcrService implements ResourceProvider {
     }
 
     public Repository putLifecyclePolicy(String repoName, String registryId, String policyText, String region) {
+        validateLifecyclePolicyDocument(policyText);
         Repository repo = requireRepo(repoName, registryId, region);
         repo.setLifecyclePolicyText(policyText);
         repoStore.put(key(region, repo.getRegistryId(), repoName), repo);
         return repo;
+    }
+
+    public static void validateLifecyclePolicyDocument(String text) {
+        JsonNode policy;
+        try {
+            policy = text == null ? null : SINGLE_JSON_VALUE.readTree(text);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidParameterException", "Lifecycle policy must be a JSON object", 400);
+        }
+        JsonNode rules = policy == null || !policy.isObject() ? null : policy.get("rules");
+        if (rules == null || !rules.isArray() || rules.isEmpty()) {
+            throw new AwsException("InvalidParameterException",
+                    "Lifecycle policy must contain a nonempty rules array", 400);
+        }
+        Set<Integer> priorities = new LinkedHashSet<>();
+        for (JsonNode rule : rules) {
+            JsonNode priority = rule.get("rulePriority");
+            if (priority == null || !priority.isIntegralNumber() || !priority.canConvertToInt()
+                    || priority.intValue() <= 0 || !priorities.add(priority.intValue())) {
+                throw new AwsException("InvalidParameterException",
+                        "Lifecycle rule priorities must be unique positive integers", 400);
+            }
+        }
     }
 
     public Repository getLifecyclePolicy(String repoName, String registryId, String region) {

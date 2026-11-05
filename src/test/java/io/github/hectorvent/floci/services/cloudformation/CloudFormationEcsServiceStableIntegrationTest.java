@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -161,6 +162,7 @@ class CloudFormationEcsServiceStableIntegrationTest {
         String name = "cfn-stable-" + Long.toString(System.nanoTime(), 36);
 
         stackCall("CreateStack", name, TEMPLATE.formatted(name, "app:v1", 1));
+        CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
 
         assertThat(stackStatus(name), equalTo("CREATE_COMPLETE"));
         Response service = describeService(name);
@@ -176,8 +178,10 @@ class CloudFormationEcsServiceStableIntegrationTest {
     void updateStack_ecsService_runsOnlyTheNewRevisionWhenTheUpdateCompletes() {
         String name = "cfn-stable-upd-" + Long.toString(System.nanoTime(), 36);
         stackCall("CreateStack", name, TEMPLATE.formatted(name, "app:v1", 1));
+        CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
 
         stackCall("UpdateStack", name, TEMPLATE.formatted(name, "app:v2", 2));
+        CfnStackWaits.awaitStatus(name, "UPDATE_COMPLETE");
 
         assertThat(stackStatus(name), equalTo("UPDATE_COMPLETE"));
         Response service = describeService(name);
@@ -195,9 +199,11 @@ class CloudFormationEcsServiceStableIntegrationTest {
         String name = "cfn-stable-rb-" + Long.toString(System.nanoTime(), 36);
         String subnet = Ec2Service.defaultSubnetId("us-east-1", "a");
         stackCall("CreateStack", name, AWSVPC_TEMPLATE.formatted(name, 1, subnet));
+        CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
         assertThat(stackStatus(name), equalTo("CREATE_COMPLETE"));
 
         stackCall("UpdateStack", name, AWSVPC_TEMPLATE.formatted(name, 2, "subnet-does-not-exist"));
+        CfnStackWaits.awaitStatus(name, "UPDATE_ROLLBACK_COMPLETE");
 
         assertThat(stackStatus(name), equalTo("UPDATE_ROLLBACK_COMPLETE"));
         Response service = describeService(name);
@@ -226,6 +232,7 @@ class CloudFormationEcsServiceStableIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
+        CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
         assertThat(stackStatus(name), equalTo("CREATE_COMPLETE"));
         Response service = describeService(name);
         assertThat(service.path("services[0].networkConfiguration.awsvpcConfiguration.subnets"),

@@ -235,6 +235,7 @@ class ElbV2ListenerCertificateIntegrationTest {
                 () -> assertTrue(listenerCertificates(listener).isEmpty()));
         given().header("Authorization", ELB_AUTH).formParam("Action", "ModifyListener")
                 .formParam("ListenerArn", listener).formParam("Protocol", "HTTPS").formParam("Port", "444")
+                .formParam("SslPolicy", "ELBSecurityPolicy-2016-08")
                 .formParam("Certificates.member.1.CertificateArn", certificate)
                 .when().post("/").then().statusCode(200);
         assertEquals("HTTPS", listenerField(listener, "Protocol"));
@@ -345,16 +346,15 @@ class ElbV2ListenerCertificateIntegrationTest {
     }
 
     @Test
-    void turningAnHttpListenerIntoAnHttpsOneChecksTheCertificateItAlreadyHeld() {
-        // An HTTP listener may carry a certificate nothing resolves, because the check does not
-        // cover its protocol. Serving it is what the check covers, and the request that starts
-        // serving it names no certificate of its own, so the one on file is the one to resolve.
-        String listenerArn = listenerServing("HTTP", MISSING_IAM_CERTIFICATE);
+    void turningAnHttpListenerIntoAnHttpsOneChecksTheSuppliedCertificate() {
+        String listenerArn = listenerServing("HTTP", null);
 
         given().header("Authorization", ELB_AUTH)
                 .formParam("Action", "ModifyListener")
                 .formParam("ListenerArn", listenerArn)
                 .formParam("Protocol", "HTTPS")
+                .formParam("SslPolicy", "ELBSecurityPolicy-2016-08")
+                .formParam("Certificates.member.1.CertificateArn", MISSING_IAM_CERTIFICATE)
             .when().post("/").then()
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("CertificateNotFound"));
@@ -364,12 +364,15 @@ class ElbV2ListenerCertificateIntegrationTest {
 
     @Test
     void turningAnHttpListenerIntoAnHttpsOneIsAllowedWhenTheCertificateExists() {
-        String listenerArn = listenerServing("HTTP", uploadCertificate());
+        String certificate = uploadCertificate();
+        String listenerArn = listenerServing("HTTP", null);
 
         given().header("Authorization", ELB_AUTH)
                 .formParam("Action", "ModifyListener")
                 .formParam("ListenerArn", listenerArn)
                 .formParam("Protocol", "HTTPS")
+                .formParam("SslPolicy", "ELBSecurityPolicy-2016-08")
+                .formParam("Certificates.member.1.CertificateArn", certificate)
             .when().post("/").then().statusCode(200);
 
         assertEquals("HTTPS", listenerField(listenerArn, "Protocol"));

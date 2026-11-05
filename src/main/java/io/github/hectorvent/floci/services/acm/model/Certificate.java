@@ -266,7 +266,11 @@ public class Certificate {
     }
 
     public String extractCertificateId() {
-        if (arn == null) return null;
+        return arn == null ? null : idFromArn(arn);
+    }
+
+    /** The id at the end of a certificate ARN. A value with no {@code /} is taken as the id itself. */
+    public static String idFromArn(String arn) {
         int lastSlash = arn.lastIndexOf('/');
         return lastSlash >= 0 ? arn.substring(lastSlash + 1) : arn;
     }

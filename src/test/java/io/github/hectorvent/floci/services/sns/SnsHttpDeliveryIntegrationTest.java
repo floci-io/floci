@@ -159,6 +159,9 @@ class SnsHttpDeliveryIntegrationTest {
         assertEquals(1, receivedRequests.size());
         ReceivedRequest confirmReq = receivedRequests.get(0);
         assertEquals("SubscriptionConfirmation", confirmReq.headers().get("X-amz-sns-message-type").get(0));
+        // AWS SNS posts plain HTTP/1.1, with no h2c upgrade offer.
+        assertNull(firstHeader(confirmReq.headers(), "Upgrade"));
+        assertNull(firstHeader(confirmReq.headers(), "HTTP2-Settings"));
 
         // Confirm the subscription
         confirmSubscription(confirmReq);
@@ -192,6 +195,8 @@ class SnsHttpDeliveryIntegrationTest {
         assertEquals(topicArn, req.headers().get("X-amz-sns-topic-arn").get(0));
         assertNotNull(req.headers().get("X-amz-sns-message-id"));
         assertNotNull(req.headers().get("X-amz-sns-subscription-arn"));
+        assertNull(firstHeader(req.headers(), "Upgrade"));
+        assertNull(firstHeader(req.headers(), "HTTP2-Settings"));
 
         // Verify body is a proper SNS notification envelope
         JsonNode envelope = objectMapper.readTree(req.body());

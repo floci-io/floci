@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.DatabaseSecretCredentials;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer;
 import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer.Permission;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
@@ -21,6 +22,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
@@ -37,6 +39,8 @@ public class FirehoseRedshiftDelivery {
     private static final int CONNECT_TIMEOUT_SECONDS = 10;
     private static final int SOCKET_TIMEOUT_SECONDS = 150;
     private static final String FIREHOSE_PRINCIPAL = ServicePrincipals.of("firehose");
+    /** Outlives one COPY, whose socket timeout is the longest it can run. */
+    private static final Duration LOAD_CREDENTIALS_TTL = Duration.ofMinutes(15);
 
     /** Seam for tests; production opens a real JDBC connection. */
     interface SqlRunner {
@@ -53,24 +57,27 @@ public class FirehoseRedshiftDelivery {
     private final RedshiftServerlessService serverlessService;
     private final SecretsManagerService secretsManagerService;
     private final ServiceRoleAuthorizer roleAuthorizer;
+    private final IamService iamService;
     private final ObjectMapper mapper;
     private final SqlRunner runner;
 
     @Inject
     public FirehoseRedshiftDelivery(RedshiftService redshiftService, RedshiftServerlessService serverlessService,
                                     SecretsManagerService secretsManagerService,
-                                    ServiceRoleAuthorizer roleAuthorizer, ObjectMapper mapper) {
-        this(redshiftService, serverlessService, secretsManagerService, roleAuthorizer, mapper,
+                                    ServiceRoleAuthorizer roleAuthorizer, IamService iamService,
+                                    ObjectMapper mapper) {
+        this(redshiftService, serverlessService, secretsManagerService, roleAuthorizer, iamService, mapper,
                 FirehoseRedshiftDelivery::runJdbc);
     }
 
     FirehoseRedshiftDelivery(RedshiftService redshiftService, RedshiftServerlessService serverlessService,
                              SecretsManagerService secretsManagerService, ServiceRoleAuthorizer roleAuthorizer,
-                             ObjectMapper mapper, SqlRunner runner) {
+                             IamService iamService, ObjectMapper mapper, SqlRunner runner) {
         this.redshiftService = redshiftService;
         this.serverlessService = serverlessService;
         this.secretsManagerService = secretsManagerService;
         this.roleAuthorizer = roleAuthorizer;
+        this.iamService = iamService;
         this.mapper = mapper;
         this.runner = runner;
     }
@@ -126,18 +133,34 @@ public class FirehoseRedshiftDelivery {
                 : clusterBackend(accountId, target);
         String[] credentials = credentials(destination, backend, region);
         RedshiftDestination.CopyCommand command = destination.getCopyCommand();
-        String sql = RedshiftCopySql.build(command.getDataTableName(), command.getDataTableColumns(), bucket, key,
-                command.getCopyOptions());
         String jdbcUrl = "jdbc:postgresql://" + backend.host() + ":" + backend.port() + "/" + backend.database()
                 + "?preferQueryMode=simple";
+        // Minted per attempt: the retry loop calls copy again, and credentials from the last try may have expired.
+        RedshiftRoleAccess.RoleSession loadCredentials = mintLoadCredentials(destination.getRoleArn());
         try {
+            String sql = RedshiftCopySql.build(command.getDataTableName(), command.getDataTableColumns(), bucket, key,
+                    command.getCopyOptions(), loadCredentials);
             runner.execute(jdbcUrl, credentials[0], credentials[1], sql);
         } catch (SQLException e) {
             throw new IllegalStateException("COPY into " + command.getDataTableName() + " on "
-                    + backend.description() + " failed (SQLSTATE " + e.getSQLState() + "): " + e.getMessage(), e);
+                    + backend.description() + " failed (SQLSTATE " + e.getSQLState() + "): "
+                    + RedshiftCopySql.redact(e.getMessage(), loadCredentials), e);
+        } finally {
+            RedshiftRoleAccess.releaseRoleSession(loadCredentials, destination.getRoleArn(), iamService);
         }
         LOG.debugv("Firehose copied s3://{0}/{1} into {2} on {3}", bucket, key,
                 command.getDataTableName(), backend.description());
+    }
+
+    /**
+     * Temporary credentials of the destination's {@code RoleARN}, which is what Firehose loads with. The trust
+     * and permissions were checked by {@link #requireLoadAccess}, so only the role's existence is left: with
+     * enforcement off a stream may name a role IAM does not know, and the load then runs without credentials.
+     */
+    private RedshiftRoleAccess.RoleSession mintLoadCredentials(String roleArn) {
+        return RedshiftRoleAccess.roleExists(roleArn, iamService)
+                ? RedshiftRoleAccess.resolveRoleSession(roleArn, iamService, null, null, LOAD_CREDENTIALS_TTL)
+                : null;
     }
 
     private Backend clusterBackend(String accountId, RedshiftJdbcUrl target) {

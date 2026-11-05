@@ -37,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -346,7 +347,7 @@ class NativeDynamoDbTableServiceTest {
         assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
                 resolved.approximateCreationDateTimePrecision(),
                 "the snapshot carries the precision the response echoes");
-        verify(kinesisService).describeStream(STREAM_NAME, REGION);
+        verify(kinesisService).describeStreamByArn(STREAM_ARN, REGION);
         KinesisStreamingDestination enabled = reloadFromDisk().findKinesisStreamingDestination(STREAM_ARN)
                 .orElseThrow();
         assertEquals("ACTIVE", enabled.getDestinationStatus());
@@ -385,10 +386,49 @@ class NativeDynamoDbTableServiceTest {
     }
 
     @Test
+    void updatingAKinesisDestinationChangesItsPrecisionWithoutDisablingIt() {
+        tableService.createTable(createRequest(null, NO_SETTINGS), "ACTIVE", REGION);
+        tableService.enableKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MILLISECOND, REGION);
+
+        NativeDynamoDbTableService.KinesisDestination updated = tableService.updateKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MICROSECOND, REGION);
+
+        assertEquals("ACTIVE", updated.destinationStatus());
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND, updated.approximateCreationDateTimePrecision());
+        KinesisStreamingDestination persisted = reloadFromDisk().findKinesisStreamingDestination(STREAM_ARN)
+                .orElseThrow();
+        assertEquals("ACTIVE", persisted.getDestinationStatus());
+        assertEquals(KinesisStreamingDestination.PRECISION_MICROSECOND,
+                persisted.getApproximateCreationDateTimePrecision());
+        verify(forwarder, never()).onDestinationDisabled(ACCOUNT, REGION, TABLE, STREAM_ARN);
+    }
+
+    @Test
+    void updatingADisabledOrUnknownKinesisDestinationIsRejected() {
+        tableService.createTable(createRequest(null, NO_SETTINGS), "ACTIVE", REGION);
+
+        AwsException unknown = assertThrows(AwsException.class, () -> tableService.updateKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MICROSECOND, REGION));
+        assertEquals("ResourceNotFoundException", unknown.getErrorCode());
+
+        tableService.enableKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MILLISECOND, REGION);
+        tableService.disableKinesisStreamingDestination(TABLE, STREAM_ARN, REGION);
+
+        assertValidationFailure(() -> tableService.updateKinesisStreamingDestination(
+                TABLE, STREAM_ARN, KinesisStreamingDestination.PRECISION_MICROSECOND, REGION),
+                "Kinesis streaming destination is not active for stream: " + STREAM_ARN);
+        assertEquals(KinesisStreamingDestination.PRECISION_MILLISECOND,
+                reloadFromDisk().findKinesisStreamingDestination(STREAM_ARN).orElseThrow()
+                        .getApproximateCreationDateTimePrecision());
+    }
+
+    @Test
     void unknownKinesisStreamIsReportedAsNotFound() {
         tableService.createTable(createRequest(null, NO_SETTINGS), "ACTIVE", REGION);
         String missingArn = "arn:aws:kinesis:us-east-1:000000000000:stream/missing";
-        when(kinesisService.describeStream("missing", REGION))
+        when(kinesisService.describeStreamByArn(missingArn, REGION))
                 .thenThrow(new AwsException("ResourceNotFoundException", "Stream missing not found", 400));
 
         AwsException ex = assertThrows(AwsException.class, () -> tableService.enableKinesisStreamingDestination(

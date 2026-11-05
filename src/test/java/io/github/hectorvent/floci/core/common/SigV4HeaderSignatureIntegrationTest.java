@@ -545,4 +545,30 @@ class SigV4HeaderSignatureIntegrationTest {
                     new XmlPath(refused.body()).getString("ErrorResponse.Error.Code"));
         }
     }
+
+    @Test
+    @Order(21)
+    void queryRequestOnPrefixedQueuePathIsVerifiedBeforeItIsRejectedAsInvalidAddress() {
+        // AWS rejects a Query request on a /queue/{region}/ path, but only once the signature checks out.
+        String path = "/queue/us-east-1/000000000000/" + QUEUE;
+        given()
+            .filter(AwsRequestSigner.signedAs("test", "test", "sqs"))
+            .contentType(FORM)
+            .body("Action=GetQueueAttributes&AttributeName.1=All&Version=2012-11-05")
+        .when()
+            .post(path)
+        .then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidAddress"));
+
+        given()
+            .filter(AwsRequestSigner.signedAs("test", "not-the-secret", "sqs"))
+            .contentType(FORM)
+            .body("Action=GetQueueAttributes&AttributeName.1=All&Version=2012-11-05")
+        .when()
+            .post(path)
+        .then()
+            .statusCode(403)
+            .body("ErrorResponse.Error.Code", equalTo("SignatureDoesNotMatch"));
+    }
 }

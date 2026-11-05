@@ -11,8 +11,8 @@ import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
- * RestApi response members that clients read but that a caller never supplies:
- * rootResourceId, apiKeySource and disableExecuteApiEndpoint.
+ * RestApi response members that clients read even when a caller does not supply them:
+ * rootResourceId, and the defaults of apiKeySource and disableExecuteApiEndpoint.
  *
  * @see <a href="https://docs.aws.amazon.com/apigateway/latest/api/API_GetRestApi.html">GetRestApi</a>
  */

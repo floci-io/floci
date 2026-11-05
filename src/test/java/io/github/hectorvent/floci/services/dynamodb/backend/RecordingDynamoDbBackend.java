@@ -117,6 +117,23 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
     }
 
     @Override
+    public TableDefinition enableKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                             String precision) {
+        return record("enableKinesisStreamingDestination", scope);
+    }
+
+    @Override
+    public TableDefinition disableKinesisStreamingDestination(Scope scope, String tableName, String streamArn) {
+        return record("disableKinesisStreamingDestination", scope);
+    }
+
+    @Override
+    public TableDefinition updateKinesisStreamingDestination(Scope scope, String tableName, String streamArn,
+                                                             String precision) {
+        return record("updateKinesisStreamingDestination", scope);
+    }
+
+    @Override
     public TimeToLive timeToLive(Scope scope, String tableName) {
         record("timeToLive", scope);
         return new TimeToLive(false, null);

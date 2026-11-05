@@ -8,12 +8,14 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -54,6 +56,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -74,7 +79,7 @@ import java.util.function.Supplier;
  * BOOTSTRAPPING, and leave the image its steps then run in.
  */
 @ApplicationScoped
-public class EmrService implements Resettable {
+public class EmrService implements Resettable, StoredResourceArns, ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(EmrService.class);
     private static final String UPPER_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -96,6 +101,10 @@ public class EmrService implements Resettable {
             "On the master instance (%s), bootstrap action %d could not be read from %s: %s";
     private static final String BOOTSTRAP_NOT_RUN = "Floci could not run the bootstrap actions: %s";
     static final String BOOTSTRAP_INTERRUPTED = "Floci stopped while the cluster's bootstrap actions were running.";
+    // The release whose EMR Serverless Hive image runs the HDFS of a cluster of the AWS runtime for Apache Spark,
+    // which publishes none. Hadoop keeps its wire protocols compatible across a major version's minor releases, so
+    // a newer client, such as the runtime's, reaches its NameNode.
+    static final String SPARK_RUNTIME_HDFS_RELEASE = "emr-7.5.0";
 
     private final AccountAwareStorageBackend<EmrCluster> clusterStore;
     private final StorageBackend<String, SecurityConfiguration> secConfigStore;
@@ -112,11 +121,13 @@ public class EmrService implements Resettable {
     private final SparkJobRunner sparkRunner;
     private final BootstrapRunner bootstrapRunner;
     private final ClusterStorage clusterStorage;
+    private final ReleaseImages releaseImages;
     private final Executor stepExecutor;
     private final IamService iamService;
     // Where a step's driver runs: image-template, with the release label for %s, and docker-network; null when
     // not set.
     private final String imageTemplate;
+    private final String hiveImageTemplate;
     private final String dockerNetwork;
     // The steps a thread is running, by account and id; a RUNNING container step not here was left by a restart.
     private final Set<String> executing = new HashSet<>();
@@ -129,6 +140,12 @@ public class EmrService implements Resettable {
     private final Set<String> storageBeingRemoved = new HashSet<>();
     // Raised by each reset, so a step's thread from before it writes nothing back after the wipe.
     private long generation;
+    // How many teardowns, by a reset or a shutdown, have begun: a step handed to its thread before one starts no HDFS
+    // and no driver after it.
+    private final AtomicLong teardowns = new AtomicLong();
+    // From a teardown until its reset is over, no step or bootstrap is handed to a thread: a cluster a wakeup moves on
+    // meanwhile would start containers after the teardowns that remove them. After a shutdown's, never again.
+    private volatile boolean tornDown;
 
     private static final Set<String> COMPUTE_LIMITS_UNIT_TYPES = Set.of("InstanceFleetUnits", "Instances", "VCPU");
     private static final Set<String> SCALING_STRATEGIES = Set.of("DEFAULT", "ADVANCED");
@@ -191,26 +208,28 @@ public class EmrService implements Resettable {
     @Inject
     public EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                       EmrEventPublisher eventPublisher, EmrServerlessSparkRunner sparkRunner,
-                      EmrBootstrapRunner bootstrapRunner, EmrClusterStorage clusterStorage, IamService iamService) {
+                      EmrBootstrapRunner bootstrapRunner, EmrClusterStorage clusterStorage,
+                      EmrReleaseImages releaseImages, IamService iamService) {
         this(storageFactory, config, regionResolver, eventPublisher, Clock.systemUTC(),
                 Wakeups.timer(Clock.systemUTC()),
                 RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? sparkRunner : null,
                 RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? bootstrapRunner : null,
                 RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? clusterStorage : null,
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? releaseImages : null,
                 Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-step-", 0).factory()),
                 iamService);
     }
 
     EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                EmrEventPublisher eventPublisher, Clock clock, Wakeups wakeups) {
-        this(storageFactory, config, regionResolver, eventPublisher, clock, wakeups, null, null, null, Runnable::run,
-                null);
+        this(storageFactory, config, regionResolver, eventPublisher, clock, wakeups, null, null, null, null,
+                Runnable::run, null);
     }
 
     EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                EmrEventPublisher eventPublisher, Clock clock, Wakeups wakeups, SparkJobRunner sparkRunner,
-               BootstrapRunner bootstrapRunner, ClusterStorage clusterStorage, Executor stepExecutor,
-               IamService iamService) {
+               BootstrapRunner bootstrapRunner, ClusterStorage clusterStorage, ReleaseImages releaseImages,
+               Executor stepExecutor, IamService iamService) {
         this.clusterStore = storageFactory.create("emr", "emr-clusters.json",
                 new TypeReference<Map<String, EmrCluster>>() {});
         this.secConfigStore = storageFactory.create("emr", "emr-security-configs.json",
@@ -223,9 +242,11 @@ public class EmrService implements Resettable {
         this.sparkRunner = sparkRunner;
         this.bootstrapRunner = bootstrapRunner;
         this.clusterStorage = clusterStorage;
+        this.releaseImages = releaseImages;
         this.stepExecutor = stepExecutor;
         this.iamService = iamService;
         this.imageTemplate = config.services().emr().imageTemplate().orElse(null);
+        this.hiveImageTemplate = config.services().emr().hiveImageTemplate().orElse(null);
         this.dockerNetwork = config.services().emr().dockerNetwork().orElse(null);
         this.lifecycle = new EmrClusterLifecycle(config.services().emr().clusterStartupDelaySeconds(),
                 config.services().emr().stepDurationSeconds(),
@@ -285,6 +306,28 @@ public class EmrService implements Resettable {
         if (stepExecutor instanceof ExecutorService executor) {
             executor.shutdownNow();
         }
+    }
+
+    /**
+     * A reset's or a shutdown's teardown has begun: a step handed to its thread before it, whose driver the runner's
+     * teardown cannot stop yet, starts no HDFS and no driver after it, as its progress reads it, but stops as a
+     * stopped driver does. This runs before the teardowns that stop containers.
+     */
+    @Override
+    public synchronized void stopManagedContainers() {
+        teardowns.incrementAndGet();
+        tornDown = true;
+    }
+
+    /** A reset is over: steps and bootstraps are handed to threads again. */
+    @Override
+    public synchronized void afterReset() {
+        tornDown = false;
+    }
+
+    @Override
+    public int teardownOrder() {
+        return -1;
     }
 
     /**
@@ -582,6 +625,28 @@ public class EmrService implements Resettable {
             }
             touched.forEach(clusterStore::put);
         });
+    }
+
+    @Override
+    public String namespace() {
+        return "elasticmapreduce";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The cluster an instance group a {@code ModifyInstanceGroups} names by its id alone is in, the one
+     * {@link #modifyInstanceGroups} finds it in and changes it there, read under the service's lock, as
+     * {@code addInstanceGroups} adds to a cluster's groups.
+     */
+    @Override
+    public List<String> through(String member, String value, String region) {
+        return "InstanceGroups[].InstanceGroupId".equals(member)
+                ? call(() -> clusterWithGroup(region, value).map(EmrCluster::getClusterArn).stream().toList())
+                : List.of();
     }
 
     public List<EmrInstanceGroup> listInstanceGroups(String clusterId) {
@@ -1024,12 +1089,17 @@ public class EmrService implements Resettable {
         if (instanceGroupId == null) {
             throw invalid("InstanceGroupId is required.");
         }
+        return clusterWithGroup(region, instanceGroupId)
+                .map(this::settle)
+                .orElseThrow(() -> invalid("Instance group " + instanceGroupId + " is not valid."));
+    }
+
+    /** The caller's cluster in the Region that has the instance group, as stored. */
+    private Optional<EmrCluster> clusterWithGroup(String region, String instanceGroupId) {
         return clusterStore.scan(k -> true).stream()
                 .filter(c -> region.equals(c.getRegion()))
                 .filter(c -> c.getInstanceGroups().stream().anyMatch(g -> instanceGroupId.equals(g.getId())))
-                .findFirst()
-                .map(this::settle)
-                .orElseThrow(() -> invalid("Instance group " + instanceGroupId + " is not valid."));
+                .findFirst();
     }
 
     private static AwsException invalid(String message) {
@@ -1371,7 +1441,8 @@ public class EmrService implements Resettable {
     }
 
     /** A step handed to a thread: whose it is, where, and under which reset. */
-    private record StepLaunch(String accountId, String region, String clusterId, String stepId, long launchedIn) {}
+    private record StepLaunch(String accountId, String region, String clusterId, String stepId, long launchedIn,
+                              long teardownsBefore) {}
 
     /** Starts each step a cluster runs on a thread of its own, which ends the step once it is done. */
     private final class ContainerSteps implements EmrClusterLifecycle.StepExecution {
@@ -1379,29 +1450,61 @@ public class EmrService implements Resettable {
         @Override
         public void start(EmrCluster cluster, EmrStep step, String region) {
             String accountId = regionResolver.getAccountId();
-            List<String> application = EmrSparkSteps.application(step);
-            List<String> command = application == null ? EmrSparkSteps.command(step) : null;
+            if (tornDown) {
+                // Left RUNNING and counted as running, as a step whose driver the teardown stopped: the reset wipes it,
+                // a restart fails it.
+                executing.add(stepKey(accountId, step.getId()));
+                return;
+            }
+            EmrSparkSteps.HiveCommand hive = EmrSparkSteps.hive(step, cluster.getApplications(),
+                    cluster.getConfigurations(), SNAPSHOT_MAPPER);
+            List<String> application = hive == null ? EmrSparkSteps.application(step) : null;
+            List<String> command = hive == null && application == null ? EmrSparkSteps.command(step) : null;
             SparkJobRunner.Storage storage = null;
-            if ((application != null || command != null) && clusterStorage != null) {
+            if ((hive != null || application != null || command != null) && clusterStorage != null) {
                 storage = clusterStorage.volumes(cluster.getId());
                 cluster.setStorageCreated(true);
             }
-            SparkJobRunner.Job job = application == null && command == null ? null
-                    : new SparkJobRunner.Job(SERVICE, step.getId(), accountId, region, cluster.getReleaseLabel(),
-                    cluster.getBootstrapImage() != null ? cluster.getBootstrapImage() : imageTemplate, null,
-                    dockerNetwork, executionRole(cluster, step, accountId),
-                    EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER),
-                    application != null ? application : List.of(), command, Duration.ZERO,
-                    EmrSparkSteps.logFolder(cluster, step), null,
-                    EmrSparkSteps.environment(step, cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
-                    storage, EmrSparkSteps.coreSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
-                    EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
-                    EmrSparkSteps.mapredSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
-                    EmrSparkSteps.hadoopLog4j(cluster.getConfigurations(), SNAPSHOT_MAPPER),
-                    EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER));
-            StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation);
+            // The image a cluster's bootstrap left, which holds what its release's does; else a cluster with Hive's,
+            // which the step's thread makes, or the release's.
+            String image = cluster.getBootstrapImage() != null ? cluster.getBootstrapImage() : imageTemplate;
+            Supplier<String> releaseImage = cluster.getBootstrapImage() == null ? releaseImage(cluster) : null;
+            // Every EMR cluster runs HDFS on its primary node, which the step's thread starts when it is not running:
+            // a NameNode and a DataNode, in a container of the release's Hive image, the one with HDFS's daemons.
+            String clusterId = cluster.getId();
+            String hdfsHost = masterPrivateDnsName(cluster);
+            String hdfsImage = hdfsImage(cluster.getReleaseLabel());
+            Function<BooleanSupplier, SparkJobRunner.Storage> hdfs = storage == null ? null
+                    : stopped -> clusterStorage.hdfs(clusterId, accountId, region, hdfsHost, hdfsImage, dockerNetwork,
+                            stopped);
+            SparkJobRunner.Job job;
+            if (hive != null) {
+                job = new SparkJobRunner.Job(SERVICE, step.getId(), accountId, region, cluster.getReleaseLabel(),
+                        SparkJobRunner.Engine.HIVE, image, null, dockerNetwork,
+                        executionRole(cluster, step, accountId), Map.of(), hive.arguments(), hive.runner(),
+                        Duration.ZERO, EmrSparkSteps.logFolder(cluster, step), null,
+                        EmrSparkSteps.hiveEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
+                        storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+            } else if (application == null && command == null) {
+                job = null;
+            } else {
+                job = new SparkJobRunner.Job(SERVICE, step.getId(), accountId, region, cluster.getReleaseLabel(),
+                        SparkJobRunner.Engine.SPARK, image, null, dockerNetwork,
+                        executionRole(cluster, step, accountId),
+                        EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        application != null ? application : List.of(), command, Duration.ZERO,
+                        EmrSparkSteps.logFolder(cluster, step), null,
+                        EmrSparkSteps.environment(step, cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
+                        storage, EmrSparkSteps.coreSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        EmrSparkSteps.mapredSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        EmrSparkSteps.hadoopLog4j(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER));
+            }
+            StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation,
+                    teardowns.get());
             executing.add(stepKey(accountId, step.getId()));
-            stepExecutor.execute(() -> runStep(job, launch));
+            stepExecutor.execute(() -> runStep(job, launch, releaseImage, hdfs));
         }
 
         @Override
@@ -1410,8 +1513,10 @@ public class EmrService implements Resettable {
         }
     }
 
-    // A step's thread: its driver runs to its end, or the step fails at once when Floci does not run its kind.
-    private void runStep(SparkJobRunner.Job job, StepLaunch launch) {
+    // A step's thread: its driver runs to its end, or the step fails at once when Floci does not run its kind. A
+    // cluster with Hive's image is made first, when it is not there yet, so a failure to make it fails the step.
+    private void runStep(SparkJobRunner.Job job, StepLaunch launch, Supplier<String> releaseImage,
+                         Function<BooleanSupplier, SparkJobRunner.Storage> hdfs) {
         String failure;
         if (job == null) {
             failure = EmrSparkSteps.NOT_RUN;
@@ -1419,15 +1524,28 @@ public class EmrService implements Resettable {
             SparkJobRunner.Outcome outcome;
             StepProgress progress = new StepProgress(launch);
             try {
-                // The cluster's storage is there before its first step's container mounts it. A step a cancel,
-                // its cluster's end or a reset has passed does not start, so it makes none.
+                SparkJobRunner.Job running = releaseImage != null && !progress.cancelled()
+                        ? job.inImage(releaseImage.get()) : job;
+                // The cluster's storage is there, its HDFS running, before its first step's container mounts it. A step
+                // a cancel, its cluster's end or a reset has passed does not start, so it makes none.
                 if (job.storage() != null && !progress.cancelled()) {
                     clusterStorage.create(launch.clusterId(), launch.accountId(), launch.region());
+                    running = running.onStorage(hdfs.apply(progress::cancelled));
                 }
-                outcome = sparkRunner.run(job, progress);
+                outcome = sparkRunner.run(running, progress);
+            } catch (ClusterStorage.Stopped e) {
+                // It stopped while its HDFS started, before its driver did, as a driver stopped then would.
+                outcome = SparkJobRunner.Outcome.halted();
             } catch (RuntimeException e) {
-                LOG.warnv(e, "EMR step {0} could not run", launch.stepId());
-                outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage());
+                if (progress.cancelled() || Thread.currentThread().isInterrupted()) {
+                    // A teardown, a cancel or Floci's shutdown cut its start short, as it would have a driver.
+                    LOG.warnv(e, "EMR step {0} stopped while it started, as this failed: {1}", launch.stepId(),
+                            e.getMessage());
+                    outcome = SparkJobRunner.Outcome.halted();
+                } else {
+                    LOG.warnv(e, "EMR step {0} could not run", launch.stepId());
+                    outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage());
+                }
             }
             // A reset since the step started has swept the storage and wiped its cluster, so nothing would remove
             // volumes made, or mounted, after its sweep: they go now, the step's container being gone.
@@ -1440,11 +1558,20 @@ public class EmrService implements Resettable {
             }
             failure = failureOf(job, outcome);
         }
-        RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> stepEnded(launch, failure)));
+        // A teardown since the step was handed off ends it as it does a driver, whatever it ran to: ending it now
+        // could start the next step after the teardown has passed. The service's lock orders the two.
+        RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> {
+            if (teardowns.get() != launch.teardownsBefore()) {
+                driverStopped(launch);
+            } else {
+                stepEnded(launch, failure);
+            }
+        }));
     }
 
     /** A cluster handed to a bootstrap thread: whose it is, where, and under which reset. */
-    private record BootstrapLaunch(String accountId, String region, String clusterId, long launchedIn) {}
+    private record BootstrapLaunch(String accountId, String region, String clusterId, long launchedIn,
+                                   long teardownsBefore) {}
 
     /** Runs each cluster's bootstrap actions on a thread of its own, which ends its BOOTSTRAPPING. */
     private final class ContainerBootstrap implements EmrClusterLifecycle.BootstrapExecution {
@@ -1452,15 +1579,23 @@ public class EmrService implements Resettable {
         @Override
         public void start(EmrCluster cluster, String region) {
             String accountId = regionResolver.getAccountId();
+            if (tornDown) {
+                // Left BOOTSTRAPPING and counted as bootstrapping, as one the teardown stopped: the reset wipes it, a
+                // restart ends it.
+                bootstrapping.add(clusterKey(accountId, cluster.getId()));
+                return;
+            }
             // "logs/<cluster-id>/node/<primary-instance-id>/bootstrap-actions/<action-number>/stdout.gz"
             String logFolder = EmrServerlessSparkRunner.logFolder(cluster.getLogUri(),
                     cluster.getId() + "/node/" + masterInstanceId(cluster) + "/bootstrap-actions/");
             BootstrapRunner.Bootstrap bootstrap = new BootstrapRunner.Bootstrap(cluster.getId(), accountId, region,
                     cluster.getReleaseLabel(), imageTemplate, dockerNetwork, instanceProfileRole(cluster, accountId),
                     bootstrapActions(cluster), logFolder);
-            BootstrapLaunch launch = new BootstrapLaunch(accountId, region, cluster.getId(), generation);
+            BootstrapLaunch launch = new BootstrapLaunch(accountId, region, cluster.getId(), generation,
+                    teardowns.get());
+            Supplier<String> releaseImage = releaseImage(cluster);
             bootstrapping.add(clusterKey(accountId, cluster.getId()));
-            stepExecutor.execute(() -> runBootstrap(bootstrap, launch));
+            stepExecutor.execute(() -> runBootstrap(bootstrap, launch, releaseImage));
         }
 
         @Override
@@ -1469,6 +1604,32 @@ public class EmrService implements Resettable {
             String id = cluster.getId();
             stepExecutor.execute(() -> bootstrapRunner.stop(id));
         }
+    }
+
+    /**
+     * What makes, on the thread that needs it, the image a cluster that installs Hive starts from, its release's EMR
+     * Serverless image with its EMR Serverless Hive image's Hive, and returns the image's id: an EMR cluster's nodes
+     * hold every application it installs, so its bootstrap actions and steps all run in it. Null for a cluster
+     * without Hive, which starts from the release's EMR Serverless image.
+     */
+    private Supplier<String> releaseImage(EmrCluster cluster) {
+        if (releaseImages == null || !EmrSparkSteps.installsHive(cluster.getApplications(), SNAPSHOT_MAPPER)) {
+            return null;
+        }
+        String release = cluster.getReleaseLabel();
+        String spark = EmrServerlessSparkRunner.image(imageTemplate, release);
+        String hive = EmrServerlessSparkRunner.image(hiveImageTemplate, release, SparkJobRunner.Engine.HIVE);
+        return () -> releaseImages.image(release, spark, hive);
+    }
+
+    /**
+     * The image a cluster runs its HDFS in: its release's EMR Serverless Hive image, which has HDFS's daemons, or, for
+     * a release of the AWS runtime for Apache Spark, which has no Hive image, {@link #SPARK_RUNTIME_HDFS_RELEASE}'s.
+     */
+    private String hdfsImage(String releaseLabel) {
+        String release = EmrServerlessSparkRunner.sparkRuntime(releaseLabel) ? SPARK_RUNTIME_HDFS_RELEASE
+                : releaseLabel;
+        return EmrServerlessSparkRunner.image(hiveImageTemplate, release, SparkJobRunner.Engine.HIVE);
     }
 
     // A cluster's BootstrapActionConfig list, as RunJobFlow stored it once it had checked it.
@@ -1488,19 +1649,34 @@ public class EmrService implements Resettable {
         return actions;
     }
 
-    // A cluster's bootstrap thread: its actions run to their end, which then ends its BOOTSTRAPPING.
-    private void runBootstrap(BootstrapRunner.Bootstrap bootstrap, BootstrapLaunch launch) {
+    // A cluster's bootstrap thread: its actions run to their end, which then ends its BOOTSTRAPPING. They run in
+    // a cluster with Hive's image, which is made first when it is not there yet, unless the cluster ended, or a reset
+    // removed it, before the thread ran; a failure to make it ends the cluster as one to run the bootstrap does.
+    private void runBootstrap(BootstrapRunner.Bootstrap bootstrap, BootstrapLaunch launch,
+                              Supplier<String> releaseImage) {
+        // A teardown since the bootstrap was handed off stops it as it does a step, before it runs or as it goes.
+        BooleanSupplier cancelled = () -> teardowns.get() != launch.teardownsBefore()
+                || !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillBootstrapping(launch));
         BootstrapRunner.Outcome outcome;
         try {
-            outcome = bootstrapRunner.run(bootstrap, () -> !RequestScopes.callAs(launch.accountId(), launch.region(),
-                    () -> stillBootstrapping(launch)));
+            outcome = bootstrapRunner.run(releaseImage != null && !cancelled.getAsBoolean()
+                    ? bootstrap.inImage(releaseImage.get()) : bootstrap, cancelled);
         } catch (RuntimeException e) {
             LOG.warnv(e, "The bootstrap actions of EMR cluster {0} could not run", launch.clusterId());
             outcome = BootstrapRunner.Outcome.couldNotRun(e.getMessage());
         }
         BootstrapRunner.Outcome ended = outcome;
-        RequestScopes.runAs(launch.accountId(), launch.region(),
-                () -> run(() -> bootstrapEnded(bootstrap, launch, ended)));
+        // One that ended, however, after a teardown began ends as one Floci stopped, which starts no step: the
+        // service's lock orders the two.
+        AtomicBoolean tornDownSince = new AtomicBoolean();
+        RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> {
+            tornDownSince.set(teardowns.get() != launch.teardownsBefore());
+            bootstrapEnded(bootstrap, launch, tornDownSince.get() ? BootstrapRunner.Outcome.halted() : ended);
+        }));
+        // An image it committed as the teardown began goes, as no cluster starts from it.
+        if (tornDownSince.get() && ended.image() != null) {
+            bootstrapRunner.removeImage(ended.image());
+        }
     }
 
     // Whether a cluster's bootstrap may still start, or go on: one that ended, or a reset removed, is past it.
@@ -1561,16 +1737,24 @@ public class EmrService implements Resettable {
         return "i-" + String.format("%017d", index);
     }
 
-    // The primary instance's: the first of the MASTER group in the order ListInstances lists them.
+    /** The private IPv4 address ListInstances gives a cluster's instance {@code index}, counted from 1. */
+    static String privateIpAddress(int index) {
+        return "10.0.0." + index;
+    }
+
+    // The primary instance's: the first of the MASTER group, which ListInstances numbers before the others.
     static String masterInstanceId(EmrCluster cluster) {
-        int index = 1;
-        for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
-            if ("MASTER".equals(group.getInstanceGroupType())) {
-                return ec2InstanceId(index);
-            }
-            index += group.getRunningInstanceCount();
-        }
         return ec2InstanceId(1);
+    }
+
+    // The primary instance's private DNS name, as ListInstances gives it, which names the cluster's HDFS: the same
+    // while the other groups resize, so an hdfs:// path naming it keeps leading there.
+    static String masterPrivateDnsName(EmrCluster cluster) {
+        return AwsRegions.ec2PrivateIpDnsName(privateIpAddress(1), cluster.getRegion());
+    }
+
+    static boolean isMasterGroup(EmrInstanceGroup group) {
+        return "MASTER".equals(group.getInstanceGroupType());
     }
 
     /** What a step's thread asks the service while its driver goes: a step has no timeout to report. */
@@ -1594,7 +1778,8 @@ public class EmrService implements Resettable {
 
         @Override
         public boolean cancelled() {
-            return !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillRunning(launch));
+            return teardowns.get() != launch.teardownsBefore()
+                    || !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillRunning(launch));
         }
     }
 

@@ -137,6 +137,7 @@ class CloudFormationRdsDynamicReferenceIntegrationTest {
             createStack(stackName, mapper.writeValueAsString(document));
             stackCreated = true;
 
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
             String describeXml = describeStack(stackName);
             assertTrue(describeXml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
                     "an ssm-secure master password is legal on RDS and must provision: " + describeXml);
@@ -167,6 +168,7 @@ class CloudFormationRdsDynamicReferenceIntegrationTest {
                     "{{resolve:ssm:" + parameterName + "}}"));
             stackCreated = true;
 
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
             String describeXml = describeStack(stackName);
             assertTrue(describeXml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
                     "a plain ssm master password must still resolve: " + describeXml);

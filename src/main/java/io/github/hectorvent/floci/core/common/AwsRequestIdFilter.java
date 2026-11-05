@@ -7,6 +7,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.ext.Provider;
 
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Adds AWS request-id response headers to every HTTP response.
@@ -56,6 +57,14 @@ public class AwsRequestIdFilter implements ContainerResponseFilter {
                 return value.toString();
             }
         }
-        return UUID.randomUUID().toString();
+        return newRequestId();
+    }
+
+    // A request id is not a secret, so it does not need SecureRandom.
+    private static String newRequestId() {
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        long high = (random.nextLong() & 0xFFFFFFFFFFFF0FFFL) | 0x0000000000004000L;
+        long low = (random.nextLong() & 0x3FFFFFFFFFFFFFFFL) | 0x8000000000000000L;
+        return new UUID(high, low).toString();
     }
 }

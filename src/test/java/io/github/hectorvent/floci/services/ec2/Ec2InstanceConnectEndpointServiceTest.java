@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
@@ -13,7 +12,6 @@ import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
-import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -28,38 +26,20 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import static io.github.hectorvent.floci.testing.Ec2ServiceFixtures.mockModeService;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /** CreateInstanceConnectEndpoint, DescribeInstanceConnectEndpoints and DeleteInstanceConnectEndpoint. */
 class Ec2InstanceConnectEndpointServiceTest {
 
     private static final String REGION = "us-east-1";
 
-    static Ec2Service newService() {
-        return newService(new InMemoryStorageFactory("000000000000"));
-    }
-
-    static Ec2Service newService(InMemoryStorageFactory storage) {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.Ec2ServiceConfig ec2 = mock(EmulatorConfig.Ec2ServiceConfig.class);
-        when(config.defaultAccountId()).thenReturn("000000000000");
-        when(config.services()).thenReturn(services);
-        when(services.ec2()).thenReturn(ec2);
-        when(ec2.mock()).thenReturn(true);
-        return new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
-                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
-                storage);
-    }
-
     @Test
     void lifecycleFiltersAndDefaults() {
-        Ec2Service service = newService();
+        Ec2Service service = mockModeService();
         String vpcId = service.createVpc(REGION, "10.71.0.0/16", false).getVpcId();
         String subnetId = service.createSubnet(REGION, vpcId, "10.71.1.0/24", "us-east-1a").getSubnetId();
         String otherVpc = service.createVpc(REGION, "10.72.0.0/16", false).getVpcId();
@@ -103,7 +83,7 @@ class Ec2InstanceConnectEndpointServiceTest {
 
     @Test
     void aLiveEndpointBlocksDeletingItsSubnetAndVpc() {
-        Ec2Service service = newService();
+        Ec2Service service = mockModeService();
         String vpcId = service.createVpc(REGION, "10.74.0.0/16", false).getVpcId();
         String subnetId = service.createSubnet(REGION, vpcId, "10.74.1.0/24", "us-east-1a").getSubnetId();
         String id = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(), null)
@@ -121,7 +101,7 @@ class Ec2InstanceConnectEndpointServiceTest {
 
     @Test
     void aNatGatewayCannotTakeTheAddressAnEndpointHolds() {
-        Ec2Service service = newService();
+        Ec2Service service = mockModeService();
         String vpcId = service.createVpc(REGION, "10.75.0.0/16", false).getVpcId();
         String subnetId = service.createSubnet(REGION, vpcId, "10.75.1.0/24", "us-east-1a").getSubnetId();
         InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(),
@@ -139,7 +119,7 @@ class Ec2InstanceConnectEndpointServiceTest {
 
     @Test
     void aReplayedClientTokenReturnsTheFirstEndpoint() {
-        Ec2Service service = newService();
+        Ec2Service service = mockModeService();
         String vpcId = service.createVpc(REGION, "10.75.0.0/16", false).getVpcId();
         String subnetId = service.createSubnet(REGION, vpcId, "10.75.1.0/24", "us-east-1a").getSubnetId();
         String otherSubnet = service.createSubnet(REGION, vpcId, "10.75.2.0/24", "us-east-1a").getSubnetId();
@@ -156,7 +136,7 @@ class Ec2InstanceConnectEndpointServiceTest {
 
     @Test
     void aReplayedClientTokenWithOtherParametersIsAMismatch() {
-        Ec2Service service = newService();
+        Ec2Service service = mockModeService();
         String vpcId = service.createVpc(REGION, "10.78.0.0/16", false).getVpcId();
         String subnetId = service.createSubnet(REGION, vpcId, "10.78.1.0/24", "us-east-1a").getSubnetId();
         String group = service.createSecurityGroup(REGION, "eice", "x", vpcId).getGroupId();
@@ -194,7 +174,7 @@ class Ec2InstanceConnectEndpointServiceTest {
 
     @Test
     void changingAReturnedEndpointLeavesTheStoredOneAlone() {
-        Ec2Service service = newService();
+        Ec2Service service = mockModeService();
         String vpcId = service.createVpc(REGION, "10.76.0.0/16", false).getVpcId();
         String subnetId = service.createSubnet(REGION, vpcId, "10.76.1.0/24", "us-east-1a").getSubnetId();
         InstanceConnectEndpoint created = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null,
@@ -213,7 +193,7 @@ class Ec2InstanceConnectEndpointServiceTest {
     @Test
     void describeListsWhatTheClientTokenReplaySees() {
         InMemoryStorageFactory storage = new InMemoryStorageFactory("000000000000");
-        Ec2Service service = newService(storage);
+        Ec2Service service = mockModeService(storage);
         String vpcId = service.createVpc(REGION, "10.77.0.0/16", false).getVpcId();
         String subnetId = service.createSubnet(REGION, vpcId, "10.77.1.0/24", "us-east-1a").getSubnetId();
         String id = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(),
@@ -237,7 +217,7 @@ class Ec2InstanceConnectEndpointServiceTest {
         ExecutorService pool = Executors.newFixedThreadPool(8);
         try {
             for (int round = 0; round < 50; round++) {
-                Ec2Service service = newService();
+                Ec2Service service = mockModeService();
                 String vpcId = service.createVpc(REGION, "10.73.0.0/16", false).getVpcId();
                 String subnetId = service.createSubnet(REGION, vpcId, "10.73.1.0/24", "us-east-1a").getSubnetId();
                 CountDownLatch go = new CountDownLatch(1);
@@ -267,7 +247,7 @@ class Ec2InstanceConnectEndpointServiceTest {
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             for (int round = 0; round < 200; round++) {
-                Ec2Service service = newService();
+                Ec2Service service = mockModeService();
                 String vpcId = service.createVpc(REGION, "10.74.0.0/16", false).getVpcId();
                 String subnetId = service.createSubnet(REGION, vpcId, "10.74.1.0/24", "us-east-1a").getSubnetId();
                 CountDownLatch go = new CountDownLatch(1);
@@ -304,8 +284,119 @@ class Ec2InstanceConnectEndpointServiceTest {
     }
 
     @Test
+    void changingAReturnedOrRequestedTagLeavesTheCreationParametersAlone() {
+        Ec2Service service = mockModeService();
+        String vpcId = service.createVpc(REGION, "10.81.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.81.1.0/24", "us-east-1a").getSubnetId();
+        Tag requested = new Tag("Name", "kthw");
+        String id = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
+                List.of(requested), "token-81").getInstanceConnectEndpointId();
+        requested.setValue("changed-after-create");
+        service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).get(0)
+                .getCreationTags().get(0).setValue("changed-on-a-copy");
+
+        assertEquals(id, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
+                List.of(new Tag("Name", "kthw")), "token-81").getInstanceConnectEndpointId());
+    }
+
+    @Test
+    void anUnknownFilterNameFailsWhenNoEndpointIsTestedAgainstIt() {
+        Ec2Service service = mockModeService();
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service
+                .describeInstanceConnectEndpoints(REGION, List.of(), Map.of("bogus", List.of("x"))))
+                .getErrorCode());
+
+        String vpcId = service.createVpc(REGION, "10.80.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.80.1.0/24", "us-east-1a").getSubnetId();
+        service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(), null);
+        // An earlier filter that excludes every endpoint does not hide the bad name after it.
+        List<Map.Entry<String, List<String>>> filters = List.of(
+                Map.entry("vpc-id", List.of("vpc-00000000000000000")), Map.entry("bogus", List.of("x")));
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service
+                .describeInstanceConnectEndpoints(REGION, List.of(), filters)).getErrorCode());
+    }
+
+    @Test
+    void tagValueMatchesAnEndpointCarryingThatValueUnderAnyKey() {
+        Ec2Service service = mockModeService();
+        String vpcId = service.createVpc(REGION, "10.81.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.81.1.0/24", "us-east-1a").getSubnetId();
+        String id = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
+                List.of(new Tag("Name", "kthw"), new Tag("Team", "infra")), null).getInstanceConnectEndpointId();
+
+        assertEquals(List.of(id), service.describeInstanceConnectEndpoints(REGION, List.of(),
+                Map.of("tag-value", List.of("nope", "infra")))
+                .stream().map(InstanceConnectEndpoint::getInstanceConnectEndpointId).toList());
+        assertTrue(service.describeInstanceConnectEndpoints(REGION, List.of(),
+                Map.of("tag-value", List.of("Team"))).isEmpty(), "a key is not a value");
+    }
+
+    @Test
+    void availabilityZoneAndOwnerIdAreRefusedLikeAnyFilterAwsDoesNotList() {
+        Ec2Service service = mockModeService();
+        String vpcId = service.createVpc(REGION, "10.82.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.82.1.0/24", "us-east-1a").getSubnetId();
+        service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(), null);
+        AwsException unknown = assertThrows(AwsException.class, () -> service
+                .describeInstanceConnectEndpoints(REGION, List.of(), Map.of("bogus", List.of("x"))));
+        for (String name : List.of("availability-zone", "owner-id")) {
+            AwsException error = assertThrows(AwsException.class, () -> service
+                    .describeInstanceConnectEndpoints(REGION, List.of(), Map.of(name, List.of("x"))), name);
+            assertEquals(unknown.getErrorCode(), error.getErrorCode(), name);
+            assertEquals(unknown.getHttpStatus(), error.getHttpStatus(), name);
+            assertEquals("The filter '" + name + "' is invalid", error.getMessage(), name);
+        }
+    }
+
+    @Test
+    void theEndpointsInterfaceResolvesInDescribeNetworkInterfacesUntilItIsDeleted() {
+        Ec2Service service = mockModeService();
+        String vpcId = service.createVpc(REGION, "10.79.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.79.1.0/24", "us-east-1a").getSubnetId();
+        String otherSubnet = service.createSubnet(REGION, vpcId, "10.79.2.0/24", "us-east-1a").getSubnetId();
+        String group = service.createSecurityGroup(REGION, "eice-sg", "x", vpcId).getGroupId();
+        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group),
+                null, null, List.of(), null);
+        String eniId = endpoint.getNetworkInterfaceIds().get(0);
+
+        NetworkInterface ni = service.describeNetworkInterfaces(REGION, List.of(eniId), Map.of())
+                .networkInterfaces().get(0);
+        assertEquals(eniId, ni.getNetworkInterfaceId());
+        assertEquals(subnetId, ni.getSubnetId());
+        assertEquals(vpcId, ni.getVpcId());
+        assertEquals("us-east-1a", ni.getAvailabilityZone());
+        assertEquals(endpoint.getPrivateIpAddress(), ni.getPrivateIpAddress());
+        assertEquals(List.of(group), ni.getGroups().stream().map(GroupIdentifier::getGroupId).toList());
+        assertEquals(List.of("eice-sg"), ni.getGroups().stream().map(GroupIdentifier::getGroupName).toList());
+        assertTrue(ni.isRequesterManaged());
+        assertEquals("ec2_instance_connect_endpoint", ni.getInterfaceType());
+        assertEquals("EC2 Instance Connect Endpoint " + endpoint.getInstanceConnectEndpointId(), ni.getDescription());
+
+        // Filters see it the way they see any other interface, and only once.
+        assertEquals(List.of(eniId), service.describeNetworkInterfaces(REGION, List.of(),
+                Map.of("subnet-id", List.of(subnetId))).networkInterfaces().stream()
+                .map(NetworkInterface::getNetworkInterfaceId).toList());
+        assertEquals(List.of(eniId), service.describeNetworkInterfaces(REGION, List.of(),
+                Map.of("interface-type", List.of("ec2_instance_connect_endpoint"), "group-id", List.of(group)))
+                .networkInterfaces().stream().map(NetworkInterface::getNetworkInterfaceId).toList());
+        assertTrue(service.describeNetworkInterfaces(REGION, List.of(), Map.of("subnet-id", List.of(otherSubnet)))
+                .networkInterfaces().isEmpty());
+
+        // A tag on the interface is the interface's own and goes with it.
+        service.createTags(REGION, List.of(eniId), List.of(new Tag("Role", "eice")));
+        assertEquals(List.of("Role"), service.describeNetworkInterfaces(REGION, List.of(eniId), Map.of())
+                .networkInterfaces().get(0).getTagSet().stream().map(Tag::getKey).toList());
+
+        service.deleteInstanceConnectEndpoint(REGION, endpoint.getInstanceConnectEndpointId());
+        assertTrue(service.describeTags(REGION, Map.of("resource-id", List.of(eniId))).isEmpty());
+        assertEquals("InvalidNetworkInterfaceID.NotFound", assertThrows(AwsException.class, () -> service
+                .describeNetworkInterfaces(REGION, List.of(eniId), Map.of())).getErrorCode());
+    }
+
+
+    @Test
     void tunnelReachNeedsTheEndpointsEgressAndTheInstancesIngress() {
-        Ec2Service service = newService();
+        Ec2Service service = mockModeService();
         String vpcId = service.createVpc(REGION, "10.73.0.0/16", false).getVpcId();
         String subnetId = service.createSubnet(REGION, vpcId, "10.73.1.0/24", "us-east-1a").getSubnetId();
         String eiceGroup = service.createSecurityGroup(REGION, "eice", "x", vpcId).getGroupId();
@@ -349,83 +440,5 @@ class Ec2InstanceConnectEndpointServiceTest {
             permission.setIpRanges(new ArrayList<>(List.of(range)));
         }
         return permission;
-    }
-
-    @Test
-    void changingAReturnedOrRequestedTagLeavesTheCreationParametersAlone() {
-        Ec2Service service = newService();
-        String vpcId = service.createVpc(REGION, "10.81.0.0/16", false).getVpcId();
-        String subnetId = service.createSubnet(REGION, vpcId, "10.81.1.0/24", "us-east-1a").getSubnetId();
-        Tag requested = new Tag("Name", "kthw");
-        String id = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
-                List.of(requested), "token-81").getInstanceConnectEndpointId();
-        requested.setValue("changed-after-create");
-        service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).get(0)
-                .getCreationTags().get(0).setValue("changed-on-a-copy");
-
-        assertEquals(id, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
-                List.of(new Tag("Name", "kthw")), "token-81").getInstanceConnectEndpointId());
-    }
-
-    @Test
-    void anUnknownFilterNameFailsWhenNoEndpointIsTestedAgainstIt() {
-        Ec2Service service = newService();
-        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service
-                .describeInstanceConnectEndpoints(REGION, List.of(), Map.of("bogus", List.of("x"))))
-                .getErrorCode());
-
-        String vpcId = service.createVpc(REGION, "10.80.0.0/16", false).getVpcId();
-        String subnetId = service.createSubnet(REGION, vpcId, "10.80.1.0/24", "us-east-1a").getSubnetId();
-        service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(), null);
-        // An earlier filter that excludes every endpoint does not hide the bad name after it.
-        List<Map.Entry<String, List<String>>> filters = List.of(
-                Map.entry("vpc-id", List.of("vpc-00000000000000000")), Map.entry("bogus", List.of("x")));
-        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service
-                .describeInstanceConnectEndpoints(REGION, List.of(), filters)).getErrorCode());
-    }
-
-    @Test
-    void theEndpointsInterfaceResolvesInDescribeNetworkInterfacesUntilItIsDeleted() {
-        Ec2Service service = newService();
-        String vpcId = service.createVpc(REGION, "10.79.0.0/16", false).getVpcId();
-        String subnetId = service.createSubnet(REGION, vpcId, "10.79.1.0/24", "us-east-1a").getSubnetId();
-        String otherSubnet = service.createSubnet(REGION, vpcId, "10.79.2.0/24", "us-east-1a").getSubnetId();
-        String group = service.createSecurityGroup(REGION, "eice-sg", "x", vpcId).getGroupId();
-        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group),
-                null, null, List.of(), null);
-        String eniId = endpoint.getNetworkInterfaceIds().get(0);
-
-        NetworkInterface ni = service.describeNetworkInterfaces(REGION, List.of(eniId), Map.of())
-                .networkInterfaces().get(0);
-        assertEquals(eniId, ni.getNetworkInterfaceId());
-        assertEquals(subnetId, ni.getSubnetId());
-        assertEquals(vpcId, ni.getVpcId());
-        assertEquals("us-east-1a", ni.getAvailabilityZone());
-        assertEquals(endpoint.getPrivateIpAddress(), ni.getPrivateIpAddress());
-        assertEquals(List.of(group), ni.getGroups().stream().map(GroupIdentifier::getGroupId).toList());
-        assertEquals(List.of("eice-sg"), ni.getGroups().stream().map(GroupIdentifier::getGroupName).toList());
-        assertTrue(ni.isRequesterManaged());
-        assertEquals("ec2_instance_connect_endpoint", ni.getInterfaceType());
-        assertEquals("EC2 Instance Connect Endpoint " + endpoint.getInstanceConnectEndpointId(), ni.getDescription());
-
-        // Filters see it the way they see any other interface, and only once.
-        assertEquals(List.of(eniId), service.describeNetworkInterfaces(REGION, List.of(),
-                Map.of("subnet-id", List.of(subnetId))).networkInterfaces().stream()
-                .map(NetworkInterface::getNetworkInterfaceId).toList());
-        assertEquals(List.of(eniId), service.describeNetworkInterfaces(REGION, List.of(),
-                Map.of("interface-type", List.of("ec2_instance_connect_endpoint"), "group-id", List.of(group)))
-                .networkInterfaces().stream().map(NetworkInterface::getNetworkInterfaceId).toList());
-        assertTrue(service.describeNetworkInterfaces(REGION, List.of(), Map.of("subnet-id", List.of(otherSubnet)))
-                .networkInterfaces().isEmpty());
-
-        // A tag on the interface is the interface's own and goes with it.
-        service.createTags(REGION, List.of(eniId), List.of(new Tag("Role", "eice")));
-        assertEquals(List.of("Role"), service.describeNetworkInterfaces(REGION, List.of(eniId), Map.of())
-                .networkInterfaces().get(0).getTagSet().stream().map(Tag::getKey).toList());
-
-        service.deleteInstanceConnectEndpoint(REGION, endpoint.getInstanceConnectEndpointId());
-        assertTrue(service.describeTags(REGION, Map.of("resource-id", List.of(eniId))).isEmpty());
-        assertEquals("InvalidNetworkInterfaceID.NotFound", assertThrows(AwsException.class, () -> service
-                .describeNetworkInterfaces(REGION, List.of(eniId), Map.of())).getErrorCode());
     }
 }

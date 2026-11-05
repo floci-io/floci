@@ -899,6 +899,39 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void tryStartKeepsFixedNameWhenCreateResponseAndCleanupAreLost() {
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.create(any()))
+                .thenThrow(new IllegalStateException("connection reset after Docker create"));
+        doThrow(new IllegalStateException("fixed-name cleanup unavailable"))
+                .when(lifecycleManager).stopAndRemoveStrict(any(), any());
+        when(lifecycleManager.getDockerClient()).thenThrow(
+                new RuntimeException("java.net.SocketException: No such file or directory"));
+        RdsContainerManager manager = daemonlessCapableManager(lifecycleManager);
+        String runtimeId = "arn:aws:rds:us-east-1:000000000000:db:db1";
+
+        assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
+        assertEquals("floci-aws-rds-db1", manager.getActiveHandle(runtimeId).getContainerId());
+
+        assertNull(manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of()));
+        assertEquals("floci-aws-rds-db1", manager.getActiveHandle(runtimeId).getContainerId());
+
+        Mockito.reset(lifecycleManager);
+        stubStarts(lifecycleManager, new ContainerLifecycleManager.ContainerInfo(
+                "late-container", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        DockerClient dockerClient = mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+
+        RdsContainerHandle handle = manager.tryStart(runtimeId, "db1", "db1", "floci-rds-db1",
+                DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db", Map.of());
+
+        assertEquals("late-container", handle.getContainerId());
+        verify(lifecycleManager).stopAndRemoveStrict(eq("floci-aws-rds-db1"), any());
+    }
+
+    @Test
     void tryStartRetriesACleanupThatFailedAfterAStop() {
         // The service stops a container whose auth proxy did not start. When that stop fails
         // the handle and claim stay retained, and the runtime's next start must clean them up
@@ -1184,6 +1217,59 @@ class RdsContainerManagerTest {
     }
 
     @Test
+    void stopForDeleteRemovesPersistedCurrentAndLegacyContainerNames() {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class),
+                        mock(EmbeddedDnsServer.class)),
+                lifecycleManager, mock(ContainerLogStreamer.class),
+                mock(ContainerDetector.class), config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        manager.stopForDelete("arn:aws:rds:us-east-1:111111111111:db:legacy",
+                "floci-rds-legacy-volume");
+
+        verify(lifecycleManager).removeIfExistsStrict("floci-aws-rds-legacy-volume");
+        verify(lifecycleManager).removeIfExistsStrict("floci-rds-legacy-volume");
+    }
+
+    @Test
+    void failedFixedNameDeleteRetainsOwnershipForRetry() {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        doThrow(new IllegalStateException("fixed-name removal failed"))
+                .doNothing()
+                .when(lifecycleManager).removeIfExistsStrict("floci-aws-rds-legacy-volume");
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class),
+                        mock(EmbeddedDnsServer.class)),
+                lifecycleManager, mock(ContainerLogStreamer.class),
+                mock(ContainerDetector.class), config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+        String runtimeId = "arn:aws:rds:us-east-1:111111111111:db:legacy";
+
+        assertThrows(IllegalStateException.class, () ->
+                manager.stopForDelete(runtimeId, "floci-rds-legacy-volume"));
+        assertEquals("floci-aws-rds-legacy-volume",
+                manager.getActiveHandle(runtimeId).getContainerId());
+        assertThrows(IllegalStateException.class, () -> manager.start(
+                "arn:aws:rds:us-east-1:222222222222:db:legacy", "legacy", "legacy",
+                "floci-rds-legacy-volume", DatabaseEngine.MYSQL, "mysql:8.0",
+                "root", "password", "db"));
+        verify(lifecycleManager, never()).create(any());
+
+        manager.stopForDelete(runtimeId, "floci-rds-legacy-volume");
+        assertNull(manager.getActiveHandle(runtimeId));
+        verify(lifecycleManager).stopAndRemoveStrict(eq("floci-aws-rds-legacy-volume"),
+                ArgumentMatchers.isNull());
+        verify(lifecycleManager, times(2)).removeIfExistsStrict("floci-aws-rds-legacy-volume");
+        verify(lifecycleManager).removeIfExistsStrict("floci-rds-legacy-volume");
+    }
+
+    @Test
     void inProgressRuntimeClaimRejectsConcurrentDuplicateStart() throws Exception {
         EmulatorConfig config = config(tempDir.resolve("host-root"));
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
@@ -1442,10 +1528,10 @@ class RdsContainerManagerTest {
 
         assertTrue(script.contains("WITH (FORCE)"),
                 "Restore must terminate sessions such as pg_cron connected to the target database");
-        assertTrue(script.contains("datistemplate = false"),
-                "Script must only drop non-template databases");
-        assertTrue(script.contains("datname <> 'postgres'"),
-                "Script must preserve the postgres database");
+        assertTrue(script.contains("datname NOT IN ('postgres', 'template0', 'template1')"),
+                "Script must preserve the postgres database and the system templates");
+        assertTrue(script.contains("IS_TEMPLATE false"),
+                "Script must drop template databases an image created, which the dump creates again");
         assertTrue(script.contains("rolname <> current_user"),
                 "Script must not drop the current user");
         assertTrue(script.contains("rolname NOT LIKE 'pg_%'"),

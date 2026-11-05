@@ -3,6 +3,21 @@
 **Protocol:** JSON 1.0 (`X-Amz-Target: DynamoDB_20120810.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
+## ListTables authorization
+
+With IAM enforcement enabled, `ListTables` evaluates the regional table collection
+`arn:<partition>:dynamodb:<region>:<account>:table/*`. A matching allow permits listing;
+a matching explicit deny overrides it. A grant for one table or a table-name prefix
+does not permit listing, and a grant in another account or Region does not apply.
+The listing is not filtered to the caller's individually authorized tables.
+
+This resource matching was checked against live AWS with isolated role sessions.
+Pagination and ignored table selectors do not change the collection being authorized.
+Other DynamoDB operations retain their own authorization resources.
+The generated IAM request-resource table records `ListTables` as a measured correction to
+the Service Reference. Other DynamoDB operations keep their existing resource builders,
+including batch, transaction and PartiQL table extraction.
+
 ## Supported Actions
 
 | Action | Description |
@@ -118,7 +133,7 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 | `GetRecords` | Read stream records from a shard |
 
 Redshift zero-ETL integrations can consume these stream records directly. See the
-[Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported target,
+[Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported sources and targets,
 landing table, checkpoint, and retry behavior.
 
 Stream records are held in memory. `POST /_floci/state/reset` removes every stream along with the

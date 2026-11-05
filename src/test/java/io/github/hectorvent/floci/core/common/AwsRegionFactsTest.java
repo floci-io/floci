@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.Optional;
 
@@ -77,13 +78,27 @@ class AwsRegionFactsTest {
         assertTrue(AwsRegionFacts.cloudFrontDomainSuffix(null).isEmpty());
     }
 
-    /** The GovCloud guide states the two regional endpoint zones; no source covers another region. */
+    /** The General Reference data plane table; the GovCloud guide states the same two GovCloud zones. */
+    @ParameterizedTest
+    @CsvSource({
+            "us-east-1,      Z1UJRXOUMOOFQ8",
+            "eu-west-1,      ZLY8HYME6SFDD",
+            "ap-east-2,      Z02909591O7FG9Q56HWB1",
+            "us-gov-west-1,  Z1K6XKP9SAGWDV",
+            "us-gov-east-1,  Z3SE9ATJYCRCZJ"})
+    void apiGatewayRegionalZoneFollowsTheGeneralReference(String region, String zone) {
+        assertEquals(Optional.of(zone), AwsRegionFacts.apiGatewayRegionalHostedZoneId(region));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ap-southeast-6", "cn-north-1", "cn-northwest-1", "eusc-de-east-1", "us-iso-east-1",
+            "us-isob-east-1", "eu-isoe-west-1", "us-isof-south-1"})
+    void apiGatewayRegionalZoneIsAbsentWhereTheTableHasNoRow(String region) {
+        assertTrue(AwsRegionFacts.apiGatewayRegionalHostedZoneId(region).isEmpty());
+    }
+
     @Test
-    void apiGatewayRegionalZoneIsPublishedForGovCloudOnly() {
-        assertEquals(Optional.of("Z1K6XKP9SAGWDV"), AwsRegionFacts.apiGatewayRegionalHostedZoneId("us-gov-west-1"));
-        assertEquals(Optional.of("Z3SE9ATJYCRCZJ"), AwsRegionFacts.apiGatewayRegionalHostedZoneId("us-gov-east-1"));
-        assertTrue(AwsRegionFacts.apiGatewayRegionalHostedZoneId("us-east-1").isEmpty());
-        assertTrue(AwsRegionFacts.apiGatewayRegionalHostedZoneId("cn-north-1").isEmpty());
+    void apiGatewayRegionalZoneIsAbsentWithoutARegion() {
         assertTrue(AwsRegionFacts.apiGatewayRegionalHostedZoneId(null).isEmpty());
     }
 

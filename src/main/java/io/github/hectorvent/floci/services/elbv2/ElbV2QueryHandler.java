@@ -161,7 +161,6 @@ public class ElbV2QueryHandler {
             xml.start("member").raw(loadBalancerXml(lb)).end("member");
         }
         xml.end("LoadBalancers")
-           .elem("NextMarker", "")
            .end("DescribeLoadBalancersResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeLoadBalancersResponse");
@@ -331,7 +330,6 @@ public class ElbV2QueryHandler {
             xml.start("member").raw(targetGroupXml(tg)).end("member");
         }
         xml.end("TargetGroups")
-           .elem("NextMarker", "")
            .end("DescribeTargetGroupsResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeTargetGroupsResponse");
@@ -453,7 +451,6 @@ public class ElbV2QueryHandler {
             xml.start("member").raw(listenerXml(l)).end("member");
         }
         xml.end("Listeners")
-           .elem("NextMarker", "")
            .end("DescribeListenersResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeListenersResponse");
@@ -575,7 +572,6 @@ public class ElbV2QueryHandler {
             xml.start("member").raw(ruleXml(r)).end("member");
         }
         xml.end("Rules")
-           .elem("NextMarker", "")
            .end("DescribeRulesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeRulesResponse");
@@ -742,7 +738,6 @@ public class ElbV2QueryHandler {
             xml.start("member").elem("Name", e.getKey()).elem("Max", e.getValue()).end("member");
         }
         xml.end("Limits")
-           .elem("NextMarker", "")
            .end("DescribeAccountLimitsResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeAccountLimitsResponse");
@@ -809,14 +804,9 @@ public class ElbV2QueryHandler {
 
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeListenerCertificatesResponse", AwsNamespaces.ELB_V2)
-                .start("DescribeListenerCertificatesResult")
-                  .start("Certificates");
-        for (String c : certs) {
-            xml.start("member").elem("CertificateArn", c).end("member");
-        }
-        xml.end("Certificates")
-           .elem("NextMarker", "")
-           .end("DescribeListenerCertificatesResult")
+                .start("DescribeListenerCertificatesResult");
+        appendCertificates(xml, certs);
+        xml.end("DescribeListenerCertificatesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeListenerCertificatesResponse");
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
@@ -887,12 +877,8 @@ public class ElbV2QueryHandler {
         xml.elem("LoadBalancerArn", l.getLoadBalancerArn());
         if (l.getPort() != null) xml.elem("Port", String.valueOf(l.getPort()));
         xml.elem("Protocol", safe(l.getProtocol()));
-        xml.elem("SslPolicy", safe(l.getSslPolicy()));
-        xml.start("Certificates");
-        for (String c : l.getCertificates()) {
-            xml.start("member").elem("CertificateArn", c).end("member");
-        }
-        xml.end("Certificates");
+        xml.elem("SslPolicy", l.getSslPolicy());
+        appendCertificates(xml, l.getCertificates());
         xml.start("DefaultActions");
         for (Action a : l.getDefaultActions()) {
             xml.start("member").raw(actionXml(a)).end("member");
@@ -904,6 +890,16 @@ public class ElbV2QueryHandler {
         }
         xml.end("AlpnPolicy");
         return xml.build();
+    }
+
+    private static void appendCertificates(XmlBuilder xml, List<String> certificates) {
+        if (!certificates.isEmpty()) {
+            xml.start("Certificates");
+            for (String certificate : certificates) {
+                xml.start("member").elem("CertificateArn", certificate).end("member");
+            }
+            xml.end("Certificates");
+        }
     }
 
     private String ruleXml(Rule r) {

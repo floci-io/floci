@@ -412,7 +412,9 @@ class IamConcurrencyTest {
                             iam.changePassword("racer", "Passw0rd$start", candidate);
                             winners.add(candidate);
                         } catch (AwsException e) {
-                            if (!"InvalidParameterValue".equals(e.getErrorCode())) {
+                            // The losers hold a password that is no longer current, which
+                            // is what AccessDenied answers.
+                            if (!"AccessDenied".equals(e.getErrorCode())) {
                                 unexpected.add(e.getErrorCode());
                             }
                         } catch (InterruptedException e) {

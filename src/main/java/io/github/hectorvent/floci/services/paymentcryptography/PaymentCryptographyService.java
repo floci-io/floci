@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.StoredResourceArns;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyAlias;
@@ -15,13 +16,17 @@ import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryp
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.security.KeyPair;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -50,14 +55,18 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /** The error a bad page size or a bad token is refused with. */
     private static final String PAGINATION_ERROR = "ValidationException";
 
-    /** The only algorithm this service makes material for. */
-    private static final String SUPPORTED_ALGORITHM = "AES_256";
-
     /** The only class this service makes material for. */
     private static final String SUPPORTED_CLASS = "SYMMETRIC_KEY";
 
+    /** The class of a key pair, which has a public half and a private one. */
+    private static final String ASYMMETRIC_CLASS = "ASYMMETRIC_KEY_PAIR";
+
+    /** The class of a key that is only a public half. */
+    private static final String PUBLIC_KEY_CLASS = "PUBLIC_KEY";
+
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
+
     private final RegionResolver regionResolver;
     private final SecureRandom secureRandom;
     private final PaymentCryptographyRequestContext requestContext;
@@ -81,6 +90,19 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         this(keyStore, aliasStore, regionResolver, new SecureRandom(), requestContext);
     }
 
+    /**
+     * The service over two stores, with a request context of its own.
+     *
+     * <p>The context belongs to a request in the running service, so a caller that is not
+     * one, such as a test, is given one that resolves its aliases itself.
+     */
+    PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
+                                StorageBackend<String, PaymentCryptographyAlias> aliasStore,
+                                RegionResolver regionResolver) {
+        this(keyStore, aliasStore, regionResolver, new SecureRandom(),
+                new PaymentCryptographyRequestContext());
+    }
+
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 RegionResolver regionResolver,
@@ -99,45 +121,130 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public PaymentCryptographyKey createKey(String region, Map<String, Object> attributes,
                                             Map<String, Boolean> modesOfUse, boolean exportable,
                                             boolean enabled, Map<String, String> tags) {
-        String algorithm = string(attributes, "KeyAlgorithm", "AES_256");
+        return makeKey(region, attributes, modesOfUse, exportable, enabled, tags, null);
+    }
+
+    /**
+     * Makes a key, with the material it is given rather than with fresh material.
+     *
+     * <p>An imported key holds the material that came in with it, so the material is a
+     * parameter of the key that is made.
+     */
+    private PaymentCryptographyKey makeKey(String region, Map<String, Object> attributes,
+                                           Map<String, Boolean> modesOfUse, boolean exportable,
+                                           boolean enabled, Map<String, String> tags,
+                                           String materialHex) {
+        return makeKey(region, attributes, modesOfUse, exportable, enabled, tags, materialHex,
+                null, null, null);
+    }
+
+    /**
+     * Makes a key, with the material it is given rather than with fresh material.
+     *
+     * <p>An imported key holds the material that came in with it, so the material is a
+     * parameter of the key that is made. An asymmetric key holds a key pair rather than
+     * material, so its halves are parameters too.
+     *
+     * @param publicKeyBase64 the public half of an asymmetric key, or null
+     * @param privateKeyBase64 the private half of an asymmetric key, or null
+     * @param certificatePem the certificate an imported public key arrived with, or null
+     */
+    private PaymentCryptographyKey makeKey(String region, Map<String, Object> attributes,
+                                           Map<String, Boolean> modesOfUse, boolean exportable,
+                                           boolean enabled, Map<String, String> tags,
+                                           String materialHex, String publicKeyBase64,
+                                           String privateKeyBase64, String certificatePem) {
+        String algorithmName = string(attributes, "KeyAlgorithm", "AES_256");
         String keyClass = string(attributes, "KeyClass", "SYMMETRIC_KEY");
-        // The material is AES-256 and symmetric, so a key that says otherwise would be a key
+        // The material has to be the algorithm's, so a key that says otherwise would be a key
         // whose attributes do not describe it.
-        if (!SUPPORTED_ALGORITHM.equals(algorithm)) {
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.from(algorithmName);
+        if (algorithm == null) {
             throw new AwsException("ValidationException",
-                    "KeyAlgorithm '" + algorithm + "' is not supported, this service makes "
-                            + SUPPORTED_ALGORITHM + " keys", 400);
+                    "KeyAlgorithm '" + algorithmName + "' is not supported, this service makes "
+                            + PaymentCryptographyKeyAlgorithm.supportedAll() + " keys", 400);
         }
-        if (!SUPPORTED_CLASS.equals(keyClass)) {
+        if (!SUPPORTED_CLASS.equals(keyClass) && !ASYMMETRIC_CLASS.equals(keyClass)
+                && !PUBLIC_KEY_CLASS.equals(keyClass)) {
             throw new AwsException("ValidationException",
                     "KeyClass '" + keyClass + "' is not supported, this service makes "
-                            + SUPPORTED_CLASS + " keys", 400);
+                            + SUPPORTED_CLASS + ", " + ASYMMETRIC_CLASS + " and " + PUBLIC_KEY_CLASS
+                            + " keys", 400);
+        }
+        // The class says what shape the key has, and the algorithm says what material it
+        // has, so the two must agree: a symmetric algorithm cannot make a key pair, and an
+        // asymmetric one cannot make a symmetric key.
+        boolean symmetric = algorithm.symmetric();
+        if (symmetric && !SUPPORTED_CLASS.equals(keyClass)) {
+            throw new AwsException("ValidationException",
+                    "KeyAlgorithm '" + algorithmName + "' is a symmetric algorithm, so the key is a "
+                            + SUPPORTED_CLASS + " and not a " + keyClass, 400);
+        }
+        if (!symmetric && SUPPORTED_CLASS.equals(keyClass)) {
+            throw new AwsException("ValidationException",
+                    "KeyAlgorithm '" + algorithmName + "' is an asymmetric algorithm, so the key is a "
+                            + ASYMMETRIC_CLASS + " or a " + PUBLIC_KEY_CLASS + " and not a "
+                            + SUPPORTED_CLASS, 400);
+        }
+        // The usage says what the key is for, so a key without one is not a key: the service
+        // refuses it rather than guessing a purpose for it.
+        String usage = usage(attributes);
+        // The usage binds the key to its purpose, and a key whose algorithm does not serve
+        // that purpose is not one the service makes.
+        String badAlgorithm = PaymentCryptographyKeyAlgorithm.refusal(usage, algorithm);
+        if (badAlgorithm != null) {
+            throw new AwsException("ValidationException", badAlgorithm, 400);
         }
         PaymentCryptographyKey key = new PaymentCryptographyKey();
         key.setKeyId(UUID.randomUUID().toString().replace("-", ""));
         key.setRegion(region);
         key.setArn(regionResolver.buildArn(SERVICE, region, "key/" + key.getKeyId()));
-        key.setKeyAlgorithm(algorithm);
+        key.setKeyAlgorithm(algorithm.name());
         key.setKeyClass(keyClass);
-        key.setKeyUsage(usage(attributes));
+        key.setKeyUsage(usage);
+        key.setDeriveKeyUsage(string(attributes, "DeriveKeyUsage", ""));
         key.setKeyModesOfUse(modesOfUse);
         key.setExportable(exportable);
         key.setEnabled(enabled);
         key.setTags(new LinkedHashMap<>(tags));
         key.setKeyState("CREATE_COMPLETE");
-        key.setKeyMaterialHex(PaymentCryptographyCrypto.randomAes256Hex(secureRandom));
-        key.setKeyCheckValue(PaymentCryptographyCrypto.checkValue(key.getKeyMaterialHex()));
-        key.setKeyCheckValueAlgorithm("CMAC");
+        key.setKeyMaterialHex(materialHex);
+        key.setKeyPublicKeyBase64(publicKeyBase64);
+        key.setKeyPrivateKeyBase64(privateKeyBase64);
+        key.setKeyCertificatePem(certificatePem);
+        if (algorithm.symmetric()) {
+            key.setKeyMaterialHex(materialHex != null
+                    ? materialHex
+                    : PaymentCryptographyCrypto.randomMaterialHex(algorithm, secureRandom));
+            key.setKeyCheckValue(
+                    PaymentCryptographyCrypto.checkValue(key.getKeyMaterialHex(), algorithm));
+            key.setKeyCheckValueAlgorithm(algorithm.checkValueAlgorithm());
+        } else {
+            // An asymmetric key has no material a check value could be computed from, so it
+            // reports the fixed placeholder a public key does.
+            key.setKeyCheckValue("000000");
+            key.setKeyCheckValueAlgorithm(algorithm.checkValueAlgorithm());
+            if (key.getKeyPublicKeyBase64() == null) {
+                KeyPair pair = algorithm.rsa
+                        ? PaymentCryptographyKeyPairs.rsa(algorithm.bytes * 8, secureRandom)
+                        : PaymentCryptographyKeyPairs.ec(algorithm, secureRandom);
+                key.setKeyPublicKeyBase64(Base64.getEncoder()
+                        .encodeToString(pair.getPublic().getEncoded()));
+                if (!PUBLIC_KEY_CLASS.equals(keyClass)) {
+                    key.setKeyPrivateKeyBase64(Base64.getEncoder()
+                            .encodeToString(pair.getPrivate().getEncoded()));
+                }
+            }
+        }
         long now = Instant.now().getEpochSecond();
         key.setCreateTimestamp(now);
         key.setUsageStartTimestamp(now);
-        keyStore.put(key.getKeyId(), key);
+        keyStore.put(storageKey(region, key.getKeyId()), key);
         return key;
     }
 
     /** The key an identifier names, or null when there is none. */
-    public PaymentCryptographyKey findKey(String region, String identifier) {
-        if (identifier == null || identifier.isEmpty()) {
+    public PaymentCryptographyKey findKey(String region, String identifier) {        if (identifier == null || identifier.isEmpty()) {
             return null;
         }
         if (identifier.startsWith("alias/")) {
@@ -161,7 +268,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             }
             return null;
         }
-        PaymentCryptographyKey byId = keyStore.get(identifier).orElse(null);
+        PaymentCryptographyKey byId = findKeyRecord(keyStore, region, identifier);
         return byId != null && region.equals(byId.getRegion()) ? byId : null;
     }
 
@@ -211,6 +318,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setKeyState("DELETE_PENDING");
         key.setEnabled(false);
         key.setDeletePendingTimestamp(now);
+        keyStore.delete(storageKey(key.getRegion(), key.getKeyId()));
+        // A key saved before the region became part of its name is under that name too,
+        // and it goes with the key: a record left behind would be a key that was deleted
+        // and still there.
         keyStore.delete(key.getKeyId());
         for (PaymentCryptographyAlias alias : aliasStore.scan(a -> true)) {
             if (key.getKeyId().equals(alias.getKeyId())) {
@@ -229,7 +340,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * by name and region together.
      */
     public PaymentCryptographyAlias findAlias(String region, String aliasName) {
-        return aliasStore.get(aliasKey(aliasName, region)).orElse(null);
+        return findAliasRecord(region, aliasName);
     }
 
     /**
@@ -247,7 +358,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             keyId = alias == null || alias.getKeyId() == null ? "" : alias.getKeyId();
             requestContext.pinAliasKeyId(region, aliasName, keyId);
         }
-        return keyId.isEmpty() ? null : keyStore.get(keyId).orElse(null);
+        // A key saved before the region became part of its name is still found under that
+        // name, so an alias written then keeps working.
+        return keyId.isEmpty() ? null : findKeyRecord(keyStore, region, keyId);
     }
 
     /** Points a name at a key. The name must be free in the key's region. */
@@ -342,7 +455,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized void tag(PaymentCryptographyKey key, Map<String, String> tags) {
         PaymentCryptographyKey current = liveKey(key);
         current.getTags().putAll(tags);
-        keyStore.put(current.getKeyId(), current);
+        storeKey(current);
     }
 
     /**
@@ -354,12 +467,29 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * read again under the lock and the request fails if it is not there.
      */
     private PaymentCryptographyKey liveKey(PaymentCryptographyKey key) {
-        PaymentCryptographyKey current = keyStore.get(key.getKeyId()).orElse(null);
+        PaymentCryptographyKey current =
+                findKeyRecord(keyStore, key.getRegion(), key.getKeyId());
         if (current == null) {
             throw new AwsException("ResourceNotFoundException",
                     "Key " + key.getArn() + " is not found", 400);
         }
         return current;
+    }
+
+    /**
+     * Writes a key back, under the name the store holds it under now.
+     *
+     * <p>A record that was found under the older name is moved to the current one, so the
+     * store holds one record of the key and not two.
+     *
+     * @param key the key to write
+     */
+    private void storeKey(PaymentCryptographyKey key) {
+        String current = storageKey(key.getRegion(), key.getKeyId());
+        keyStore.put(current, key);
+        if (!key.getKeyId().equals(current)) {
+            keyStore.delete(key.getKeyId());
+        }
     }
 
     /** Removes tags from a key, in this region only. */
@@ -368,7 +498,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         for (String tagKey : tagKeys) {
             current.getTags().remove(tagKey);
         }
-        keyStore.put(current.getKeyId(), current);
+        storeKey(current);
     }
 
     /**
@@ -391,6 +521,190 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                                                 Integer maxResults, String nextToken) {
         return Pagination.paginate(new ArrayList<>(listTags(key).entrySet()), Map.Entry::getKey,
                 maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
+    }
+
+    // ---- the replication ------------------------------------------------------
+
+    // ---- the key exchange ----------------------------------------------------
+
+    /**
+     * The usages a key block may carry, and the modes of use each of them has.
+     *
+     * <p>A key block carries the usage of the key it carries, so every usage the service
+     * makes has to have a code, or a key of that usage cannot leave the service and the
+     * counterparty cannot tell what it has.
+     */
+    private static final Map<String, String> USAGE_NAMES = Map.ofEntries(
+            Map.entry("B0", "TR31_B0_BASE_DERIVATION_KEY"),
+            Map.entry("C0", "TR31_C0_CARD_VERIFICATION_KEY"),
+            Map.entry("D0", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+            Map.entry("E0", "TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"),
+            Map.entry("E1", "TR31_E1_EMV_MKEY_CONFIDENTIALITY"),
+            Map.entry("E2", "TR31_E2_EMV_MKEY_INTEGRITY"),
+            Map.entry("E4", "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS"),
+            Map.entry("E5", "TR31_E5_EMV_MKEY_CARD_PERSONALIZATION"),
+            Map.entry("E6", "TR31_E6_EMV_MKEY_OTHER"),
+            Map.entry("K0", "TR31_K0_KEY_ENCRYPTION_KEY"),
+            Map.entry("K1", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+            Map.entry("M0", "TR31_M0_ISO_16609_MAC_KEY"),
+            Map.entry("M1", "TR31_M1_ISO_9797_1_MAC_KEY"),
+            Map.entry("M3", "TR31_M3_ISO_9797_3_MAC_KEY"),
+            Map.entry("M6", "TR31_M6_ISO_9797_5_CMAC_KEY"),
+            Map.entry("M7", "TR31_M7_HMAC_KEY"),
+            Map.entry("P0", "TR31_P0_PIN_ENCRYPTION_KEY"),
+            Map.entry("P1", "TR31_P1_PIN_GENERATION_KEY"),
+            Map.entry("V1", "TR31_V1_IBM3624_PIN_VERIFICATION_KEY"),
+            Map.entry("V2", "TR31_V2_VISA_PIN_VERIFICATION_KEY"),
+            Map.entry("S0", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE"));
+
+    /** The TR-31 usage code of a usage name, such as {@code D0}. */
+    static String usageCode(String usageName) {
+        for (Map.Entry<String, String> entry : USAGE_NAMES.entrySet()) {
+            if (entry.getValue().equals(usageName)) {
+                return entry.getKey();
+            }
+        }
+        throw new AwsException("ValidationException",
+                "the usage " + usageName + " cannot leave the service: a key block carries one of "
+                        + USAGE_NAMES.keySet(), 400);
+    }
+
+    /**
+     * Whether a key is an AES key rather than a TDES one.
+     *
+     * <p>The key record knows its algorithm, so the family is read from there and not guessed
+     * from the length of the material, because a 16-byte key is a two-key TDES one and an
+     * AES-128 one, and a 24-byte key is a three-key TDES one and an AES-192 one.
+     */
+    static boolean isAes(PaymentCryptographyKey key) {
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
+        return algorithm != null && algorithm.aes;
+    }
+
+    /**
+     * The algorithm byte of a key: {@code A} for an AES key and {@code T} for a TDES one.
+     *
+     * <p>The key record knows its algorithm, so the byte is read from there and not guessed from
+     * the length of the material, because a TDES key and an AES key of the same length are
+     * different keys.
+     */
+    static String algorithmByte(PaymentCryptographyKey key) {
+        return "AES_256".equals(key.getKeyAlgorithm()) || "AES_192".equals(key.getKeyAlgorithm())
+                || "AES_128".equals(key.getKeyAlgorithm()) ? "A" : "T";
+    }
+
+    /** The usage name of a TR-31 usage code, such as {@code TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY}. */
+    static String usageName(String usageCode) {
+        String usage = USAGE_NAMES.get(usageCode);
+        if (usage == null) {
+            throw new AwsException("ValidationException",
+                    "the usage " + usageCode + " of the key block is not one this service serves: "
+                            + USAGE_NAMES.keySet(), 400);
+        }
+        return usage;
+    }
+
+    /**
+     * The modes of use a mode of use code of a key block stands for.
+     *
+     * <p>A key encryption key wraps and unwraps rather than encrypts and decrypts, so the
+     * same character means the other modes for one.
+     *
+     * @param mode the mode of use character of the block
+     * @param isKek true when the block carries a key encryption key
+     */
+    static Map<String, Boolean> modesFor(String mode, boolean isKek) {
+        return switch (mode) {
+            case "B" -> isKek
+                    ? Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE)
+                    : Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE);
+            case "E" -> isKek
+                    ? Map.of("Wrap", Boolean.TRUE)
+                    : Map.of("Encrypt", Boolean.TRUE);
+            case "D" -> isKek
+                    ? Map.of("Unwrap", Boolean.TRUE)
+                    : Map.of("Decrypt", Boolean.TRUE);
+            case "G" -> Map.of("Generate", Boolean.TRUE);
+            case "V" -> Map.of("Verify", Boolean.TRUE);
+            case "C" -> Map.of("Generate", Boolean.TRUE, "Verify", Boolean.TRUE);
+            case "X" -> Map.of("DeriveKey", Boolean.TRUE);
+            case "N" -> Map.of("NoRestrictions", Boolean.TRUE);
+            default -> throw new AwsException("ValidationException",
+                    "the mode of use " + mode + " of the key block is not one this service serves", 400);
+        };
+    }
+
+    /**
+     * The mode of use character a key block carries.
+     *
+     * <p>The character is read off the key's own modes, because that is what it says: a key
+     * that encrypts and decrypts is a {@code B}, one that only encrypts is an {@code E}. A key
+     * encryption key wraps and unwraps rather than encrypts and decrypts, so its modes are read
+     * that way.
+     *
+     * @param key the key the block carries
+     * @return the character
+     */
+    static String modeCode(PaymentCryptographyKey key) {
+        Map<String, Boolean> modes = key.getKeyModesOfUse();
+        boolean isKek = isKeyEncryptionKey(key.getKeyUsage());
+        boolean encrypt = isKek
+                ? enabled(modes, "Wrap") || enabled(modes, "Encrypt")
+                : enabled(modes, "Encrypt");
+        boolean decrypt = isKek
+                ? enabled(modes, "Unwrap") || enabled(modes, "Decrypt")
+                : enabled(modes, "Decrypt");
+        boolean generate = enabled(modes, "Generate");
+        boolean verify = enabled(modes, "Verify");
+        boolean derive = enabled(modes, "DeriveKey");
+        if (encrypt && decrypt) {
+            return "B";
+        }
+        if (encrypt) {
+            return "E";
+        }
+        if (decrypt) {
+            return "D";
+        }
+        if (generate && verify) {
+            return "C";
+        }
+        if (generate) {
+            return "G";
+        }
+        if (verify) {
+            return "V";
+        }
+        if (derive) {
+            return "X";
+        }
+        return "N";
+    }
+
+    /** Whether a mode of use is on. A key with no modes at all has every one of them. */
+    private static boolean enabled(Map<String, Boolean> modes, String mode) {
+        return modes == null || Boolean.TRUE.equals(modes.get(mode));
+    }
+
+    /** Whether a usage is a key encryption key's, whose modes wrap and unwrap. */
+    static boolean isKeyEncryptionKey(String usageName) {
+        return "TR31_K0_KEY_ENCRYPTION_KEY".equals(usageName)
+                || "TR31_K1_KEY_BLOCK_PROTECTION_KEY".equals(usageName);
+    }
+
+    /** Whether a key may wrap another key. */
+    static boolean mayWrap(PaymentCryptographyKey key) {
+        Map<String, Boolean> modes = key.getKeyModesOfUse();
+        return modes == null || Boolean.TRUE.equals(modes.get("Wrap"))
+                || Boolean.TRUE.equals(modes.get("Encrypt"));
+    }
+
+    /** Whether a key may unwrap another key. */
+    static boolean mayUnwrap(PaymentCryptographyKey key) {
+        Map<String, Boolean> modes = key.getKeyModesOfUse();
+        return modes == null || Boolean.TRUE.equals(modes.get("Unwrap"))
+                || Boolean.TRUE.equals(modes.get("Decrypt"));
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -438,6 +752,52 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
+     * The storage key of a key.
+     *
+     * <p>The region is part of it, because a multi-region key has one identifier in several
+     * regions, and each of them is a key of its own region.
+     */
+    private static String storageKey(String region, String keyId) {
+        return region + "\u0000" + keyId;
+    }
+
+    /**
+     * The key a store holds under the name it was saved under.
+     *
+     * <p>A store written before the region became part of the name holds its keys under
+     * their identifier alone, and its aliases under their name alone. A record saved then is
+     * still found here, so a store that was not emptied keeps working.
+     *
+     * @param store the store to look in
+     * @param region the region the key is in
+     * @param keyId the key's identifier
+     * @param <T> what the store holds
+     * @return the key, or null when the store holds none
+     */
+    private static <T> T findKeyRecord(StorageBackend<String, T> store, String region,
+                                       String keyId) {
+        Optional<T> current = store.get(storageKey(region, keyId));
+        if (current.isPresent()) {
+            return current.get();
+        }
+        return store.get(keyId).orElse(null);
+    }
+
+    /**
+     * The alias a store holds under the name it was saved under.
+     *
+     * <p>An alias saved before the region became part of the name is still found here.
+     *
+     * @param region the region the alias is in
+     * @param aliasName the alias's name
+     * @return the alias, or null when the store holds none
+     */
+    private PaymentCryptographyAlias findAliasRecord(String region, String aliasName) {
+        PaymentCryptographyAlias current = aliasStore.get(aliasKey(aliasName, region)).orElse(null);
+        return current != null ? current : aliasStore.get(aliasName).orElse(null);
+    }
+
+    /**
      * The storage key of an alias.
      *
      * <p>The name and the region together, because the name is unique in the
@@ -470,5 +830,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public void clear() {
         keyStore.clear();
         aliasStore.clear();
+    }
+
+    /** The key store, for the tests. */
+    Optional<PaymentCryptographyKey> storedKey(String region, String keyId) {
+        return keyStore.get(storageKey(region, keyId));
     }
 }

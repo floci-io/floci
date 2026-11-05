@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -15,6 +16,8 @@ import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -289,16 +292,35 @@ class LeafCfnProvisionerTest {
             when(ecr.createRepository(anyString(), any(), any(), any(), any(), any(), any(), anyString()))
                     .thenReturn(repo("arn", "uri"));
 
-            provisioner.provision(resource("Repo", "AWS::ECR::Repository"), props("""
-                    {
-                      "RepositoryName": "app",
-                      "LifecyclePolicy": {"LifecyclePolicyText": "{\\"rules\\":[]}"},
-                      "RepositoryPolicyText": "{\\"Version\\":\\"2012-10-17\\"}"
-                    }
-                    """), ctx);
+            String lifecyclePolicy = """
+                    {"rules":[{"rulePriority":1,"selection":{"tagStatus":"any",
+                    "countType":"imageCountMoreThan","countNumber":2},"action":{"type":"expire"}}]}
+                    """;
+            JsonNode properties = props("""
+                    {"RepositoryName":"app","RepositoryPolicyText":"{\\"Version\\":\\"2012-10-17\\"}"}
+                    """);
+            ((ObjectNode) properties).putObject("LifecyclePolicy")
+                    .put("LifecyclePolicyText", lifecyclePolicy);
+            provisioner.provision(resource("Repo", "AWS::ECR::Repository"), properties, ctx);
 
-            verify(ecr).putLifecyclePolicy("app", null, "{\"rules\":[]}", REGION);
+            verify(ecr).putLifecyclePolicy("app", null, lifecyclePolicy, REGION);
             verify(ecr).setRepositoryPolicy("app", null, "{\"Version\":\"2012-10-17\"}", REGION);
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"", " ", "{\"rules\":[]}"})
+        void invalidLifecyclePolicyDoesNotCreateOrReconcileARepository(String policy) {
+            ObjectNode invalid = (ObjectNode) props("{\"RepositoryName\":\"app\"}");
+            invalid.putObject("LifecyclePolicy").put("LifecyclePolicyText", policy);
+            assertThrows(AwsException.class, () -> provisioner.provision(
+                    resource("Repo", "AWS::ECR::Repository"), invalid, ctx));
+            assertThrows(AwsException.class, () -> provisioner.provision(
+                    resource("Repo", "AWS::ECR::Repository"), invalid,
+                    new ProvisionContext(engine, REGION, "000000000000", "my-stack", "app")));
+            verify(ecr, never()).createRepository(anyString(), any(), any(), any(), any(), any(), any(), anyString());
+            verify(ecr, never()).putImageTagMutability(anyString(), any(), any(), anyString());
+            verify(ecr, never()).putLifecyclePolicy(anyString(), any(), any(), anyString());
+            verify(ecr, never()).deleteLifecyclePolicy(anyString(), any(), anyString());
         }
 
         @Test

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingReconciler;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.specification.RequestSpecification;
@@ -55,6 +56,7 @@ class AutoScalingConfigurationUserDataIntegrationTest {
         createConfiguration(source, name, encoded);
         try {
             if (!source.equals("query")) {
+                CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
                 String status = request("cloudformation", "DescribeStacks").formParam("StackName", name)
                         .post("/").then().statusCode(200).extract().xmlPath()
                         .getString("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus");
@@ -126,6 +128,7 @@ class AutoScalingConfigurationUserDataIntegrationTest {
         } else {
             createConfiguration(source, name, data);
             try {
+                CfnStackWaits.awaitStatus(name, "ROLLBACK_COMPLETE");
                 String status = request("cloudformation", "DescribeStacks").formParam("StackName", name)
                         .post("/").then().statusCode(200).extract().xmlPath()
                         .getString("DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus");
