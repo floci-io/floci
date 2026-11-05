@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.codepipeline.model.CodePipelinePipeli
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
 
@@ -1159,8 +1160,7 @@ class CodePipelineServiceTest {
                             }
                             """.formatted(pipeline, executionId));
                 });
-                await().atMost(Duration.ofSeconds(5)).until(() -> stoppingThread.get() != null
-                        && stoppingThread.get().getState() == Thread.State.BLOCKED);
+                ThreadStates.awaitBlockedOrDone(stoppingThread, stopped);
                 // The worker registers actions under this monitor before the stop can traverse them.
                 execution.getActionExecutions().add(registering);
             }
