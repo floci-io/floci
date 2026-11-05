@@ -2478,7 +2478,14 @@ public class SnsService implements Resettable, ResourceProvider {
     private List<Subscription> subscriptionsByTopic(String topicArn, String region) {
         List<Subscription> result = new ArrayList<>();
         String prefix = "sub::" + region + "::";
-        for (Subscription sub : subscriptionStore.scan(k -> k.startsWith(prefix))) {
+        List<Subscription> regional;
+        if (subscriptionStore instanceof AccountAwareStorageBackend<Subscription> aware) {
+            String rawPrefix = AccountAwareStorageBackend.rawKey(aware.accountId(), prefix);
+            regional = aware.scanRaw(raw -> raw.startsWith(rawPrefix));
+        } else {
+            regional = subscriptionStore.scan(k -> k.startsWith(prefix));
+        }
+        for (Subscription sub : regional) {
             if (topicArn.equals(sub.getTopicArn())) {
                 result.add(sub);
             }
