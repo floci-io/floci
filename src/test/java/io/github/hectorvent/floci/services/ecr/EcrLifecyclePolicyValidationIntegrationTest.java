@@ -3,15 +3,13 @@ package io.github.hectorvent.floci.services.ecr;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.quarkus.test.InjectMock;
-import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.ecr.EcrClient;
@@ -19,7 +17,6 @@ import software.amazon.awssdk.services.ecr.model.InvalidParameterException;
 import software.amazon.awssdk.services.ecr.model.LifecyclePolicyNotFoundException;
 import software.amazon.awssdk.services.ecr.model.RepositoryNotFoundException;
 
-import java.net.URI;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -44,9 +41,6 @@ class EcrLifecyclePolicyValidationIntegrationTest {
             + RULE.replace("\"tagStatus\":\"any\"", "\"tagStatus\":\"untagged\"") + ","
             + RULE.replace("\"rulePriority\":1", "\"rulePriority\":2") + "]}";
 
-    @TestHTTPResource("/")
-    URI endpoint;
-
     @InjectMock
     EcrRegistryManager registry;
 
@@ -60,12 +54,9 @@ class EcrLifecyclePolicyValidationIntegrationTest {
     void emptyCloudFormationUpdatePreservesPolicyAndOmittedPolicyStillRemovesIt() {
         String repository = "lifecycle-validation/" + UUID.randomUUID();
         String stack = "lifecycle-validation-" + UUID.randomUUID();
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create("test", "test"));
-        try (EcrClient client = EcrClient.builder().endpointOverride(endpoint)
-                .region(Region.US_EAST_1).credentialsProvider(credentials).build();
-             CloudFormationClient cfn = CloudFormationClient.builder().endpointOverride(endpoint)
-                     .region(Region.US_EAST_1).credentialsProvider(credentials).build()) {
+        try (EcrClient client = AwsTestClients.create(EcrClient.builder(), "test", Region.US_EAST_1);
+             CloudFormationClient cfn = AwsTestClients.create(
+                     CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
             ObjectNode template = JSON.createObjectNode();
             ObjectNode properties = template.putObject("Resources").putObject("Repo")
                     .put("Type", "AWS::ECR::Repository").putObject("Properties");
@@ -122,10 +113,7 @@ class EcrLifecyclePolicyValidationIntegrationTest {
     @MethodSource("regions")
     void invalidDocumentIsRejectedBeforeLookingUpTheRepository(Region region) {
         String repository = "lifecycle-validation/" + UUID.randomUUID();
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create("test", "test"));
-        try (EcrClient client = EcrClient.builder().endpointOverride(endpoint)
-                .region(region).credentialsProvider(credentials).build()) {
+        try (EcrClient client = AwsTestClients.create(EcrClient.builder(), "test", region)) {
             assertThrows(InvalidParameterException.class,
                     () -> client.putLifecyclePolicy(r -> r.repositoryName(repository)
                             .lifecyclePolicyText("{\"rules\":[]}" + " ".repeat(100))));
@@ -139,10 +127,7 @@ class EcrLifecyclePolicyValidationIntegrationTest {
     @MethodSource("invalidPolicies")
     void rejectedPolicyPreservesThePreviouslyAcceptedDocument(Region region, String invalidPolicy) {
         String repository = "lifecycle-validation/" + UUID.randomUUID();
-        StaticCredentialsProvider credentials = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create("test", "test"));
-        try (EcrClient client = EcrClient.builder().endpointOverride(endpoint)
-                .region(region).credentialsProvider(credentials).build()) {
+        try (EcrClient client = AwsTestClients.create(EcrClient.builder(), "test", region)) {
             client.createRepository(r -> r.repositoryName(repository));
             try {
                 assertEquals(VALID_POLICY, client.putLifecyclePolicy(r -> r.repositoryName(repository)
