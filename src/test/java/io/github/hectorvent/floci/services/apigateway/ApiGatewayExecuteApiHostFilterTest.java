@@ -63,10 +63,13 @@ class ApiGatewayExecuteApiHostFilterTest {
                 "abc123.execute-api.localhost.floci.io",
                 URI.create("http://abc123.execute-api.localhost.floci.io/files/a%2Fb?value=a%2Fb"));
 
-        new ApiGatewayExecuteApiHostFilter(lookup, new RegionResolver(REGION, "000000000000"))
+        ApiGatewayExecuteRouteContext routeContext = new ApiGatewayExecuteRouteContext();
+        new ApiGatewayExecuteApiHostFilter(lookup, new RegionResolver(REGION, "000000000000"), routeContext)
                 .filter(request.context());
 
-        assertEquals("/execute-api/abc123/$default/files/a%2Fb", request.routedUri().getRawPath());
+        assertEquals("/execute-api/abc123/$default/files/a%252Fb", request.routedUri().getRawPath());
+        assertEquals("/execute-api/abc123/$default/files/a%2Fb", routeContext.rewrittenRequestPath());
+        assertEquals("/files/a%2Fb", routeContext.signedRequestPath());
         assertEquals("value=a%2Fb", request.routedUri().getRawQuery());
     }
 
@@ -101,6 +104,7 @@ class ApiGatewayExecuteApiHostFilterTest {
         assertEquals("value=a%2Fb", request.routedUri().getRawQuery());
         assertNull(routeContext.httpApiRegion());
         assertEquals("/dev/deep/path", routeContext.signedRequestPath());
+        assertEquals("/execute-api/abc123/dev/deep/path", routeContext.rewrittenRequestPath());
     }
 
     @Test

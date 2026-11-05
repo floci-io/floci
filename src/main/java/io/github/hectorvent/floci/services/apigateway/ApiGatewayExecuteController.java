@@ -660,7 +660,7 @@ public class ApiGatewayExecuteController {
         pathMap.putAll(extractPathParams(resource.getPath(), path));
         pathMap.putAll(greedyPathParam(resource.getPath(), path));
 
-        String rawPath = rawStagelessPath(path, uriInfo.getRequestUri().getRawPath());
+        String rawPath = rawStagelessPath(path, rawRequestPath(uriInfo));
         Map<String, String> rawPathMap = new LinkedHashMap<>();
         rawPathMap.putAll(extractPathParams(resource.getPath(), rawPath));
         rawPathMap.putAll(greedyPathParam(resource.getPath(), rawPath));
@@ -969,7 +969,7 @@ public class ApiGatewayExecuteController {
         if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
         pathMap.putAll(extractPathParams(resource.getPath(), path));
 
-        String rawPath = rawStagelessPath(path, uriInfo.getRequestUri().getRawPath());
+        String rawPath = rawStagelessPath(path, rawRequestPath(uriInfo));
         Map<String, String> rawPathMap = new HashMap<>();
         if (rawPath != null && pathMap.containsKey("proxy")) {
             rawPathMap.put("proxy", rawPath.substring(1));
@@ -1337,7 +1337,7 @@ public class ApiGatewayExecuteController {
         // Recover the trailing slash the JAX-RS {proxy} binding strips, so the authorizer sees
         // the same raw path the Lambda later receives from buildProxyEvent (AWS parity). Path
         // matching and path-parameter extraction keep using the normalized requestPath.
-        String preservedPath = preserveTrailingSlash(requestPath, uriInfo.getRequestUri().getRawPath());
+        String preservedPath = preserveTrailingSlash(requestPath, rawRequestPath(uriInfo));
 
         ObjectNode node = objectMapper.createObjectNode();
         node.put("type", auth.getType());
@@ -1470,7 +1470,7 @@ public class ApiGatewayExecuteController {
         // significant in the delivered path (routers treat /x and /x/ as distinct routes).
         // Recover it from the raw request URI for the event path fields. Resource matching
         // and path-parameter extraction continue to use the normalized `path`.
-        String requestPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
+        String requestPath = preserveTrailingSlash(path, rawRequestPath(uriInfo));
 
         ObjectNode event = objectMapper.createObjectNode();
         event.put("resource", resourcePath);
@@ -3025,7 +3025,7 @@ public class ApiGatewayExecuteController {
             queryParams.put(e.getKey(), String.join(",", e.getValue()));
         }
         Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
-        String rawPath = rawStagelessPath(path, uriInfo.getRequestUri().getRawPath());
+        String rawPath = rawStagelessPath(path, rawRequestPath(uriInfo));
         Map<String, String> rawPathParams = rawPath == null ? Map.of() : extractV2PathParams(route.getRouteKey(), rawPath);
 
         // Reuses the claims dispatchV2 already verified via enforceJwtAuthorizer, rather than
@@ -3528,7 +3528,7 @@ public class ApiGatewayExecuteController {
         // do NOT: an HTTP API has no REST-style resource template, so both are copies of the
         // request path here rather than of a matched resource, and AWS's own 1.0 payload example
         // shows `resource` and `path` carrying the same value.
-        String preservedPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
+        String preservedPath = preserveTrailingSlash(path, rawRequestPath(uriInfo));
 
         ObjectNode event = objectMapper.createObjectNode();
         event.put("version", "1.0");
@@ -3580,7 +3580,7 @@ public class ApiGatewayExecuteController {
         // rawPath is by contract the raw, unmodified path, so recover the trailing slash the
         // JAX-RS {proxy} binding stripped. routeArn keeps the normalized path for the same reason
         // methodArn does in the 1.0 shape above.
-        String preservedPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
+        String preservedPath = preserveTrailingSlash(path, rawRequestPath(uriInfo));
 
         ObjectNode event = objectMapper.createObjectNode();
         event.put("version", "2.0");
@@ -3908,7 +3908,7 @@ public class ApiGatewayExecuteController {
         // request URI for the event path fields. Route matching in dispatchV2 and the
         // pathParameters extraction below continue to use the normalized `path`, mirroring what
         // buildProxyEvent already does for REST (V1).
-        String preservedPath = preserveTrailingSlash(path, uriInfo.getRequestUri().getRawPath());
+        String preservedPath = preserveTrailingSlash(path, rawRequestPath(uriInfo));
 
 
         ObjectNode event = objectMapper.createObjectNode();
@@ -4405,8 +4405,13 @@ public class ApiGatewayExecuteController {
         return defaultStage ? path : "/" + stageName + path;
     }
 
-    private static String proxyTargetPath(String normalizedPath, UriInfo uriInfo, String stageName) {
-        return rawTargetPath(normalizedPath, uriInfo.getRequestUri().getRawPath(), stageName);
+    String rawRequestPath(UriInfo uriInfo) {
+        String rewrittenPath = routeContext.rewrittenRequestPath();
+        return rewrittenPath != null ? rewrittenPath : uriInfo.getRequestUri().getRawPath();
+    }
+
+    private String proxyTargetPath(String normalizedPath, UriInfo uriInfo, String stageName) {
+        return rawTargetPath(normalizedPath, rawRequestPath(uriInfo), stageName);
     }
 
     /**
