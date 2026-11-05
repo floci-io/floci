@@ -1382,6 +1382,10 @@ public class Ec2ContainerManager {
         String containerId;
         long lookup;
         synchronized (instance) {
+            if (isLaunchCancelledState(instance)) {
+                // Torn down or going: nothing to report, and no lookup state to leave behind.
+                return;
+            }
             containerId = instance.getDockerContainerId();
             lookup = serviceNetworkLookups.merge(instanceId, 1L, Long::sum);
         }
@@ -1407,6 +1411,10 @@ public class Ec2ContainerManager {
             instance.setServiceNetworkIp(address);
             serviceNetworkRetries.remove(instanceId);
         }
+    }
+
+    boolean hasServiceNetworkLookupStateForTest(String instanceId) {
+        return serviceNetworkLookups.containsKey(instanceId) || serviceNetworkRetries.contains(instanceId);
     }
 
     /** Called under the instance lock. */
@@ -1548,6 +1556,9 @@ public class Ec2ContainerManager {
             firewallEniId = instance.getNetworkInterfaces() == null || instance.getNetworkInterfaces().isEmpty()
                     ? null : instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId();
             instance.setState(InstanceState.shuttingDown());
+            // In-flight lookups no longer match and publish nothing; later ones see the state.
+            serviceNetworkRetries.remove(instance.getInstanceId());
+            serviceNetworkLookups.remove(instance.getInstanceId());
         }
         executor.submit(() -> {
             // The post-teardown hook's only precondition; see the Javadoc above for why.

@@ -1224,6 +1224,23 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void terminationDropsTheLookupStateAndALaterLookupLeavesNone() {
+        DockerClient docker = guestDocker("172.20.0.9", null);
+        Ec2ContainerManager manager = managerOnServiceNetwork(true, true, docker);
+        Instance instance = serviceNetworkInstance();
+        manager.refreshServiceNetworkIp(instance);
+        assertTrue(manager.hasServiceNetworkLookupStateForTest(instance.getInstanceId()));
+
+        manager.terminate(instance, null);
+        clearInvocations(docker);
+        // A retry queued before the teardown runs after it.
+        manager.refreshServiceNetworkIp(instance);
+
+        assertFalse(manager.hasServiceNetworkLookupStateForTest(instance.getInstanceId()));
+        verify(docker, never()).inspectContainerCmd(anyString());
+    }
+
+    @Test
     void aLookupInFlightDuringTeardownCannotRestoreTheAddress() throws Exception {
         CountDownLatch staleInspectStarted = new CountDownLatch(1);
         CountDownLatch releaseStaleInspect = new CountDownLatch(1);
