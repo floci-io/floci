@@ -25,9 +25,9 @@ import java.util.UUID;
  * <p>The Data API uses named placeholders ({@code :name}); JDBC uses positional
  * {@code ?}. {@link #parse(String)} rewrites the SQL to positional form while
  * recording the placeholder order, and {@link #bind} binds each value variant.
- * The rewrite is shared across MySQL, MariaDB, and PostgreSQL; the only
- * dialect difference is whether a backslash escapes quotes inside string
- * literals (see {@link #parse(String, boolean)}).
+ * The rewrite is shared across MySQL, MariaDB, and PostgreSQL. PostgreSQL
+ * escape strings and pgjdbc's {@code ??} escape for literal question-mark
+ * operators are handled separately from MySQL and MariaDB quoting rules.
  */
 final class RdsDataSqlParameters {
 
@@ -36,8 +36,9 @@ final class RdsDataSqlParameters {
 
     /**
      * Rewrites {@code :name} placeholders to positional {@code ?} without
-     * treating backslash as a string-literal escape (the PostgreSQL default
-     * with {@code standard_conforming_strings} on).
+     * treating backslash as an escape in ordinary string literals (the PostgreSQL
+     * default with {@code standard_conforming_strings} on). {@code E'...'}
+     * escape strings still use backslash escapes.
      */
     static ParsedSql parse(String sql) {
         return parse(sql, false);
@@ -47,11 +48,12 @@ final class RdsDataSqlParameters {
      * Rewrites {@code :name} placeholders to positional {@code ?}, skipping over
      * string literals, quoted/backtick identifiers, line and block comments,
      * PostgreSQL {@code ::} casts, and PostgreSQL dollar-quoted strings so a
-     * colon inside any of those is left untouched.
+     * colon inside any of those is left untouched. PostgreSQL question-mark
+     * operators are escaped for pgjdbc without changing generated bindings.
      */
     static ParsedSql parse(String sql, boolean backslashEscapes) {
         SqlParameterParser.Options statementOptions = new SqlParameterParser.Options(
-                true, backslashEscapes, !backslashEscapes, true, backslashEscapes);
+                true, backslashEscapes, !backslashEscapes, true, backslashEscapes, !backslashEscapes);
         if (SqlParameterParser.isMultiStatement(sql, statementOptions)) {
             throw new AwsException("ValidationException", "Multistatements aren't supported.", 400);
         }

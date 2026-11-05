@@ -32,12 +32,13 @@ public final class SqlParameterParser {
      * @param numericNames whether a parameter name may start with a digit, as in
      *                     {@code :1} (RDS Data API)
      * @param mysqlComments whether comments follow MySQL's hash, double-dash, and non-nesting rules
+     * @param escapeQuestionMarks whether literal {@code ?} operators need pgjdbc's {@code ??} escape
      */
     public record Options(boolean allowBackticks, boolean backslashEscapes, boolean escapeStrings,
-                          boolean numericNames, boolean mysqlComments) {
-        public static final Options REDSHIFT = new Options(false, false, true, true, false);
-        public static final Options RDS_MYSQL = new Options(true, true, false, true, true);
-        public static final Options RDS_POSTGRESQL = new Options(true, false, false, true, false);
+                          boolean numericNames, boolean mysqlComments, boolean escapeQuestionMarks) {
+        public static final Options REDSHIFT = new Options(false, false, true, true, false, false);
+        public static final Options RDS_MYSQL = new Options(true, true, false, true, true, false);
+        public static final Options RDS_POSTGRESQL = new Options(true, false, true, true, false, true);
     }
 
     /**
@@ -178,6 +179,9 @@ public final class SqlParameterParser {
                 subscriptStart = false;
             }
             out.append(c);
+            if (c == '?' && options.escapeQuestionMarks()) {
+                out.append('?');
+            }
             i++;
         }
         return new ParsedSql(out.toString(), order);

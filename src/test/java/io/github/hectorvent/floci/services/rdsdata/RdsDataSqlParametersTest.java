@@ -56,6 +56,17 @@ class RdsDataSqlParametersTest {
     }
 
     @Test
+    void postgresJsonbOperatorsReachJdbcEscapedAlongsideNamedBindings() {
+        ParsedSql parsed = RdsDataSqlParameters.parse(
+                "select data ? :key, data ?| array[:first, :second], data ?& array[:third] from t where id = :id",
+                false);
+
+        assertEquals("select data ?? ?, data ??| array[?, ?], data ??& array[?] from t where id = ?",
+                parsed.sql());
+        assertEquals(List.of("key", "first", "second", "third", "id"), parsed.parameterOrder());
+    }
+
+    @Test
     void repeatsPlaceholderOncePerOccurrence() {
         ParsedSql parsed = RdsDataSqlParameters.parse(
                 "select * from t where a = :id or b = :id");
@@ -130,11 +141,11 @@ class RdsDataSqlParametersTest {
     }
 
     @Test
-    void postgresModeDoesNotTreatBackslashAsEscapeEvenInEscapeStringLiteral() {
+    void postgresModeRecognizesBackslashEscapesInEscapeStringLiteral() {
         ParsedSql parsed = RdsDataSqlParameters.parse(
                 "select E'it\\'s :value' as v where id = :id", false);
 
-        assertEquals("select E'it\\'s ?' as v where id = :id", parsed.sql());
-        assertEquals(List.of("value"), parsed.parameterOrder());
+        assertEquals("select E'it\\'s :value' as v where id = ?", parsed.sql());
+        assertEquals(List.of("id"), parsed.parameterOrder());
     }
 }
