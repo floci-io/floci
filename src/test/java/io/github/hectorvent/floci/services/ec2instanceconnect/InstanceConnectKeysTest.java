@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2instanceconnect;
 
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.testing.ManualClock;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateHolder;
 import org.bouncycastle.cert.ocsp.BasicOCSPResp;
 import org.bouncycastle.cert.ocsp.CertificateID;
@@ -21,10 +22,8 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.PSSParameterSpec;
-import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -44,13 +43,13 @@ class InstanceConnectKeysTest {
     Path tlsDir;
 
     private FlociCertificateAuthority root;
-    private MutableClock clock;
+    private ManualClock clock;
     private InstanceConnectKeys keys;
 
     @BeforeEach
     void setUp() {
         root = FlociCertificateAuthority.loadOrCreate(tlsDir);
-        clock = new MutableClock(NOW);
+        clock = new ManualClock(NOW);
         keys = new InstanceConnectKeys(() -> root, new CertificateGenerator(), clock);
     }
 
@@ -123,7 +122,7 @@ class InstanceConnectKeysTest {
 
         assertTrue(keys.activeKeysDocument(REGION, "i-0123456789abcdef0", "root").isEmpty());
         assertTrue(keys.activeKeysDocument(REGION, "i-0000000000000000f", "admin").isEmpty());
-        clock.now = NOW.plusSeconds(60);
+        clock.advance(Duration.ofSeconds(60));
         assertTrue(keys.activeKeysDocument(REGION, "i-0123456789abcdef0", "admin").isEmpty());
     }
 
@@ -131,9 +130,9 @@ class InstanceConnectKeysTest {
     void expiredKeysAreDroppedWhenTheNextKeyArrives() {
         keys.add(new InstanceConnectKeys.ActiveKey("i-0123456789abcdef0", "admin", KEY,
                 NOW.plus(InstanceConnectKeys.KEY_LIFETIME), "caller", "req-1"));
-        clock.now = NOW.plusSeconds(61);
+        clock.advance(Duration.ofSeconds(61));
         keys.add(new InstanceConnectKeys.ActiveKey("i-0000000000000000f", "admin", KEY,
-                clock.now.plus(InstanceConnectKeys.KEY_LIFETIME), "caller", "req-2"));
+                clock.instant().plus(InstanceConnectKeys.KEY_LIFETIME), "caller", "req-2"));
 
         assertEquals(1, keys.trackedInstanceCount(), "the first instance's expired key is not kept");
     }
@@ -144,28 +143,5 @@ class InstanceConnectKeysTest {
         factory.generateCertificates(new ByteArrayInputStream(pem.getBytes(StandardCharsets.US_ASCII)))
                 .forEach(cert -> chain.add((X509Certificate) cert));
         return chain;
-    }
-
-    private static final class MutableClock extends Clock {
-        Instant now;
-
-        MutableClock(Instant now) {
-            this.now = now;
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
-        }
     }
 }

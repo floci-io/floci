@@ -92,6 +92,12 @@ class InstanceConnectJsonHandlerTest {
         cases.put(request(INSTANCE, "admin", "ssh-ed25519 AAAA"), "InvalidArgsException");
         cases.put(request(INSTANCE, "admin", "ssh-dss " + "A".repeat(100)), "InvalidArgsException");
         cases.put(request(INSTANCE, "admin", rsaKey(1024)), "InvalidArgsException");
+        // Right type, no key material: SSH could not use these, so they must not report Success.
+        cases.put(request(INSTANCE, "admin", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 " + "c".repeat(80)), "InvalidArgsException");
+        cases.put(request(INSTANCE, "admin", sshKey("ssh-ed25519", new byte[31])), "InvalidArgsException");
+        cases.put(request(INSTANCE, "admin", ecdsaKey("nistp256", "nistp384", 65, (byte) 4)), "InvalidArgsException");
+        cases.put(request(INSTANCE, "admin", ecdsaKey("nistp256", "nistp256", 64, (byte) 4)), "InvalidArgsException");
+        cases.put(request(INSTANCE, "admin", ecdsaKey("nistp256", "nistp256", 65, (byte) 2)), "InvalidArgsException");
         cases.put(request(INSTANCE, "admin", ED25519 + "\n#Timestamp=9999999999\n" + ED25519), "InvalidArgsException");
         cases.put(request(INSTANCE, "admin", ED25519.replace("user@host", "us\u0007er@host")), "InvalidArgsException");
         cases.put(request("i-0000000000000000f", "admin", ED25519), "EC2InstanceNotFoundException");
@@ -118,6 +124,41 @@ class InstanceConnectJsonHandlerTest {
     void acceptsAnRsaKeyOf2048Bits() {
         handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", rsaKey(2048)), REGION);
         verify(keys).add(any());
+    }
+
+    @Test
+    void acceptsWellFormedEd25519AndEcdsaKeys() {
+        // ECDSA lines are real ssh-keygen -t ecdsa output (throwaway keys, public half only).
+        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", sshKey("ssh-ed25519", new byte[32])), REGION);
+        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBKhKXIBq6uSFm4w/wDQuFN9HzZFxgqLbSpaTJB+J6aAHWXBU7rpF1xa7s4dpFzLTSb+xn8JbKWbLozKoeIWV8hw= test"), REGION);
+        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", "ecdsa-sha2-nistp384 AAAAE2VjZHNhLXNoYTItbmlzdHAzODQAAAAIbmlzdHAzODQAAABhBJFY0hkoTsJID0TIS1BgpJVWTDguQ7sTojV4dfGqMEKjMSAoOnXUdGV1Y+AIhF4rZE9IKsHsjtxg4JYesYz7FR+9CTxHjog7BGzYmVcsVSnRL3t68fT7S3cXhoVkV/3WZA== test"), REGION);
+        handler.handle("SendSSHPublicKey", request(INSTANCE, "admin", "ecdsa-sha2-nistp521 AAAAE2VjZHNhLXNoYTItbmlzdHA1MjEAAAAIbmlzdHA1MjEAAACFBABCp6D79VfVN1Td7nP/lhUWST6qIkN28rgBp1FhyKO2UCTwxObXTOEL7WvfyQ+/J60K21J1ovjtlcC61YhWx0F7eAC/glgVeIBd0leLmmv3YGJkmE7POLgg4nfVXNLJayW3Q8rgyNAROCIC++3Avdn9GZIPrrFnyo1M0aNeW03/dLE2Xg== test"), REGION);
+        verify(keys, org.mockito.Mockito.times(4)).add(any());
+    }
+
+    /** An ssh-ed25519 line carrying {@code material} as its key. */
+    private static String sshKey(String type, byte[] material) {
+        return type + " " + blob(type, material) + " test";
+    }
+
+    private static String ecdsaKey(String typeCurve, String blobCurve, int pointLength, byte first) {
+        byte[] point = new byte[pointLength];
+        point[0] = first;
+        return "ecdsa-sha2-" + typeCurve + " " + blob("ecdsa-sha2-" + typeCurve, blobCurve.getBytes(StandardCharsets.US_ASCII), point)
+                + " test";
+    }
+
+    private static String blob(String type, byte[]... fields) {
+        byte[] t = type.getBytes(StandardCharsets.US_ASCII);
+        int size = 4 + t.length;
+        for (byte[] f : fields) {
+            size += 4 + f.length;
+        }
+        ByteBuffer b = ByteBuffer.allocate(size).putInt(t.length).put(t);
+        for (byte[] f : fields) {
+            b.putInt(f.length).put(f);
+        }
+        return Base64.getEncoder().encodeToString(b.array());
     }
 
     private ObjectNode request(String instanceId, String user, String key) {

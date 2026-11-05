@@ -1,13 +1,16 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.services.ec2instanceconnect.InstanceConnectKeys;
+import io.vertx.core.Context;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -47,6 +50,23 @@ class Ec2MetadataInstanceConnectTest {
             assertEquals("AA11\nBB22", imds.get(keysPath + "signer-ocsp/", token).body());
             assertEquals("c3RhcGxlMg==", imds.get(keysPath + "signer-ocsp/BB22", token).body());
             assertEquals(404, imds.get(keysPath + "signer-ocsp/CC33", token).statusCode());
+        }
+    }
+
+    @Test
+    void keyGenerationAndSigningRunOffTheEventLoop() throws Exception {
+        AtomicBoolean onEventLoop = new AtomicBoolean();
+        InstanceConnectKeys keys = mock(InstanceConnectKeys.class);
+        when(keys.signerCertificateChain(anyString())).thenAnswer(inv -> {
+            onEventLoop.set(Context.isOnEventLoopThread());
+            return "CHAIN";
+        });
+        try (Ec2MetadataTestFixture imds = new Ec2MetadataTestFixture().withInstanceConnect(keys)) {
+            imds.instance().setRegion("us-east-1");
+            imds.start();
+            String token = imds.putToken("60").body();
+            assertEquals("CHAIN", imds.get("/latest/meta-data/managed-ssh-keys/signer-cert", token).body());
+            assertFalse(onEventLoop.get(), "signing must not run on the Vert.x event loop");
         }
     }
 

@@ -160,6 +160,28 @@ public class InstanceConnectJsonHandler {
                 if (bits < MIN_RSA_BITS) {
                     throw invalid("RSA keys must be at least " + MIN_RSA_BITS + " bits long.");
                 }
+            } else if ("ssh-ed25519".equals(type)) {
+                if (readString(blob).length != 32) {
+                    throw invalid("Malformed SSH public key: an ED25519 key is 32 bytes.");
+                }
+            } else {
+                // ecdsa-sha2-<curve>: the curve name, then the uncompressed point 0x04 || X || Y.
+                String curve = type.substring("ecdsa-sha2-".length());
+                int coordinate = switch (curve) {
+                    case "nistp256" -> 32;
+                    case "nistp384" -> 48;
+                    default -> 66; // nistp521
+                };
+                byte[] point = null;
+                if (curve.equals(new String(readString(blob), StandardCharsets.US_ASCII))) {
+                    point = readString(blob);
+                }
+                if (point == null || point.length != 1 + 2 * coordinate || point[0] != 4) {
+                    throw invalid("Malformed SSH public key: the ECDSA curve or point does not match " + type + ".");
+                }
+            }
+            if (blob.hasRemaining()) {
+                throw invalid("Malformed SSH public key.");
             }
         } catch (IllegalArgumentException | BufferUnderflowException e) {
             throw invalid("Malformed SSH public key.");
