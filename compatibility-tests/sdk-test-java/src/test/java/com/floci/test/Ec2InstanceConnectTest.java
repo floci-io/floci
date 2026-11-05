@@ -26,6 +26,7 @@ class Ec2InstanceConnectTest {
             String instanceId = ec2.runInstances(r -> r.imageId("ami-0abcdef1234567890")
                     .instanceType(InstanceType.T3_MICRO).minCount(1).maxCount(1)).instances().get(0).instanceId();
             try {
+                ec2.waiter().waitUntilInstanceRunning(r -> r.instanceIds(instanceId));
                 SendSshPublicKeyResponse response = connect.sendSSHPublicKey(r -> r.instanceId(instanceId)
                         .instanceOSUser("ec2-user").sshPublicKey(ED25519));
                 assertThat(response.success()).isTrue();
