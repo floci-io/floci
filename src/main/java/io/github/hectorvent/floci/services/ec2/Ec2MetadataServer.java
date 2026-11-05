@@ -195,14 +195,15 @@ public class Ec2MetadataServer {
         router.get("/latest/meta-data/tags/instance/").handler(ctx -> handleInstanceTagKeys(ctx));
         router.getWithRegex("/latest/meta-data/tags/instance/.+").handler(ctx -> handleInstanceTagValue(ctx));
         router.get("/latest/meta-data/services/domain").handler(ctx -> handleText(ctx, inst -> AwsRegions.dnsSuffixFor(inst.getRegion())));
-        // EC2 Instance Connect. The agent probes active-keys with HEAD before fetching it.
+        // EC2 Instance Connect. The agent probes active-keys with HEAD before fetching it. Blocking
+        // handlers: the first call generates RSA key pairs and every one signs, which must not stall the event loop.
         router.route("/latest/meta-data/managed-ssh-keys/active-keys/:user").method(HttpMethod.GET)
-                .method(HttpMethod.HEAD).handler(this::handleManagedSshKeys);
-        router.get("/latest/meta-data/managed-ssh-keys/signer-cert").handler(ctx -> handleInstanceConnect(ctx,
+                .method(HttpMethod.HEAD).blockingHandler(this::handleManagedSshKeys);
+        router.get("/latest/meta-data/managed-ssh-keys/signer-cert").blockingHandler(ctx -> handleInstanceConnect(ctx,
                 (keys, inst) -> keys.signerCertificateChain(inst.getRegion())));
-        router.get("/latest/meta-data/managed-ssh-keys/signer-ocsp").handler(ctx -> handleInstanceConnect(ctx,
+        router.get("/latest/meta-data/managed-ssh-keys/signer-ocsp").blockingHandler(ctx -> handleInstanceConnect(ctx,
                 (keys, inst) -> String.join("\n", keys.ocspStaples(inst.getRegion()).keySet())));
-        router.get("/latest/meta-data/managed-ssh-keys/signer-ocsp/:fingerprint").handler(ctx -> handleInstanceConnect(ctx,
+        router.get("/latest/meta-data/managed-ssh-keys/signer-ocsp/:fingerprint").blockingHandler(ctx -> handleInstanceConnect(ctx,
                 (keys, inst) -> keys.ocspStaples(inst.getRegion()).get(ctx.pathParam("fingerprint"))));
         router.get("/latest/user-data").handler(ctx -> handleUserData(ctx));
         router.get("/latest/dynamic/instance-identity/document").handler(ctx -> handleIdentityDocument(ctx));

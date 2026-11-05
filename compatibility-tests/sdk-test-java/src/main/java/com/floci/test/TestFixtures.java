@@ -58,6 +58,7 @@ import software.amazon.awssdk.services.ec2.model.Subnet;
 import software.amazon.awssdk.services.ec2.model.Vpc;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
+import software.amazon.awssdk.services.ec2instanceconnect.Ec2InstanceConnectClient;
 import software.amazon.awssdk.services.efs.EfsClient;
 import software.amazon.awssdk.services.eks.EksClient;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
@@ -1818,6 +1819,14 @@ public final class TestFixtures {
 
     public static GlobalAcceleratorClient globalAcceleratorClient() {
         return GlobalAcceleratorClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static Ec2InstanceConnectClient ec2InstanceConnectClient() {
+        return Ec2InstanceConnectClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

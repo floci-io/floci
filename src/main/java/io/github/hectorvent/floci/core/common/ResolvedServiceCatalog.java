@@ -618,7 +618,7 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AmazonSSMMessageDeliveryService."), Set.of("ec2messages"), Set.of(), Set.of()),
-                descriptor("ec2-instance-connect", "ec2-instance-connect", config.services().ec2().enabled(), false,
+                descriptor("ec2-instance-connect", "ec2-instance-connect", config.services().ec2instanceconnect().enabled(), false,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AWSEC2InstanceConnectService."), Set.of("ec2-instance-connect"), Set.of(), Set.of()),
