@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PostgresWire;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -759,7 +760,7 @@ public final class S3CopySimulator {
         // 1042 = bpchar, 1043 = varchar; atttypmod carries the declared length plus a 4-byte header.
         return "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
                 + "THEN a.atttypmod - 4 END, a.atttypid FROM pg_catalog.pg_attribute a "
-                + "WHERE a.attrelid = to_regclass(E'" + quoteLiteral(spec.targetTable().replace("\\", "\\\\")) + "') "
+                + "WHERE a.attrelid = to_regclass(" + PostgresWire.quoteLiteral(spec.targetTable()) + ") "
                 + "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' "
                 + "ORDER BY a.attnum";
     }

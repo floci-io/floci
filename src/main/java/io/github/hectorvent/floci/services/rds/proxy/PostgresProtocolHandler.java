@@ -1049,7 +1049,7 @@ public class PostgresProtocolHandler {
                 + "FROM pg_catalog.pg_db_role_setting s "
                 + "JOIN pg_catalog.pg_roles r ON r.oid = s.setrole "
                 + "CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) WITH ORDINALITY AS c(cfg, n) "
-                + "WHERE r.rolname = " + quoteLiteral(role) + " AND s.setdatabase IN (0, "
+                + "WHERE r.rolname = " + PostgresWire.quoteLiteral(role) + " AND s.setdatabase IN (0, "
                 + "(SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())) "
                 + "ORDER BY s.setdatabase = 0 DESC, c.n";
     }
@@ -1448,20 +1448,12 @@ public class PostgresProtocolHandler {
                 sql.append(", ");
             }
             sql.append("pg_catalog.set_config(")
-                    .append(quoteLiteral(settings.get(i).name()))
+                    .append(PostgresWire.quoteLiteral(settings.get(i).name()))
                     .append(", ")
-                    .append(quoteLiteral(settings.get(i).value()))
+                    .append(PostgresWire.quoteLiteral(settings.get(i).value()))
                     .append(", false)");
         }
         return sql.toString();
-    }
-
-    /**
-     * An escape-string literal, so it reads the same whatever standard_conforming_strings says.
-     * Apostrophes are doubled rather than backslash-escaped, which backslash_quote can forbid.
-     */
-    static String quoteLiteral(String value) {
-        return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'";
     }
 
     /**

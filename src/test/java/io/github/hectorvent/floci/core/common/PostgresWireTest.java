@@ -17,6 +17,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class PostgresWireTest {
 
     @Test
+    void quoteLiteralUsesEscapeStringsAndPreservesText() {
+        assertEquals("E''", PostgresWire.quoteLiteral(""));
+        assertEquals("E'plain'", PostgresWire.quoteLiteral("plain"));
+        assertEquals("E'it''s a \\\\ path'", PostgresWire.quoteLiteral("it's a \\ path"));
+        assertEquals("E'\\\\n'", PostgresWire.quoteLiteral("\\n"));
+        assertEquals("E'line\nnext'", PostgresWire.quoteLiteral("line\nnext"));
+    }
+
+    @Test
     void aMessageIsFramedWithALengthThatCountsItself() throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         PostgresWire.write(out, 'Q', PostgresWire.cStringBytes("SELECT 1"));

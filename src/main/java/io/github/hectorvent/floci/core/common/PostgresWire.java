@@ -24,6 +24,14 @@ public final class PostgresWire {
     private PostgresWire() {
     }
 
+    /**
+     * An escape-string literal, so it reads the same whatever standard_conforming_strings says.
+     * Apostrophes are doubled rather than backslash-escaped, which backslash_quote can forbid.
+     */
+    public static String quoteLiteral(String value) {
+        return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'";
+    }
+
     /** A message after the startup: its type byte and its body, without the length. */
     public record Message(byte type, byte[] body) {
     }

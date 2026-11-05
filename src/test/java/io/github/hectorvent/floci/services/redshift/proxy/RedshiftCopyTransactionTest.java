@@ -15,9 +15,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -61,7 +59,7 @@ class RedshiftCopyTransactionTest {
                     "1\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
             CompletableFuture<Void> server = CompletableFuture.runAsync(() -> {
                 try {
-                    serve(backend, false, true);
+                    serve(backend, false, true, null);
                 } catch (Exception exception) {
                     throw new AssertionError(exception);
                 }
@@ -145,10 +143,10 @@ class RedshiftCopyTransactionTest {
         }
     }
 
-    private static void statement(ByteArrayOutputStream output, String name, String sql) {
+    private static void statement(ByteArrayOutputStream output, String name, String sql) throws IOException {
         output.writeBytes(PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage(name, sql, List.of()), sql));
-        output.writeBytes(PostgresWire.frame('B', join(PostgresWire.cStringBytes(name), PostgresWire.cStringBytes(name), new byte[6])));
-        output.writeBytes(PostgresWire.frame('E', join(PostgresWire.cStringBytes(name), new byte[4])));
+        PostgresWire.write(output, 'B', PostgresWire.cStringBytes(name), PostgresWire.cStringBytes(name), new byte[6]);
+        PostgresWire.write(output, 'E', PostgresWire.cStringBytes(name), new byte[4]);
     }
 
     private static Socket observePumpTimeout(Socket backend, CountDownLatch midFrameTimeout) throws IOException {
@@ -179,94 +177,18 @@ class RedshiftCopyTransactionTest {
         return observed;
     }
 
-    private static void serve(Socket socket, boolean fragmentNotice, boolean failCommit) throws Exception {
-        serve(socket, fragmentNotice, failCommit, null);
-    }
-
     private static void serve(Socket socket, boolean fragmentNotice, boolean failCommit,
                               CountDownLatch midFrameTimeout) throws Exception {
-        PostgresWireDecoder decoder = new PostgresWireDecoder(socket.getInputStream());
-        Map<String, String> statements = new HashMap<>();
-        Map<String, String> portals = new HashMap<>();
-        boolean transaction = false;
-        boolean failed = false;
-        while (true) {
-            PostgresWireDecoder.FrontendMessage message = decoder.nextMessage();
-            if (message == null) {
-                return;
+        new FakeCopyBackend(socket).serveUntilSync(failCommit, sql -> {
+            if (fragmentNotice && sql.equals("SAVEPOINT client_sp")) {
+                byte[] notice = PostgresWire.frame('N', S3CopySimulator.errorBody("00000", "async notice"));
+                socket.getOutputStream().write(notice, 0, 3);
+                socket.getOutputStream().flush();
+                assertTrue(midFrameTimeout.await(5, TimeUnit.SECONDS),
+                        "Pump must time out while the notice frame is incomplete");
+                socket.getOutputStream().write(notice, 3, notice.length - 3);
+                socket.getOutputStream().flush();
             }
-            if (failed && message.type() != 'S') {
-                continue;
-            }
-            switch (message.type()) {
-                case 'P' -> {
-                    PostgresWireDecoder.ParseMessage parsed = decoder.decodeParse(message);
-                    statements.put(parsed.statementName(), parsed.sql());
-                    send(socket, '1', new byte[0]);
-                }
-                case 'B' -> {
-                    PostgresWireDecoder.BindMessage bound = decoder.decodeBind(message);
-                    portals.put(bound.portalName(), statements.get(bound.statementName()));
-                    send(socket, '2', new byte[0]);
-                }
-                case 'E' -> {
-                    String sql = portals.get(decoder.decodeExecute(message).portalName());
-                    if (sql.equals("BEGIN")) {
-                        transaction = true;
-                    } else if (sql.equals("COMMIT") || sql.equals("ROLLBACK")) {
-                        transaction = false;
-                    }
-                    if (failCommit && sql.equals("COMMIT")) {
-                        send(socket, 'E', S3CopySimulator.errorBody("23505", "deferred constraint violation"));
-                        failed = true;
-                    } else if (sql.startsWith("SAVEPOINT ") && !transaction) {
-                        send(socket, 'E', S3CopySimulator.errorBody("25P01", "SAVEPOINT requires a transaction"));
-                        failed = true;
-                    } else if (sql.startsWith("COPY ")) {
-                        send(socket, 'G', new byte[]{0, 0, 0});
-                    } else {
-                        if (sql.startsWith("SELECT a.attname")) {
-                            send(socket, 'D', join(new byte[]{0, 3}, new byte[]{0, 0, 0, 2, 'i', 'd'},
-                                    new byte[]{-1, -1, -1, -1}, new byte[]{0, 0, 0, 2, '2', '3'}));
-                        }
-                        String tag = sql.startsWith("ROLLBACK") ? "ROLLBACK" : sql.split(" ")[0];
-                        send(socket, 'C', PostgresWire.cStringBytes(tag));
-                        if (fragmentNotice && sql.equals("SAVEPOINT client_sp")) {
-                            byte[] notice = PostgresWire.frame('N', S3CopySimulator.errorBody("00000", "async notice"));
-                            socket.getOutputStream().write(notice, 0, 3);
-                            socket.getOutputStream().flush();
-                            assertTrue(midFrameTimeout.await(5, TimeUnit.SECONDS),
-                                    "Pump must time out while the notice frame is incomplete");
-                            socket.getOutputStream().write(notice, 3, notice.length - 3);
-                            socket.getOutputStream().flush();
-                        }
-                    }
-                }
-                case 'c' -> send(socket, 'C', PostgresWire.cStringBytes("COPY 1"));
-                case 'C' -> send(socket, '3', new byte[0]);
-                case 'S' -> {
-                    send(socket, 'Z', new byte[]{(byte) (transaction ? 'T' : 'I')});
-                    if (!failed) {
-                        return;
-                    }
-                    failed = false;
-                }
-                case 'd', 'H' -> { }
-                default -> throw new AssertionError("Unexpected wire message " + message.type());
-            }
-        }
-    }
-
-    private static byte[] join(byte[]... parts) {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        for (byte[] part : parts) {
-            output.writeBytes(part);
-        }
-        return output.toByteArray();
-    }
-
-    private static void send(Socket socket, char type, byte[] body) throws IOException {
-        socket.getOutputStream().write(PostgresWire.frame(type, body));
-        socket.getOutputStream().flush();
+        });
     }
 }

@@ -57,6 +57,14 @@ import static org.mockito.Mockito.when;
 class S3CopySimulatorTest {
 
     @Test
+    void columnInfoQueryEscapesApostrophesAndBackslashesInTableNames() {
+        CopyStatementParser.S3CopyFrom copy = new CopyStatementParser.S3CopyFrom(
+                "\"o'brien\\new\"", List.of(), "b", "data", "|", 0, false, false, null, null);
+
+        assertTrue(S3CopySimulator.columnInfoQuery(copy).contains("to_regclass(E'\"o''brien\\\\new\"')"));
+    }
+
+    @Test
     void parquetSlicesWaitForCompleteCsvRecordsAndManifestUsesConvertedLengths() throws Exception {
         long previous = S3CopySimulator.UNLOAD_TARGET_FILE_BYTES;
         S3CopySimulator.UNLOAD_TARGET_FILE_BYTES = 3;
