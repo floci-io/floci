@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 
 import java.util.ArrayList;
@@ -108,6 +109,22 @@ public final class DynamoDbTableNames {
 
         validateTableName(tableName);
         return new ResolvedTableRef(tableName, region);
+    }
+
+    static boolean isTableArn(String value, String region) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(value);
+        } catch (IllegalArgumentException notAnArn) {
+            return false;
+        }
+        String resource = arn.resource();
+        return arn.partition().equals(AwsRegions.partitionFor(region))
+                && "dynamodb".equals(arn.service())
+                && arn.region().equals(region)
+                && ACCOUNT_PATTERN.matcher(arn.accountId()).matches()
+                && resource.startsWith("table/")
+                && nameViolations(resource.substring("table/".length())).isEmpty();
     }
 
     private static void validateTableName(String tableName) {

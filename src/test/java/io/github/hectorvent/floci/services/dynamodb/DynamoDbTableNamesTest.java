@@ -66,6 +66,21 @@ class DynamoDbTableNamesTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "arn:aws:dynamodb:eu-west-2:123456789012:table/abc, true",
+            "arn:aws:dynamodb:us-east-1:123456789012:table/abc, false",
+            "arn:aws-cn:dynamodb:eu-west-2:123456789012:table/abc, false",
+            "arn:aws:dynamodb:eu-west-2:12:table/abc, false",
+            "arn:aws:dynamodb:eu-west-2:123456789012:table/ab, false",
+            "arn:aws:dynamodb:eu-west-2:123456789012:table/abc/stream/x, false",
+            "arn:aws:dynamodb::123456789012:global-table/abc, false",
+            "arn:x, false"
+    })
+    void isTableArnNeedsATableInTheRequestRegion(String value, boolean expected) {
+        assertEquals(expected, DynamoDbTableNames.isTableArn(value, "eu-west-2"));
+    }
+
     @Test
     void resolveAcceptsShortNameWithoutRegion() {
         DynamoDbTableNames.ResolvedTableRef ref = DynamoDbTableNames.resolveWithRegion("Orders", "us-east-1");
