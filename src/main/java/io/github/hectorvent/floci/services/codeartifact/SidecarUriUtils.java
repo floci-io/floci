@@ -1,7 +1,8 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
+
 import java.net.URI;
-import java.nio.charset.StandardCharsets;
 
 /**
  * Shared URI-construction helpers for the Maven, npm, and pypi sidecar clients, each of which
@@ -54,17 +55,6 @@ final class SidecarUriUtils {
         if (segment.equals(".") || segment.equals("..")) {
             return segment.replace(".", "%2E");
         }
-        StringBuilder encoded = new StringBuilder();
-        for (byte b : segment.getBytes(StandardCharsets.UTF_8)) {
-            int v = b & 0xFF;
-            char c = (char) v;
-            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '~' || c == '.') {
-                encoded.append(c);
-            } else {
-                encoded.append('%').append(String.format("%02X", v));
-            }
-        }
-        return encoded.toString();
+        return SigV4Canonicalization.uriEncode(segment);
     }
 }
