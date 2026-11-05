@@ -1147,6 +1147,55 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void matchesPatternByWildcard_matchesOnlyTheKeysItsStarsCover() {
+        String pattern = "{\"detail\":{\"object\":{\"key\":[{\"wildcard\":\"templates/*/v*/.switchboard.yaml\"}]}}}";
+        assertTrue(service.matchesPattern(objectCreated("templates/switchboard/v1.2.3/.switchboard.yaml"), pattern));
+        assertFalse(service.matchesPattern(objectCreated("templates/switchboard/v1.2.3/assets/Mutation.js"), pattern));
+        assertFalse(service.matchesPattern(objectCreated("configs/switchboard/v1.2.3/.switchboard.yaml"), pattern));
+    }
+
+    @Test
+    void matchesPatternByWildcard_isAnchoredAndAStarMatchesNothingToo() {
+        assertTrue(service.matchesPattern(objectCreated("dir/a.png"), wildcardOnKey("dir/*.png")));
+        assertTrue(service.matchesPattern(objectCreated("dir/.png"), wildcardOnKey("dir/*.png")));
+        assertFalse(service.matchesPattern(objectCreated("dir/a.png.txt"), wildcardOnKey("dir/*.png")));
+        assertFalse(service.matchesPattern(objectCreated("top/dir/a.png"), wildcardOnKey("dir/*.png")));
+        assertTrue(service.matchesPattern(objectCreated("a.b"), wildcardOnKey("a.b")));
+        assertFalse(service.matchesPattern(objectCreated("axb"), wildcardOnKey("a.b")));
+    }
+
+    @Test
+    void matchesPatternByWildcard_takesABackslashedStarOrBackslashLiterally() {
+        // The pattern's JSON is "dir/\\*.png": a literal star.
+        assertTrue(service.matchesPattern(objectCreated("dir/*.png"), wildcardOnKey("dir/\\\\*.png")));
+        assertFalse(service.matchesPattern(objectCreated("dir/a.png"), wildcardOnKey("dir/\\\\*.png")));
+        // "a\\\\*": a literal backslash, then a star.
+        assertTrue(service.matchesPattern(objectCreated("a\\b"), wildcardOnKey("a\\\\\\\\*")));
+        assertFalse(service.matchesPattern(objectCreated("ab"), wildcardOnKey("a\\\\\\\\*")));
+    }
+
+    @Test
+    void matchesPatternByWildcard_matchesNoValueThatIsNotAString() {
+        Map<String, Object> event = Map.of("Source", "my.app", "Detail", "{\"size\":12}");
+        assertFalse(service.matchesPattern(event, "{\"detail\":{\"size\":[{\"wildcard\":\"*\"}]}}"));
+        assertFalse(service.matchesPattern(event, "{\"detail\":{\"other\":[{\"wildcard\":\"*\"}]}}"));
+    }
+
+    private static Map<String, Object> objectCreated(String key) {
+        try {
+            String detail = OBJECT_MAPPER.writeValueAsString(
+                    Map.of("bucket", Map.of("name", "registry"), "object", Map.of("key", key)));
+            return Map.of("Source", "aws.s3", "DetailType", "Object Created", "Detail", detail);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static String wildcardOnKey(String wildcardJson) {
+        return "{\"detail\":{\"object\":{\"key\":[{\"wildcard\":\"" + wildcardJson + "\"}]}}}";
+    }
+
+    @Test
     void matchesPatternByEqualsIgnoreCase_matches() {
         Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "PROD");
         assertTrue(service.matchesPattern(event, "{\"detail-type\":[{\"equals-ignore-case\":\"prod\"}]}"));
