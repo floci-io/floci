@@ -186,6 +186,8 @@ class AppSyncCfnProvisionerTest {
         assertEquals(API_ID, r.getPhysicalId());
         assertEquals(API_ID, r.getAttributes().get("ApiId"));
         assertEquals("arn:aws:appsync:eu-west-1:000000000000:apis/" + API_ID, r.getAttributes().get("Arn"));
+        assertEquals("arn:aws:appsync:eu-west-1:000000000000:endpoints/graphql-api/" + API_ID,
+                r.getAttributes().get("GraphQLEndpointArn"));
         assertEquals("http://localhost:4566/v1/apis/" + API_ID + "/graphql",
                 r.getAttributes().get("GraphQLUrl"));
         assertEquals("ws://localhost:4566/v1/apis/" + API_ID + "/graphql/realtime",

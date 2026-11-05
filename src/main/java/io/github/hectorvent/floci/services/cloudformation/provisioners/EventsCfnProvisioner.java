@@ -231,6 +231,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 target.setBatchParameters(batchParameters);
             }
             target.setRoleArn(resolved.path("RoleArn").asText(null));
+            JsonNode appSyncParamsNode = resolved.path("AppSyncParameters");
+            if (appSyncParamsNode.isObject()) {
+                target.setAppSyncParameters(MAPPER.convertValue(appSyncParamsNode, Target.AppSyncParameters.class));
+            }
             JsonNode ecsParamsNode = resolved.path("EcsParameters");
             if (ecsParamsNode.isObject()) {
                 target.setEcsParameters(MAPPER.convertValue(
@@ -347,7 +351,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             eventBridgeService.removeTargets(ruleName, busName, added, region);
         }
         if (!restored.isEmpty()) {
-            eventBridgeService.putTargets(ruleName, busName, restored, region);
+            eventBridgeService.restoreAcceptedTargets(ruleName, busName, restored, region);
         }
         resource.getAttributes().remove(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
     }

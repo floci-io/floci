@@ -22,6 +22,7 @@ public class Target {
     private RetryPolicy retryPolicy;
     private DeadLetterConfig deadLetterConfig;
     private HttpParameters httpParameters;
+    private AppSyncParameters appSyncParameters;
 
     public Target() {}
 
@@ -72,6 +73,14 @@ public class Target {
 
     public HttpParameters getHttpParameters() { return httpParameters; }
     public void setHttpParameters(HttpParameters httpParameters) { this.httpParameters = httpParameters; }
+
+    public AppSyncParameters getAppSyncParameters() { return appSyncParameters; }
+    public void setAppSyncParameters(AppSyncParameters appSyncParameters) { this.appSyncParameters = appSyncParameters; }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record AppSyncParameters(@JsonProperty("GraphQLOperation") String graphQLOperation) {}
 
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)

@@ -1,20 +1,14 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.cloudformation.model.StackUpdateSnapshot;
-import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnDynamicReferences;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnRollback;
@@ -28,7 +22,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.UpdateCle
 import io.github.hectorvent.floci.services.cloudformation.provisioners.WafV2CfnProvisioner;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
-import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
@@ -58,7 +52,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_DEFAULTS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
@@ -383,23 +376,9 @@ class CloudFormationServiceRollbackTest {
                 .thenAnswer(invocation -> routing.takesParentPhysicalId(invocation.getArgument(0)));
         when(provisioner.idPrefixCanNameParent(any()))
                 .thenAnswer(invocation -> routing.idPrefixCanNameParent(invocation.getArgument(0)));
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.defaultAccountId()).thenReturn(ACCOUNT);
-
         templateStore = mock(S3Service.class);
-        RegionResolver resolver = mock(RegionResolver.class);
-        when(resolver.getAccountId()).thenReturn(ACCOUNT);
-        service = new CloudFormationService(
-                provisioner,
-                templateStore,
-                mock(SsmService.class),
-                mock(GetStackOutputRoleAuthorizer.class),
-                mock(CfnDynamicReferences.class),
-                new ObjectMapper(),
-                config,
-                resolver,
-                Clock.systemUTC(),
-                new InMemoryStorageFactory());
+        service = CloudFormationServiceFixture.create(provisioner, templateStore, Clock.systemUTC(),
+                new InMemoryStorageFactory(ACCOUNT));
     }
 
     @Test
@@ -1032,11 +1011,7 @@ class CloudFormationServiceRollbackTest {
             resource.getAttributes().remove("rollbackSnapshot");
             return null;
         }).when(cleanupDispatcher).delete(resource, REGION);
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.defaultAccountId()).thenReturn(ACCOUNT);
-        CloudFormationService deleteService = new CloudFormationService(cleanupDispatcher, mock(S3Service.class),
-                mock(SsmService.class), mock(GetStackOutputRoleAuthorizer.class), mock(CfnDynamicReferences.class), new ObjectMapper(),
-                config, mock(RegionResolver.class), Clock.systemUTC(), new InMemoryStorageFactory());
+        CloudFormationService deleteService = CloudFormationServiceFixture.create(cleanupDispatcher);
 
         assertThrows(IllegalStateException.class, () -> deleteService.deleteStackResources(stack, REGION, ACCOUNT));
         assertEquals("DELETE_FAILED", stack.getStatus());
@@ -2276,13 +2251,8 @@ class CloudFormationServiceRollbackTest {
 
     /** A service over the shared provisioner that reads the time from {@code clock}. */
     private CloudFormationService serviceReading(Clock clock) {
-        RegionResolver regionResolver = mock(RegionResolver.class);
-        when(regionResolver.getAccountId()).thenReturn(ACCOUNT);
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.defaultAccountId()).thenReturn(ACCOUNT);
-        return new CloudFormationService(provisioner, mock(S3Service.class), mock(SsmService.class),
-                mock(GetStackOutputRoleAuthorizer.class), mock(CfnDynamicReferences.class), new ObjectMapper(), config,
-                regionResolver, clock, new InMemoryStorageFactory());
+        return CloudFormationServiceFixture.create(provisioner, mock(S3Service.class), clock,
+                new InMemoryStorageFactory(ACCOUNT));
     }
 
     /** The stack as {@code PersistentStorage} writes it and reads it back. */
@@ -2318,18 +2288,6 @@ class CloudFormationServiceRollbackTest {
                 throw new IllegalStateException(message);
             }
             return Instant.now();
-        }
-    }
-
-    private static final class InMemoryStorageFactory extends StorageFactory {
-        private InMemoryStorageFactory() {
-            super(null, null);
-        }
-
-        @Override
-        public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                                                         TypeReference<Map<String, V>> typeReference) {
-            return AccountAwareStorageBackend.inMemory(ACCOUNT);
         }
     }
 }

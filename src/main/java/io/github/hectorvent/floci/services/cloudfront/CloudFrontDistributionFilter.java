@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.core.common.RequestHost;
+import io.github.hectorvent.floci.core.common.RequestUriRewrite;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.inject.Instance;
@@ -91,6 +92,6 @@ public class CloudFrontDistributionFilter implements ContainerRequestFilter {
 
         LOG.debugv("CloudFront distribution routing: {0}{1} -> {2}", host, rawPath, newUri.getPath());
         requestContext.setProperty(ROUTED_PROPERTY, Boolean.TRUE);
-        requestContext.setRequestUri(newUri);
+        RequestUriRewrite.apply(requestContext, newUri);
     }
 }

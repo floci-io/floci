@@ -241,6 +241,9 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         r.setPhysicalId(api.getApiId());
         r.getAttributes().put("ApiId", api.getApiId());
         r.getAttributes().put("Arn", api.getArn());
+        AwsArnUtils.Arn apiArn = AwsArnUtils.parse(api.getArn());
+        r.getAttributes().put("GraphQLEndpointArn", new AwsArnUtils.Arn(apiArn.partition(), apiArn.service(),
+                apiArn.region(), apiArn.accountId(), "endpoints/graphql-api/" + api.getApiId()).toString());
         Map<String, String> uris = api.getUris() == null ? Map.of() : api.getUris();
         String graphqlUrl = uris.get("GRAPHQL");
         String realtimeUrl = uris.get("REALTIME");
