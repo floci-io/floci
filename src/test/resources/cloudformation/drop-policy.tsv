@@ -28,10 +28,10 @@ AWS::AppSync::FunctionConfiguration	ResponseMappingTemplateS3Location	clear	not 
 AWS::AppSync::FunctionConfiguration	Runtime	clear
 AWS::AppSync::FunctionConfiguration	SyncConfig	clear	not stored by the service
 AWS::AppSync::GraphQLApi	AdditionalAuthenticationProviders	default:[]
-AWS::AppSync::GraphQLApi	ApiType	keep:not changed by UpdateGraphqlApi
+AWS::AppSync::GraphQLApi	ApiType	keep:the provisioner leaves it out of the update, so the stored value stays
 AWS::AppSync::GraphQLApi	AuthenticationType	keep:required
 AWS::AppSync::GraphQLApi	EnhancedMetricsConfig	clear
-AWS::AppSync::GraphQLApi	EnvironmentVariables	clear
+AWS::AppSync::GraphQLApi	EnvironmentVariables	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
 AWS::AppSync::GraphQLApi	IntrospectionConfig	clear
 AWS::AppSync::GraphQLApi	LambdaAuthorizerConfig	clear
 AWS::AppSync::GraphQLApi	LogConfig	clear
@@ -41,9 +41,9 @@ AWS::AppSync::GraphQLApi	OpenIDConnectConfig	clear
 AWS::AppSync::GraphQLApi	OwnerContact	clear
 AWS::AppSync::GraphQLApi	QueryDepthLimit	clear
 AWS::AppSync::GraphQLApi	ResolverCountLimit	clear
-AWS::AppSync::GraphQLApi	Tags	clear
+AWS::AppSync::GraphQLApi	Tags	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
 AWS::AppSync::GraphQLApi	UserPoolConfig	clear
-AWS::AppSync::GraphQLApi	Visibility	keep:not changed by UpdateGraphqlApi
+AWS::AppSync::GraphQLApi	Visibility	keep:the provisioner leaves it out of the update, so the stored value stays
 AWS::AppSync::GraphQLApi	XrayEnabled	default:false
 AWS::AppSync::Resolver	ApiId	create-only
 AWS::AppSync::Resolver	CachingConfig	clear
