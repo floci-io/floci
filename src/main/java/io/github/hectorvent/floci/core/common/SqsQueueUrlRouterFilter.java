@@ -8,6 +8,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.ext.Provider;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.SequenceInputStream;
 import java.net.URI;
@@ -29,7 +30,11 @@ import java.util.regex.Pattern;
  * For the query (form-encoded) protocol, AWS SDK v1 omits QueueUrl from the body and
  * uses the queue URL as the HTTP path instead. This filter appends it back into the
  * entity stream so SqsQueryHandler can look up the queue normally. Like AWS, a query request
- * is only rewritten on the unprefixed path, because the path names the queue.
+ * is only rewritten on the unprefixed path, because the path names the queue. On a
+ * /queue/{region}/ prefixed path the path names no queue, so a query request without
+ * QueueUrl in the body is answered with 404 InvalidAddress instead of falling through
+ * to S3. When the body does carry QueueUrl, the body names the queue and the request
+ * is routed to SQS like a JSON one.
  * <p>
  * S3 object POSTs, which always carry uploads, uploadId, restore or select, are never rewritten.
  */
@@ -47,14 +52,14 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
     // The queue URL path (/{account}/{queue}), optionally behind a /queue/{region}/ prefix, with an optional
     // trailing slash, as the AWS SDK v2 may append one. Like AWS, a JSON request is routed on either form because
     // it names the queue in its QueueUrl body field, while a Query request is named by its path and is routed
-    // only without the prefix.
+    // only without the prefix, unless its body carries QueueUrl.
     private static final Pattern QUEUE_PATH = Pattern.compile("^/(queue/[a-z0-9-]+/)?(\\d+)/([^/]+)/?$");
 
     // S3 POSTs to /{bucket}/{key} always carry one of these parameters, and SQS never sends them.
     private static final List<String> S3_OBJECT_POST_PARAMS = List.of("uploads", "uploadId", "restore", "select");
 
     @Override
-    public void filter(ContainerRequestContext ctx) {
+    public void filter(ContainerRequestContext ctx) throws IOException {
 
         if (!"POST".equals(ctx.getMethod())) {
             return;
@@ -85,11 +90,20 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
 
         // A form-encoded S3 POST to /{bucket}/{key} carries one of S3_OBJECT_POST_PARAMS, handled above.
         // S3 presigned POST always goes to /{bucket}, not /{bucket}/{key}.
-        boolean isSqsQuery = !hasRegionPrefix
-                && "application".equals(mt.getType())
+        boolean isSqsQuery = "application".equals(mt.getType())
                 && "x-www-form-urlencoded".equals(mt.getSubtype());
 
         if (!isSqsJson && !isSqsQuery) {
+            return;
+        }
+
+        // A Query request on a /queue/{region}/ prefixed path names no queue by its path. Like AWS,
+        // answer 404 InvalidAddress when the body carries no QueueUrl, instead of letting the request
+        // fall through to S3. When the body does carry QueueUrl, the body names the queue and the
+        // request is routed below.
+        if (isSqsQuery && hasRegionPrefix && !bodyHasQueueUrl(ctx)) {
+            ctx.abortWith(AwsQueryResponse.error("InvalidAddress",
+                    "The queue address is not valid.", AwsNamespaces.SQS, 404));
             return;
         }
 
@@ -98,7 +112,7 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
         String queuePath = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
         String queueUrl = reqUri.getScheme() + "://" + reqUri.getAuthority() + queuePath;
 
-        if (isSqsQuery) {
+        if (isSqsQuery && !hasRegionPrefix) {
             // AWS SDK v1 omits QueueUrl from the form body and uses the queue URL as the
             // HTTP path instead. Append it to the entity stream so SqsQueryHandler gets it
             // naturally from form params — no changes needed in AwsQueryController.
@@ -118,6 +132,21 @@ public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
         ctx.setRequestUri(ctx.getUriInfo().getRequestUriBuilder()
                 .replacePath("/")
                 .build());
+    }
+
+    // Reads the form body only to check for a QueueUrl parameter, then restores the stream
+    // untouched so signature verification and the handler still see the exact bytes sent.
+    private boolean bodyHasQueueUrl(ContainerRequestContext ctx) throws IOException {
+        InputStream entity = ctx.getEntityStream();
+        byte[] body = entity != null ? entity.readAllBytes() : new byte[0];
+        ctx.setEntityStream(new ByteArrayInputStream(body));
+        String form = new String(body, StandardCharsets.UTF_8);
+        for (String param : form.split("&")) {
+            if (param.equals("QueueUrl") || param.startsWith("QueueUrl=")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isSqsTarget(String target) {

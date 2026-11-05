@@ -26,7 +26,9 @@ import static org.hamcrest.Matchers.not;
  * SDKs that use the queue URL as the request endpoint post SQS calls to the queue path instead of "/". Routing
  * follows AWS: a JSON request names the queue in its QueueUrl body field, so it reaches SQS on the queue path, on
  * a /queue/{region}/ prefixed path and on either with a trailing slash. A Query request without a QueueUrl is
- * named by its path, so it reaches SQS only on the queue path, with or without a trailing slash.
+ * named by its path, so it reaches SQS only on the queue path, with or without a trailing slash. On a
+ * /queue/{region}/ prefixed path without a QueueUrl, AWS answers 404 InvalidAddress; with a QueueUrl in the
+ * body, the body names the queue and the request reaches SQS.
  */
 @QuarkusTest
 class SqsQueueUrlPathRoutingIntegrationTest {
@@ -91,12 +93,32 @@ class SqsQueueUrlPathRoutingIntegrationTest {
         "/queue/us-east-1/000000000000/" + QUEUE_NAME,
         "/queue/us-east-1/000000000000/" + QUEUE_NAME + "/"
     })
-    void queryRequestPostedToPrefixedQueuePathWithoutQueueUrlIsNotRoutedToSqs(String path) {
-        // AWS rejects these with 404 InvalidAddress.
+    void queryRequestPostedToPrefixedQueuePathWithoutQueueUrlReturnsInvalidAddress(String path) {
+        // AWS rejects these with 404 InvalidAddress instead of the S3 error they used to fall through to.
         postQueryWithoutQueueUrl(path)
         .then()
-            .statusCode(not(equalTo(200)))
+            .statusCode(404)
+            .body(containsString("InvalidAddress"))
             .body(not(containsString(QUEUE_ARN)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "/queue/us-east-1/000000000000/" + QUEUE_NAME,
+        "/queue/us-east-1/000000000000/" + QUEUE_NAME + "/"
+    })
+    void queryRequestPostedToPrefixedQueuePathWithQueueUrlReachesSqs(String path) {
+        // The body names the queue here, so the request is routed to SQS like a JSON one.
+        given()
+            .contentType(FORM_CONTENT_TYPE)
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("AttributeName.1", "QueueArn")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/" + QUEUE_NAME)
+        .when()
+            .post(path)
+        .then()
+            .statusCode(200)
+            .body(containsString(QUEUE_ARN));
     }
 
     @ParameterizedTest
