@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
+import io.github.hectorvent.floci.core.common.ValidatingDnsResolver;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.apache.hc.client5.http.DnsResolver;
@@ -89,26 +90,13 @@ class HttpDataSourceTransport implements AutoCloseable {
     }
 
     static DnsResolver checkedResolver(DnsResolver delegate) {
-        return new DnsResolver() {
-            @Override
-            public InetAddress[] resolve(String host) throws UnknownHostException {
-                InetAddress[] addresses = delegate.resolve(host);
-                if (addresses == null || addresses.length == 0) {
-                    throw new UnknownHostException("HTTP data source endpoint has no addresses");
+        return new ValidatingDnsResolver(delegate, (host, addresses) -> {
+            for (InetAddress address : addresses) {
+                if (SsrfProtection.isBlockedAddress(address)) {
+                    throw new UnknownHostException("HTTP data source endpoint resolves to a private or reserved address");
                 }
-                for (InetAddress address : addresses) {
-                    if (SsrfProtection.isBlockedAddress(address)) {
-                        throw new UnknownHostException("HTTP data source endpoint resolves to a private or reserved address");
-                    }
-                }
-                return addresses.clone();
             }
-
-            @Override
-            public String resolveCanonicalHostname(String host) {
-                return host;
-            }
-        };
+        });
     }
 
     Map<String, Object> send(HttpDataSourceRequest request) {
