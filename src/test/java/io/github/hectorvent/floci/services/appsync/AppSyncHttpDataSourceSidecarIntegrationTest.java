@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.appsync;
 
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testing.AppSyncHttpTestPolicies;
 import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
@@ -79,11 +80,8 @@ class AppSyncHttpDataSourceSidecarIntegrationTest {
         await().atMost(Duration.ofSeconds(30)).until(() -> "SUCCESS".equals(
                 client.getSchemaCreationStatus(r -> r.apiId(apiId)).statusAsString()));
         roleName = "http-resolver-" + suffix;
-        String roleArn = RequestScopes.callAs(ACCOUNT, REGION, () -> iam.createRole(roleName, "/", """
-                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-                "Principal":{"Service":"appsync.amazonaws.com"},
-                "Condition":{"ArnEquals":{"aws:SourceArn":"%s"},"StringEquals":{"aws:SourceAccount":"%s"}}}]}
-                """.formatted(apiArn, ACCOUNT), null, 3600, Map.of()).getArn());
+        String roleArn = RequestScopes.callAs(ACCOUNT, REGION, () -> iam.createRole(roleName, "/",
+                AppSyncHttpTestPolicies.trust(apiArn, ACCOUNT), null, 3600, Map.of()).getArn());
         setPolicy("Allow");
         client.createDataSource(r -> r.apiId(apiId).name("Schedules").type("HTTP").serviceRoleArn(roleArn)
                 .httpConfig(h -> h.endpoint("https://scheduler." + TARGET_REGION + ".amazonaws.com")
@@ -183,9 +181,7 @@ class AppSyncHttpDataSourceSidecarIntegrationTest {
     }
 
     private void setPolicy(String effect) {
-        RequestScopes.runAs(ACCOUNT, REGION, () -> iam.putRolePolicy(roleName, "schedule", """
-                {"Version":"2012-10-17","Statement":[{"Effect":"%s","Action":"scheduler:GetSchedule",
-                "Resource":"arn:aws:scheduler:%s:%s:schedule/default/missing"}]}
-                """.formatted(effect, TARGET_REGION, ACCOUNT)));
+        RequestScopes.runAs(ACCOUNT, REGION, () -> iam.putRolePolicy(roleName, "schedule",
+                AppSyncHttpTestPolicies.getSchedule(effect, TARGET_REGION, ACCOUNT)));
     }
 }

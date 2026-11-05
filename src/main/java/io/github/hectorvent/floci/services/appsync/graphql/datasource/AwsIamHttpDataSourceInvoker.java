@@ -17,6 +17,7 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
+import org.jboss.logging.Logger;
 
 import java.net.URI;
 import java.security.SecureRandom;
@@ -32,6 +33,7 @@ import java.util.TreeMap;
 @ApplicationScoped
 public class AwsIamHttpDataSourceInvoker {
 
+    private static final Logger LOG = Logger.getLogger(AwsIamHttpDataSourceInvoker.class);
     private static final SecureRandom RANDOM = new SecureRandom();
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
@@ -96,6 +98,8 @@ public class AwsIamHttpDataSourceInvoker {
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
+            LOG.debugv("Signed HTTP data source failed: service={0}, region={1}, cause={2}",
+                    target.service(), target.region(), e.getClass().getSimpleName());
             throw new AwsException("HttpException", "The signed HTTP data source request could not complete", 500);
         } finally {
             iam.unregisterSession(target.accountId(), key);

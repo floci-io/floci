@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
+import io.github.hectorvent.floci.testing.AppSyncHttpTestPolicies;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -72,11 +73,7 @@ class AwsIamHttpDataSourceIntegrationTest {
     void createRole() {
         roleName = "http-data-source-" + UUID.randomUUID();
         String roleArn = RequestScopes.callAs(ACCOUNT, API_REGION, () -> {
-            String arn = iam.createRole(roleName, "/appsync/", """
-                    {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
-                    "Principal":{"Service":"appsync.amazonaws.com"},
-                    "Condition":{"ArnEquals":{"aws:SourceArn":"%s"},"StringEquals":{"aws:SourceAccount":"%s"}}}]}
-                    """.formatted(API_ARN, ACCOUNT), null, 3600, Map.of()).getArn();
+            String arn = iam.createRole(roleName, "/appsync/", AppSyncHttpTestPolicies.trust(API_ARN, ACCOUNT), null, 3600, Map.of()).getArn();
             iam.putRolePolicy(roleName, "schedule", policy("Allow"));
             return arn;
         });
@@ -258,9 +255,6 @@ class AwsIamHttpDataSourceIntegrationTest {
     }
 
     private static String policy(String effect) {
-        return """
-                {"Version":"2012-10-17","Statement":[{"Effect":"%s","Action":"scheduler:GetSchedule",
-                "Resource":"arn:aws:scheduler:%s:%s:schedule/default/missing"}]}
-                """.formatted(effect, TARGET_REGION, ACCOUNT);
+        return AppSyncHttpTestPolicies.getSchedule(effect, TARGET_REGION, ACCOUNT);
     }
 }

@@ -100,10 +100,15 @@ class HttpDataSourceTransportTest {
         });
         server.start();
         // Only this transport fixture pins a synthetic public hostname to the test listener.
+        DnsResolver resolver = publicResolver();
+        transport = new HttpDataSourceTransport(HttpDataSourceTransport.client(resolver));
+    }
+
+    private static DnsResolver publicResolver() throws UnknownHostException {
         DnsResolver resolver = mock(DnsResolver.class, CALLS_REAL_METHODS);
         when(resolver.resolve("public.example")).thenReturn(new InetAddress[]{InetAddress.getLoopbackAddress()});
         when(resolver.resolveCanonicalHostname("public.example")).thenReturn("public.example");
-        transport = new HttpDataSourceTransport(HttpDataSourceTransport.client(resolver));
+        return resolver;
     }
 
     @AfterEach
@@ -197,9 +202,7 @@ class HttpDataSourceTransportTest {
 
     @Test
     void totalDeadlineCancelsResponseBodyRead() throws Exception {
-        DnsResolver resolver = mock(DnsResolver.class, CALLS_REAL_METHODS);
-        when(resolver.resolve("public.example")).thenReturn(new InetAddress[]{InetAddress.getLoopbackAddress()});
-        when(resolver.resolveCanonicalHostname("public.example")).thenReturn("public.example");
+        DnsResolver resolver = publicResolver();
         try (HttpDataSourceTransport shortDeadline = new HttpDataSourceTransport(
                 HttpDataSourceTransport.client(resolver), Duration.ofMillis(200))) {
             long started = System.nanoTime();

@@ -483,10 +483,16 @@ failures use `HttpException`; invalid request mappings use `MappingTemplate`. Re
 are limited to 5 MiB, and transport work has a 30-second deadline. Redirects and automatic retries
 are disabled. Supported response charsets are respected; a missing, blank, or unrecognized charset
 falls back to UTF-8. HTTPS keeps certificate and hostname verification enabled.
+HTTP resolver callbacks use separate batches so independent query fields can run concurrently;
+root mutation fields retain their selection order.
 
 Unsigned requests support public HTTP(S) endpoints. Floci rejects private, loopback,
 link-local, and other reserved destinations, including a hostname that resolves to any such address.
-Unsigned HTTP data sources do not require a service role.
+Unsigned HTTP data sources do not require a service role. Transport capacity is bounded to
+four active requests and sixteen queued requests. The caller deadline also covers DNS lookup,
+but system DNS can ignore cancellation: a stuck lookup retains its worker until it returns.
+If all four workers are stuck in DNS, other endpoints also lose transport capacity; excess
+requests fail with `HttpException`.
 
 For the following local AWS operations, set `httpConfig.authorizationConfig.authorizationType`
 to `AWS_IAM` and supply `awsIamConfig.signingRegion`, `awsIamConfig.signingServiceName`, and the

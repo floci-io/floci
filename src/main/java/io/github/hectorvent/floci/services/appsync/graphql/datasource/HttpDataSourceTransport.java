@@ -18,6 +18,7 @@ import org.apache.hc.core5.http.Header;
 import org.apache.hc.core5.http.io.entity.ByteArrayEntity;
 import org.apache.hc.core5.io.CloseMode;
 import org.apache.hc.core5.util.Timeout;
+import org.jboss.logging.Logger;
 
 import javax.net.ssl.SSLContext;
 import java.io.IOException;
@@ -41,6 +42,7 @@ import java.util.concurrent.TimeoutException;
 @ApplicationScoped
 class HttpDataSourceTransport implements AutoCloseable {
 
+    private static final Logger LOG = Logger.getLogger(HttpDataSourceTransport.class);
     static final int MAX_BYTES = 5 * 1024 * 1024;
     private final CloseableHttpClient client;
     private final Duration timeout;
@@ -133,7 +135,13 @@ class HttpDataSourceTransport implements AutoCloseable {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new AwsException("HttpException", "HTTP data source request was interrupted", 500);
-        } catch (ExecutionException | TimeoutException e) {
+        } catch (TimeoutException e) {
+            LOG.debugv("HTTP data source deadline exceeded: method={0}, host={1}", request.method(), request.uri().getHost());
+            throw new AwsException("HttpException", "HTTP data source request deadline exceeded", 500);
+        } catch (ExecutionException e) {
+            // Exception messages and URLs can contain credentials or query values. Log only the type.
+            LOG.debugv("HTTP data source failed: method={0}, host={1}, cause={2}", request.method(),
+                    request.uri().getHost(), e.getCause().getClass().getSimpleName());
             throw new AwsException("HttpException", "HTTP data source request could not complete", 500);
         } finally {
             if (!completed) {
