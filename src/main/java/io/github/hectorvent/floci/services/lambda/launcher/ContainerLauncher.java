@@ -294,12 +294,6 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "lambda", fn.getFunctionName(), lambdaAccountId, lambdaRegion));
         List<String> configuredExtraHosts = config.services().lambda().extraHosts().orElse(List.of());
-        boolean hasExplicitHostAlias = Stream.concat(dockerFlags.extraHosts().stream(), configuredExtraHosts.stream())
-                .anyMatch(ContainerBuilder::isHostDockerInternalEntry);
-        if (dockerHostResolver.isLinuxHost() && !hasExplicitHostAlias) {
-            specBuilder.withHostDockerInternalOnLinux();
-        }
-
         applyDockerFlags(specBuilder, dockerFlags);
 
         specBuilder.withEmbeddedDns();
@@ -319,6 +313,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             }
             specBuilder.withExtraHost(entry.substring(0, sep), entry.substring(sep + 1));
         });
+        specBuilder.withHostDockerInternalOnLinux();
 
         // Whether /var/task is served from a shared read-only volume (large code) or copied
         // directly into this container (small code). Decided once here so both the spec (below)

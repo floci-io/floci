@@ -15,6 +15,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.List;
 import java.util.Optional;
 
+import static io.github.hectorvent.floci.testing.DockerDaemonVersionFixtures.stubDaemonVersion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -32,7 +33,7 @@ class ContainerBuilderTest {
     void withHostDockerInternalOnLinux_omitsAutomaticAliasForPodmanDaemon() {
         TestFixture fixture = new TestFixture();
         when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
-        stubDaemonVersion(fixture, "linux/amd64/fedora-42",
+        stubDaemonVersion(fixture.dockerClient, "linux/amd64/fedora-42",
                 List.of(new VersionComponent().withName("Podman Engine")));
 
         ContainerSpec spec = fixture.builder.newContainer("alpine")
@@ -52,7 +53,7 @@ class ContainerBuilderTest {
     void withHostDockerInternalOnLinux_explicitAliasSkipsPodmanProbe() {
         TestFixture fixture = new TestFixture();
         when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
-        stubDaemonVersion(fixture, "Podman Engine", List.of());
+        stubDaemonVersion(fixture.dockerClient, "Podman Engine", List.of());
 
         ContainerSpec spec = fixture.builder.newContainer("alpine")
                 .withExtraHost("host.docker.internal", "192.0.2.10")
@@ -67,7 +68,7 @@ class ContainerBuilderTest {
     void withHostDockerInternalOnLinux_emptyExplicitAliasDoesNotSuppressGateway() {
         TestFixture fixture = new TestFixture();
         when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
-        stubDaemonVersion(fixture, "Docker Engine - Community", List.of());
+        stubDaemonVersion(fixture.dockerClient, "Docker Engine - Community", List.of());
 
         ContainerSpec before = fixture.builder.newContainer("alpine")
                 .withExtraHost("host.docker.internal", "")
@@ -90,7 +91,7 @@ class ContainerBuilderTest {
     void withHostDockerInternalOnLinux_addsAliasOnceForDockerDaemon(String engineName) {
         TestFixture fixture = new TestFixture();
         when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
-        stubDaemonVersion(fixture, engineName, List.of());
+        stubDaemonVersion(fixture.dockerClient, engineName, List.of());
 
         ContainerSpec first = fixture.builder.newContainer("alpine")
                 .withHostDockerInternalOnLinux()
@@ -121,7 +122,7 @@ class ContainerBuilderTest {
     void withHostDockerInternalOnLinux_prefersExplicitAliasInEitherOrder() {
         TestFixture fixture = new TestFixture();
         when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
-        stubDaemonVersion(fixture, "Docker Engine - Community", List.of());
+        stubDaemonVersion(fixture.dockerClient, "Docker Engine - Community", List.of());
 
         ContainerSpec before = fixture.builder.newContainer("alpine")
                 .withExtraHost("HOST.DOCKER.INTERNAL", "192.0.2.10")
@@ -141,7 +142,7 @@ class ContainerBuilderTest {
     void withHostDockerInternalOnLinux_keepsAliasForUnknownDaemonAndCachesResult() {
         TestFixture fixture = new TestFixture();
         when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
-        stubDaemonVersion(fixture, "unidentified engine", List.of());
+        stubDaemonVersion(fixture.dockerClient, "unidentified engine", List.of());
 
         ContainerSpec first = fixture.builder.newContainer("alpine")
                 .withHostDockerInternalOnLinux()
@@ -176,6 +177,26 @@ class ContainerBuilderTest {
         assertEquals(List.of("host.docker.internal:host-gateway"), first.extraHosts());
         assertEquals(List.of(), second.extraHosts());
         verify(fixture.dockerClient, times(2)).versionCmd();
+    }
+
+    @Test
+    void withHostDockerInternalOnLinux_keepsAliasForMissingDaemonMetadata() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.dockerHostResolver.isLinuxHost()).thenReturn(true);
+        VersionCmd versionCmd = mock(VersionCmd.class);
+        when(fixture.dockerClient.versionCmd()).thenReturn(versionCmd);
+        when(versionCmd.exec()).thenReturn(new Version());
+
+        ContainerSpec first = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .build();
+        ContainerSpec second = fixture.builder.newContainer("alpine")
+                .withHostDockerInternalOnLinux()
+                .build();
+
+        assertEquals(List.of("host.docker.internal:host-gateway"), first.extraHosts());
+        assertEquals(first.extraHosts(), second.extraHosts());
+        verify(fixture.dockerClient, times(1)).versionCmd();
     }
 
     @Test
@@ -505,16 +526,6 @@ class ContainerBuilderTest {
         String imageId = "sha256:" + "a".repeat(64);
 
         assertEquals(imageId, fixture.builder.newContainer(imageId).build().image());
-    }
-
-    private static void stubDaemonVersion(TestFixture fixture, String platformName,
-                                          List<VersionComponent> components) {
-        VersionCmd versionCmd = mock(VersionCmd.class);
-        Version version = mock(Version.class);
-        when(fixture.dockerClient.versionCmd()).thenReturn(versionCmd);
-        when(versionCmd.exec()).thenReturn(version);
-        when(version.getPlatform()).thenReturn(new VersionPlatform().withName(platformName));
-        when(version.getComponents()).thenReturn(components);
     }
 
     private static class TestFixture {
