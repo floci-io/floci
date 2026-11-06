@@ -12,6 +12,7 @@ import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -60,7 +61,7 @@ class ApiGatewayV2ApiMappingServiceTest {
         RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
         v2Service = new ApiGatewayV2Service(storageFactory, config, regionResolver);
         service = new ApiGatewayService(storageFactory, config, mock(TlsCertificateManager.class), regionResolver,
-                v2Service);
+                v2Service, Clock.systemUTC());
     }
 
     private void v2Domain(String name) {
