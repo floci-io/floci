@@ -5,6 +5,7 @@ import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.InspectImageCmd;
@@ -16,6 +17,7 @@ import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ContainerNetworkSettings;
 import com.github.dockerjava.api.model.ContainerPort;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Info;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -643,6 +645,77 @@ class EcrRegistryManagerTest {
                 new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
 
         assertEquals(expectedImage, manager.rewriteImageUri(AWS_ECR_IMAGE));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "hostname, false",
+            "path, false",
+            "hostname, true",
+            "path, true"
+    })
+    void rewriteImageUri_dockerDesktop_pointsTheDaemonAtTheHostnameItProxiesToTheHost(String style,
+                                                                                       boolean tlsUris) {
+        EmulatorConfig.TlsConfig tls = Mockito.mock(EmulatorConfig.TlsConfig.class);
+        when(config.tls()).thenReturn(tls);
+        when(tls.enabled()).thenReturn(tlsUris);
+        when(ecr.uriStyle()).thenReturn(style);
+        when(ecr.tlsUri()).thenReturn(tlsUris);
+        when(currentContainerNetworkResolver.resolvePublishedPort(4566)).thenReturn(OptionalInt.of(54321));
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        dockerOperatingSystem("Docker Desktop");
+
+        // Desktop's daemon dials localhost inside its VM, where a host port Docker chose is not bound.
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:54321/backend-user:1",
+                manager.rewriteImageUri(AWS_ECR_IMAGE));
+    }
+
+    @Test
+    void rewriteImageUri_linuxDaemon_keepsLocalhost() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        dockerOperatingSystem("Ubuntu 24.04.1 LTS");
+
+        assertEquals("localhost:4566/123456789012/us-east-1/backend-user:1",
+                manager.rewriteImageUri(AWS_ECR_IMAGE));
+    }
+
+    @Test
+    void rewriteImageUri_daemonInfoFails_keepsLocalhostAndAsksAgain() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        InfoCmd infoCmd = Mockito.mock(InfoCmd.class);
+        Info info = Mockito.mock(Info.class);
+        when(dockerClient.infoCmd()).thenReturn(infoCmd);
+        when(infoCmd.exec()).thenThrow(new DockerClientException("daemon unavailable")).thenReturn(info);
+        when(info.getOperatingSystem()).thenReturn("Docker Desktop");
+
+        assertEquals("localhost:4566/123456789012/us-east-1/backend-user:1",
+                manager.rewriteImageUri(AWS_ECR_IMAGE));
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:4566/backend-user:1",
+                manager.rewriteImageUri(AWS_ECR_IMAGE));
+    }
+
+    @Test
+    void rewriteImageUri_dockerDesktop_asksTheDaemonOnce() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        dockerOperatingSystem("Docker Desktop");
+
+        manager.rewriteImageUri(AWS_ECR_IMAGE);
+        assertEquals("123456789012.dkr.ecr.us-east-1.localhost:4566/backend-user:1",
+                manager.rewriteImageUri(AWS_ECR_IMAGE));
+
+        verify(dockerClient, times(1)).infoCmd();
+    }
+
+    private void dockerOperatingSystem(String operatingSystem) {
+        InfoCmd infoCmd = Mockito.mock(InfoCmd.class);
+        Info info = Mockito.mock(Info.class);
+        when(dockerClient.infoCmd()).thenReturn(infoCmd);
+        when(infoCmd.exec()).thenReturn(info);
+        when(info.getOperatingSystem()).thenReturn(operatingSystem);
     }
 
     @Test
