@@ -237,6 +237,11 @@ public class ElbV2DataPlane {
 
     @PostConstruct
     void init() {
+        int keepAliveTimeoutSeconds = config.services().elbv2().backendKeepAliveTimeoutSeconds();
+        if (keepAliveTimeoutSeconds < 0) {
+            throw new IllegalArgumentException(
+                    "floci.services.elbv2.backend-keep-alive-timeout-seconds must be non-negative");
+        }
         proxyClient = vertx.createHttpClient(new HttpClientOptions()
                 .setTrustAll(true)
                 .setVerifyHost(false)
@@ -245,6 +250,7 @@ public class ElbV2DataPlane {
                 .setSslHandshakeTimeout(10)
                 .setSslHandshakeTimeoutUnit(TimeUnit.SECONDS)
                 .setKeepAlive(true)
+                .setKeepAliveTimeout(keepAliveTimeoutSeconds)
                 .setMaxHeaderSize(MAX_RESPONSE_HEADER_SIZE));
         tcpClient = vertx.createNetClient(new NetClientOptions().setConnectTimeout(5000)
                 .setTcpKeepAlive(true));
@@ -1469,6 +1475,9 @@ public class ElbV2DataPlane {
                     forwarded.applyTo(req.headers(), clientReq.headers());
                     if (hostHeader != null) {
                         clientReq.putHeader("Host", hostHeader);
+                    }
+                    if (!config.services().elbv2().backendKeepAlive()) {
+                        clientReq.putHeader("Connection", "close");
                     }
                     AtomicBoolean responseStarted = new AtomicBoolean();
                     AtomicBoolean requestFailed = new AtomicBoolean();
