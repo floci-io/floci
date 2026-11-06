@@ -2370,6 +2370,16 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"BatchGetItem", "BatchWriteItem"})
+    void aBatchThatSkippedTheShapeCheckFindsNoTablesInAnArray(String operation) throws Exception {
+        JsonNode request = mapper.readTree("{\"RequestItems\":[{}]}");
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, request, "eu-west-1"));
+        assertEquals("1 validation error detected: Value at 'RequestItems' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1", ex.getMessage());
+    }
+
+    @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             PutItem    | {"TableName":"Missing","Item":{},"ReturnValues":"ALL_NEW"} | 1 validation error detected: ReturnValues can only be ALL_OLD or NONE
             DeleteItem | {"TableName":"Missing","Key":{},"ReturnValues":"BOGUS"} | 1 validation error detected: Failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, UPDATED_OLD, ALL_NEW, UPDATE_NEW, NONE]

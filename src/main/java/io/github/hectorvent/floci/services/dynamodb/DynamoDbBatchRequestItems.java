@@ -35,8 +35,8 @@ final class DynamoDbBatchRequestItems {
 
     static void requireValidLengths(JsonNode requestItems, boolean write) {
         List<String> violations = new ArrayList<>();
-        addIfPresent(violations, SmithyValidationErrors.sizeOutOfRange("RequestItems", requestItems.size(), 1,
-                write ? 25 : 100));
+        addIfPresent(violations, SmithyValidationErrors.sizeOutOfRange("RequestItems",
+                requestItems.properties().size(), 1, write ? 25 : 100));
         for (Map.Entry<String, JsonNode> table : requestItems.properties()) {
             String name = table.getKey();
             String path = "RequestItems." + name;
