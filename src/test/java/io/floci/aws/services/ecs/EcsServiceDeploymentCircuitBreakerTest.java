@@ -2,6 +2,7 @@ package io.floci.aws.services.ecs;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -34,6 +35,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -256,6 +258,24 @@ class EcsServiceDeploymentCircuitBreakerTest {
         assertEquals("STOP_REQUESTED", deployment.getStatus());
         assertEquals(List.of("new-alarm"), deployment.getAlarmNames());
         assertEquals(List.of("new-alarm"), deployment.getTriggeredAlarmNames());
+    }
+
+    @Test
+    void anUpdateNamingATaskDefinitionThatDoesNotResolveChangesNothing() {
+        EcsService service = newService();
+        EcsServiceModel model = createService(service, "cb-unresolved", 1, null);
+        UpdateServiceRequest request = new UpdateServiceRequest();
+        request.setCluster("cb-unresolved-cluster");
+        request.setService("cb-unresolved");
+        request.setDesiredCount(3);
+        request.setDeploymentConfiguration(Map.of("deploymentCircuitBreaker", breaker(true, false)));
+        request.setTaskDefinition("cb-missing-fam");
+
+        assertThrows(AwsException.class, () -> service.updateService(request, REGION));
+
+        EcsServiceModel svc = service.serviceByArn(model.getServiceArn());
+        assertEquals(1, svc.getDesiredCount());
+        assertNull(svc.getDeploymentConfiguration());
     }
 
     /** A failed initial deployment has no successful revision to roll back to. */

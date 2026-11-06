@@ -262,8 +262,6 @@ AWS::ECS::Cluster	DefaultCapacityProviderStrategy	accepted and ignored
 AWS::ECS::Cluster	ServiceConnectDefaults	accepted and ignored
 AWS::ECS::Cluster	Tags	accepted and ignored
 AWS::ECS::Service	AvailabilityZoneRebalancing	accepted and ignored
-AWS::ECS::Service	CapacityProviderStrategy	accepted and ignored
-AWS::ECS::Service	DeploymentConfiguration	accepted and ignored
 AWS::ECS::Service	DeploymentController	accepted and ignored
 AWS::ECS::Service	EnableECSManagedTags	accepted and ignored
 AWS::ECS::Service	EnableExecuteCommand	accepted and ignored
@@ -278,7 +276,6 @@ AWS::ECS::Service	PropagateTags	accepted and ignored
 AWS::ECS::Service	Role	accepted and ignored
 AWS::ECS::Service	SchedulingStrategy	accepted and ignored
 AWS::ECS::Service	ServiceConnectConfiguration	accepted and ignored
-AWS::ECS::Service	ServiceRegistries	accepted and ignored
 AWS::ECS::Service	Tags	accepted and ignored
 AWS::ECS::Service	VolumeConfigurations	accepted and ignored
 AWS::ECS::Service	VpcLatticeConfigurations	accepted and ignored
@@ -288,7 +285,6 @@ AWS::ECS::TaskDefinition	IpcMode	accepted and ignored
 AWS::ECS::TaskDefinition	PidMode	accepted and ignored
 AWS::ECS::TaskDefinition	PlacementConstraints	accepted and ignored
 AWS::ECS::TaskDefinition	ProxyConfiguration	accepted and ignored
-AWS::ECS::TaskDefinition	RuntimePlatform	accepted and ignored
 AWS::ECS::TaskDefinition	Tags	accepted and ignored
 AWS::ECS::TaskDefinition	Volumes	accepted and ignored
 AWS::EKS::Cluster	AccessConfig	accepted and ignored
