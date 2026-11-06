@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.rdsdata;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
 import org.junit.jupiter.api.Test;
+import org.postgresql.core.Parser;
 
+import java.sql.SQLException;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -53,6 +55,42 @@ class RdsDataSqlParametersTest {
 
         assertEquals("select * from t where id = ? and name = ?", parsed.sql());
         assertEquals(List.of("id", "name"), parsed.parameterOrder());
+    }
+
+    @Test
+    void postgresJsonbOperatorsReachJdbcEscapedAlongsideNamedBindings() {
+        ParsedSql parsed = RdsDataSqlParameters.parse(
+                "select data ? :key, data ?| array[:first, :second], data ?& array[:third] from t where id = :id",
+                false);
+
+        assertEquals("select data ?? ?, data ??| array[?, ?], data ??& array[?] from t where id = ?",
+                parsed.sql());
+        assertEquals(List.of("key", "first", "second", "third", "id"), parsed.parameterOrder());
+    }
+
+    @Test
+    void postgresKeepsEachQuestionMarkFromInputSqlAlongsideNamedBindings() throws SQLException {
+        ParsedSql parsed = RdsDataSqlParameters.parse(
+                "select data ?? :key, data ??| array[:keys], data ??& array[:all] from t where id = :id",
+                false);
+
+        assertEquals("select data ???? ?, data ????| array[?], data ????& array[?] from t where id = ?",
+                parsed.sql());
+        assertEquals(List.of("key", "keys", "all", "id"), parsed.parameterOrder());
+        assertEquals("select data ?? $1, data ??| array[$2], data ??& array[$3] from t where id = $4",
+                Parser.parseJdbcSql(parsed.sql(), true, true, false, false, false).getFirst().nativeSql);
+    }
+
+    @Test
+    void postgresKeepsAdjacentNamedBindingBeforeQuestionOperatorInJdbc() throws SQLException {
+        for (String operator : List.of("?'key'", "??'key'", "?|array['a']", "??|array['a']",
+                "?&array['a']", "??&array['a']")) {
+            ParsedSql parsed = RdsDataSqlParameters.parse("select :data" + operator, false);
+            assertEquals(List.of("data"), parsed.parameterOrder(), operator);
+            assertEquals("select $1 " + operator,
+                    Parser.parseJdbcSql(parsed.sql(), true, true, false, false, false).getFirst().nativeSql,
+                    operator);
+        }
     }
 
     @Test
@@ -130,11 +168,11 @@ class RdsDataSqlParametersTest {
     }
 
     @Test
-    void postgresModeDoesNotTreatBackslashAsEscapeEvenInEscapeStringLiteral() {
+    void postgresModeRecognizesBackslashEscapesInEscapeStringLiteral() {
         ParsedSql parsed = RdsDataSqlParameters.parse(
                 "select E'it\\'s :value' as v where id = :id", false);
 
-        assertEquals("select E'it\\'s ?' as v where id = :id", parsed.sql());
-        assertEquals(List.of("value"), parsed.parameterOrder());
+        assertEquals("select E'it\\'s :value' as v where id = ?", parsed.sql());
+        assertEquals(List.of("id"), parsed.parameterOrder());
     }
 }

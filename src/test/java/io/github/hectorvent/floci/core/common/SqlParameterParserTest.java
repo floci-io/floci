@@ -49,6 +49,60 @@ class SqlParameterParserTest {
     }
 
     @Test
+    void rdsPostgresEscapesJsonbQuestionOperatorsButNotNamedParameters() {
+        String sql = "select data ? :key, data ?| array[:first, :second], data ?& array[:third] "
+                + "from t where id = :id and note = '?' and \"?\" = \"?\" "
+                + "/* ? :ignored */ -- ? :ignored\n and marker = $tag$? :ignored$tag$";
+
+        ParsedSql parsed = SqlParameterParser.parse(sql, Options.RDS_POSTGRESQL);
+
+        assertEquals("select data ?? ?, data ??| array[?, ?], data ??& array[?] "
+                + "from t where id = ? and note = '?' and \"?\" = \"?\" "
+                + "/* ? :ignored */ -- ? :ignored\n and marker = $tag$? :ignored$tag$", parsed.sql());
+        assertEquals(List.of("key", "first", "second", "third", "id"), parsed.parameterOrder());
+    }
+
+    @Test
+    void rdsPostgresEscapesEveryQuestionMarkInExistingPairs() {
+        ParsedSql parsed = SqlParameterParser.parse(
+                "select data ?? :key, data ??| array[:keys], data ??& array[:all] "
+                        + "from t where id = :id and note = '??' /* ?? */ and marker = $tag$??$tag$",
+                Options.RDS_POSTGRESQL);
+
+        assertEquals("select data ???? ?, data ????| array[?], data ????& array[?] "
+                + "from t where id = ? and note = '??' /* ?? */ and marker = $tag$??$tag$", parsed.sql());
+        assertEquals(List.of("key", "keys", "all", "id"), parsed.parameterOrder());
+    }
+
+    @Test
+    void rdsPostgresEscapesEveryQuestionMarkInRuns() {
+        ParsedSql parsed = SqlParameterParser.parse(
+                "select ? :one, ?? :two, ??? :three, ???? :four, :id??", Options.RDS_POSTGRESQL);
+
+        assertEquals("select ?? ?, ???? ?, ?????? ?, ???????? ?, ? ????", parsed.sql());
+        assertEquals(List.of("one", "two", "three", "four", "id"), parsed.parameterOrder());
+    }
+
+    @Test
+    void rdsPostgresPreservesQuestionMarksAndColonsInsideEscapeStrings() {
+        ParsedSql parsed = SqlParameterParser.parse(
+                "select E'it\\'s ? :ignored' as note, data ? :key from t", Options.RDS_POSTGRESQL);
+
+        assertEquals("select E'it\\'s ? :ignored' as note, data ?? ? from t", parsed.sql());
+        assertEquals(List.of("key"), parsed.parameterOrder());
+    }
+
+    @Test
+    void redshiftAndMysqlLeaveQuestionOperatorsUntouched() {
+        for (Options options : List.of(Options.REDSHIFT, Options.RDS_MYSQL)) {
+            ParsedSql parsed = SqlParameterParser.parse("select data ? :key, data ?| :keys, data ?& :all", options);
+
+            assertEquals("select data ? ?, data ?| ?, data ?& ?", parsed.sql());
+            assertEquals(List.of("key", "keys", "all"), parsed.parameterOrder());
+        }
+    }
+
+    @Test
     void redshiftAcceptsParameterNamesThatStartWithADigit() {
         ParsedSql parsed = SqlParameterParser.parse("select :1", Options.REDSHIFT);
 
@@ -129,12 +183,12 @@ class SqlParameterParserTest {
     }
 
     @Test
-    void rdsPostgresDoesNotTreatEscapeStringsSpecially() {
+    void rdsPostgresRecognizesBackslashEscapesInEscapeStrings() {
         ParsedSql parsed = SqlParameterParser.parse(
                 "select E'it\\'s :value' as v where id = :id", Options.RDS_POSTGRESQL);
 
-        assertEquals("select E'it\\'s ?' as v where id = :id", parsed.sql());
-        assertEquals(List.of("value"), parsed.parameterOrder());
+        assertEquals("select E'it\\'s :value' as v where id = ?", parsed.sql());
+        assertEquals(List.of("id"), parsed.parameterOrder());
     }
 
     @Test
@@ -188,7 +242,7 @@ class SqlParameterParserTest {
 
     @Test
     void mysqlCommentRulesAreIndependentOfQuotingAndParameterOptions() {
-        Options options = new Options(false, false, true, false, true);
+        Options options = new Options(false, false, true, false, true, false);
         assertFalse(SqlParameterParser.isMultiStatement("select 1; # ignored; select 2\n", options));
         assertTrue(SqlParameterParser.isMultiStatement("select 1--1; select 2", options));
         assertTrue(SqlParameterParser.isMultiStatement("select 1; /* outer /* inner */ select 2; */", options));
@@ -203,7 +257,7 @@ class SqlParameterParserTest {
 
     @Test
     void mysqlQuotingOptionsDoNotEnableMysqlComments() {
-        Options options = new Options(true, true, false, true, false);
+        Options options = new Options(true, true, false, true, false, false);
         assertTrue(SqlParameterParser.isMultiStatement("select 1; # not a comment", options));
         assertFalse(SqlParameterParser.isMultiStatement("select 1--1; select 2", options));
         assertFalse(SqlParameterParser.isMultiStatement("select 1; /* outer /* inner */ select 2; */", options));
