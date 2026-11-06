@@ -92,6 +92,12 @@
     </dependencyManagement>
 
     <dependencies>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>quicksight</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
         <!-- Quarkus REST (RESTEasy Reactive) -->
         <dependency>
           <groupId>io.quarkus</groupId>

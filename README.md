@@ -350,6 +350,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | DocumentDB | Real Docker, mock mode available | MongoDB-compatible cluster via real MongoDB containers; RDS-shaped control plane; MongoDB wire protocol on port 27017 |
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
 | Amazon MQ | Real Docker | RabbitMQ broker via rabbitmq:3-management; AMQP + management console |
+| QuickSight | In-process metadata | Dashboard, dataset, data-source, user and ingestion metadata; direct-user dashboard search and a limited embed page; no SQL, SPICE processing or BI visualization |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
 | EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets (including resizing), bootstrap actions, steps, security configurations, scaling and termination policies, block public access, tagging |

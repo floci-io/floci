@@ -1122,6 +1122,9 @@ floci:
       npm-image: "verdaccio/verdaccio:6.10.4"
       pypi-image: "pypiserver/pypiserver:v2.4.2"
       nuget-image: "bagetter/bagetter:1.6.5"
+    quicksight:
+      enabled: true
+      embed-base-url: ${floci.base-url}
     marketplace:
       enabled: true
     dms:
