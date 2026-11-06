@@ -112,17 +112,24 @@ public class SecurityHubController {
 
     @GET
     @Path("/standards")
-    public Response describeStandards(@Context HttpHeaders headers) {
+    public Response describeStandards(@Context HttpHeaders headers,
+                                      @QueryParam("MaxResults") String maxResults,
+                                      @QueryParam("NextToken") String nextToken) {
         String region = region(headers);
+        PaginatedResult<SecurityHubService.Standard> page = securityHubService.describeStandards(region,
+                Pagination.parseMaxResults(maxResults, "InvalidInputException"), nextToken);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode standards = response.putArray("Standards");
-        for (SecurityHubService.Standard standard : SecurityHubService.STANDARDS) {
+        for (SecurityHubService.Standard standard : page.items()) {
             ObjectNode item = standards.addObject()
                     .put("StandardsArn", securityHubService.standardsArn(region, standard))
                     .put("Name", standard.name())
                     .put("Description", standard.name())
                     .put("EnabledByDefault", standard.enabledByDefault());
             item.putObject("StandardsManagedBy").put("Company", "AWS").put("Product", "Security Hub");
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
