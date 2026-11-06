@@ -254,6 +254,7 @@ NOT_COVERED: dict[str, str] = {
     "network-firewall": _LATER,
     "oam": _REST,
     "organizations": _LATER,
+    "quicksight": "metadata-only REST subset; request-resource IAM authorization is not implemented",
     "ram": _REST,
     "rds": _LATER,
     "rds-data": _REST,
