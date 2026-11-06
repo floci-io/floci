@@ -1,0 +1,364 @@
+package io.floci.aws.services.ses;
+
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.ses.model.CloudWatchDestination;
+import io.floci.aws.services.ses.model.CloudWatchDimensionConfiguration;
+import io.floci.aws.services.ses.model.EventBridgeDestination;
+import io.floci.aws.services.ses.model.EventDestination;
+import io.floci.aws.services.ses.model.KinesisFirehoseDestination;
+import io.floci.aws.services.ses.model.PinpointDestination;
+import io.floci.aws.services.ses.model.SnsDestination;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+/**
+ * Unit tests for the static input validation behind the SES V2
+ * ConfigurationSetEventDestination operations. These fail-closed paths are
+ * pure logic and live here rather than in the integration test. Protocol
+ * integration tests cover the AWS-modeled error responses.
+ */
+class SesConfigurationSetEventDestinationTest {
+
+    private static final String ACCOUNT_ID = "000000000000";
+    private static final String REGION = "us-east-1";
+
+    private static EventDestination withSns(List<String> matchingEventTypes) {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(matchingEventTypes);
+        SnsDestination sns = new SnsDestination();
+        sns.setTopicArn("arn:aws:sns:us-east-1:000000000000:ses-events");
+        ed.setSnsDestination(sns);
+        return ed;
+    }
+
+    @Test
+    void validName_passes() {
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestinationName("my-dest_1"));
+    }
+
+    @Test
+    void blankName_throwsInvalidParameterValue() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestinationName("   "));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void invalidNameCharacters_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestinationName("bad name!"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Invalid event destination name <bad name!>: only alphanumeric ASCII characters, "
+                + "'_', and '-' are allowed.", ex.getMessage());
+    }
+
+    @Test
+    void nameTooLong_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestinationName("a".repeat(65)));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Event destination name cannot exceed 64 characters.", ex.getMessage());
+    }
+
+    @Test
+    void validDestination_passes() {
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(
+                withSns(List.of("SEND", "BOUNCE")), ACCOUNT_ID, REGION));
+    }
+
+    @Test
+    void emptyMatchingEventTypes_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(withSns(List.of()), ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("At least one event type must be specified.", ex.getMessage());
+    }
+
+    @Test
+    void invalidEventType_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(
+                        withSns(List.of("SEND", "NOPE")), ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Invalid event type: NOPE. Valid values are [SEND, REJECT, BOUNCE, COMPLAINT, "
+                + "DELIVERY, OPEN, CLICK, RENDERING_FAILURE, DELIVERY_DELAY, SUBSCRIPTION].", ex.getMessage());
+    }
+
+    @Test
+    void zeroDestinations_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Event destination is not provided.", ex.getMessage());
+    }
+
+    @Test
+    void multipleDestinations_throws() {
+        EventDestination ed = withSns(List.of("SEND"));
+        ed.setCloudWatchDestination(cloudWatch());
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Please provide only one destination with each request. Either a Firehose Destination "
+                + "or a Cloudwatch Destination or an SNS Destination or an EventBridge Destination.",
+                ex.getMessage());
+    }
+
+    @Test
+    void cloudWatchEmptyDimensions_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        ed.setCloudWatchDestination(new CloudWatchDestination());
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("CloudWatch metrics dimension configuration list cannot be empty.", ex.getMessage());
+    }
+
+    @Test
+    void validCloudWatchDestination_passes() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        ed.setCloudWatchDestination(cloudWatch());
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+    }
+
+    @Test
+    void pinpointNullArn_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        ed.setPinpointDestination(new PinpointDestination());
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Invalid Pinpoint application ARN provided: null.", ex.getMessage());
+    }
+
+    @Test
+    void validPinpointDestination_passes() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        PinpointDestination pp = new PinpointDestination();
+        pp.setApplicationArn("arn:aws:mobiletargeting:us-east-1:000000000000:apps/abc");
+        ed.setPinpointDestination(pp);
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+    }
+
+    @Test
+    void snsBlankTopicArn_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        SnsDestination sns = new SnsDestination();
+        sns.setTopicArn("");
+        ed.setSnsDestination(sns);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("SnsDestination requires a non-blank TopicArn.", ex.getMessage());
+    }
+
+    @Test
+    void snsNullTopicArn_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        ed.setSnsDestination(new SnsDestination()); // TopicArn left null
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("SnsDestination requires a non-blank TopicArn.", ex.getMessage());
+    }
+
+    @Test
+    void firehoseMissingDeliveryStream_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        KinesisFirehoseDestination fh = new KinesisFirehoseDestination();
+        fh.setIamRoleArn("arn:aws:iam::000000000000:role/ses-firehose");
+        // DeliveryStreamArn left null
+        ed.setKinesisFirehoseDestination(fh);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("KinesisFirehoseDestination requires both IamRoleArn and DeliveryStreamArn.",
+                ex.getMessage());
+    }
+
+    @Test
+    void firehoseMissingIamRole_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        KinesisFirehoseDestination fh = new KinesisFirehoseDestination();
+        fh.setDeliveryStreamArn("arn:aws:firehose:us-east-1:000000000000:deliverystream/ses");
+        // IamRoleArn left null
+        ed.setKinesisFirehoseDestination(fh);
+        assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+    }
+
+    @Test
+    void firehoseValid_passes() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        KinesisFirehoseDestination fh = new KinesisFirehoseDestination();
+        fh.setIamRoleArn("arn:aws:iam::000000000000:role/ses-firehose");
+        fh.setDeliveryStreamArn("arn:aws:firehose:us-east-1:000000000000:deliverystream/ses");
+        ed.setKinesisFirehoseDestination(fh);
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+    }
+
+    @Test
+    void cloudWatchDimensionMissingName_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        CloudWatchDestination cw = new CloudWatchDestination();
+        CloudWatchDimensionConfiguration dim = new CloudWatchDimensionConfiguration();
+        // DimensionName left null
+        dim.setDimensionValueSource("MESSAGE_TAG");
+        dim.setDefaultDimensionValue("default");
+        cw.setDimensionConfigurations(List.of(dim));
+        ed.setCloudWatchDestination(cw);
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        // Member index 1-based for callers, included in the error message.
+        assertEquals("CloudWatchDestination dimension configurations require "
+                + "DimensionName, DimensionValueSource, and DefaultDimensionValue "
+                + "(missing on member 1).", ex.getMessage());
+    }
+
+    @Test
+    void cloudWatchDimensionBlankValueSource_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        CloudWatchDestination cw = new CloudWatchDestination();
+        CloudWatchDimensionConfiguration dim = new CloudWatchDimensionConfiguration();
+        dim.setDimensionName("dim");
+        dim.setDimensionValueSource("");
+        dim.setDefaultDimensionValue("default");
+        cw.setDimensionConfigurations(List.of(dim));
+        ed.setCloudWatchDestination(cw);
+        assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+    }
+
+    @Test
+    void cloudWatchDimensionMissingDefaultValue_throws() {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        CloudWatchDestination cw = new CloudWatchDestination();
+        CloudWatchDimensionConfiguration dim = new CloudWatchDimensionConfiguration();
+        dim.setDimensionName("dim");
+        dim.setDimensionValueSource("MESSAGE_TAG");
+        // DefaultDimensionValue left null
+        cw.setDimensionConfigurations(List.of(dim));
+        ed.setCloudWatchDestination(cw);
+        assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(ed, ACCOUNT_ID, REGION));
+    }
+
+    @Test
+    void eventBridgeDefaultBusCommercialPartition_passes() {
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(
+                withEventBridge("arn:aws:events:us-east-1:000000000000:event-bus/default"), ACCOUNT_ID, REGION));
+    }
+
+    @Test
+    void eventBridgeDefaultBusNonCommercialPartition_passes() {
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(
+                withEventBridge("arn:aws-cn:events:cn-north-1:000000000000:event-bus/default"),
+                ACCOUNT_ID, "cn-north-1"));
+    }
+
+    @Test
+    void eventBridgeDefaultBusMatchingNonDefaultRequestScope_passes() {
+        assertDoesNotThrow(() -> SesConfigurationSetService.validateEventDestination(
+                withEventBridge("arn:aws:events:eu-west-1:111111111111:event-bus/default"),
+                "111111111111", "eu-west-1"));
+    }
+
+    @Test
+    void eventBridgeMismatchedAccount_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(
+                        withEventBridge("arn:aws:events:us-east-1:111111111111:event-bus/default"),
+                        ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void eventBridgeMismatchedRegion_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(
+                        withEventBridge("arn:aws:events:us-west-2:000000000000:event-bus/default"),
+                        ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void eventBridgeNullBusArn_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(withEventBridge(null), ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void eventBridgeBlankBusArn_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(withEventBridge("  "), ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void eventBridgeCustomBus_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(
+                        withEventBridge(
+                                "arn:aws:events:us-east-1:000000000000:event-bus/custom-bus"), ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void eventBridgeWrongServiceWithDefaultSuffix_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(
+                        withEventBridge(
+                                "arn:aws:sns:us-east-1:000000000000:event-bus/default"), ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void eventBridgeMalformedArn_throws() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> SesConfigurationSetService.validateEventDestination(
+                        withEventBridge("not-an-arn"), ACCOUNT_ID, REGION));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    private static EventDestination withEventBridge(String busArn) {
+        EventDestination ed = new EventDestination();
+        ed.setMatchingEventTypes(List.of("SEND"));
+        EventBridgeDestination eventBridge = new EventBridgeDestination();
+        eventBridge.setEventBusArn(busArn);
+        ed.setEventBridgeDestination(eventBridge);
+        return ed;
+    }
+
+    private static CloudWatchDestination cloudWatch() {
+        CloudWatchDestination cw = new CloudWatchDestination();
+        CloudWatchDimensionConfiguration dim = new CloudWatchDimensionConfiguration();
+        dim.setDimensionName("floci-dim");
+        dim.setDimensionValueSource("MESSAGE_TAG");
+        dim.setDefaultDimensionValue("default");
+        cw.setDimensionConfigurations(List.of(dim));
+        return cw;
+    }
+}

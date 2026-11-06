@@ -1,0 +1,376 @@
+package io.floci.aws.services.cloudformation.provisioners;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.IamService.InlinePolicyChange;
+import io.floci.aws.services.iam.model.AccessKey;
+import io.floci.aws.services.iam.model.IamUser;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+/**
+ * CloudFormation provisioning for {@code AWS::IAM::User}, moved out of the
+ * former CloudFormation monolith's switch.
+ */
+@ApplicationScoped
+public class IamUserCfnProvisioner implements CfnResourceProvisioner {
+
+    private static final Logger LOG = Logger.getLogger(IamUserCfnProvisioner.class);
+
+    private static final String INLINE_NAMES_ATTR = "__FlociInlinePolicyNames";
+    private static final String MANAGED_ARNS_ATTR = "__FlociManagedPolicyArns";
+    private static final String GROUPS_ATTR = "__FlociGroups";
+    private static final String USER_ID_ATTR = "__FlociUserId";
+
+    private final IamService iamService;
+
+    @Inject
+    public IamUserCfnProvisioner(IamService iamService) {
+        this.iamService = iamService;
+    }
+
+    private record InlinePolicyUndo(String name, InlinePolicyChange change) {}
+
+    @Override
+    public Set<String> resourceTypes() {
+        return Set.of("AWS::IAM::User");
+    }
+
+    @Override
+    public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String userName = ctx.stablePhysicalName(ctx.resolveOptional(props, "UserName"),
+                r.getLogicalId(), 64, false);
+        final String resolvedUserName = userName;
+        if (ctx.isUpdate() && !ctx.priorPhysicalId().equals(resolvedUserName)) {
+            throw new AwsException("ValidationError",
+                    "Updating UserName requires resource replacement, which is not supported.", 400);
+        }
+
+        String path = ctx.resolveOptional(props, "Path");
+        if (path == null) {
+            path = "/";
+        }
+        final String resolvedPath = path;
+
+        List<String> managedPolicyArns = ctx.resolveStringList(props, "ManagedPolicyArns");
+        List<String> groups = ctx.resolveStringList(props, "Groups");
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        // Blank means absent: Fn::If with Ref AWS::NoValue resolves to "" (CDK bootstrap does this).
+        String permissionsBoundary = ctx.resolveOrDefault(props, "PermissionsBoundary", null);
+
+        IamUser user;
+        boolean createdUser = false;
+        String priorPath = null;
+        String priorUserId = null;
+        String priorPermissionsBoundary = null;
+        try {
+            user = iamService.createUser(resolvedUserName, resolvedPath, permissionsBoundary);
+            createdUser = true;
+            r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
+        } catch (AwsException e) {
+            if (!ctx.reusesPriorEntity(resolvedUserName) || !"EntityAlreadyExists".equals(e.getErrorCode())) {
+                throw e;
+            }
+            user = iamService.getUser(resolvedUserName);
+            String existingUserId = r.getAttributes().get(USER_ID_ATTR);
+            if (existingUserId == null || existingUserId.isBlank()
+                    || !existingUserId.equals(user.getUserId())) {
+                r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+                throw e;
+            }
+            priorPath = user.getPath();
+            priorUserId = existingUserId;
+            priorPermissionsBoundary = user.getPermissionsBoundaryArn();
+            if (!resolvedPath.equals(user.getPath())) {
+                iamService.updateUser(resolvedUserName, null, resolvedPath, existingUserId);
+                user = iamService.getUser(resolvedUserName);
+            }
+        }
+
+        r.setPhysicalId(resolvedUserName);
+        r.getAttributes().put("Arn", user.getArn());
+        r.getAttributes().put(USER_ID_ATTR, user.getUserId());
+
+        Set<String> previousInlineNames = CfnTrackedSets.read(r, INLINE_NAMES_ATTR);
+        Set<String> previousManagedArns = CfnTrackedSets.read(r, MANAGED_ARNS_ATTR);
+        Set<String> previousGroups = CfnTrackedSets.read(r, GROUPS_ATTR);
+
+        Set<String> originalGroups = new HashSet<>(user.getGroupNames());
+        Set<String> originalPolicyArns = new HashSet<>(user.getAttachedPolicyArns());
+        Map<String, String> originalInlinePolicies = new HashMap<>(user.getInlinePolicies());
+        Map<String, String> originalTags = new HashMap<>(user.getTags());
+
+        Map<String, String> tagUpdates = new HashMap<>();
+        for (Map.Entry<String, String> entry : tags.entrySet()) {
+            if (!originalTags.containsKey(entry.getKey())
+                    || !entry.getValue().equals(originalTags.get(entry.getKey()))) {
+                tagUpdates.put(entry.getKey(), entry.getValue());
+            }
+        }
+        List<String> tagRemovals = new ArrayList<>();
+        for (String key : originalTags.keySet()) {
+            if (!tags.containsKey(key)) {
+                tagRemovals.add(key);
+            }
+        }
+
+        LinkedHashSet<String> groupsAddedByThisAttempt = new LinkedHashSet<>();
+        LinkedHashSet<String> groupsRemovedByThisAttempt = new LinkedHashSet<>();
+        LinkedHashSet<String> attachedByThisAttempt = new LinkedHashSet<>();
+        LinkedHashSet<String> detachedByThisAttempt = new LinkedHashSet<>();
+        LinkedHashSet<String> inlineWrittenByThisAttempt = new LinkedHashSet<>();
+        List<InlinePolicyUndo> inlineChanges = new ArrayList<>();
+        boolean tagMutationStarted = false;
+
+        final String pathToRestore = priorPath;
+        final String userIdToRestore = priorUserId;
+        final String boundaryToRestore = priorPermissionsBoundary;
+        boolean boundaryChangedByThisAttempt = false;
+
+        try {
+            // createUser() only applies PermissionsBoundary on first create. On adoption, set a
+            // changed boundary, and remove one only if the user has one and the template dropped it.
+            // ID-verified like the path write, here and in the rollback restore.
+            if (!createdUser && !Objects.equals(permissionsBoundary, boundaryToRestore)) {
+                if (permissionsBoundary != null) {
+                    iamService.putUserPermissionsBoundary(resolvedUserName, permissionsBoundary, userIdToRestore);
+                } else {
+                    iamService.deleteUserPermissionsBoundary(resolvedUserName, userIdToRestore);
+                }
+                boundaryChangedByThisAttempt = true;
+            }
+
+            for (String groupName : groups) {
+                iamService.addUserToGroup(groupName, resolvedUserName);
+                if (!originalGroups.contains(groupName)) {
+                    groupsAddedByThisAttempt.add(groupName);
+                }
+            }
+
+            for (String policyArn : managedPolicyArns) {
+                iamService.attachUserPolicy(resolvedUserName, policyArn);
+                if (!originalPolicyArns.contains(policyArn)) {
+                    attachedByThisAttempt.add(policyArn);
+                }
+            }
+
+            Map<String, String> desiredInlinePolicies = new LinkedHashMap<>();
+            if (props != null && props.has("Policies")) {
+                for (JsonNode policy : props.get("Policies")) {
+                    String declaredName = ctx.resolveOptional(policy, "PolicyName");
+                    if (declaredName == null || declaredName.isBlank()) {
+                        throw new AwsException("ValidationError",
+                                "An inline policy on user " + resolvedUserName + " has no PolicyName.", 400);
+                    }
+                    final String policyName = declaredName;
+                    JsonNode document = policy.get("PolicyDocument");
+                    if (document == null || document.isNull()) {
+                        throw new AwsException("ValidationError",
+                                "Inline policy '" + policyName + "' on user " + resolvedUserName
+                                        + " has no PolicyDocument.", 400);
+                    }
+                    desiredInlinePolicies.put(policyName, ctx.engine().resolveJsonAttributeStrict(document));
+                }
+            }
+
+            for (String stale : previousInlineNames) {
+                if (originalInlinePolicies.containsKey(stale)
+                        && !originalInlinePolicies.get(stale).equals(desiredInlinePolicies.get(stale))) {
+                    inlineChanges.add(new InlinePolicyUndo(stale,
+                            iamService.deleteUserPolicyWithRollback(resolvedUserName, stale)));
+                }
+            }
+            // Release replaced documents before writing, including policies that retain their names.
+            for (Map.Entry<String, String> policy : desiredInlinePolicies.entrySet()) {
+                inlineChanges.add(new InlinePolicyUndo(policy.getKey(), iamService.putUserPolicyWithRollback(
+                        resolvedUserName, policy.getKey(), policy.getValue())));
+                inlineWrittenByThisAttempt.add(policy.getKey());
+            }
+            for (String stale : previousManagedArns) {
+                if (!managedPolicyArns.contains(stale) && originalPolicyArns.contains(stale)) {
+                    iamService.detachUserPolicy(resolvedUserName, stale);
+                    detachedByThisAttempt.add(stale);
+                }
+            }
+            for (String stale : previousGroups) {
+                if (!groups.contains(stale) && originalGroups.contains(stale)) {
+                    iamService.removeUserFromGroup(stale, resolvedUserName);
+                    groupsRemovedByThisAttempt.add(stale);
+                }
+            }
+            if (!tagUpdates.isEmpty() || !tagRemovals.isEmpty()) {
+                tagMutationStarted = true;
+                if (!tagUpdates.isEmpty()) {
+                    iamService.tagUser(resolvedUserName, tagUpdates);
+                }
+                if (!tagRemovals.isEmpty()) {
+                    iamService.untagUser(resolvedUserName, tagRemovals);
+                }
+            }
+        } catch (RuntimeException failure) {
+            boolean cleanupSucceeded = true;
+
+            if (tagMutationStarted) {
+                List<String> introducedTagKeys = new ArrayList<>(tags.keySet());
+                introducedTagKeys.removeAll(originalTags.keySet());
+                if (!introducedTagKeys.isEmpty()
+                        && !CfnRollback.attemptIamCleanup(failure,
+                        "remove newly applied tags from user " + resolvedUserName,
+                        () -> iamService.untagUser(resolvedUserName, introducedTagKeys))) {
+                    cleanupSucceeded = false;
+                }
+                if (!originalTags.isEmpty()
+                        && !CfnRollback.attemptIamCleanup(failure,
+                        "restore prior tags on user " + resolvedUserName,
+                        () -> iamService.tagUser(resolvedUserName, originalTags))) {
+                    cleanupSucceeded = false;
+                }
+            }
+
+            for (String groupName : groupsRemovedByThisAttempt) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "re-add user " + resolvedUserName + " to group " + groupName,
+                        () -> iamService.addUserToGroup(groupName, resolvedUserName))) {
+                    cleanupSucceeded = false;
+                }
+            }
+            for (String policyArn : detachedByThisAttempt) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "reattach policy " + policyArn + " to user " + resolvedUserName,
+                        () -> iamService.attachUserPolicy(resolvedUserName, policyArn))) {
+                    cleanupSucceeded = false;
+                }
+            }
+
+            for (InlinePolicyUndo undo : inlineChanges.reversed()) {
+                String operation = undo.change().previousDocument() == null ? "remove" : "restore";
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        operation + " inline policy " + undo.name() + " on user " + resolvedUserName,
+                        undo.change().rollback())) {
+                    cleanupSucceeded = false;
+                }
+            }
+
+            List<String> rollbackArns = new ArrayList<>(attachedByThisAttempt);
+            Collections.reverse(rollbackArns);
+            for (String policyArn : rollbackArns) {
+                String cleanupDescription = "detach policy " + policyArn + " from user " + resolvedUserName;
+                if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
+                        () -> iamService.detachUserPolicy(resolvedUserName, policyArn))) {
+                    cleanupSucceeded = false;
+                }
+            }
+
+            List<String> rollbackGroups = new ArrayList<>(groupsAddedByThisAttempt);
+            Collections.reverse(rollbackGroups);
+            for (String groupName : rollbackGroups) {
+                String cleanupDescription = "remove user " + resolvedUserName + " from group " + groupName;
+                if (!CfnRollback.attemptIamCleanup(failure, cleanupDescription,
+                        () -> iamService.removeUserFromGroup(groupName, resolvedUserName))) {
+                    cleanupSucceeded = false;
+                }
+            }
+
+            if (boundaryChangedByThisAttempt) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "restore prior permissions boundary on user " + resolvedUserName, () -> {
+                            if (boundaryToRestore == null) {
+                                iamService.deleteUserPermissionsBoundary(resolvedUserName, userIdToRestore);
+                            } else {
+                                iamService.putUserPermissionsBoundary(resolvedUserName, boundaryToRestore, userIdToRestore);
+                            }
+                        })) {
+                    cleanupSucceeded = false;
+                }
+            }
+
+            if (pathToRestore != null) {
+                if (!CfnRollback.attemptIamCleanup(failure, "restore prior path on user " + resolvedUserName,
+                        () -> iamService.updateUser(resolvedUserName, null, pathToRestore, userIdToRestore))) {
+                    cleanupSucceeded = false;
+                }
+            }
+
+            if (createdUser) {
+                if (!CfnRollback.attemptIamCleanup(failure, "delete user " + resolvedUserName,
+                        () -> iamService.deleteUser(resolvedUserName))) {
+                    cleanupSucceeded = false;
+                }
+                if (cleanupSucceeded) {
+                    r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+                }
+            }
+            if (!createdUser && !cleanupSucceeded) {
+                r.getAttributes().remove(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR);
+                r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
+                        "Could not restore user after failed update: " + failure.getMessage());
+            }
+            throw failure;
+        }
+
+        CfnTrackedSets.write(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
+        CfnTrackedSets.write(r, MANAGED_ARNS_ATTR, managedPolicyArns);
+        CfnTrackedSets.write(r, GROUPS_ATTR, groups);
+    }
+
+    @Override
+    public void delete(String resourceType, String physicalId, String region) {
+        IamUser user;
+        try {
+            user = iamService.getUser(physicalId);
+        } catch (AwsException e) {
+            if (!"NoSuchEntity".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("IAM user already gone, treating as deleted: {0}", physicalId);
+            return;
+        }
+
+        for (String policyArn : new ArrayList<>(user.getAttachedPolicyArns())) {
+            CfnDeletes.safeDelete("attached policy " + policyArn + " on user", physicalId,
+                    () -> iamService.detachUserPolicy(physicalId, policyArn), "NoSuchEntity");
+        }
+
+        for (String policyName : new ArrayList<>(user.getInlinePolicies().keySet())) {
+            CfnDeletes.safeDelete("inline policy " + policyName + " on user", physicalId,
+                    () -> iamService.deleteUserPolicy(physicalId, policyName), "NoSuchEntity");
+        }
+
+        for (String groupName : new ArrayList<>(user.getGroupNames())) {
+            CfnDeletes.safeDelete("user " + physicalId + " membership in group " + groupName, physicalId,
+                    () -> iamService.removeUserFromGroup(groupName, physicalId), "NoSuchEntity");
+        }
+
+        try {
+            for (AccessKey key : iamService.listAccessKeys(physicalId)) {
+                CfnDeletes.safeDelete("access key " + key.getAccessKeyId() + " on user", physicalId,
+                        () -> iamService.deleteAccessKey(physicalId, key.getAccessKeyId()), "NoSuchEntity");
+            }
+        } catch (AwsException e) {
+            if (!"NoSuchEntity".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("IAM user access keys already gone, treating as deleted: {0}", physicalId);
+        }
+
+        CfnDeletes.safeDelete("login profile on user", physicalId,
+                () -> iamService.deleteLoginProfile(physicalId), "NoSuchEntity");
+
+        CfnDeletes.safeDelete("IAM user", physicalId,
+                () -> iamService.deleteUser(physicalId), "NoSuchEntity");
+    }
+}

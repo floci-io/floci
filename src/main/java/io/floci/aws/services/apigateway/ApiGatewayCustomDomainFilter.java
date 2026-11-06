@@ -1,0 +1,139 @@
+package io.floci.aws.services.apigateway;
+
+import io.floci.aws.core.common.RequestHost;
+import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.RequestUriRewrite;
+import io.floci.aws.services.apigateway.model.BasePathMapping;
+import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
+import jakarta.annotation.Priority;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.container.ContainerRequestFilter;
+import jakarta.ws.rs.container.PreMatching;
+import jakarta.ws.rs.core.UriBuilder;
+import jakarta.ws.rs.ext.Provider;
+import org.jboss.logging.Logger;
+
+import java.net.URI;
+
+/**
+ * Routes requests based on the Host header for API Gateway custom domains.
+ *
+ * <p>When a request arrives with a Host header matching a registered custom domain's
+ * {@code regionalDomainName} (e.g., {@code my-domain.regional.local:4566}), this filter
+ * resolves the corresponding base path mapping and rewrites the request URI to the
+ * standard execute-api path format: {@code /execute-api/{apiId}/{stageName}/{path}}.
+ *
+ * <p>This enables users to invoke API Gateway APIs using custom domain names, matching
+ * real AWS behavior where custom domains route to REST APIs via base path mappings.
+ */
+@Provider
+@PreMatching
+@Priority(10) // Run after Lambda URL filter (5) but before general processing
+@ApplicationScoped
+public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
+
+    /** Set on requests this filter rewrote, so later Host filters do not claim them again. */
+    public static final String ROUTED_PROPERTY = ApiGatewayCustomDomainFilter.class.getName() + ".routed";
+
+    private static final Logger LOG = Logger.getLogger(ApiGatewayCustomDomainFilter.class);
+    private static final String REGIONAL_SUFFIX = ".regional.local";
+
+    private final ApiGatewayService apiGatewayService;
+    private final ApiGatewayV2Service apiGatewayV2Service;
+    private final ApiGatewayExecuteRouteContext routeContext;
+
+    @Inject
+    public ApiGatewayCustomDomainFilter(ApiGatewayService apiGatewayService,
+                                        ApiGatewayV2Service apiGatewayV2Service,
+                                        ApiGatewayExecuteRouteContext routeContext) {
+        this.apiGatewayService = apiGatewayService;
+        this.apiGatewayV2Service = apiGatewayV2Service;
+        this.routeContext = routeContext;
+    }
+
+    @Override
+    public void filter(ContainerRequestContext requestContext) {
+        String host = RequestHost.of(requestContext);
+        if (host == null) {
+            return;
+        }
+
+        String hostname = stripPort(host);
+
+        // Try matching by regionalDomainName first, then by bare domain name
+        ApiGatewayService.CustomDomainRoute domain = null;
+        if (hostname.endsWith(REGIONAL_SUFFIX)) {
+            domain = apiGatewayService.findDomainByRegionalHostname(hostname);
+        }
+        if (domain == null) {
+            domain = apiGatewayService.findDomainByName(hostname);
+        }
+        if (domain == null) {
+            return;
+        }
+
+        URI originalUri = requestContext.getUriInfo().getRequestUri();
+        String path = originalUri.getRawPath();
+        if (path == null) {
+            path = "/";
+        }
+
+        // Resolve the base path mapping for this domain + path
+        BasePathMapping mapping = apiGatewayService.resolveBasePathMapping(domain, path);
+        if (mapping == null) {
+            LOG.debugv("No base path mapping found for domain {0} path {1}", domain.domainName(), path);
+            return;
+        }
+
+        String restApiId = mapping.getRestApiId();
+
+        if (restApiId == null) {
+            return;
+        }
+
+        // Strip the base path from the request path to get the remaining path
+        String remainingPath = apiGatewayService.stripBasePath(path, mapping);
+
+        String effectiveStage = mapping.getStage();
+        if (effectiveStage == null || effectiveStage.isEmpty()) {
+            return;
+        }
+
+        if (remainingPath.startsWith("/")) {
+            remainingPath = remainingPath.substring(1);
+        }
+
+        // Rewrite to the standard execute-api path
+        String newPath = "/execute-api/" + restApiId + "/" + effectiveStage + "/" + remainingPath;
+
+        URI newUri = UriBuilder.fromUri(originalUri)
+                .replacePath(newPath)
+                .build();
+
+        LOG.debugv("Custom domain routing: {0}{1} -> {2}", host, path, newUri.getPath());
+        String mappedRegion = domain.region();
+        boolean restApi = "REST".equals(mapping.getApiType())
+                || (mapping.getApiType() == null && RequestScopes.callAs(
+                        domain.accountId(), domain.region(),
+                        () -> apiGatewayService.hasRestApi(mappedRegion, restApiId)
+                                || !apiGatewayV2Service.hasApi(mappedRegion, restApiId)));
+        routeContext.routeToMappedApi(domain, restApi);
+        routeContext.recordSignedRequestPath(path);
+        routeContext.recordRewrittenRequestPath(newUri.getRawPath());
+        requestContext.setProperty(ROUTED_PROPERTY, Boolean.TRUE);
+        RequestUriRewrite.apply(requestContext, newUri);
+    }
+
+    private static String stripPort(String host) {
+        int colonIndex = host.lastIndexOf(':');
+        if (colonIndex > 0) {
+            String maybePart = host.substring(colonIndex + 1);
+            if (!maybePart.isEmpty() && maybePart.chars().allMatch(Character::isDigit)) {
+                return host.substring(0, colonIndex);
+            }
+        }
+        return host;
+    }
+}

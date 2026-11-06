@@ -160,7 +160,7 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bcm-data-exports",
               "bcm-pricing-calculator", "budgets", "ce", "cloudtrail", "codebuild", "codepipeline", "cognito-identity",
               "cognito-idp", "cur", "datasync", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
-              "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "redshift",
+              "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "quicksight", "redshift",
               "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso", "states", "textract",
               "timestream-influxdb", "translate")
 
@@ -295,6 +295,21 @@ NOT_COVERED: dict[str, str] = {
 # them apart (EventBridge's `events` and EventBridge V2's `eventsv2`): Floci applies it only to a request the service
 # of that endpoint serves, never by a member a caller could add to a request of the other.
 CORRECTIONS: dict[str, tuple[list[dict], str]] = {
+    "quicksight:CreateDataSet": ([{"types": ["datasource"], "arn": f"PhysicalTableMap{{}}.{kind}.DataSourceArn"}
+                                 for kind in ("S3Source", "RelationalTable", "CustomSql", "SaaSTable", "FileSource")],
+                                "CreateDataSet acts on each data source named by its physical tables; "
+                                "FolderArns and RowLevelPermissionDataSet.Arn name other resource types"),
+    "quicksight:CreateDashboard": ([{"type": "dashboard", "fill": {"ResourceId": "DashboardId"}}],
+                                   "DashboardId names the created dashboard; FolderArns and ThemeArn name "
+                                   "other resource types and are not dashboard ARN selectors"),
+    **{f"quicksight:{operation}": ([{"type": "ingestion", "fill": {"DatasetId": "DataSetId", "ResourceId": "IngestionId"}}],
+                                   "the ingestion ARN contains its dataset id and ingestion id, named by "
+                                   "DataSetId and IngestionId in the REST path")
+       for operation in ("CreateIngestion", "DescribeIngestion")},
+    **{f"quicksight:{operation}": ([{"type": "user", "fill": {}, "find": ["AwsAccountId", "Namespace", "UserName"]}],
+                                   "the user ARN ends in namespace/user-name, which the reference combines as "
+                                   "ResourceId; QuickSight resolves it from the account, namespace and user name")
+       for operation in ("RegisterUser", "DescribeUser")},
     "logs:PutDeliverySource": ([{"type": "delivery-source", "fill": {"DeliverySourceName": "name"}}],
                                "resourceArn is the ARN of the resource that sends the logs (an event bus, a load "
                                "balancer), never the delivery source's, which the request names by name"),
@@ -1098,7 +1113,7 @@ def _named(value: object) -> set[str]:
         return set().union(*(_named(key) | _named(item) for key, item in value.items())) if value else set()
     if isinstance(value, list):
         return set().union(*(_named(item) for item in value)) if value else set()
-    return {re.split(r"[\[.]", value, maxsplit=1)[0]} if isinstance(value, str) else set()
+    return {re.split(r"[\[{.]", value, maxsplit=1)[0]} if isinstance(value, str) else set()
 
 
 def with_found(resources: list[dict], namespace: str, types: list[str], members: dict[str, str]) -> list[dict]:
@@ -1291,8 +1306,9 @@ PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?$")
 # A member filling a variable may also be a field of a structure, or of each element of a list of structures, one
 # value for each.
 FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*|\.[A-Za-z][A-Za-z0-9_]*)?$")
-# An ARN member's path may go one level into a structure or a list's structures.
-ARN_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?$")
+# ARN paths can traverse structures, array elements ([]) and map values ({}).
+ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?"
+                         r"|[A-Za-z][A-Za-z0-9_]*\{\}(\.[A-Za-z][A-Za-z0-9_]*){1,2})$")
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
 # The keys a resource found by members does not take: it is read no other way, in the caller's account.
