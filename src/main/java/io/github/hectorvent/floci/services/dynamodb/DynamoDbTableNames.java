@@ -112,19 +112,12 @@ public final class DynamoDbTableNames {
     }
 
     static boolean isTableArn(String value, String region) {
-        AwsArnUtils.Arn arn;
         try {
-            arn = AwsArnUtils.parse(value);
-        } catch (IllegalArgumentException notAnArn) {
+            return region.equals(parseArn(value).region())
+                    && AwsRegions.partitionFor(region).equals(AwsArnUtils.parse(value).partition());
+        } catch (AwsException notATableArn) {
             return false;
         }
-        String resource = arn.resource();
-        return arn.partition().equals(AwsRegions.partitionFor(region))
-                && "dynamodb".equals(arn.service())
-                && arn.region().equals(region)
-                && ACCOUNT_PATTERN.matcher(arn.accountId()).matches()
-                && resource.startsWith("table/")
-                && nameViolations(resource.substring("table/".length())).isEmpty();
     }
 
     private static void validateTableName(String tableName) {
