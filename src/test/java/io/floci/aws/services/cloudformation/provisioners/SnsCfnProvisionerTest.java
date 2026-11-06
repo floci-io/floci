@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -79,6 +80,8 @@ class SnsCfnProvisionerTest {
                 .thenAnswer(i -> new SnsService.SubscriptionCreation(
                         sns.subscribe(i.getArgument(0), i.getArgument(1), i.getArgument(2), i.getArgument(3),
                                 i.getArgument(4)), true));
+        when(sns.subscribe(anyString(), anyString(), anyString(), anyString(), anyMap()))
+                .thenReturn(subscription("arn:prior"));
         ctx = new ProvisionContext(engine, REGION, "000000000000", "my-stack");
     }
 
@@ -655,6 +658,126 @@ class SnsCfnProvisionerTest {
 
         assertEquals(Map.of(), attrs.getValue(),
                 "unset optional attributes must not be sent as empty strings");
+    }
+
+    @Test
+    void subscriptionUpdateSetsMutableAttributesOnThePriorIdentity() {
+        StackResource resource = existingSubscription();
+        when(sns.getSubscriptionAttributes("arn:prior", REGION))
+                .thenReturn(Map.of("TopicArn", "t", "Protocol", "sqs", "Endpoint", "e"));
+
+        provisioner.provision(resource, props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e","FilterPolicy":{"kind":["updated"]},
+                 "RawMessageDelivery":true,"FilterPolicyScope":"MessageBody",
+                 "RedrivePolicy":{"deadLetterTargetArn":"arn:dlq"}}
+                """), subscriptionUpdate(null));
+
+        verify(sns, never()).subscribe(anyString(), anyString(), anyString(), anyString(), anyMap());
+        verify(sns).setSubscriptionAttribute("arn:prior", "FilterPolicy", "{\"kind\":[\"updated\"]}", REGION);
+        verify(sns).setSubscriptionAttribute("arn:prior", "RawMessageDelivery", "true", REGION);
+        verify(sns).setSubscriptionAttribute("arn:prior", "FilterPolicyScope", "MessageBody", REGION);
+        verify(sns).setSubscriptionAttribute("arn:prior", "RedrivePolicy", "{\"deadLetterTargetArn\":\"arn:dlq\"}", REGION);
+        assertEquals("arn:prior", resource.getPhysicalId());
+        assertEquals("arn:prior", resource.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void subscriptionUpdateResetsDroppedDeclaredProperties() {
+        when(sns.getSubscriptionAttributes("arn:prior", REGION))
+                .thenReturn(Map.of("TopicArn", "t", "Protocol", "sqs", "Endpoint", "e"));
+
+        provisioner.provision(existingSubscription(), props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
+                """), subscriptionUpdate(props("""
+                {"FilterPolicy":{"kind":["created"]},"RawMessageDelivery":true,
+                 "FilterPolicyScope":"MessageBody","RedrivePolicy":{"deadLetterTargetArn":"arn:dlq"}}
+                """)));
+
+        verify(sns).setSubscriptionAttribute("arn:prior", "FilterPolicy", "", REGION);
+        verify(sns).setSubscriptionAttribute("arn:prior", "RawMessageDelivery", "false", REGION);
+        verify(sns).setSubscriptionAttribute("arn:prior", "FilterPolicyScope", "MessageAttributes", REGION);
+        verify(sns).setSubscriptionAttribute("arn:prior", "RedrivePolicy", "", REGION);
+        verify(sns, never()).setSubscriptionAttribute(anyString(), eq("SubscriptionRoleArn"), anyString(), anyString());
+    }
+
+    @Test
+    void subscriptionUpdatePreservesUndeclaredExternalAttributes() {
+        when(sns.getSubscriptionAttributes("arn:prior", REGION))
+                .thenReturn(Map.of("TopicArn", "t", "Protocol", "sqs", "Endpoint", "e",
+                        "FilterPolicy", "{\"kind\":[\"external\"]}"));
+
+        provisioner.provision(existingSubscription(), props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e"}
+                """), subscriptionUpdate(props("{}")));
+
+        verify(sns, never()).setSubscriptionAttribute(anyString(), anyString(), anyString(), anyString());
+        verify(sns, never()).subscribe(anyString(), anyString(), anyString(), anyString(), anyMap());
+    }
+
+    @Test
+    void subscriptionReplacementStillUsesSubscribeValidation() {
+        when(sns.getSubscriptionAttributes("arn:prior", REGION))
+                .thenReturn(Map.of("TopicArn", "t", "Protocol", "sqs", "Endpoint", "e"));
+        when(sns.subscribe("t", "sqs", "replacement", REGION, Map.of("RawMessageDelivery", "true")))
+                .thenReturn(subscription("arn:replacement"));
+        StackResource resource = existingSubscription();
+
+        provisioner.provision(resource, props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"replacement","RawMessageDelivery":true}
+                """), subscriptionUpdate(null));
+
+        assertEquals("arn:replacement", resource.getPhysicalId());
+        verify(sns).subscribe("t", "sqs", "replacement", REGION, Map.of("RawMessageDelivery", "true"));
+        verify(sns, never()).setSubscriptionAttribute(anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void missingPriorSubscriptionDoesNotAdoptAnotherCallersSubscription() {
+        when(sns.getSubscriptionAttributes("arn:prior", REGION))
+                .thenThrow(new AwsException("NotFound", "Subscription does not exist.", 404));
+        StackResource resource = existingSubscription();
+
+        AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(resource, props("""
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e","RawMessageDelivery":true}
+                """), subscriptionUpdate(null)));
+
+        assertEquals("NotFound", error.getErrorCode());
+        assertEquals("arn:prior", resource.getPhysicalId());
+        verify(sns, never()).subscribe(anyString(), anyString(), anyString(), anyString(), anyMap());
+        verify(sns, never()).setSubscriptionAttribute(anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void removedFirehoseRoleFailsBeforeOtherAttributesChange() {
+        when(sns.getSubscriptionAttributes("arn:prior", REGION))
+                .thenReturn(Map.of("TopicArn", "t", "Protocol", "firehose", "Endpoint", "e"));
+        doThrow(new AwsException("InvalidParameter", "A role is required.", 400)).when(sns)
+                .setSubscriptionAttribute("arn:prior", "SubscriptionRoleArn", "", REGION);
+        StackResource resource = existingSubscription();
+
+        AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(resource, props("""
+                {"TopicArn":"t","Protocol":"firehose","Endpoint":"e","RawMessageDelivery":true}
+                """), subscriptionUpdate(props("""
+                {"SubscriptionRoleArn":"arn:aws:iam::000000000000:role/previous"}
+                """))));
+
+        assertEquals("InvalidParameter", error.getErrorCode());
+        assertEquals("arn:prior", resource.getPhysicalId());
+        verify(sns, never()).setSubscriptionAttribute(anyString(), eq("RawMessageDelivery"), anyString(), anyString());
+    }
+
+    private static StackResource existingSubscription() {
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Sub");
+        resource.setResourceType("AWS::SNS::Subscription");
+        resource.setPhysicalId("arn:prior");
+        resource.setAttributes(new HashMap<>(Map.of("Arn", "arn:prior")));
+        return resource;
+    }
+
+    private ProvisionContext subscriptionUpdate(JsonNode priorProperties) {
+        return new ProvisionContext(engine, REGION, "000000000000", "my-stack", "arn:prior",
+                event -> { }, priorProperties);
     }
 
     @Test

@@ -51,6 +51,62 @@ class CloudFormationSnsFirehoseRoleIntegrationTest {
         }
     }
 
+    @Test
+    void filterPolicyAndRawDeliveryUpdateAndRemovalKeepSubscriptionIdentity() {
+        String suffix = UUID.randomUUID().toString();
+        String stackName = "sns-subscription-attributes-" + suffix;
+        try (CloudFormationClient cfn = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1);
+             SnsClient sns = AwsTestClients.create(SnsClient.builder(), "test", Region.US_EAST_1)) {
+            String topic = sns.createTopic(request -> request.name("sns-attributes-" + suffix)).topicArn();
+            boolean created = false;
+            try {
+                cfn.createStack(request -> request.stackName(stackName)
+                        .templateBody(attributeTemplate(topic, ",\"FilterPolicy\":{\"kind\":[\"created\"]}")));
+                created = true;
+                CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
+                String arn = subscription(cfn, stackName);
+                assertEquals("{\"kind\":[\"created\"]}", sns.getSubscriptionAttributes(
+                        request -> request.subscriptionArn(arn)).attributes().get("FilterPolicy"));
+
+                cfn.updateStack(request -> request.stackName(stackName).templateBody(attributeTemplate(topic,
+                        ",\"FilterPolicy\":{\"kind\":[\"updated\"]},\"RawMessageDelivery\":true")));
+                CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
+                assertEquals(arn, subscription(cfn, stackName));
+                assertEquals("{\"kind\":[\"updated\"]}", sns.getSubscriptionAttributes(
+                        request -> request.subscriptionArn(arn)).attributes().get("FilterPolicy"));
+                assertEquals("true", sns.getSubscriptionAttributes(
+                        request -> request.subscriptionArn(arn)).attributes().get("RawMessageDelivery"));
+                assertEquals(1, sns.listSubscriptionsByTopic(request -> request.topicArn(topic)).subscriptions().size());
+
+                cfn.updateStack(request -> request.stackName(stackName).templateBody(attributeTemplate(topic, "")));
+                CfnStackWaits.awaitStatus(cfn, stackName, "UPDATE_COMPLETE");
+                assertEquals(arn, subscription(cfn, stackName));
+                assertEquals("", sns.getSubscriptionAttributes(
+                        request -> request.subscriptionArn(arn)).attributes().get("FilterPolicy"));
+                assertEquals("false", sns.getSubscriptionAttributes(
+                        request -> request.subscriptionArn(arn)).attributes().get("RawMessageDelivery"));
+            } finally {
+                try {
+                    if (created) {
+                        cfn.deleteStack(request -> request.stackName(stackName));
+                    }
+                } finally {
+                    sns.deleteTopic(request -> request.topicArn(topic));
+                }
+            }
+        }
+    }
+
+    private static String attributeTemplate(String topic, String attributes) {
+        return """
+                {"Resources":{"Subscription":{"Type":"AWS::SNS::Subscription","Properties":{
+                  "TopicArn":"%s","Protocol":"sqs",
+                  "Endpoint":{"Fn::Sub":"arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:test"}%s
+                }}}}
+                """.formatted(topic, attributes);
+    }
+
     private static String subscription(CloudFormationClient cfn, String stackName) {
         return cfn.describeStackResource(request -> request.stackName(stackName).logicalResourceId("Subscription"))
                 .stackResourceDetail().physicalResourceId();
