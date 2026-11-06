@@ -894,9 +894,9 @@ public class ApiGatewayController {
 
     @GET
     @Path("/usageplans")
-    public Response getUsagePlans(@Context HttpHeaders headers) {
+    public Response getUsagePlans(@Context HttpHeaders headers, @QueryParam("keyId") String keyId) {
         String region = regionResolver.resolveRegion(headers);
-        List<UsagePlan> plans = service.getUsagePlans(region);
+        List<UsagePlan> plans = service.getUsagePlans(region, keyId);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
         plans.forEach(p -> items.add(toUsagePlanNode(p, false)));

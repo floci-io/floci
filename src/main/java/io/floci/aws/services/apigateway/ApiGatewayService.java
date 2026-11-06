@@ -1629,6 +1629,21 @@ public class ApiGatewayService implements ResourceProvider {
         return usagePlanStore.scan(k -> k.startsWith(prefix));
     }
 
+    /**
+     * {@code GetUsagePlans} with its {@code keyId} filter, measured on API Gateway: only the plans
+     * the key is added to, an empty list for a key in no plan or no key at all, and every plan for a
+     * blank {@code keyId}.
+     */
+    public List<UsagePlan> getUsagePlans(String region, String keyId) {
+        List<UsagePlan> plans = getUsagePlans(region);
+        if (keyId == null || keyId.isBlank()) {
+            return plans;
+        }
+        return plans.stream()
+                .filter(plan -> usagePlanKeyStore.get(usagePlanKeyPathKey(region, plan.getId(), keyId)).isPresent())
+                .toList();
+    }
+
     public void deleteUsagePlan(String region, String usagePlanId) {
         synchronized (usagePlanLock) {
             getUsagePlan(region, usagePlanId);
