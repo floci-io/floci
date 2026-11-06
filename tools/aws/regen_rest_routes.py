@@ -73,6 +73,7 @@ MODELS: dict[str, str] = {
     "s3control": "s3",
     "scheduler": "scheduler",
     "signer": "signer",
+    "xray": "xray",
 }
 
 # The models whose routes are rewritten onto an internal prefix, and the prefix they are rewritten
@@ -87,8 +88,10 @@ INTERNAL_ROUTES: dict[str, tuple[str, bool]] = {
     # filter owns, so its routes are vendored as the rewritten path: the action and the request's
     # resource labels both resolve from it.
     "signer": ("/_signer", False),
+    # X-Ray's routes collide with S3's path-style ones too, for the same reason and with the same
+    # fix: the vendored route is the path its filter rewrites the request onto.
+    "xray": ("/_xray", False),
 }
-
 
 # Operations a model does not serve itself, so their path is not rewritten onto its internal prefix.
 # The shared tags controller serves /tags/{resourceArn} for every service that is a TagHandler, and

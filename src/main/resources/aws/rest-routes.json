@@ -1589,6 +1589,50 @@
         "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "body"}}]},
         "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]}
       }
+    },
+    "xray": {
+      "credentialScope": "xray",
+      "apiVersion": "2016-04-12",
+      "operations": {
+        "BatchGetTraces": {"method": "POST", "requestUri": "/_xray/Traces"},
+        "CancelTraceRetrieval": {"method": "POST", "requestUri": "/_xray/CancelTraceRetrieval"},
+        "CreateGroup": {"method": "POST", "requestUri": "/_xray/CreateGroup"},
+        "CreateSamplingRule": {"method": "POST", "requestUri": "/_xray/CreateSamplingRule"},
+        "DeleteGroup": {"method": "POST", "requestUri": "/_xray/DeleteGroup"},
+        "DeleteResourcePolicy": {"method": "POST", "requestUri": "/_xray/DeleteResourcePolicy"},
+        "DeleteSamplingRule": {"method": "POST", "requestUri": "/_xray/DeleteSamplingRule"},
+        "GetEncryptionConfig": {"method": "POST", "requestUri": "/_xray/EncryptionConfig"},
+        "GetGroup": {"method": "POST", "requestUri": "/_xray/GetGroup"},
+        "GetGroups": {"method": "POST", "requestUri": "/_xray/Groups"},
+        "GetIndexingRules": {"method": "POST", "requestUri": "/_xray/GetIndexingRules"},
+        "GetInsight": {"method": "POST", "requestUri": "/_xray/Insight"},
+        "GetInsightEvents": {"method": "POST", "requestUri": "/_xray/InsightEvents"},
+        "GetInsightImpactGraph": {"method": "POST", "requestUri": "/_xray/InsightImpactGraph"},
+        "GetInsightSummaries": {"method": "POST", "requestUri": "/_xray/InsightSummaries"},
+        "GetRetrievedTracesGraph": {"method": "POST", "requestUri": "/_xray/GetRetrievedTracesGraph"},
+        "GetSamplingRules": {"method": "POST", "requestUri": "/_xray/GetSamplingRules"},
+        "GetSamplingStatisticSummaries": {"method": "POST", "requestUri": "/_xray/SamplingStatisticSummaries"},
+        "GetSamplingTargets": {"method": "POST", "requestUri": "/_xray/SamplingTargets"},
+        "GetServiceGraph": {"method": "POST", "requestUri": "/_xray/ServiceGraph"},
+        "GetTimeSeriesServiceStatistics": {"method": "POST", "requestUri": "/_xray/TimeSeriesServiceStatistics"},
+        "GetTraceGraph": {"method": "POST", "requestUri": "/_xray/TraceGraph"},
+        "GetTraceSegmentDestination": {"method": "POST", "requestUri": "/_xray/GetTraceSegmentDestination"},
+        "GetTraceSummaries": {"method": "POST", "requestUri": "/_xray/TraceSummaries"},
+        "ListResourcePolicies": {"method": "POST", "requestUri": "/_xray/ListResourcePolicies"},
+        "ListRetrievedTraces": {"method": "POST", "requestUri": "/_xray/ListRetrievedTraces"},
+        "ListTagsForResource": {"method": "POST", "requestUri": "/_xray/ListTagsForResource"},
+        "PutEncryptionConfig": {"method": "POST", "requestUri": "/_xray/PutEncryptionConfig"},
+        "PutResourcePolicy": {"method": "POST", "requestUri": "/_xray/PutResourcePolicy"},
+        "PutTelemetryRecords": {"method": "POST", "requestUri": "/_xray/TelemetryRecords"},
+        "PutTraceSegments": {"method": "POST", "requestUri": "/_xray/TraceSegments"},
+        "StartTraceRetrieval": {"method": "POST", "requestUri": "/_xray/StartTraceRetrieval"},
+        "TagResource": {"method": "POST", "requestUri": "/_xray/TagResource"},
+        "UntagResource": {"method": "POST", "requestUri": "/_xray/UntagResource"},
+        "UpdateGroup": {"method": "POST", "requestUri": "/_xray/UpdateGroup"},
+        "UpdateIndexingRule": {"method": "POST", "requestUri": "/_xray/UpdateIndexingRule"},
+        "UpdateSamplingRule": {"method": "POST", "requestUri": "/_xray/UpdateSamplingRule"},
+        "UpdateTraceSegmentDestination": {"method": "POST", "requestUri": "/_xray/UpdateTraceSegmentDestination"}
+      }
     }
   }
 }

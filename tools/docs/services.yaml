@@ -212,6 +212,10 @@ services:
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
+  - service: xray
+    doc: docs/services/xray.md
+    sources:
+      - { path: services/xray/XrayController.java, mode: rest }
   - service: connect
     doc: docs/services/connect.md
     sources:

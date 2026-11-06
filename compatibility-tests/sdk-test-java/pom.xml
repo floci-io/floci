@@ -664,6 +664,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>signer</artifactId>
         </dependency>
+        <!-- X-Ray client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>xray</artifactId>
+        </dependency>
         <!-- DataSync client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

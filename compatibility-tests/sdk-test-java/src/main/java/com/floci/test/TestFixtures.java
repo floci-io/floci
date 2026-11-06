@@ -176,6 +176,7 @@ import software.amazon.awssdk.services.timestreaminfluxdb.TimestreamInfluxDbClie
 import software.amazon.awssdk.services.transfer.TransferClient;
 import software.amazon.awssdk.services.verifiedpermissions.VerifiedPermissionsClient;
 import software.amazon.awssdk.services.wafv2.Wafv2Client;
+import software.amazon.awssdk.services.xray.XRayClient;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -1624,6 +1625,14 @@ public final class TestFixtures {
 
     public static AppIntegrationsClient appIntegrationsClient() {
         return AppIntegrationsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static XRayClient xrayClient() {
+        return XRayClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

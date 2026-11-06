@@ -57,7 +57,8 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "paymentcryptography", "pipes", "quicksight", "ram", "rds", "redshift", "redshiftserverless",
             "resourceexplorer2", "resourcegroups", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "signer", "sns", "sqs",
-            "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2");
+            "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2",
+            "xray");
 
     private static final String JSON_1_0 = "application/x-amz-json-1.0";
     private static final String JSON_1_1 = "application/x-amz-json-1.1";
@@ -97,6 +98,23 @@ class PartitionCrossServiceSmokeIntegrationTest {
                 .when().post("/groups").then().statusCode(200).extract().path("Group.GroupArn");
         cleanup.register(() -> signed(region, "resource-groups").contentType(JSON)
                 .body("{\"Group\":\"" + arn + "\"}").when().post("/delete-group"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void xraySamplingRuleArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "xray");
+        String name = unique("smoke-rule", partitionCase);
+        String body = "{\"SamplingRule\":{\"RuleName\":\"" + name + "\",\"Priority\":10,"
+                + "\"FixedRate\":0.1,\"ReservoirSize\":1,\"ServiceName\":\"*\","
+                + "\"ServiceType\":\"*\",\"Host\":\"*\",\"HTTPMethod\":\"*\","
+                + "\"URLPath\":\"*\",\"Version\":1}}";
+        String arn = signed(region, "xray").contentType(JSON).body(body)
+                .when().post("/CreateSamplingRule")
+                .then().statusCode(200).extract().path("SamplingRuleRecord.SamplingRule.RuleARN");
+        cleanup.register(() -> signed(region, "xray").contentType(JSON)
+                .body("{\"RuleName\":\"" + name + "\"}").when().post("/DeleteSamplingRule"));
         PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 
