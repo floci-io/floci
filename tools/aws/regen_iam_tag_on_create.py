@@ -111,7 +111,7 @@ NAMESPACES = (
     "elasticmapreduce", "es", "events", "firehose", "globalaccelerator", "glue", "iam", "kinesis", "kinesisanalytics",
     "kms", "lambda", "lightsail", "logs", "memorydb", "network-firewall", "organizations", "payment-cryptography",
     "pipes", "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "route53resolver",
-    "sagemaker", "scheduler", "secretsmanager", "servicediscovery", "ses", "sns", "sqs", "ssm", "sso", "states",
+    "sagemaker", "scheduler", "secretsmanager", "servicediscovery", "ses", "signer", "sns", "sqs", "ssm", "sso", "states",
     "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2",
 )
 

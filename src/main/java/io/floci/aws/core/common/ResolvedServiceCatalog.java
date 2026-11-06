@@ -101,6 +101,7 @@ import io.floci.aws.services.ses.SesSuppressionController;
 import io.floci.aws.services.ses.SesTagController;
 import io.floci.aws.services.ses.SesTemplateController;
 import io.floci.aws.services.ses.SesTenantController;
+import io.floci.aws.services.signer.SignerController;
 import io.floci.aws.services.signin.SigninController;
 import io.floci.aws.services.ssooidc.SsoOidcController;
 import io.floci.aws.services.ssoportal.SsoPortalController;
@@ -777,6 +778,10 @@ public class ResolvedServiceCatalog {
                         "dlm", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("dlm"), Set.of(), Set.of(DlmController.class)),
+                descriptor("signer", "signer", config.services().signer().enabled(), true,
+                        "signer", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("signer"), Set.of(), Set.of(SignerController.class)),
                 descriptor("cognito-identity", "cognitoidentity",
                         config.services().cognitoidentity().enabled(), true,
                         "cognitoidentity", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,

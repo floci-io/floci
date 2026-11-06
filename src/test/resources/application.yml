@@ -559,6 +559,8 @@ floci:
       enabled: true
     dlm:
       enabled: true
+    signer:
+      enabled: true
     cognitoidentity:
       enabled: true
     globalaccelerator:
