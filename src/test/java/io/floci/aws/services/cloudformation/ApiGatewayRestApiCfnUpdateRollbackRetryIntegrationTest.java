@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.floci.aws.testing.CfnRequests.cfn;
+import static io.floci.aws.testing.CfnRequests.physicalIdUnauthenticated;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -69,7 +70,7 @@ class ApiGatewayRestApiCfnUpdateRollbackRetryIntegrationTest {
         try {
             stackAction(stack, "CreateStack", TEMPLATE.formatted(name, "first", "REGIONAL", ""));
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
-            String apiId = physicalId(stack);
+            String apiId = physicalIdUnauthenticated(stack, "Api");
             // After putRestApi accepted the document, applying the declared name and description
             // again (just those two operations) fails once.
             Mockito.doThrow(new AwsException("TooManyRequestsException", "Too Many Requests", 429))
@@ -108,7 +109,7 @@ class ApiGatewayRestApiCfnUpdateRollbackRetryIntegrationTest {
         try {
             stackAction(stack, "CreateStack", TEMPLATE.formatted(name, "first", "REGIONAL", ""));
             assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
-            String apiId = physicalId(stack);
+            String apiId = physicalIdUnauthenticated(stack, "Api");
             // The import rejects the document, and the first restore of the patch fails.
             ArgumentMatcher<List<Map<String, String>>> restore =
                     operations -> operations != null && operations.contains(replace("/description", "first"));
@@ -150,10 +151,6 @@ class ApiGatewayRestApiCfnUpdateRollbackRetryIntegrationTest {
     private static void assertPaths(String apiId, String... paths) {
         given().when().get("/restapis/" + apiId + "/resources").then().statusCode(200)
                 .body("item.path", containsInAnyOrder(paths));
-    }
-
-    private static String physicalId(String stack) {
-        return XmlParser.extractFirst(apiResource(stack), "PhysicalResourceId", null);
     }
 
     private static String apiResourceReason(String stack) {
