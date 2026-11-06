@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -105,11 +106,7 @@ class ApiGatewayOpenApiParameterRefImportIntegrationTest {
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", containsString("#/components/parameters/Missing"));
 
-        given()
-                .when().get("/restapis")
-                .then()
-                .statusCode(200)
-                .body("item.name", not(hasItem("MissingParameterRefAPI")));
+        assertThat(ApiGatewayRestApiPages.restApiNames(), not(hasItem("MissingParameterRefAPI")));
     }
 
     @Test
@@ -231,11 +228,7 @@ class ApiGatewayOpenApiParameterRefImportIntegrationTest {
                 .body("__type", equalTo("BadRequestException"))
                 .body("message", containsString("#/components/parameters/Loop"));
 
-        given()
-                .when().get("/restapis")
-                .then()
-                .statusCode(200)
-                .body("item.name", not(hasItem("CyclicParameterRefAPI")));
+        assertThat(ApiGatewayRestApiPages.restApiNames(), not(hasItem("CyclicParameterRefAPI")));
     }
 
     private static void assertImportedRequestParameters(String spec, String path, String httpMethod,

@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -469,6 +471,20 @@ public class ApiGatewayService implements ResourceProvider {
     public List<RestApi> getRestApis(String region) {
         String prefix = region + "::";
         return apiStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public PaginatedResult<RestApi> getRestApis(String region, Integer limit, String position) {
+        // Non-positive limits keep their existing unpaged behavior.
+        if (limit != null && limit <= 0) {
+            return new PaginatedResult<>(getRestApis(region), null);
+        }
+        int pageSize = limit == null ? 25 : limit;
+        if (pageSize > 500) {
+            throw new AwsException("BadRequestException", "limit must not exceed 500.", 400);
+        }
+        return Pagination.paginate(getRestApis(region), RestApi::getId, pageSize, position,
+                "apigateway-rest-apis:" + regionResolver.getAccountId() + ":" + region,
+                token -> new AwsException("BadRequestException", "Invalid position.", 400));
     }
 
     public void deleteRestApi(String region, String apiId) {

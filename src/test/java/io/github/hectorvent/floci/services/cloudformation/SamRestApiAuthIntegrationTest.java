@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayRestApiPages;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -65,8 +66,7 @@ class SamRestApiAuthIntegrationTest {
         given().contentType(ContentType.JSON).queryParam("mode", "import")
                 .body(document.toString()).post("/restapis").then().statusCode(400)
                 .body("message", containsString("Only one Authorizer or IAM authorization"));
-        given().get("/restapis").then().statusCode(200)
-                .body("item.find { it.name == '" + title + "' }", equalTo(null));
+        assertFalse(ApiGatewayRestApiPages.restApiNames().contains(title));
     }
 
     @ParameterizedTest

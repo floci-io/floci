@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 
 @QuarkusTest
@@ -52,11 +53,7 @@ class ApiGatewayIntegrationTest {
 
     @Test @Order(3)
     void listRestApis() {
-        given()
-                .when().get("/restapis")
-                .then()
-                .statusCode(200)
-                .body("item.id", hasItem(apiId));
+        assertThat(ApiGatewayRestApiPages.restApiIds(), hasItem(apiId));
     }
 
     @Test @Order(4)

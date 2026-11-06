@@ -6,9 +6,9 @@ import org.junit.jupiter.api.Test;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
  * RestApi response members that clients read even when a caller does not supply them:
@@ -161,11 +161,6 @@ class ApiGatewayRestApiResponseFieldsTest {
     void listRestApisReportsTheSameMembersAsGetRestApi() {
         String apiId = createApi("api-in-list");
 
-        given()
-        .when()
-            .get("/restapis")
-        .then()
-            .statusCode(200)
-            .body("item.findAll { it.id == '" + apiId + "' }.rootResourceId", everyItem(notNullValue()));
+        assertNotNull(ApiGatewayRestApiPages.restApi(apiId).get("rootResourceId"));
     }
 }

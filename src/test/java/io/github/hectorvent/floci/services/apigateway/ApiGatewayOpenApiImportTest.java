@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -1756,8 +1757,7 @@ class ApiGatewayOpenApiImportTest {
         given().contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
                 .post("/restapis").then().statusCode(400)
                 .body("message", containsString("Only one Authorizer or IAM authorization"));
-        given().get("/restapis").then().statusCode(200)
-                .body("item.find { it.name == 'MultiAuthAPI' }", nullValue());
+        assertThat(ApiGatewayRestApiPages.restApiNames(), not(hasItem("MultiAuthAPI")));
 
     }
 
@@ -1836,10 +1836,7 @@ class ApiGatewayOpenApiImportTest {
                         containsString("identitySource"),
                         containsString("caching")));
 
-        given()
-                .when().get("/restapis")
-                .then().statusCode(200)
-                .body("item.name", not(hasItem(title)));
+        assertThat(ApiGatewayRestApiPages.restApiNames(), not(hasItem(title)));
     }
 
     @Test

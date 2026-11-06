@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsCertificateManager;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -92,7 +93,7 @@ class ApiGatewayRootResourceLookupTest {
         api.setRootResourceId("root-id");
 
         ApiGatewayService mockedService = mock(ApiGatewayService.class);
-        when(mockedService.getRestApis(REGION)).thenReturn(List.of(api));
+        when(mockedService.getRestApis(REGION, null, null)).thenReturn(new PaginatedResult<>(List.of(api), null));
         RegionResolver regionResolver = mock(RegionResolver.class);
         HttpHeaders headers = mock(HttpHeaders.class);
         when(regionResolver.resolveRegion(headers)).thenReturn(REGION);
@@ -101,7 +102,7 @@ class ApiGatewayRootResourceLookupTest {
                 mock(ApiGatewayV2Service.class), mock(ApiGatewayV2OpenApiImporter.class),
                 regionResolver, objectMapper, null);
 
-        Response response = controller.getRestApis(headers);
+        Response response = controller.getRestApis(headers, null, null);
         JsonNode body = objectMapper.readTree((String) response.getEntity());
 
         assertEquals("root-id", body.path("item").get(0).path("rootResourceId").asText());
