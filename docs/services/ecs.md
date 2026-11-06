@@ -348,6 +348,14 @@ stops, and the ENI is released. Security-group enforcement
 (`FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED`) adds packet filtering on top of the ENI; it is
 not needed for the ENI itself.
 
+With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true` and
+`FLOCI_SERVICES_EC2_MOCK=false`), a Docker-mode task also joins its VPC's Docker network at the ENI
+address, so an EC2 instance, a `VpcConfig` Lambda function or any other container on that network
+reaches the task at the `privateIPv4Address` that `DescribeTasks` reports. AWS gives the whole task
+that one address; Floci gives it to one container, the first in the task definition that maps a
+port, else the first, and the task's other containers do not answer at it. A task in a
+security-group protected namespace keeps that namespace and does not join the VPC network.
+
 #### Capacity providers
 
 `capacityProviderStrategy` is honoured on `RunTask` and `CreateService`, including the built-in
@@ -586,7 +594,7 @@ carries `AWS_INSTANCE_IPV4` and `AWS_INSTANCE_PORT`, chosen by network mode:
 
 | Network mode | `AWS_INSTANCE_IPV4` | `AWS_INSTANCE_PORT` |
 |---|---|---|
-| `awsvpc` | the address the task's container holds on its Docker network | the entry's `containerPort` |
+| `awsvpc` | the address the task's container holds on the Docker network it was created on | the entry's `containerPort` |
 | `bridge` or `host` | the address Floci reaches the container at: `127.0.0.1` when Floci runs natively, the container's Docker network address when Floci runs in Docker | the host port the entry's `containerPort` was published on, or the `containerPort` when it has no binding |
 
 An explicit `port` on the registry entry is registered as-is in every mode, as on AWS. The
@@ -607,8 +615,9 @@ Known differences from AWS:
   only A records, so such a task registers its address and its published host port and
   resolves by address; the port is readable through `DiscoverInstances` rather than DNS.
 - An awsvpc task registers its container's Docker network address, not its ENI address. On
-  AWS the two are the same interface. In Floci a task's containers never join the subnet's
-  network, so the ENI address `DescribeTasks` reports is not one a peer can connect to. The
+  AWS the two are the same interface. In Floci the ENI address is held only on the VPC's
+  Docker network, when VPC networks are enabled, so it is not one a peer outside that network
+  can connect to. The
   registrar falls back to the ENI address only when it cannot read an address from a running
   container. Because the address is the container's own, the port is its `containerPort`, not
   any host port Floci also published it on.

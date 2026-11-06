@@ -255,7 +255,7 @@ class LambdaImageConfigTest {
             launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                     runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
                     mock(LambdaLayerService.class), awsEnv,
-                    mock(LambdaExecutionRoleCredentials.class));
+                    mock(LambdaExecutionRoleCredentials.class), null);
 
             when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
             when(runtimeApiServer.getPort()).thenReturn(9000);

@@ -1020,8 +1020,12 @@ group lists detach the function, and the response then omits `VpcConfig`. Publis
 versions retain their network configuration when `$LATEST` changes.
 
 These checks validate the declaration. Function containers still use the configured
-Docker network; `VpcConfig` does not yet enforce VPC packet routing, security-group
-rules, or NAT egress.
+Docker network. With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true`
+and `FLOCI_SERVICES_EC2_MOCK=false`) and a known `VpcId`, the container also joins that VPC's
+Docker network at an address leased from the first subnet in `SubnetIds`, so it reaches EC2
+instances and `awsvpc` ECS tasks in the VPC at the private addresses they report. The address is
+returned once the container is removed. `VpcConfig` does not yet enforce security-group rules or
+NAT egress, and the other subnets are not used.
 
 `RuntimeVersionConfig.RuntimeVersionArn` is returned for managed (non-image)
 runtimes. Its value is derived from the runtime name, so it is stable across
