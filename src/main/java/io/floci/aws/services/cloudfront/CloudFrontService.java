@@ -76,6 +76,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private static final List<String> OAC_SIGNING_BEHAVIORS =
             List.of("always-amz-auth", "never", "always", "no-override");
     private static final Set<String> FUNCTION_RUNTIMES = Set.of("cloudfront-js-1.0", "cloudfront-js-2.0");
+    private static final int MAX_FUNCTIONS_PER_KEY_VALUE_STORE = 100;
     private static final int MAX_ORIGIN_CUSTOM_HEADERS = 30;
     private static final int MAX_CUSTOM_HEADER_NAME_LENGTH = 256;
     private static final int MAX_CUSTOM_HEADER_VALUE_LENGTH = 1_783;
@@ -158,7 +159,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
         this(factory, config, regionResolver, null, null,
-                new CloudFrontKeyValueStoreService(factory, config, regionResolver));
+                new CloudFrontKeyValueStoreService(factory, regionResolver));
     }
 
     @Inject
@@ -1801,17 +1802,28 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             if (keyValueStores.findByArn(arn).isEmpty()) {
                 throw new AwsException("EntityNotFound", "The specified KeyValueStore does not exist.", 404);
             }
+            long otherFunctions = functionStore.scan(key -> true).stream()
+                    .filter(other -> !other.getName().equals(fn.getName())
+                            && other.getKeyValueStoreArns() != null
+                            && other.getKeyValueStoreArns().contains(arn))
+                    .map(CloudFrontFunction::getName)
+                    .distinct()
+                    .count();
+            if (otherFunctions >= MAX_FUNCTIONS_PER_KEY_VALUE_STORE) {
+                throw new AwsException("TooManyFunctionsAssociatedToKeyValueStore",
+                        "A key value store can be associated with at most " + MAX_FUNCTIONS_PER_KEY_VALUE_STORE
+                                + " functions.", 400);
+            }
         }
     }
 
     // ── Key value stores ──────────────────────────────────────────────────────
 
     public KeyValueStore createKeyValueStore(String name, String comment, boolean hasImportSource) {
-        KeyValueStore created = keyValueStores.create(name, comment);
         if (hasImportSource) {
-            keyValueStores.warnImportSourceIgnored(name);
+            throw new AwsException("InvalidArgument", "ImportSource is not supported.", 400);
         }
-        return created;
+        return keyValueStores.create(name, comment);
     }
 
     public KeyValueStore describeKeyValueStore(String name) {
@@ -1836,6 +1848,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "Cannot delete KeyValueStore " + name + " because it is associated with a function", 409);
         }
         keyValueStores.delete(name, ifMatch);
+        tagStore.delete(existing.getArn());
     }
 
     private static AwsException invalidFunctionStage(String stage) {

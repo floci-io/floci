@@ -16,6 +16,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.xml.HasXPath.hasXPath;
@@ -36,7 +37,7 @@ class CloudFrontKeyValueStoreIntegrationTest {
             + "Credential=000000000000/20260101/cloudfront-keyvaluestore/aws4_request, "
             + "SignedHeaders=host;x-amz-date, Signature=00";
 
-    private record Store(String name, String arn, String etag) {}
+    private record Store(String name, String arn, String etag, String dataEtag) {}
 
     private static String uniqueName() {
         return "kvs-" + UUID.randomUUID().toString().substring(0, 8);
@@ -49,7 +50,11 @@ class CloudFrontKeyValueStoreIntegrationTest {
                 .when().post(CLOUDFRONT + "key-value-store");
         created.then().statusCode(201);
         String xml = created.asString();
-        return new Store(name, XmlParser.extractFirst(xml, "ARN", null), created.header("ETag"));
+        String arn = XmlParser.extractFirst(xml, "ARN", null);
+        Response described = given().urlEncodingEnabled(false).header("Authorization", SIGV4A_AUTHORIZATION)
+                .when().get(DATA_PLANE + encoded(arn));
+        described.then().statusCode(200);
+        return new Store(name, arn, created.header("ETag"), described.header("ETag"));
     }
 
     private static String encoded(String value) {
@@ -156,12 +161,12 @@ class CloudFrontKeyValueStoreIntegrationTest {
     void dataPlaneRoundTripsKeysThroughAPercentEncodedArn() {
         Store store = createStore(uniqueName(), "data plane");
 
-        Response put = putKey(store, store.etag(), "demo.example.com", "3-5-19-1234");
+        Response put = putKey(store, store.dataEtag(), "demo.example.com", "3-5-19-1234");
         put.then().statusCode(200)
                 .body("ItemCount", equalTo(1))
                 .body("TotalSizeInBytes", equalTo("demo.example.com".length() + "3-5-19-1234".length()))
                 .header("ETag", notNullValue());
-        assertNotEquals(store.etag(), put.header("ETag"));
+        assertNotEquals(store.dataEtag(), put.header("ETag"));
 
         dataPlane().when().get(storePath(store) + "/keys/" + encoded("demo.example.com"))
                 .then().statusCode(200)
@@ -190,7 +195,7 @@ class CloudFrontKeyValueStoreIntegrationTest {
         Store store = createStore(uniqueName(), "odd keys");
         String key = "tenant/a b?c";
 
-        putKey(store, store.etag(), key, "v1").then().statusCode(200);
+        putKey(store, store.dataEtag(), key, "v1").then().statusCode(200);
 
         dataPlane().when().get(storePath(store) + "/keys/" + encoded(key))
                 .then().statusCode(200).body("Key", equalTo(key)).body("Value", equalTo("v1"));
@@ -199,10 +204,10 @@ class CloudFrontKeyValueStoreIntegrationTest {
     @Test
     void dataPlaneWritesNeedTheCurrentEtag() {
         Store store = createStore(uniqueName(), "etag");
-        Response first = putKey(store, store.etag(), "a", "1");
+        Response first = putKey(store, store.dataEtag(), "a", "1");
         first.then().statusCode(200);
 
-        putKey(store, store.etag(), "b", "2").then()
+        putKey(store, store.dataEtag(), "b", "2").then()
                 .statusCode(400)
                 .header("X-Amzn-Errortype", equalTo("ValidationException"));
         dataPlane().contentType("application/json").body("{\"Value\":\"2\"}")
@@ -213,9 +218,80 @@ class CloudFrontKeyValueStoreIntegrationTest {
     }
 
     @Test
+    void updateKeysRejectsMoreThanFiftyEntriesAndAPutWithoutAValue() {
+        Store store = createStore(uniqueName(), "limits");
+
+        StringBuilder puts = new StringBuilder();
+        for (int i = 0; i < 51; i++) {
+            puts.append(i == 0 ? "" : ",").append("{\"Key\":\"k").append(i).append("\",\"Value\":\"v\"}");
+        }
+        dataPlane().header("If-Match", store.dataEtag()).contentType("application/json")
+                .body("{\"Puts\":[" + puts + "]}")
+                .when().post(storePath(store) + "/keys")
+                .then().statusCode(400).header("X-Amzn-Errortype", equalTo("ValidationException"));
+
+        dataPlane().header("If-Match", store.dataEtag()).contentType("application/json")
+                .body("{\"Puts\":[{\"Key\":\"a\",\"Value\":\"1\"},{\"Key\":\"b\"}]}")
+                .when().post(storePath(store) + "/keys")
+                .then().statusCode(400).header("X-Amzn-Errortype", equalTo("ValidationException"));
+
+        dataPlane().when().get(storePath(store))
+                .then().statusCode(200).body("ItemCount", equalTo(0)).header("ETag", equalTo(store.dataEtag()));
+    }
+
+    @Test
+    void controlPlaneAndDataPlaneEtagsAreIndependent() {
+        Store store = createStore(uniqueName(), "etags");
+
+        putKey(store, store.dataEtag(), "a", "1").then().statusCode(200);
+        Response updated = given().contentType(XML).header("If-Match", store.etag())
+                .body("<UpdateKeyValueStoreRequest xmlns=\"%s\"><Comment>changed</Comment></UpdateKeyValueStoreRequest>"
+                        .formatted(NS))
+                .when().put(CLOUDFRONT + "key-value-store/" + store.name());
+        updated.then().statusCode(200);
+
+        Response written = dataPlane().when().get(storePath(store));
+        putKey(store, written.header("ETag"), "b", "2").then().statusCode(200).body("ItemCount", equalTo(2));
+        given().header("If-Match", updated.header("ETag"))
+                .when().delete(CLOUDFRONT + "key-value-store/" + store.name())
+                .then().statusCode(204);
+    }
+
+    @Test
+    void createWithAnImportSourceIsRejectedInsteadOfCreatingAnEmptyStore() {
+        String name = uniqueName();
+        given().contentType(XML)
+                .body(("<CreateKeyValueStoreRequest xmlns=\"%s\"><Name>%s</Name><ImportSource><SourceType>S3</SourceType>"
+                        + "<SourceARN>arn:aws:s3:::bucket/keys.json</SourceARN></ImportSource></CreateKeyValueStoreRequest>")
+                        .formatted(NS, name))
+                .when().post(CLOUDFRONT + "key-value-store")
+                .then().statusCode(400).body(hasXPath("//*[local-name()='Code']", equalTo("InvalidArgument")));
+        given().when().get(CLOUDFRONT + "key-value-store/" + name).then().statusCode(404);
+    }
+
+    @Test
+    void deletingAStoreDropsItsTags() {
+        String name = uniqueName();
+        Response created = given().contentType(XML)
+                .body(("<CreateKeyValueStoreRequest xmlns=\"%s\"><Name>%s</Name></CreateKeyValueStoreRequest>")
+                        .formatted(NS, name))
+                .when().post(CLOUDFRONT + "key-value-store");
+        created.then().statusCode(201);
+        String arn = XmlParser.extractFirst(created.asString(), "ARN", null);
+        given().contentType(XML).queryParam("Operation", "Tag").queryParam("Resource", arn)
+                .body("<Tags xmlns=\"%s\"><Items><Tag><Key>team</Key><Value>a</Value></Tag></Items></Tags>".formatted(NS))
+                .when().post(CLOUDFRONT + "tagging").then().statusCode(204);
+
+        given().header("If-Match", created.header("ETag"))
+                .when().delete(CLOUDFRONT + "key-value-store/" + name).then().statusCode(204);
+
+        given().queryParam("Resource", arn).when().get(CLOUDFRONT + "tagging")
+                .then().statusCode(200).body(not(containsString("team")));
+    }
+    @Test
     void updateKeysAppliesPutsAndDeletesAtOnce() {
         Store store = createStore(uniqueName(), "batch");
-        Response seeded = dataPlane().header("If-Match", store.etag()).contentType("application/json")
+        Response seeded = dataPlane().header("If-Match", store.dataEtag()).contentType("application/json")
                 .body("{\"Puts\":[{\"Key\":\"a\",\"Value\":\"1\"},{\"Key\":\"b\",\"Value\":\"2\"}]}")
                 .when().post(storePath(store) + "/keys");
         seeded.then().statusCode(200).body("ItemCount", equalTo(2));
@@ -233,7 +309,7 @@ class CloudFrontKeyValueStoreIntegrationTest {
     @Test
     void listKeysPagesInKeyOrder() {
         Store store = createStore(uniqueName(), "paging");
-        Response seeded = dataPlane().header("If-Match", store.etag()).contentType("application/json")
+        Response seeded = dataPlane().header("If-Match", store.dataEtag()).contentType("application/json")
                 .body("{\"Puts\":[{\"Key\":\"c\",\"Value\":\"3\"},{\"Key\":\"a\",\"Value\":\"1\"},"
                         + "{\"Key\":\"b\",\"Value\":\"2\"}]}")
                 .when().post(storePath(store) + "/keys");
@@ -258,11 +334,11 @@ class CloudFrontKeyValueStoreIntegrationTest {
     void keyAndValueSizeLimitsAreValidationErrors() {
         Store store = createStore(uniqueName(), "limits");
 
-        putKey(store, store.etag(), "k".repeat(513), "v").then().statusCode(400)
+        putKey(store, store.dataEtag(), "k".repeat(513), "v").then().statusCode(400)
                 .header("X-Amzn-Errortype", equalTo("ValidationException"));
-        putKey(store, store.etag(), "k", "v".repeat(1025)).then().statusCode(400)
+        putKey(store, store.dataEtag(), "k", "v".repeat(1025)).then().statusCode(400)
                 .header("X-Amzn-Errortype", equalTo("ValidationException"));
-        putKey(store, store.etag(), "k".repeat(512), "v".repeat(1024)).then().statusCode(200);
+        putKey(store, store.dataEtag(), "k".repeat(512), "v".repeat(1024)).then().statusCode(200);
     }
 
     @Test

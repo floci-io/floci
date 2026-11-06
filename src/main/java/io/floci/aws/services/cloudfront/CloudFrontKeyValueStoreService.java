@@ -1,7 +1,6 @@
 package io.floci.aws.services.cloudfront;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.StorageBackend;
@@ -9,7 +8,6 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudfront.model.KeyValueStore;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -27,36 +25,34 @@ import java.util.regex.Pattern;
 /**
  * CloudFront key value stores. The stores are created and described through the CloudFront
  * control plane, and their keys are read and written through the separate
- * {@code cloudfront-keyvaluestore} data plane. Both planes share this service and one ETag per
- * store, which every key write and every control plane update rotates. AWS keeps an independent
- * ETag for each plane.
+ * {@code cloudfront-keyvaluestore} data plane. Both planes share this service but keep an independent
+ * ETag per store: a control plane update rotates only the control plane ETag, and a key write only the
+ * data plane ETag.
  */
 @ApplicationScoped
 public class CloudFrontKeyValueStoreService {
-
-    private static final Logger LOG = Logger.getLogger(CloudFrontKeyValueStoreService.class);
 
     static final int MAX_KEY_BYTES = 512;
     static final int MAX_VALUE_BYTES = 1024;
     static final long MAX_STORE_BYTES = 5L * 1024 * 1024;
     static final int DEFAULT_LIST_KEYS = 10;
     static final int MAX_LIST_KEYS = 50;
+    static final int MAX_KEY_UPDATES = 50;
+    static final int MAX_UPDATE_PAYLOAD_BYTES = 3 * 1024 * 1024;
+    static final int MAX_STORES = 200;
 
-    private static final Pattern STORE_NAME = Pattern.compile("[a-zA-Z0-9-_]{1,64}");
+    private static final Pattern STORE_NAME = Pattern.compile("[a-zA-Z0-9_-]{1,64}");
     private static final int MAX_COMMENT_LENGTH = 128;
     private static final String STATUS_READY = "READY";
 
     private final StorageBackend<String, KeyValueStore> store;
     private final RegionResolver regionResolver;
-    private final String accountId;
 
     @Inject
-    public CloudFrontKeyValueStoreService(StorageFactory factory, EmulatorConfig config,
-                                          RegionResolver regionResolver) {
+    public CloudFrontKeyValueStoreService(StorageFactory factory, RegionResolver regionResolver) {
         this.store = factory.create("cloudfront", "cloudfront-key-value-stores.json",
                 new TypeReference<Map<String, KeyValueStore>>() {});
         this.regionResolver = regionResolver;
-        this.accountId = config.defaultAccountId();
     }
 
     // ── Control plane ─────────────────────────────────────────────────────────
@@ -68,14 +64,19 @@ public class CloudFrontKeyValueStoreService {
         if (store.get(name).isPresent()) {
             throw new AwsException("EntityAlreadyExists", "The Key Value Store already exists.", 409);
         }
+        if (store.scan(key -> true).size() >= MAX_STORES) {
+            throw new AwsException("EntityLimitExceeded",
+                    "The maximum number of Key Value Stores for this account has been reached.", 400);
+        }
         Instant now = Instant.now();
         KeyValueStore created = new KeyValueStore();
         created.setName(name);
         created.setId(UUID.randomUUID().toString());
         created.setComment(effectiveComment);
-        created.setArn(regionResolver.buildGlobalArn("cloudfront", accountId, "key-value-store/" + created.getId()));
+        created.setArn(regionResolver.buildGlobalArn("cloudfront", "key-value-store/" + created.getId()));
         created.setStatus(STATUS_READY);
         created.setEtag(newEtag());
+        created.setDataEtag(newEtag());
         created.setCreated(now);
         created.setLastModifiedTime(now);
         store.put(name, created);
@@ -113,7 +114,8 @@ public class CloudFrontKeyValueStoreService {
         validateComment(effectiveComment);
         KeyValueStore updated = copyOf(existing);
         updated.setComment(effectiveComment);
-        touch(updated);
+        updated.setEtag(newEtag());
+        updated.setLastModifiedTime(Instant.now());
         store.put(name, updated);
         return updated;
     }
@@ -135,11 +137,6 @@ public class CloudFrontKeyValueStoreService {
         return store.scan(key -> true).stream().filter(kvs -> arn.equals(kvs.getArn())).findFirst();
     }
 
-    public void warnImportSourceIgnored(String name) {
-        LOG.warnv("Key value store {0} was created with an ImportSource, which is ignored: its keys are not imported",
-                name);
-    }
-
     // ── Data plane ────────────────────────────────────────────────────────────
 
     public KeyValueStore describeByArn(String arn) {
@@ -147,14 +144,17 @@ public class CloudFrontKeyValueStoreService {
                 new AwsException("ResourceNotFoundException", "The Key Value Store was not found.", 404));
     }
 
-    public Map.Entry<String, String> getKey(String arn, String key) {
+    /** One read of the store, so the value and the counts that go with it come from the same state. */
+    public KeyLookup getKey(String arn, String key) {
         KeyValueStore kvs = describeByArn(arn);
         String value = kvs.getItems().get(key);
         if (value == null) {
             throw new AwsException("ResourceNotFoundException", "The Key was not found.", 404);
         }
-        return Map.entry(key, value);
+        return new KeyLookup(key, value, kvs);
     }
+
+    public record KeyLookup(String key, String value, KeyValueStore store) {}
 
     public synchronized KeyValueStore putKey(String arn, String ifMatch, String key, String value) {
         Map<String, String> puts = new LinkedHashMap<>();
@@ -201,7 +201,8 @@ public class CloudFrontKeyValueStoreService {
 
         KeyValueStore result = copyOf(kvs);
         result.setItems(updated);
-        touch(result);
+        result.setDataEtag(newEtag());
+        result.setLastModifiedTime(Instant.now());
         store.put(result.getName(), result);
         return result;
     }
@@ -266,15 +267,11 @@ public class CloudFrontKeyValueStoreService {
         copy.setArn(source.getArn());
         copy.setStatus(source.getStatus());
         copy.setEtag(source.getEtag());
+        copy.setDataEtag(source.getDataEtag());
         copy.setCreated(source.getCreated());
         copy.setLastModifiedTime(source.getLastModifiedTime());
         copy.setItems(new LinkedHashMap<>(source.getItems()));
         return copy;
-    }
-
-    private static void touch(KeyValueStore kvs) {
-        kvs.setEtag(newEtag());
-        kvs.setLastModifiedTime(Instant.now());
     }
 
     private static void requireControlPlaneEtag(KeyValueStore kvs, String ifMatch) {
@@ -285,7 +282,7 @@ public class CloudFrontKeyValueStoreService {
     }
 
     private static void requireDataPlaneEtag(KeyValueStore kvs, String ifMatch) {
-        if (ifMatch == null || !kvs.getEtag().equals(ifMatch)) {
+        if (ifMatch == null || !kvs.getDataEtag().equals(ifMatch)) {
             throw new AwsException("ValidationException",
                     "Pre-Condition failed during update of Key-Value-Store", 400);
         }

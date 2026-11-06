@@ -15,6 +15,7 @@ public class KeyValueStore {
     private String arn;
     private String status;
     private String etag;
+    private String dataEtag;
     private Instant created;
     private Instant lastModifiedTime;
     private Map<String, String> items = new LinkedHashMap<>();
@@ -38,6 +39,9 @@ public class KeyValueStore {
 
     public String getEtag() { return etag; }
     public void setEtag(String etag) { this.etag = etag; }
+
+    public String getDataEtag() { return dataEtag; }
+    public void setDataEtag(String dataEtag) { this.dataEtag = dataEtag; }
 
     public Instant getCreated() { return created; }
     public void setCreated(Instant created) { this.created = created; }

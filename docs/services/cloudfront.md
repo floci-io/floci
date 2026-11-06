@@ -370,13 +370,15 @@ and described through the CloudFront control plane, and its keys are managed thr
 - Quotas: a key is at most 512 bytes, a value at most 1,024 bytes and a store at most 5 MiB, counting the
   UTF-8 bytes of every key and value. Exceeding the first two is a `ValidationException`, and exceeding the
   store size is a `ServiceQuotaExceededException`. `ItemCount` and `TotalSizeInBytes` follow the same count.
-- Every key write needs the store's current ETag in `If-Match`, and rotates it. `UpdateKeys` applies its
-  puts and deletes together, and changes nothing when any entry is invalid. A stale or missing ETag on the
+- Every key write needs the store's current data plane ETag in `If-Match`, and rotates it. `UpdateKeys`
+  applies its puts and deletes together (at most 50 entries and 3 MB per request), and changes nothing when any
+  entry is invalid, including a put without a `Value`. A stale or missing ETag on the
   data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"), and on the
   control plane an `InvalidIfMatchVersion`.
-- **Deviation:** AWS keeps an independent ETag for the control plane and the data plane. Floci keeps one per
-  store, which control plane updates and key writes both rotate, so an ETag read from either plane is accepted
-  by the other.
+- The control plane and the data plane keep independent ETags: a comment update rotates only the control plane
+  ETag, and a key write only the data plane ETag.
+- An account can hold at most 200 stores (`EntityLimitExceeded`), and a store can be associated with at most 100
+  functions (`TooManyFunctionsAssociatedToKeyValueStore`). Deleting a store also drops its tags.
 - Deleting a key that is not in the store is a `ResourceNotFoundException`. In `UpdateKeys` the delete of an
   absent key is skipped.
 - A function can name at most one store in `FunctionConfig.KeyValueStoreAssociations`, and only with the
@@ -572,7 +574,8 @@ signatures must still return 403. Verify those cases through the proxy after con
 - `TestFunction` execution (function is stored, not executed)
 - Streaming distributions (RTMP — deprecated by AWS)
 - VPC origins, Anycast IP lists
-- Importing keys into a key value store from S3 (`ImportSource` is accepted, logged and ignored)
+- Importing keys into a key value store from S3: `CreateKeyValueStore` with an `ImportSource` is rejected with
+  `InvalidArgument`
 - Running CloudFront Functions, so the key value store can only be read and written through its API, not
   from a function with `cf.kvs()`
 - CloudFormation provisioning of `AWS::CloudFront::KeyValueStore`, and `KeyValueStoreAssociations` on
