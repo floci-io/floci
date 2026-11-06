@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.quicksight.model.QuickSightResource;
@@ -22,11 +23,12 @@ import java.net.URI;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
 
 @ApplicationScoped
-public class QuickSightService implements Resettable {
+public class QuickSightService implements Resettable, StoredResourceArns {
     private final ObjectMapper mapper;
     private final RegionResolver regions;
     private final AccountAwareStorageBackend<QuickSightResource> resources;
@@ -225,17 +227,31 @@ public class QuickSightService implements Resettable {
         return response(200).set("Ingestion", get(account, "ingestion", dataSetId + "/" + id));
     }
 
+    @Override
+    public String namespace() {
+        return "quicksight";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        if ("user".equals(type) && names.size() == 3) {
+            return Optional.of(regions.buildArn("quicksight", region, names.getFirst(),
+                    "user/" + names.get(1) + "/" + names.get(2)));
+        }
+        return Optional.empty();
+    }
+
     public synchronized ObjectNode generateEmbedUrl(String account, JsonNode request) {
         String principal = required(request, "UserArn");
         requireRegisteredUser(account, principal);
         String id = required(request.path("ExperienceConfiguration").path("Dashboard"), "InitialDashboardId");
         ObjectNode dashboard = get(account, "dashboard", id);
         if (!canRead(dashboard, principal)) {
-            throw denied("User does not have permission to view this dashboard.");
+            throw new AwsException("AccessDeniedException", "User does not have permission to view this dashboard.", 401);
         }
-        int lifetime = request.path("SessionLifetimeInMinutes").asInt(600);
+        long lifetime = request.path("SessionLifetimeInMinutes").asLong(600);
         if (lifetime < 15 || lifetime > 600) {
-            throw invalid("SessionLifetimeInMinutes must be between 15 and 600.");
+            throw new AwsException("SessionLifetimeInMinutesInvalidException", "SessionLifetimeInMinutes must be between 15 and 600.", 400);
         }
         ArrayNode domains = mapper.createArrayNode();
         JsonNode requested = request.path("AllowedDomains");
@@ -318,7 +334,7 @@ public class QuickSightService implements Resettable {
     private void requireRegisteredUser(String account, String principal) {
         String userPrefix = arn(account, "user", "");
         if (!principal.startsWith(userPrefix)) {
-            throw denied("UserArn must belong to this account and region.");
+            throw new AwsException("AccessDeniedException", "UserArn must belong to this account and region.", 401);
         }
         get(account, "user", principal.substring(userPrefix.length()));
     }

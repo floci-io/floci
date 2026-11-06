@@ -93,13 +93,13 @@ class QuickSightServiceTest {
         assertEquals(404, assertThrows(AwsException.class, () -> service.generateEmbedUrl(ACCOUNT, request)).getHttpStatus());
         service.create(ACCOUNT, "dashboard", "private", mapper.readTree("{\"Name\":\"Private\",\"Definition\":{}}"));
         request.withObject("/ExperienceConfiguration/Dashboard").put("InitialDashboardId", "private");
-        assertEquals(403, assertThrows(AwsException.class, () -> service.generateEmbedUrl(ACCOUNT, request)).getHttpStatus());
+        assertEquals(401, assertThrows(AwsException.class, () -> service.generateEmbedUrl(ACCOUNT, request)).getHttpStatus());
     }
 
     @Test
     void embeddingEnforcesDomainAndLifetimeLimits() {
         ObjectNode request = embedRequest().put("SessionLifetimeInMinutes", 14);
-        assertEquals(400, assertThrows(AwsException.class, () -> service.generateEmbedUrl(ACCOUNT, request)).getHttpStatus());
+        assertEquals("SessionLifetimeInMinutesInvalidException", assertThrows(AwsException.class, () -> service.generateEmbedUrl(ACCOUNT, request)).getErrorCode());
         request.put("SessionLifetimeInMinutes", 601);
         assertThrows(AwsException.class, () -> service.generateEmbedUrl(ACCOUNT, request));
         request.put("SessionLifetimeInMinutes", 15);

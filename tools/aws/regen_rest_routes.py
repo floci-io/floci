@@ -59,6 +59,7 @@ MODELS: dict[str, str] = {
     "lambda-microvms": "lambda",
     "opensearch": "es",
     "pipes": "pipes",
+    "quicksight": "quicksight",
     "s3": "s3",
     "s3control": "s3",
     "scheduler": "scheduler",

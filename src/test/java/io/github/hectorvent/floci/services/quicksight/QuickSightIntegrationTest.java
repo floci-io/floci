@@ -1,11 +1,9 @@
 package io.github.hectorvent.floci.services.quicksight;
 
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.quicksight.QuickSightClient;
 import software.amazon.awssdk.services.quicksight.model.AccessDeniedException;
@@ -18,6 +16,7 @@ import software.amazon.awssdk.services.quicksight.model.PhysicalTable;
 import software.amazon.awssdk.services.quicksight.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.quicksight.model.ResourcePermission;
 import software.amazon.awssdk.services.quicksight.model.SearchDashboardsResponse;
+import software.amazon.awssdk.services.quicksight.model.SessionLifetimeInMinutesInvalidException;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -40,10 +39,10 @@ class QuickSightIntegrationTest {
     URI endpoint;
 
     @Test
-    void embeddingUsesTheResourceAccountWhenTheRequestAccountDiffers() throws Exception {
+    void embeddingUsesTheAuthenticatedResourceAccount() throws Exception {
         String account = "111122223333";
         String id = "shared-" + UUID.randomUUID();
-        try (QuickSightClient client = client(Region.EU_WEST_2); HttpClient http = HttpClient.newHttpClient()) {
+        try (QuickSightClient client = AwsTestClients.create(QuickSightClient.builder(), account, Region.EU_WEST_2); HttpClient http = HttpClient.newHttpClient()) {
             String principal = client.registerUser(request -> request.awsAccountId(account).namespace("default")
                     .userName(id).email("reader@example.com").identityType("QUICKSIGHT").userRole("READER")).user().arn();
             try {
@@ -64,13 +63,40 @@ class QuickSightIntegrationTest {
     }
 
     @Test
+    void aCallerCannotCreateReadOrDeleteAnotherAccountsDashboard() {
+        String owner = "111122223333";
+        String id = "isolated-" + UUID.randomUUID();
+        try (QuickSightClient caller = client(Region.EU_WEST_2);
+                QuickSightClient target = AwsTestClients.create(QuickSightClient.builder(), owner, Region.EU_WEST_2)) {
+            target.createDashboard(request -> request.awsAccountId(owner).dashboardId(id).name("Owner")
+                    .definition(definition -> definition.sheets(List.of())));
+            try {
+                AccessDeniedException read = assertThrows(AccessDeniedException.class,
+                        () -> caller.describeDashboard(request -> request.awsAccountId(owner).dashboardId(id)));
+                assertEquals(401, read.statusCode());
+                assertThrows(AccessDeniedException.class,
+                        () -> caller.deleteDashboard(request -> request.awsAccountId(owner).dashboardId(id)));
+                assertThrows(AccessDeniedException.class,
+                        () -> caller.createDashboard(request -> request.awsAccountId(owner).dashboardId(id + "-new")
+                                .name("Intruder").definition(definition -> definition.sheets(List.of()))));
+                assertEquals("Owner", target.describeDashboard(request -> request.awsAccountId(owner).dashboardId(id)).dashboard().name());
+                assertThrows(ResourceNotFoundException.class,
+                        () -> target.describeDashboard(request -> request.awsAccountId(owner).dashboardId(id + "-new")));
+            } finally {
+                target.deleteDashboard(request -> request.awsAccountId(owner).dashboardId(id));
+            }
+        }
+    }
+
+    @Test
     void searchFiltersDirectSharingAndScopesTokensToUserAccountAndRegion() {
         String id = "scoped-" + UUID.randomUUID();
         String otherAccount = "444455556666";
-        try (QuickSightClient client = client(Region.EU_WEST_2); QuickSightClient west = client(Region.US_WEST_2)) {
+        try (QuickSightClient client = client(Region.EU_WEST_2); QuickSightClient west = client(Region.US_WEST_2);
+                QuickSightClient foreign = AwsTestClients.create(QuickSightClient.builder(), otherAccount, Region.EU_WEST_2)) {
             String user = register(client, ACCOUNT, id);
             String otherUser = register(client, ACCOUNT, "other-" + id);
-            String foreignUser = register(client, otherAccount, id);
+            String foreignUser = register(foreign, otherAccount, id);
             String westUser = register(west, ACCOUNT, id);
             for (String dashboard : List.of(id + "-a", id + "-b")) {
                 client.createDashboard(request -> request.awsAccountId(ACCOUNT).dashboardId(dashboard).name("Shared")
@@ -88,12 +114,12 @@ class QuickSightIntegrationTest {
                 assertTrue(client.searchDashboards(request -> request.awsAccountId(ACCOUNT).filters(filters(otherUser))).dashboardSummaryList().isEmpty());
                 assertThrows(InvalidNextTokenException.class, () -> client.searchDashboards(request -> request.awsAccountId(ACCOUNT)
                         .filters(filters(otherUser)).nextToken(page.nextToken())));
-                assertThrows(InvalidNextTokenException.class, () -> client.searchDashboards(request -> request.awsAccountId(otherAccount)
+                assertThrows(InvalidNextTokenException.class, () -> foreign.searchDashboards(request -> request.awsAccountId(otherAccount)
                         .filters(filters(foreignUser)).nextToken(page.nextToken())));
                 assertThrows(InvalidNextTokenException.class, () -> west.searchDashboards(request -> request.awsAccountId(ACCOUNT)
                         .filters(filters(westUser)).nextToken(page.nextToken())));
                 assertThrows(ResourceNotFoundException.class, () -> west.describeDashboard(request -> request.awsAccountId(ACCOUNT).dashboardId(id)));
-                assertThrows(ResourceNotFoundException.class, () -> client.describeDashboard(request -> request.awsAccountId(otherAccount).dashboardId(id)));
+                assertThrows(ResourceNotFoundException.class, () -> foreign.describeDashboard(request -> request.awsAccountId(otherAccount).dashboardId(id)));
                 assertThrows(InvalidParameterValueException.class, () -> client.searchDashboards(request -> request.awsAccountId(ACCOUNT).filters(filters).maxResults(0)));
                 assertThrows(InvalidParameterValueException.class, () -> client.searchDashboards(request -> request.awsAccountId(ACCOUNT).filters(filters).maxResults(101)));
                 assertThrows(AccessDeniedException.class, () -> client.generateEmbedUrlForRegisteredUser(request -> request.awsAccountId(ACCOUNT).userArn(foreignUser)
@@ -147,9 +173,7 @@ class QuickSightIntegrationTest {
     }
 
     private QuickSightClient client(Region region) {
-        return QuickSightClient.builder().endpointOverride(endpoint).region(region)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("floci", "floci")))
-                .httpClient(UrlConnectionHttpClient.create()).build();
+        return AwsTestClients.create(QuickSightClient.builder(), ACCOUNT, region);
     }
 
     private String register(QuickSightClient client, String account, String name) {
@@ -205,6 +229,12 @@ class QuickSightIntegrationTest {
             assertEquals(second, next.dashboardSummaryList().getFirst().dashboardId());
             assertThrows(InvalidNextTokenException.class, () -> client.searchDashboards(request -> request.awsAccountId(ACCOUNT).filters(filters).nextToken("invalid")));
             assertEquals(List.of(dataSetArn), client.describeDashboard(request -> request.awsAccountId(ACCOUNT).dashboardId(first)).dashboard().version().dataSetArns());
+            for (long lifetime : List.of(14L, 601L, 4294967311L, Long.MAX_VALUE)) {
+                SessionLifetimeInMinutesInvalidException error = assertThrows(SessionLifetimeInMinutesInvalidException.class,
+                        () -> client.generateEmbedUrlForRegisteredUser(request -> request.awsAccountId(ACCOUNT).userArn(principal)
+                                .sessionLifetimeInMinutes(lifetime).experienceConfiguration(experience -> experience.dashboard(dashboard -> dashboard.initialDashboardId(first)))));
+                assertEquals(400, error.statusCode());
+            }
             GenerateEmbedUrlForRegisteredUserResponse embed = client.generateEmbedUrlForRegisteredUser(request -> request.awsAccountId(ACCOUNT).userArn(principal)
                     .sessionLifetimeInMinutes(180L).experienceConfiguration(experience -> experience.dashboard(dashboard -> dashboard.initialDashboardId(first))));
             URI generated = URI.create(embed.embedUrl());

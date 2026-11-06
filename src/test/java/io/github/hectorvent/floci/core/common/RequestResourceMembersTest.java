@@ -317,6 +317,7 @@ class RequestResourceMembersTest {
                     });
                     // A member the table locates in a REST request's path or query goes there, where the reader takes it
                     // from, and the body and the form give it another value, which names nothing.
+                    // REST map selectors have no Query form encoding, so they are checked only as JSON.
                     Map<String, String> located = table.located().getOrDefault(operation.getKey(), Map.of());
                     Map<String, String> labels = new LinkedHashMap<>();
                     MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
@@ -346,9 +347,11 @@ class RequestResourceMembersTest {
                     assertEquals(named, RequestResources.of(operation.getKey(),
                             sentWith(servedBy(json(body.toString()), resource.endpoint()), query), "aws", "us-east-1",
                             "000000000000", stored, labels), body + " " + labels + " " + query);
-                    assertEquals(named, RequestResources.of(operation.getKey(),
-                            sentWith(servedBy(form(form.toString()), resource.endpoint()), query), "aws", "us-east-1",
-                            "000000000000", stored, labels), form + " " + labels + " " + query);
+                    if (given.keySet().stream().noneMatch(Member::map)) {
+                        assertEquals(named, RequestResources.of(operation.getKey(),
+                                sentWith(servedBy(form(form.toString()), resource.endpoint()), query), "aws", "us-east-1",
+                                "000000000000", stored, labels), form + " " + labels + " " + query);
+                    }
                 })));
     }
 
@@ -442,6 +445,8 @@ class RequestResourceMembersTest {
             } else {
                 body.put(member.name(), value);
             }
+        } else if (member.map()) {
+            put(body.putObject(member.name()).putObject("table"), member.field(), value);
         } else {
             put(member.list() ? body.putArray(member.name()).addObject() : body.putObject(member.name()), member.field(), value);
         }

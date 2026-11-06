@@ -2,6 +2,10 @@
 
 QuickSight uses the AWS REST JSON wire protocol and the `quicksight` signing scope.
 Resources use account-aware storage and region-specific, partition-aware ARNs.
+Every management request requires `AwsAccountId` to match the caller's account,
+including requests made with Floci's default local credentials. With IAM enforcement
+enabled, management actions use the shared REST route and request-resource tables
+to evaluate identity policies.
 This is a metadata-only subset for local SDK integration tests.
 
 ## Supported operations
@@ -61,11 +65,14 @@ metadata transitions synchronously and report zero imported rows. Dashboard embe
 shows the stored dashboard's title. Embedding-SDK control iframes, interactive
 commands and QuickSight postMessage event processing are not implemented.
 Console analysis authoring, templates, federated registration, group-based dashboard
-sharing, IAM policy evaluation, dataset transforms and scheduling are not implemented.
+sharing, creation-tag IAM conditions, role passing, dataset transforms and scheduling
+are not implemented.
 QuickSight-native users become active immediately; there is no invitation flow.
 Search requires a registered user in the addressed account and region and enforces
-direct user sharing; other management calls use Floci's normal local
-credential handling.
+direct user sharing in addition to IAM policy checks when enforcement is enabled.
+Denied management requests return `AccessDeniedException` with HTTP 401; an embed
+session lifetime outside 15 to 600 minutes returns
+`SessionLifetimeInMinutesInvalidException` with HTTP 400.
 
 Timestamp fields use epoch seconds as defined by the QuickSight REST JSON model and
 are verified by strict AWS SDK clients. `SearchDashboards` and `ListIngestions` validate

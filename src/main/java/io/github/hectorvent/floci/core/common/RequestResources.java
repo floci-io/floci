@@ -614,6 +614,9 @@ public final class RequestResources {
      */
     private static void addFormValues(List<String> values, Map<String, String> form, String prefix,
                                       RequestResourceMembers.Member member) {
+        if (member.map()) {
+            return;
+        }
         String key = prefix + member.name();
         if (!member.list()) {
             if (member.field() == null) {
@@ -640,13 +643,19 @@ public final class RequestResources {
         return form.containsKey(element + "." + field.name() + (field.list() ? ".member.1" : ""));
     }
 
-    /** A body's values of a member, and of its field in its structure or in each of its list's structures. */
+    /** A body's selector values, traversing structures, array elements and map values. */
     private static void addBodyValues(List<String> values, JsonNode node, RequestResourceMembers.Member member) {
         JsonNode value = node.get(member.name());
         if (value == null) {
             return;
         }
-        if (!member.list()) {
+        if (member.map()) {
+            if (value.isObject()) {
+                for (JsonNode element : value) {
+                    addElement(values, element, member.field());
+                }
+            }
+        } else if (!member.list()) {
             addElement(values, value, member.field());
         } else if (value.isArray()) {
             for (JsonNode element : value) {
