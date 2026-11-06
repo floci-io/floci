@@ -33,12 +33,19 @@ EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addre
 interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
 `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
 
+The catalog also includes `i4i.large`: 2 vCPUs, 16 GiB of memory, Intel x86_64
+processors, 468 GB of local NVMe SSD storage, and one network card supporting
+3 interfaces and 10 IPv4 addresses per interface, following the
+[AWS storage optimized specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/so.html).
+Both describe APIs and the existing container resource limits use this entry.
+
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
-instance types. The values were captured from AWS in `us-east-1` on 2026-11-04:
+instance types. The original values were captured from AWS in `us-east-1` on 2026-11-04:
 `AWS` for Graviton, `Intel` for the catalog's T2, T3, M5 and R5 types, and `AMD`
-for `t3a.nano`. The catalog stores these values explicitly; architecture alone
+for `t3a.nano`. I4i uses `Intel` from the specifications above.
+The catalog stores these values explicitly; architecture alone
 cannot distinguish Intel from AMD. See the AWS
 [ProcessorInfo API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ProcessorInfo.html).
 

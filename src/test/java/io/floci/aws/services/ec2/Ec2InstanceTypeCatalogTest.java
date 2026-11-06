@@ -43,6 +43,7 @@ class Ec2InstanceTypeCatalogTest {
                 "t3a.nano",
                 "m5.large",
                 "r5.large",
+                "i4i.large",
                 "t4g.micro",
                 "t4g.small",
                 "t4g.medium",
@@ -61,6 +62,20 @@ class Ec2InstanceTypeCatalogTest {
         }
         expected.addAll(List.of("c8g.24xlarge", "c8g.48xlarge", "m8g.24xlarge", "m8g.48xlarge"));
         assertEquals(expected, instanceTypes);
+    }
+
+    @Test
+    void storageOptimizedI4iLargeHasItsDocumentedCapacity() {
+        Ec2InstanceTypeCatalog.CatalogInstanceType i4iLarge = instanceTypeCatalog.find("i4i.large").orElseThrow();
+        assertEquals(2, i4iLarge.vcpu);
+        assertEquals(16384, i4iLarge.memoryMib);
+        assertEquals(468, i4iLarge.localStorageGiB);
+        assertEquals(List.of("x86_64"), i4iLarge.supportedArchitectures);
+        assertEquals("Intel", i4iLarge.processorManufacturer);
+        assertTrue(i4iLarge.encryptionInTransitSupported);
+        assertEquals(10, i4iLarge.ipv4AddressesPerInterface);
+        assertEquals(3, i4iLarge.networkCards.get(0).maximumNetworkInterfaces);
+        assertEquals(true, i4iLarge.toResponseMap().get("instanceStorageSupported"));
     }
 
     @Test
