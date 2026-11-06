@@ -265,7 +265,11 @@ class EksRegistryHostsDockerIntegrationTest {
                 {"kubectl", "describe", "nodes"},
                 {"kubectl", "get", "pods", "-A", "-o", "wide"},
                 {"crictl", "images"},
-                {"cat", "/run/flannel/subnet.env"}
+                {"cat", "/run/flannel/subnet.env"},
+                // An unassigned pod on a Ready node points at the cloud controller, whose role k3s installs as an addon.
+                {"kubectl", "get", "crd", "addons.k3s.cattle.io", "-o", "json"},
+                {"kubectl", "get", "clusterrole/k3s-cloud-controller-manager",
+                        "clusterrolebinding/k3s-cloud-controller-manager", "-o", "json"}
         };
         for (String[] command : commands) {
             try {
@@ -281,13 +285,20 @@ class EksRegistryHostsDockerIntegrationTest {
     private String k3sLogTail(String containerId) {
         StringBuilder out = new StringBuilder();
         try {
-            dockerClient.logContainerCmd(containerId).withStdOut(true).withStdErr(true).withTail(2000)
+            boolean completed = dockerClient.logContainerCmd(containerId).withStdOut(true).withStdErr(true)
+                    .withTail(2000)
                     .exec(new ResultCallback.Adapter<Frame>() {
                         @Override
                         public void onNext(Frame frame) {
                             out.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
                         }
                     }).awaitCompletion(10, TimeUnit.SECONDS);
+            if (!completed) {
+                out.append("(timed out reading logs)");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            out.append("(interrupted while reading logs)");
         } catch (Exception e) {
             out.append("(could not read logs: ").append(e.getMessage()).append(')');
         }
