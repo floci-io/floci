@@ -296,20 +296,12 @@ NOT_COVERED: dict[str, str] = {
 # of that endpoint serves, never by a member a caller could add to a request of the other.
 CORRECTIONS: dict[str, tuple[list[dict], str]] = {
     "quicksight:CreateDataSet": ([{"types": ["datasource"], "arn": f"PhysicalTableMap{{}}.{kind}.DataSourceArn"}
-                                 for kind in ("S3Source", "RelationalTable", "CustomSql")],
+                                 for kind in ("S3Source", "RelationalTable", "CustomSql", "SaaSTable", "FileSource")],
                                 "CreateDataSet acts on each data source named by its physical tables; "
                                 "FolderArns and RowLevelPermissionDataSet.Arn name other resource types"),
-    **{f"quicksight:{operation}": ([{"type": kind, "fill": {"ResourceId": member}}],
-                                   f"the reference names the {kind}'s id ResourceId, while the REST request names "
-                                   f"it by {member}; this is the id QuickSight stores in its ARN")
-       for operation, kind, member in (
-           ("CreateDashboard", "dashboard", "DashboardId"),
-           ("DescribeDashboard", "dashboard", "DashboardId"),
-           ("DeleteDashboard", "dashboard", "DashboardId"),
-           ("DescribeDataSet", "dataset", "DataSetId"),
-           ("DeleteDataSet", "dataset", "DataSetId"),
-           ("DescribeDataSource", "datasource", "DataSourceId"),
-           ("DeleteDataSource", "datasource", "DataSourceId"))},
+    "quicksight:CreateDashboard": ([{"type": "dashboard", "fill": {"ResourceId": "DashboardId"}}],
+                                   "DashboardId names the created dashboard; FolderArns and ThemeArn name "
+                                   "other resource types and are not dashboard ARN selectors"),
     **{f"quicksight:{operation}": ([{"type": "ingestion", "fill": {"DatasetId": "DataSetId", "ResourceId": "IngestionId"}}],
                                    "the ingestion ARN contains its dataset id and ingestion id, named by "
                                    "DataSetId and IngestionId in the REST path")

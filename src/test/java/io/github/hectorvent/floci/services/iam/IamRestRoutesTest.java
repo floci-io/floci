@@ -55,6 +55,29 @@ class IamRestRoutesTest {
     }
 
     @Test
+    void denialStatusComesFromTheModelAndFallsBackWhenMissing() {
+        IamRestRoutes modelled = routes(ROUTES.replace("\"credentialScope\": \"svc\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": 402"));
+        assertEquals(402, modelled.accessDeniedStatus("svc", 403));
+        assertEquals(403, modelled.accessDeniedStatus("hand", 403));
+        assertEquals(400, modelled.accessDeniedStatus("unknown", 400));
+        assertEquals(403, modelled.accessDeniedStatus(null, 403));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"401\"", "401.5", "399", "600", "null", "{}"})
+    void invalidModelledDenialStatusesAreRejected(String status) {
+        String document = ROUTES.replace("\"credentialScope\": \"svc\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": " + status);
+        assertThrows(IllegalStateException.class, () -> routes(document));
+    }
+
+    @Test
+    void modelsSharingAScopeMustAgreeOnTheDenialStatus() {
+        String document = ROUTES.replace("\"credentialScope\": \"svc\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": 401")
+                .replace("\"credentialScope\": \"hand\"", "\"credentialScope\": \"svc\", \"accessDeniedStatus\": 403");
+        assertThrows(IllegalStateException.class, () -> routes(document));
+    }
+
+    @Test
     void aLiteralSegmentOutranksALabel() {
         assertEquals(Optional.of("GetThingPolicy"), get("/things/policy"));
         assertEquals(Optional.of("GetThing"), get("/things/web"));

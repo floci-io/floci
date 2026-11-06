@@ -10,6 +10,8 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.quicksight.QuickSightClient;
 import software.amazon.awssdk.services.quicksight.model.AccessDeniedException;
@@ -179,6 +181,43 @@ class QuickSightIamEnforcementIntegrationTest {
                         () -> user.createDataSet(request -> request.awsAccountId(ACCOUNT).dataSetId(name + "-denied").name("Denied")
                                 .importMode("SPICE").physicalTableMap(tables)));
             }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SaaSTable", "FileSource"})
+    void additionalPhysicalTableSourcesHonorScopedGrantsAndDenies(String kind) {
+        String name = "qs-source-" + UUID.randomUUID();
+        EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(cleanup, endpoint.getPort(), auth(ACCOUNT, "iam"), name);
+        try (QuickSightClient root = AwsTestClients.create(QuickSightClient.builder(), ACCOUNT, REGION);
+                QuickSightClient user = AwsTestClients.create(QuickSightClient.builder(), credentials.accessKeyId(), credentials.secretAccessKey(), REGION)) {
+            String source = root.createDataSource(request -> request.awsAccountId(ACCOUNT).dataSourceId(name).name("Source").type("S3")).arn();
+            cleanup.register(() -> rootDeleteDataSource(name));
+            PhysicalTable table = switch (kind) {
+                case "SaaSTable" -> PhysicalTable.builder().saaSTable(value -> value.dataSourceArn(source)
+                        .inputColumns(column -> column.name("value").type("STRING"))).build();
+                case "FileSource" -> PhysicalTable.builder().fileSource(value -> value.dataSourceArn(source)
+                        .inputColumns(column -> column.name("value").type("STRING"))).build();
+                default -> throw new IllegalArgumentException(kind);
+            };
+            policy(name, "quicksight:CreateDataSet", source);
+            user.createDataSet(request -> request.awsAccountId(ACCOUNT).dataSetId(name).name("Data").importMode("SPICE")
+                    .physicalTableMap(Map.of("table", table)));
+            cleanup.register(() -> rootDeleteDataSet(name));
+            policy(name, "quicksight:CreateDataSet", source + "-other");
+            assertThrows(AccessDeniedException.class,
+                    () -> user.createDataSet(request -> request.awsAccountId(ACCOUNT).dataSetId(name + "-denied").name("Denied")
+                            .importMode("SPICE").physicalTableMap(Map.of("table", table))));
+            EnforcementFixtures.putUserPolicy(endpoint.getPort(), auth(ACCOUNT, "iam"), name, "p", """
+                    {"Version":"2012-10-17","Statement":[
+                      {"Effect":"Allow","Action":"quicksight:CreateDataSet","Resource":"*"},
+                      {"Effect":"Deny","Action":"quicksight:CreateDataSet","Resource":"%s"}]}""".formatted(source));
+            AccessDeniedException denied = assertThrows(AccessDeniedException.class,
+                    () -> user.createDataSet(request -> request.awsAccountId(ACCOUNT).dataSetId(name + "-denied").name("Denied")
+                            .importMode("SPICE").physicalTableMap(Map.of("table", table))));
+            assertEquals(401, denied.statusCode());
+            assertThrows(ResourceNotFoundException.class,
+                    () -> root.describeDataSet(request -> request.awsAccountId(ACCOUNT).dataSetId(name + "-denied")));
         }
     }
 

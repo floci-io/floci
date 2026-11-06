@@ -1872,7 +1872,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      *   <li>{@code application/x-www-form-urlencoded} body → AWS Query
      *       {@code <ErrorResponse>...</ErrorResponse>} (IAM/STS/EC2/SQS/SNS/...), with the code
      *       {@link #queryAccessDeniedCode} gives the service that serves the request</li>
-     *   <li>JSON 1.x: JSON with HTTP 400; REST-JSON: JSON with HTTP 403, or QuickSight's modelled 401</li>
+     *   <li>JSON 1.x: JSON with HTTP 400; REST-JSON: JSON with its modelled denial status, defaulting to HTTP 403</li>
      *   <li>CBOR: the request's own encoding with HTTP 403, from {@link #accessDeniedForRequest},
      *       which has the request to read it from</li>
      * </ul>
@@ -1931,8 +1931,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if (restXml || protocol == WireProtocol.AWS_QUERY || isFormEncoded(requestMediaType)) {
             return queryXmlError(queryAccessDeniedCode(credentialScope), message);
         }
-        int status = protocol == WireProtocol.AWS_JSON_1_0 || protocol == WireProtocol.AWS_JSON_1_1 ? 400 : 403;
-        return jsonAccessDenied(message, "quicksight".equals(credentialScope) ? 401 : status);
+        int status = protocol == WireProtocol.AWS_JSON_1_0 || protocol == WireProtocol.AWS_JSON_1_1
+                ? 400 : IamActionRegistry.accessDeniedStatus(credentialScope, 403);
+        return jsonAccessDenied(message, status);
     }
 
     /**

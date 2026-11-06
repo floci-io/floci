@@ -105,9 +105,11 @@ final class IamRestRoutes {
 
     /** Each credential scope's routes, by method. */
     private final Map<String, Map<String, List<Route>>> routes;
+    private final Map<String, Integer> accessDeniedStatuses;
 
-    private IamRestRoutes(Map<String, Map<String, List<Route>>> routes) {
+    private IamRestRoutes(Map<String, Map<String, List<Route>>> routes, Map<String, Integer> accessDeniedStatuses) {
         this.routes = routes;
+        this.accessDeniedStatuses = accessDeniedStatuses;
     }
 
     /** The vendored routes. */
@@ -135,6 +137,11 @@ final class IamRestRoutes {
         return best == null ? Optional.empty() : Optional.of(new Match(best.operation(), best.labelValues(requestPath)));
     }
 
+    /** The modelled denial status, or the existing protocol default when the model declares none. */
+    int accessDeniedStatus(String scope, int fallback) {
+        return scope == null ? fallback : accessDeniedStatuses.getOrDefault(scope, fallback);
+    }
+
     /** Whether the file routes any request of the credential scope. */
     boolean routes(String scope) {
         return routes.containsKey(scope);
@@ -149,12 +156,25 @@ final class IamRestRoutes {
         }
         Set<String> skipped = Set.copyOf(handRouted.propertyStream().map(Map.Entry::getKey).toList());
         Map<String, Map<String, List<Route>>> routes = new HashMap<>();
+        Map<String, Integer> denialStatuses = new HashMap<>();
         models.properties().forEach(model -> {
             String scope = model.getValue().path("credentialScope").asText("");
             JsonNode operations = model.getValue().path("operations");
             if (scope.isEmpty() || !operations.isObject() || operations.isEmpty()) {
                 throw new IllegalStateException(RESOURCE_NAME + " gives model " + model.getKey()
                         + " no credential scope or no operations");
+            }
+            if (model.getValue().has("accessDeniedStatus")) {
+                JsonNode status = model.getValue().get("accessDeniedStatus");
+                if (!status.isIntegralNumber() || !status.canConvertToInt() || status.asInt() < 400 || status.asInt() > 599) {
+                    throw new IllegalStateException(RESOURCE_NAME + " gives model " + model.getKey()
+                            + " an invalid access-denied HTTP status");
+                }
+                Integer previous = denialStatuses.putIfAbsent(scope, status.asInt());
+                if (previous != null && previous.intValue() != status.asInt()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " gives scope " + scope
+                            + " conflicting access-denied HTTP statuses");
+                }
             }
             if (skipped.contains(scope)) {
                 return;
@@ -177,7 +197,7 @@ final class IamRestRoutes {
             byMethod.forEach((method, list) -> methods.put(method, List.copyOf(list)));
             copied.put(scope, Map.copyOf(methods));
         });
-        return new IamRestRoutes(Map.copyOf(copied));
+        return new IamRestRoutes(Map.copyOf(copied), Map.copyOf(denialStatuses));
     }
 
     /** A route of the operation from its request URI, its path's segments and the query after its {@code ?}. */

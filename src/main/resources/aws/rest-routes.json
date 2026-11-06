@@ -1,5 +1,5 @@
 {
-  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.43.118 (local/aws/botocore)"},
+  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.43.118 (installed package)"},
   "handRouted": {
     "apigateway": "API Gateway's management API is authorized by HTTP method, apigateway:GET, apigateway:POST and so on, on the resource path a route names, not by its operations' names, and the registry's rules give every route its method's action",
     "s3": "S3 tells apart the operations it serves on one route by their query parameters and headers, which the registry's S3 rules and sub-resource overrides read, and an S3 Control route Floci does not serve runs as the S3 data plane, checked as the bucket or object operation that runs"
@@ -8,6 +8,7 @@
     "accessanalyzer": {
       "credentialScope": "access-analyzer",
       "apiVersion": "2019-11-01",
+      "accessDeniedStatus": 403,
       "operations": {
         "ApplyArchiveRule": {"method": "PUT", "requestUri": "/archive-rule"},
         "CancelPolicyGeneration": {"method": "PUT", "requestUri": "/policy/generation/{jobId}"},
@@ -183,6 +184,7 @@
     "apigatewayv2": {
       "credentialScope": "apigateway",
       "apiVersion": "2018-11-29",
+      "accessDeniedStatus": 403,
       "operations": {
         "CreateApi": {"method": "POST", "requestUri": "/v2/apis"},
         "CreateApiMapping": {"method": "POST", "requestUri": "/v2/domainnames/{domainName}/apimappings"},
@@ -292,6 +294,7 @@
     "dsql": {
       "credentialScope": "dsql",
       "apiVersion": "2018-05-10",
+      "accessDeniedStatus": 403,
       "operations": {
         "CreateCluster": {"method": "POST", "requestUri": "/cluster"},
         "CreateStream": {"method": "POST", "requestUri": "/stream/{clusterIdentifier}"},
@@ -314,6 +317,7 @@
     "eks": {
       "credentialScope": "eks",
       "apiVersion": "2017-11-01",
+      "accessDeniedStatus": 403,
       "operations": {
         "ActivateCertificateAuthority": {"method": "POST", "requestUri": "/clusters/{name}/certificate-authorities/{certificateAuthorityId}/activate"},
         "AssociateAccessPolicy": {"method": "POST", "requestUri": "/clusters/{name}/access-entries/{principalArn}/access-policies"},
@@ -390,6 +394,7 @@
     "es": {
       "credentialScope": "es",
       "apiVersion": "2015-01-01",
+      "accessDeniedStatus": 403,
       "operations": {
         "AcceptInboundCrossClusterSearchConnection": {"method": "PUT", "requestUri": "/2015-01-01/es/ccs/inboundConnection/{ConnectionId}/accept"},
         "AddTags": {"method": "POST", "requestUri": "/2015-01-01/tags"},
@@ -553,6 +558,7 @@
     "lambda-microvms": {
       "credentialScope": "lambda",
       "apiVersion": "2025-09-09",
+      "accessDeniedStatus": 403,
       "operations": {
         "CreateMicrovmAuthToken": {"method": "POST", "requestUri": "/2025-09-09/microvms/{microvmIdentifier}/auth-token"},
         "CreateMicrovmImage": {"method": "POST", "requestUri": "/2025-09-09/microvm-images"},
@@ -583,6 +589,7 @@
     "opensearch": {
       "credentialScope": "es",
       "apiVersion": "2021-01-01",
+      "accessDeniedStatus": 403,
       "operations": {
         "AcceptInboundConnection": {"method": "PUT", "requestUri": "/2021-01-01/opensearch/cc/inboundConnection/{ConnectionId}/accept"},
         "AddDataSource": {"method": "POST", "requestUri": "/2021-01-01/opensearch/domain/{DomainName}/dataSource"},
@@ -701,6 +708,7 @@
     "quicksight": {
       "credentialScope": "quicksight",
       "apiVersion": "2018-04-01",
+      "accessDeniedStatus": 401,
       "operations": {
         "BatchCreateTopicReviewedAnswer": {"method": "POST", "requestUri": "/accounts/{AwsAccountId}/topics/{TopicId}/batch-create-reviewed-answers"},
         "BatchDeleteKnowledgeBase": {"method": "POST", "requestUri": "/v1/accounts/{AwsAccountId}/knowledge-bases/batch-delete"},
@@ -1006,6 +1014,7 @@
     "s3": {
       "credentialScope": "s3",
       "apiVersion": "2006-03-01",
+      "accessDeniedStatus": 403,
       "operations": {
         "AbortMultipartUpload": {"method": "DELETE", "requestUri": "/{Bucket}/{Key+}"},
         "CompleteMultipartUpload": {"method": "POST", "requestUri": "/{Bucket}/{Key+}"},
