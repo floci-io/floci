@@ -1,5 +1,5 @@
 {
-  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.43.118 (installed package)"},
+  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.43.118 (local/aws/botocore)"},
   "handRouted": {
     "apigateway": "API Gateway's management API is authorized by HTTP method, apigateway:GET, apigateway:POST and so on, on the resource path a route names, not by its operations' names, and the registry's rules give every route its method's action",
     "s3": "S3 tells apart the operations it serves on one route by their query parameters and headers, which the registry's S3 rules and sub-resource overrides read, and an S3 Control route Floci does not serve runs as the S3 data plane, checked as the bucket or object operation that runs"
@@ -1275,6 +1275,32 @@
         "TagResource": {"method": "POST", "requestUri": "/tags/{ResourceArn}"},
         "UntagResource": {"method": "DELETE", "requestUri": "/tags/{ResourceArn}"},
         "UpdateSchedule": {"method": "PUT", "requestUri": "/schedules/{Name}"}
+      }
+    },
+    "signer": {
+      "credentialScope": "signer",
+      "apiVersion": "2017-08-25",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "AddProfilePermission": {"method": "POST", "requestUri": "/signing-profiles/{profileName}/permissions"},
+        "CancelSigningProfile": {"method": "DELETE", "requestUri": "/signing-profiles/{profileName}"},
+        "DescribeSigningJob": {"method": "GET", "requestUri": "/signing-jobs/{jobId}"},
+        "GetRevocationStatus": {"method": "GET", "requestUri": "/revocations"},
+        "GetSigningPlatform": {"method": "GET", "requestUri": "/signing-platforms/{platformId}"},
+        "GetSigningProfile": {"method": "GET", "requestUri": "/signing-profiles/{profileName}"},
+        "ListProfilePermissions": {"method": "GET", "requestUri": "/signing-profiles/{profileName}/permissions"},
+        "ListSigningJobs": {"method": "GET", "requestUri": "/signing-jobs"},
+        "ListSigningPlatforms": {"method": "GET", "requestUri": "/signing-platforms"},
+        "ListSigningProfiles": {"method": "GET", "requestUri": "/signing-profiles"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn}"},
+        "PutSigningProfile": {"method": "PUT", "requestUri": "/signing-profiles/{profileName}"},
+        "RemoveProfilePermission": {"method": "DELETE", "requestUri": "/signing-profiles/{profileName}/permissions/{statementId}"},
+        "RevokeSignature": {"method": "PUT", "requestUri": "/signing-jobs/{jobId}/revoke"},
+        "RevokeSigningProfile": {"method": "PUT", "requestUri": "/signing-profiles/{profileName}/revoke"},
+        "SignPayload": {"method": "POST", "requestUri": "/signing-jobs/with-payload"},
+        "StartSigningJob": {"method": "POST", "requestUri": "/signing-jobs"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn}"}
       }
     }
   }

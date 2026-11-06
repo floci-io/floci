@@ -50,7 +50,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "paymentcryptography", "pipes", "quicksight", "ram", "rds", "redshift", "redshiftserverless",
             "resourceexplorer2", "resourcegroups", "route53resolver",
-            "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "sns", "sqs",
+            "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "signer", "sns", "sqs",
             "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2");
 
     private static final String JSON_1_0 = "application/x-amz-json-1.0";
@@ -1025,6 +1025,23 @@ class PartitionCrossServiceSmokeIntegrationTest {
         cleanup.register(() -> signed(region, "dlm").when().delete("/policies/" + policyId));
         String arn = signed(region, "dlm").when().get("/policies/" + policyId)
             .then().statusCode(200).extract().jsonPath().getString("Policy.PolicyArn");
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void signerProfileArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "signer");
+        String profileName = "Smoke" + Long.toString(System.nanoTime(), 36);
+        signed(region, "signer")
+            .contentType(JSON)
+            .body("{\"platformId\":\"AWSLambda-SHA384-ECDSA\"}")
+        .when().put("/signing-profiles/" + profileName).then().statusCode(200);
+        cleanup.register(() -> signed(region, "signer").when()
+                .delete("/signing-profiles/" + profileName));
+        String arn = signed(region, "signer").when()
+                .get("/signing-profiles/" + profileName)
+            .then().statusCode(200).extract().jsonPath().getString("arn");
         PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 
