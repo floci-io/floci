@@ -1,12 +1,28 @@
 package io.floci.aws.services.eventbridge;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridge.model.InvalidEventPatternException;
+
+import java.net.URI;
+import java.util.List;
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 class EventBridgeTestEventPatternIntegrationTest {
@@ -14,9 +30,90 @@ class EventBridgeTestEventPatternIntegrationTest {
     private static final String EVENT_BRIDGE_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET = "AWSEvents.TestEventPattern";
 
+    @TestHTTPResource
+    URI endpoint;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            7     | ">=",7         | true
+            7     | ">=",6         | true
+            6     | ">=",7         | false
+            7     | ">",7          | false
+            8     | ">",7          | true
+            7     | "<=",7         | true
+            8     | "<",7          | false
+            7.0   | "=",7          | true
+            301.8 | "=",3.018e2    | true
+            7     | ">",6,"<=",7   | true
+            8     | ">",6,"<=",7   | false
+            "7"   | ">=",7         | false
+            null  | ">=",0         | false
+            [3,7] | ">=",7         | true
+            [3,6] | ">=",7         | false
+            [3,9] | ">=",7,"<",9   | false
+            [3,8] | ">=",7,"<",9   | true
+            ["7"] | ">=",7         | false
+            []    | ">=",7         | false
+            """)
+    void numericComparisonThroughSdk(String value, String comparisons, boolean expected) {
+        try (EventBridgeClient client = sdkClient()) {
+            String event = """
+                    {"version":"0","id":"numeric-test","detail-type":"Example","source":"example.test",
+                     "account":"000000000000","time":"2026-11-06T00:00:00Z","region":"eu-west-2",
+                     "resources":[],"detail":{"severity":%s}}
+                    """.formatted(value);
+            String pattern = "{\"detail\":{\"severity\":[{\"numeric\":[" + comparisons + "]}]}}";
+
+            assertEquals(expected, client.testEventPattern(request -> request
+                    .eventPattern(pattern).event(event)).result());
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidNumericPatterns")
+    void invalidNumericPatternsRaiseSdkErrors(String pattern) {
+        try (EventBridgeClient client = sdkClient()) {
+            for (String detail : List.of("{\"severity\":7}", "{\"severity\":\"7\"}", "{}")) {
+                String event = """
+                        {"version":"0","id":"numeric-test","detail-type":"Example","source":"example.test",
+                         "account":"000000000000","time":"2026-11-06T00:00:00Z","region":"eu-west-2",
+                         "resources":[],"detail":%s}
+                        """.formatted(detail);
+                InvalidEventPatternException error = assertThrows(InvalidEventPatternException.class,
+                        () -> client.testEventPattern(request -> request.eventPattern(pattern).event(event)));
+                assertEquals(400, error.statusCode());
+                assertEquals("InvalidEventPatternException", error.awsErrorDetails().errorCode());
+            }
+            InvalidEventPatternException error = assertThrows(InvalidEventPatternException.class,
+                    () -> client.putRule(request -> request.name("invalid-numeric-pattern").eventPattern(pattern)));
+            assertEquals(400, error.statusCode());
+            assertEquals("InvalidEventPatternException", error.awsErrorDetails().errorCode());
+        }
+    }
+
+    private static Stream<String> invalidNumericPatterns() {
+        Stream<String> invalidFilters = Stream.of("null", "7", "{}", "[]", "[\">=\"]", "[\">=\",7,\"<\"]",
+                "[\"!=\",7]", "[7,7]", "[\">=\",\"7\"]", "[\">=\",null]", "[\">=\",true]")
+                .map(filter -> "{\"detail\":{\"severity\":[{\"numeric\":" + filter + "}]}}");
+        return Stream.concat(invalidFilters, Stream.of(
+                "{\"detail\":{\"nested\":{\"severity\":[{\"numeric\":[]}]}}}",
+                "{\"$or\":[{\"source\":[\"example.test\"]},{\"detail\":{\"severity\":[{\"numeric\":[]}]}}]}",
+                "{\"detail\":{\"$or\":[{\"severity\":[7]},{\"severity\":[{\"numeric\":[]}] }]}}",
+                "{\"detail\":{\"severity\":[7,{\"numeric\":[]}]}}"));
+    }
+
+    private EventBridgeClient sdkClient() {
+        return EventBridgeClient.builder()
+                .endpointOverride(endpoint)
+                .region(Region.EU_WEST_2)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
+                .httpClientBuilder(UrlConnectionHttpClient.builder())
+                .build();
     }
 
     @Test
