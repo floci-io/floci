@@ -68,9 +68,9 @@ AWS::EC2::NatGateway	AllocationId	create-only	a drop is refused for a public gat
 AWS::EC2::NatGateway	AvailabilityMode	create-only	a drop is accepted and skipped
 AWS::EC2::NatGateway	ConnectivityType	create-only	a drop reads as public, so a private gateway is replaced
 AWS::EC2::NatGateway	PrivateIpAddress	keep:a drop keeps the address the gateway holds
-AWS::EC2::NatGateway	SecondaryAllocationIds	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
-AWS::EC2::NatGateway	SecondaryPrivateIpAddressCount	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
-AWS::EC2::NatGateway	SecondaryPrivateIpAddresses	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
+AWS::EC2::NatGateway	SecondaryAllocationIds	clear	one address set with the other two Secondary* properties
+AWS::EC2::NatGateway	SecondaryPrivateIpAddressCount	clear	one address set with the other two Secondary* properties
+AWS::EC2::NatGateway	SecondaryPrivateIpAddresses	clear	one address set with the other two Secondary* properties
 AWS::EC2::NatGateway	SubnetId	create-only	a drop is refused
 AWS::EC2::NatGateway	Tags	clear
 AWS::EC2::PrefixList	AddressFamily	keep:required, a drop is refused

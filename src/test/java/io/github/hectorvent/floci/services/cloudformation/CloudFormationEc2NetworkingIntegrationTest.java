@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -41,6 +43,9 @@ class CloudFormationEc2NetworkingIntegrationTest {
     private static final String EC2_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260907/us-east-1/ec2/aws4_request";
     private static final String STACK = "ec2-networking-it";
+
+    @Inject
+    Ec2Service ec2Service;
 
     private static String template(String vpcId, String publicSubnetCidr) {
         return template(vpcId, publicSubnetCidr, "{\"Key\": \"tier\", \"Value\": \"web\"}");
@@ -240,6 +245,94 @@ class CloudFormationEc2NetworkingIntegrationTest {
 
         ec2("DeleteNatGateway", Map.of("NatGatewayId", otherNat));
         ec2("ReleaseAddress", Map.of("AllocationId", held));
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    private static final String TAGGED_PUBLIC_NAT = PUBLIC_NAT + ", \"Tags\": [{\"Key\": \"%s\", \"Value\": \"v\"}]";
+
+    /**
+     * A property the stack never declared keeps the value set outside it. The three secondary-address
+     * properties form one set, so a gateway whose templates declared none of them keeps a secondary
+     * Elastic IP added through the service, which is what AssociateNatGatewayAddress does (the
+     * query action is not exposed, so the test calls the service it maps to).
+     */
+    @Test
+    void aNatGatewaySecondaryElasticIpAddedOutsideTheStackSurvivesAnUnrelatedUpdate() {
+        String stack = "ec2-nat-secondary-outside-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.97.0.0/16")), "<vpcId>", "</vpcId>");
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.97.0.0/24",
+                TAGGED_PUBLIC_NAT.formatted("before"), false));
+        String natId = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId");
+        String outside = between(ec2("AllocateAddress", Map.of("Domain", "vpc")), "<allocationId>", "</allocationId>");
+        ec2Service.updateNatGatewaySecondaryAddresses("us-east-1", natId, List.of(outside), List.of(), null);
+        assertTrue(natXml(natId).contains("<allocationId>" + outside + "</allocationId>"), natXml(natId));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.97.0.0/24",
+                TAGGED_PUBLIC_NAT.formatted("after"), false));
+
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"), "the gateway is kept");
+        String nat = natXml(natId);
+        assertTrue(nat.contains("<allocationId>" + outside + "</allocationId>"),
+                "the secondary added outside the stack must survive: " + nat);
+        assertTrue(ec2("DescribeAddresses", Map.of("AllocationId.1", outside)).contains("<associationId>"),
+                "the Elastic IP added outside the stack is still held");
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("ReleaseAddress", Map.of("AllocationId", outside));
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** {@code AWS::NoValue} is removed before the provisioner runs, so such a property was never declared. */
+    @Test
+    void aSecondaryPropertyThatIsNoValueCountsAsNeverDeclared() {
+        String stack = "ec2-nat-secondary-novalue-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.98.0.0/16")), "<vpcId>", "</vpcId>");
+        String noValue = PUBLIC_NAT + ", \"SecondaryAllocationIds\": {\"Ref\": \"AWS::NoValue\"}";
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.98.0.0/24", noValue, false));
+        String natId = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId");
+        String outside = between(ec2("AllocateAddress", Map.of("Domain", "vpc")), "<allocationId>", "</allocationId>");
+        ec2Service.updateNatGatewaySecondaryAddresses("us-east-1", natId, List.of(outside), List.of(), null);
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.98.0.0/24",
+                noValue + ", \"Tags\": [{\"Key\": \"k\", \"Value\": \"v\"}]", false));
+
+        describeStacks(stack, "UPDATE_COMPLETE");
+        String nat = natXml(natId);
+        assertTrue(nat.contains("<allocationId>" + outside + "</allocationId>"),
+                "a NoValue property never declared the set, so the secondary added outside must survive: " + nat);
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("ReleaseAddress", Map.of("AllocationId", outside));
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** The contrast: a secondary Elastic IP the stack declared is released when a template drops the property. */
+    @Test
+    void aSecondaryElasticIpTheStackDeclaredIsClearedWhenATemplateDropsIt() {
+        String stack = "ec2-nat-secondary-dropped-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.99.0.0/16")), "<vpcId>", "</vpcId>");
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.99.0.0/24",
+                PUBLIC_NAT + ", \"SecondaryAllocationIds\": [{\"Fn::GetAtt\": [\"Eip2\", \"AllocationId\"]}]", false));
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        String natId = out.get("NatId");
+        String eip2 = out.get("Eip2Id");
+        assertTrue(natXml(natId).contains("<allocationId>" + eip2 + "</allocationId>"), natXml(natId));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.99.0.0/24", PUBLIC_NAT, false));
+
+        describeStacks(stack, "UPDATE_COMPLETE");
+        String nat = natXml(natId);
+        assertFalse(nat.contains(eip2) || !secondaryIps(nat).isEmpty(), "the declared secondary is cleared: " + nat);
+        assertFalse(ec2("DescribeAddresses", Map.of("AllocationId.1", eip2)).contains("<associationId>"));
+
         cloudFormation(stack, "DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(stack);
         ec2("DeleteVpc", Map.of("VpcId", vpcId));

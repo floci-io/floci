@@ -698,11 +698,191 @@ class Ec2NetworkCfnProvisionerTest {
                 .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
         StackResource changed = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
         provisioner.provision(changed, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID),
-                ctx(NAT_ID));
+                ctx(NAT_ID, props));
         verify(ec2).updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null);
         verify(ec2).createNatGateway(any(), any(), any(), any(), any(), any(), any(), any(), any());
         assertEquals(NAT_ID, changed.getPhysicalId(), "changed secondaries keep the gateway");
         assertFalse(changed.getAttributes().containsKey(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
+    }
+
+    private static final String OUTSIDE_ALLOC = "eipalloc-0aaaaaaaaaaaaaaaa";
+    private static final String OUTSIDE_PUBLIC_IP = "203.0.113.80";
+
+    /** A gateway holding a secondary address that no template of the stack declared. */
+    private static NatGateway natGatewayHoldingAnOutsideSecondary(String connectivityType) {
+        NatGateway nat = natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50");
+        nat.setSubnetId(SUBNET_ID);
+        nat.setConnectivityType(connectivityType);
+        NatGatewayAddress secondary = new NatGatewayAddress();
+        secondary.setPrimary(false);
+        secondary.setNetworkInterfaceId("eni-0123456789abcdef0");
+        secondary.setPrivateIp("10.0.1.80");
+        if ("public".equals(connectivityType)) {
+            nat.setAllocationId(ALLOC_ID);
+            nat.getNatGatewayAddresses().get(0).setAllocationId(ALLOC_ID);
+            secondary.setAllocationId(OUTSIDE_ALLOC);
+            secondary.setPublicIp(OUTSIDE_PUBLIC_IP);
+        }
+        nat.getNatGatewayAddresses().add(secondary);
+        return nat;
+    }
+
+    private ObjectNode publicNatProps() {
+        return mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID);
+    }
+
+    /**
+     * A property the stack never declared keeps the value set outside it: with none of the three
+     * secondary-address properties in either template, the update leaves the gateway's secondaries
+     * alone, and the attributes list what it holds.
+     */
+    @Test
+    void aNatGatewayWhoseTemplatesNeverDeclaredSecondariesKeepsTheOnesAddedOutsideTheStack() {
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of()))
+                .thenReturn(List.of(natGatewayHoldingAnOutsideSecondary("public")));
+        // Only reached by an implementation that clears the set: it reports a gateway with none left.
+        when(ec2.updateNatGatewaySecondaryAddresses(any(), any(), any(), any(), any()))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+
+        for (ProvisionContext context : List.of(ctx(NAT_ID, publicNatProps()), ctx(NAT_ID))) {
+            StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+            provisioner.provision(r, publicNatProps(), context);
+
+            assertEquals(NAT_ID, r.getPhysicalId());
+            assertEquals(OUTSIDE_PUBLIC_IP, r.getAttributes().get(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
+        }
+        verify(ec2, never()).updateNatGatewaySecondaryAddresses(any(), any(), any(), any(), any());
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    /** A JSON null counts as not declared, as {@code AWS::NoValue} does, so the set is not the stack's. */
+    @Test
+    void aNullSecondaryPropertyCountsAsNotDeclaredAndKeepsTheSecondariesAddedOutsideTheStack() {
+        ObjectNode props = publicNatProps();
+        props.putNull("SecondaryAllocationIds");
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of()))
+                .thenReturn(List.of(natGatewayHoldingAnOutsideSecondary("public")));
+        // Only reached by an implementation that clears the set: it reports a gateway with none left.
+        when(ec2.updateNatGatewaySecondaryAddresses(any(), any(), any(), any(), any()))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+        StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+
+        provisioner.provision(r, props, ctx(NAT_ID, publicNatProps()));
+
+        assertEquals(NAT_ID, r.getPhysicalId());
+        assertEquals(OUTSIDE_PUBLIC_IP, r.getAttributes().get(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
+        verify(ec2, never()).updateNatGatewaySecondaryAddresses(any(), any(), any(), any(), any());
+    }
+
+    /** Each of the three properties makes the set the stack's once the previous template declared it. */
+    @Test
+    void droppingAnyOneOfTheSecondaryPropertiesThePreviousTemplateDeclaredClearsTheSet() {
+        ObjectNode previousAlloc = publicNatProps();
+        previousAlloc.putArray("SecondaryAllocationIds").add(OUTSIDE_ALLOC);
+        ObjectNode previousIp = publicNatProps();
+        previousIp.putArray("SecondaryPrivateIpAddresses").add("10.0.1.80");
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of()))
+                .thenReturn(List.of(natGatewayHoldingAnOutsideSecondary("public")));
+        when(ec2.updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+
+        for (ObjectNode previous : List.of(previousAlloc, previousIp)) {
+            StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+            provisioner.provision(r, publicNatProps(), ctx(NAT_ID, previous));
+
+            assertEquals(NAT_ID, r.getPhysicalId(), "the gateway is kept");
+            assertFalse(r.getAttributes().containsKey(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
+        }
+        verify(ec2, times(2)).updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null);
+    }
+
+    @Test
+    void droppingTheSecondaryAddressCountThePreviousTemplateDeclaredClearsTheSet() {
+        ObjectNode privateNat = mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private");
+        ObjectNode previous = privateNat.deepCopy().put("SecondaryPrivateIpAddressCount", 1);
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of()))
+                .thenReturn(List.of(natGatewayHoldingAnOutsideSecondary("private")));
+        when(ec2.updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+        StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+
+        provisioner.provision(r, privateNat, ctx(NAT_ID, previous));
+
+        verify(ec2).updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null);
+        assertEquals(NAT_ID, r.getPhysicalId());
+    }
+
+    /** An explicit empty list is a declaration: it asks for no secondary, and a template that never declared one still gets it. */
+    @Test
+    void anExplicitlyEmptySecondaryListClearsTheSecondariesAddedOutsideTheStack() {
+        ObjectNode props = publicNatProps();
+        props.putArray("SecondaryAllocationIds");
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of()))
+                .thenReturn(List.of(natGatewayHoldingAnOutsideSecondary("public")));
+        when(ec2.updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+        StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+
+        provisioner.provision(r, props, ctx(NAT_ID, publicNatProps()));
+
+        verify(ec2).updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null);
+        assertEquals(NAT_ID, r.getPhysicalId());
+        assertFalse(r.getAttributes().containsKey(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
+    }
+
+    /**
+     * The three properties are one address set: a template that declares only the Elastic IP list
+     * manages the private-address and count properties too, so a secondary added outside the stack
+     * goes when the update brings the set to what the template says.
+     */
+    @Test
+    void aDeclaredSecondaryPropertyManagesTheWholeSetAndRemovesAnOutsideSecondary() {
+        String declaredAlloc = "eipalloc-0bbbbbbbbbbbbbbbb";
+        ObjectNode props = publicNatProps();
+        props.putArray("SecondaryAllocationIds").add(declaredAlloc);
+        NatGateway held = natGatewayHoldingAnOutsideSecondary("public");
+        NatGatewayAddress declared = new NatGatewayAddress();
+        declared.setPrimary(false);
+        declared.setNetworkInterfaceId("eni-0123456789abcdef0");
+        declared.setPrivateIp("10.0.1.81");
+        declared.setAllocationId(declaredAlloc);
+        declared.setPublicIp("203.0.113.81");
+        held.getNatGatewayAddresses().add(declared);
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of())).thenReturn(List.of(held));
+        NatGateway reconciled = natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50");
+        reconciled.getNatGatewayAddresses().add(declared);
+        when(ec2.updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(declaredAlloc), List.of(), null))
+                .thenReturn(reconciled);
+        StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+
+        provisioner.provision(r, props, ctx(NAT_ID, props));
+
+        verify(ec2).updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(declaredAlloc), List.of(), null);
+        assertEquals(NAT_ID, r.getPhysicalId());
+        assertEquals("203.0.113.81", r.getAttributes().get(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.1"),
+                "the secondary added outside the stack is gone");
+    }
+
+    /** Declaring a secondary for the first time on a kept gateway brings the set to the template's. */
+    @Test
+    void aSecondaryDeclaredForTheFirstTimeOnAKeptGatewayIsAppliedInPlace() {
+        ObjectNode props = publicNatProps();
+        props.putArray("SecondaryAllocationIds").add(OUTSIDE_ALLOC);
+        NatGateway bare = natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50");
+        bare.setSubnetId(SUBNET_ID);
+        bare.setAllocationId(ALLOC_ID);
+        bare.getNatGatewayAddresses().get(0).setAllocationId(ALLOC_ID);
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of())).thenReturn(List.of(bare));
+        when(ec2.updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(OUTSIDE_ALLOC), List.of(), null))
+                .thenReturn(natGatewayHoldingAnOutsideSecondary("public"));
+        StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+
+        provisioner.provision(r, props, ctx(NAT_ID, publicNatProps()));
+
+        verify(ec2).updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(OUTSIDE_ALLOC), List.of(), null);
+        assertEquals(NAT_ID, r.getPhysicalId());
+        assertEquals(OUTSIDE_PUBLIC_IP, r.getAttributes().get(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
     }
 
     @Test

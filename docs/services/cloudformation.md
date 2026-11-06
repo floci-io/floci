@@ -736,9 +736,11 @@ goes back to its create default, or is kept, on the AppSync resources and the EC
 an API key's `Expires`, a GraphQL API's `ApiType` and `Visibility`, a UNIT resolver's `DataSourceName`,
 a `NatGateway`'s `PrivateIpAddress` and a `PrefixList`'s `MaxEntries`. An update that drops a
 `PrefixList`'s `AddressFamily` or `PrefixListName` fails. Create-only members are not cleared either.
-A property the stack never declared keeps the value set outside it, with two exceptions that an update
-clears even then: a GraphQL API's `Tags` and `EnvironmentVariables`, which every update drives to the
-template, and the `NatGateway` secondary address properties. The table says so on each of those rows.
+A property the stack never declared keeps the value set outside it, with one exception: a GraphQL API's
+`Tags` and `EnvironmentVariables`, which every update drives to the template. The table says so on
+those rows. The three `NatGateway` `Secondary*` properties count as one
+address set: when the new or the previous template declares any of them, an update brings all three
+to the template.
 
 `src/test/resources/cloudformation/drop-policy.tsv` lists what a drop does to each property, and
 `CfnSchemaCoverageTest` keeps the list complete. Other services follow
