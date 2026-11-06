@@ -67,7 +67,7 @@ class Ec2SignatureErrorIntegrationTest {
                 return;
             }
             Ec2Exception denied = assertThrows(Ec2Exception.class, client::describeVpcs);
-            assertEquals("matching".equals(tokenMode) ? 403 : 401, denied.statusCode());
+            assertEquals("matching".equals(tokenMode) ? 400 : 401, denied.statusCode());
             assertEquals("matching".equals(tokenMode) ? "RequestExpired" : "AuthFailure",
                     denied.awsErrorDetails().errorCode());
             assertNotNull(denied.requestId());
@@ -79,7 +79,7 @@ class Ec2SignatureErrorIntegrationTest {
         URI presigned = AwsRequestSigner.signedAs(key, "session-secret", "ec2")
                 .presignedUri("GET", endpoint, query, new byte[0]);
         given().urlEncodingEnabled(false).get(presigned).then()
-                .statusCode("matching".equals(tokenMode) ? 403 : 401)
+                .statusCode("matching".equals(tokenMode) ? 400 : 401)
                 .body("Response.Errors.Error.Code",
                         equalTo("matching".equals(tokenMode) ? "RequestExpired" : "AuthFailure"));
     }
@@ -118,7 +118,7 @@ class Ec2SignatureErrorIntegrationTest {
     void headerTimestampSkewUsesRequestExpired(long offset) throws Exception {
         AwsRequestSigner signer = AwsRequestSigner.signedAs("test", "test", "ec2")
                 .signedAt(Instant.now().plusSeconds(offset));
-        Ec2ErrorAssertions.assertGetError(signer, endpoint, false, 403, "RequestExpired",
+        Ec2ErrorAssertions.assertGetError(signer, endpoint, false, 400, "RequestExpired",
                 offset < 0 ? "Signature expired:" : "Signature not yet current:");
     }
 
@@ -127,7 +127,7 @@ class Ec2SignatureErrorIntegrationTest {
     void presignedExpiryAndFutureTimestampUseRequestExpired(long offset) throws Exception {
         AwsRequestSigner signer = AwsRequestSigner.signedAs("test", "test", "ec2")
                 .signedAt(Instant.now().plusSeconds(offset));
-        Ec2ErrorAssertions.assertGetError(signer, endpoint, true, 403, "RequestExpired",
+        Ec2ErrorAssertions.assertGetError(signer, endpoint, true, 400, "RequestExpired",
                 offset < 0 ? "Signature expired:" : "Signature not yet current:");
     }
 

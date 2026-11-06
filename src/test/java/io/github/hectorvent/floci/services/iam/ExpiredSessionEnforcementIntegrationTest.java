@@ -79,7 +79,7 @@ class ExpiredSessionEnforcementIntegrationTest {
                 Region.US_EAST_1, baseUri)) {
             for (int attempt = 0; attempt < 2; attempt++) {
                 Ec2Exception denied = assertThrows(Ec2Exception.class, client::describeVpcs);
-                assertEquals(403, denied.statusCode());
+                assertEquals(400, denied.statusCode());
                 assertEquals("RequestExpired", denied.awsErrorDetails().errorCode());
                 assertNotNull(denied.requestId());
             }

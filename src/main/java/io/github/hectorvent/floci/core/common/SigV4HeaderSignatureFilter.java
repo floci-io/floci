@@ -457,7 +457,7 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
 
     private void requestExpired(ContainerRequestContext ctx, Class<?> resource, String message) {
         if (resource == AwsQueryController.class && Ec2ErrorResponses.isEc2QueryRequest(ctx)) {
-            ctx.abortWith(Ec2ErrorResponses.of("RequestExpired", message, 403));
+            ctx.abortWith(Ec2ErrorResponses.of("RequestExpired", message, 400));
             return;
         }
         signatureDoesNotMatch(ctx, resource, message);

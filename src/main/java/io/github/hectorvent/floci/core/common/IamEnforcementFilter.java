@@ -2068,7 +2068,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      */
     static Response expiredTokenResponse(String credentialScope, ContainerRequestContext ctx) {
         if ("ec2".equals(credentialScope)) {
-            return Ec2ErrorResponses.of("RequestExpired", EXPIRED_TOKEN, 403);
+            return Ec2ErrorResponses.of("RequestExpired", EXPIRED_TOKEN, 400);
         }
         if ("s3".equals(credentialScope)) {
             return s3XmlError("ExpiredToken", S3_EXPIRED_TOKEN, 400);
