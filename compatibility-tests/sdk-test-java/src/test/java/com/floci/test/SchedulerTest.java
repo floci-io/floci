@@ -595,4 +595,62 @@ class SchedulerTest {
             } catch (Exception ignored) {}
         }
     }
+
+    @Test
+    @Order(31)
+    @DisplayName("ListScheduleGroups / ListSchedules - paginators follow NextToken")
+    void listOperationsPaginate() {
+        String prefix = "sdk-paging-" + System.currentTimeMillis();
+        String groupA = prefix + "-a";
+        String groupB = prefix + "-b";
+        try {
+            for (String group : new String[]{groupA, groupB}) {
+                scheduler.createScheduleGroup(CreateScheduleGroupRequest.builder().name(group).build());
+            }
+            for (String name : new String[]{"s-1", "s-2"}) {
+                scheduler.createSchedule(CreateScheduleRequest.builder()
+                        .name(name)
+                        .groupName(groupA)
+                        .scheduleExpression("rate(1 hour)")
+                        .flexibleTimeWindow(FlexibleTimeWindow.builder().mode(FlexibleTimeWindowMode.OFF).build())
+                        .target(Target.builder()
+                                .arn("arn:aws:sqs:us-east-1:000000000000:queue")
+                                .roleArn("arn:aws:iam::000000000000:role/scheduler-role")
+                                .build())
+                        .build());
+            }
+
+            ListScheduleGroupsResponse firstGroups = scheduler.listScheduleGroups(
+                    ListScheduleGroupsRequest.builder().namePrefix(prefix).maxResults(1).build());
+            assertThat(firstGroups.scheduleGroups()).extracting(ScheduleGroupSummary::name).containsExactly(groupA);
+            assertThat(firstGroups.nextToken()).isNotNull();
+
+            assertThat(scheduler.listScheduleGroupsPaginator(
+                    ListScheduleGroupsRequest.builder().namePrefix(prefix).maxResults(1).build())
+                    .scheduleGroups())
+                    .extracting(ScheduleGroupSummary::name)
+                    .containsExactly(groupA, groupB);
+
+            assertThat(scheduler.listSchedulesPaginator(
+                    ListSchedulesRequest.builder().groupName(groupA).maxResults(1).build())
+                    .schedules())
+                    .extracting(ScheduleSummary::name)
+                    .containsExactly("s-1", "s-2");
+
+            assertThatThrownBy(() -> scheduler.listSchedules(
+                    ListSchedulesRequest.builder().nextToken("bogus-token").build()))
+                    .isInstanceOf(ValidationException.class);
+        } finally {
+            for (String name : new String[]{"s-1", "s-2"}) {
+                try {
+                    scheduler.deleteSchedule(DeleteScheduleRequest.builder().name(name).groupName(groupA).build());
+                } catch (Exception ignored) {}
+            }
+            for (String group : new String[]{groupA, groupB}) {
+                try {
+                    scheduler.deleteScheduleGroup(DeleteScheduleGroupRequest.builder().name(group).build());
+                } catch (Exception ignored) {}
+            }
+        }
+    }
 }
