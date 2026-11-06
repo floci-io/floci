@@ -14519,6 +14519,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private final ConcurrentHashMap<String, RefCountedLock> volumeLocks = new ConcurrentHashMap<>();
+    private final Set<VolumeDevice> pendingVolumeAttachments = ConcurrentHashMap.newKeySet();
+
+    private record VolumeDevice(String accountId, String region, String instanceId, String device) {}
 
     private <T> T withVolumeLock(String volumeId, Supplier<T> action) {
         if (volumeId == null) {
@@ -14797,7 +14800,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterValue",
                     "Value '" + device + "' for parameter device is invalid.", 400);
         }
-        return withVolumeLock(volumeId, () -> attachVolumeToInstance(region, volumeId, instanceId, device));
+        return withVolumeLock(volumeId, () -> {
+            String normalizedDevice = device.startsWith("/") ? device : "/dev/" + device;
+            VolumeDevice target = new VolumeDevice(callerAccountId(), region, instanceId, normalizedDevice);
+            if (!pendingVolumeAttachments.add(target)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The device '" + device + "' is already in use by an attachment in progress", 400);
+            }
+            try {
+                return attachVolumeToInstance(region, volumeId, instanceId, device);
+            } finally {
+                pendingVolumeAttachments.remove(target);
+            }
+        });
     }
 
     private VolumeAttachment attachVolumeToInstance(String region, String volumeId, String instanceId, String device) {

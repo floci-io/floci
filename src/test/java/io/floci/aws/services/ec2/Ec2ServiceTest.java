@@ -6907,6 +6907,66 @@ class Ec2ServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void differentVolumesCannotClaimTheSameDeviceDuringPhysicalAttachment(boolean firstFails) throws Exception {
+        Ec2VolumeBlockDeviceManager blockDevices = mock(Ec2VolumeBlockDeviceManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), null, null, blockDevices);
+        Instance instance = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        instance.setState(InstanceState.running());
+        String zone = instance.getPlacement().getAvailabilityZone();
+        Volume firstVolume = service.createVolume("us-east-1", zone, "gp3", 1,
+                false, 0, null, null, List.of());
+        Volume secondVolume = service.createVolume("us-east-1", zone, "gp3", 1,
+                false, 0, null, null, List.of());
+        CountDownLatch attaching = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(blockDevices.attachVolume(eq(firstVolume), any(), anyString())).thenAnswer(invocation -> {
+            attaching.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            if (firstFails) {
+                throw new AwsException("InternalError", "attachment failed", 500);
+            }
+            return Optional.of("/dev/xvdf");
+        });
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> first = executor.submit(() -> {
+                if (firstFails) {
+                    return assertThrows(AwsException.class, () -> service.attachVolume("us-east-1",
+                            firstVolume.getVolumeId(), instance.getInstanceId(), "xvdf"));
+                }
+                return service.attachVolume("us-east-1", firstVolume.getVolumeId(), instance.getInstanceId(), "xvdf");
+            });
+            try {
+                assertTrue(attaching.await(10, TimeUnit.SECONDS));
+                Future<AwsException> second = executor.submit(() -> assertThrows(AwsException.class,
+                        () -> service.attachVolume("us-east-1", secondVolume.getVolumeId(),
+                                instance.getInstanceId(), "/dev/xvdf")));
+                assertEquals("InvalidParameterValue", second.get(5, TimeUnit.SECONDS).getErrorCode());
+                assertEquals("available", secondVolume.getState());
+                assertTrue(secondVolume.getAttachments().isEmpty());
+                verify(blockDevices, never()).attachVolume(eq(secondVolume), any(), anyString());
+                release.countDown();
+                first.get(10, TimeUnit.SECONDS);
+                if (firstFails) {
+                    assertEquals("attached", service.attachVolume("us-east-1", secondVolume.getVolumeId(),
+                            instance.getInstanceId(), "/dev/xvdf").getState());
+                    assertEquals("available", firstVolume.getState());
+                } else {
+                    AwsException error = assertThrows(AwsException.class, () -> service.attachVolume("us-east-1",
+                            secondVolume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf"));
+                    assertEquals("InvalidParameterValue", error.getErrorCode());
+                    verify(blockDevices, never()).attachVolume(eq(secondVolume), any(), anyString());
+                }
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
     @Test
     void attachVolumeThrowsWithDifferentAZ() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),

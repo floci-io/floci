@@ -300,7 +300,7 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
 
         String helperId = ensureHelperContainer();
         if (helperId == null) {
-            throw attachmentFailure(volume, instance, null, null, "Volume helper container unavailable");
+            throw attachmentFailure(volume, instance, null, null, null, "Volume helper container unavailable");
         }
 
         int effectiveSize = volume.getSize() > 0 ? volume.getSize() : 8;
@@ -309,6 +309,7 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                 + "file=\"$1\"\n"
                 + "size=\"$2\"\n"
                 + "[ -f \"$file\" ] || truncate -s \"${size}G\" \"$file\"\n"
+                + "allocated=0\n"
                 + "loop=$(find_loops \"$file\" | head -n1)\n"
                 + "if [ -z \"$loop\" ]; then\n"
                 + "  loop=$(losetup -f 2>/dev/null)\n"
@@ -318,11 +319,12 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                 + "      mknod \"$loop\" b 7 \"$minor\" 2>/dev/null || true\n"
                 + "    fi\n"
                 + "    losetup \"$loop\" \"$file\" || exit 1\n"
+                + "    allocated=1\n"
                 + "  else\n"
                 + "    exit 1\n"
                 + "  fi\n"
                 + "fi\n"
-                + "echo \"$loop\"";
+                + "echo \"$allocated $loop\"";
 
         ContainerExec.Result helperResult;
         synchronized (loopAllocationLock) {
@@ -331,13 +333,17 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                     DEFAULT_TIMEOUT_SECONDS);
         }
         if (helperResult.exitCode() != 0) {
-            throw attachmentFailure(volume, instance, helperId, null, helperResult.summary());
+            throw attachmentFailure(volume, instance, null, null, null, helperResult.summary());
         }
 
-        String loopDev = helperResult.summary();
-        if (loopDev == null || !loopDev.startsWith("/dev/loop")) {
-            throw attachmentFailure(volume, instance, helperId, null, "Unexpected loop device: " + loopDev);
+        String[] allocation = helperResult.summary().split("\\s+");
+        if (allocation.length != 2 || !("0".equals(allocation[0]) || "1".equals(allocation[0]))
+                || !allocation[1].matches("/dev/loop[0-9]+")) {
+            throw attachmentFailure(volume, instance, null, null, null,
+                    "Unexpected loop allocation: " + helperResult.summary());
         }
+        String loopDev = allocation[1];
+        String allocatedLoop = "1".equals(allocation[0]) ? loopDev : null;
         activeLoopDevices.put(volume.getVolumeId(), loopDev);
 
         String minorStr = loopDev.replaceAll("[^0-9]", "");
@@ -361,7 +367,7 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                 new String[]{"sh", "-c", targetScript, "target", normalizedDevice, loopDev, minorStr},
                 DEFAULT_TIMEOUT_SECONDS);
         if (targetResult.exitCode() != 0) {
-            throw attachmentFailure(volume, instance, helperId, normalizedDevice, targetResult.summary());
+            throw attachmentFailure(volume, instance, helperId, allocatedLoop, normalizedDevice, targetResult.summary());
         }
 
         LOG.infov("Attached volume {0} as block device {1} (loop device {2}) to instance {3}",
@@ -393,7 +399,7 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
     }
 
     private AwsException attachmentFailure(Volume volume, Instance instance, String helperId,
-                                           String targetDevice, String reason) {
+                                           String allocatedLoop, String targetDevice, String reason) {
         LOG.warnv("Failed to attach volume {0} to instance {1}: {2}",
                 volume.getVolumeId(), instance.getInstanceId(), reason);
         if (targetDevice != null) {
@@ -404,8 +410,15 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                         targetDevice, volume.getVolumeId(), removed.summary());
             }
         }
-        if (helperId != null) {
-            releaseVolumeLoops(helperId, volume);
+        if (helperId != null && allocatedLoop != null) {
+            ContainerExec.Result released = execInContainer(helperId,
+                    new String[]{"losetup", "-d", allocatedLoop}, DEFAULT_TIMEOUT_SECONDS);
+            if (released.exitCode() != 0) {
+                LOG.warnv("Could not release newly allocated loop {0} for volume {1}: {2}",
+                        allocatedLoop, volume.getVolumeId(), released.summary());
+            } else {
+                activeLoopDevices.remove(volume.getVolumeId(), allocatedLoop);
+            }
         }
         return new AwsException("InternalError", "Could not attach volume '" + volume.getVolumeId()
                 + "' to instance '" + instance.getInstanceId() + "'", 500);

@@ -14,8 +14,14 @@ import io.floci.aws.services.ec2.model.Volume;
 import io.floci.aws.services.ec2.model.VolumeAttachment;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -67,7 +73,7 @@ class Ec2VolumeBlockDeviceManagerTest {
     @Test
     void attachVolumeCreatesTheDeviceBeforeReportingSuccess() {
         List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
-                0, "/dev/loop3", "");
+                0, "1 /dev/loop3", "");
         List<List<String>> targetCommands = ContainerExecStubs.completeEveryExec(dockerClient, "guest", 0, "", "");
 
         assertEquals(Optional.of("/dev/xvdf"), manager.attachVolume(volume(), runningInstance(), "xvdf"));
@@ -78,7 +84,7 @@ class Ec2VolumeBlockDeviceManagerTest {
     }
 
     @Test
-    void loopAllocationFailureReturnsAnAwsErrorAndReleasesPartialAllocation() {
+    void loopAllocationFailureReturnsAnAwsErrorWithoutReleasingUnownedLoops() {
         List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
                 List.of(1L, 0L), "", "permission denied");
 
@@ -88,29 +94,77 @@ class Ec2VolumeBlockDeviceManagerTest {
         assertEquals("InternalError", error.getErrorCode());
         assertEquals(500, error.getHttpStatus());
         assertFalse(error.getMessage().contains("permission denied"));
-        assertEquals(2, commands.size());
-        assertEquals("detach", commands.getLast().get(3));
+        assertEquals(1, commands.size());
         verify(dockerClient, never()).execCreateCmd("guest");
     }
 
     @Test
     void guestDeviceFailureCleansUpAndAllowsRetry() {
         List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
-                0, "/dev/loop3", "");
+                0, "1 /dev/loop3", "");
         List<List<String>> targetCommands = ContainerExecStubs.completeEveryExec(dockerClient, "guest",
                 List.of(1L, 0L, 0L), "", "");
         Instance instance = runningInstance();
 
         assertThrows(AwsException.class, () -> manager.attachVolume(volume(), instance, "/dev/xvdf"));
         assertEquals(List.of("rm", "-f", "/dev/xvdf"), targetCommands.getLast());
-        assertEquals("detach", helperCommands.getLast().get(3));
+        assertEquals(List.of("losetup", "-d", "/dev/loop3"), helperCommands.getLast());
         assertEquals(Optional.of("/dev/xvdf"), manager.attachVolume(volume(), instance, "/dev/xvdf"));
+    }
+
+    @Test
+    void failedRestoreDoesNotReleaseTheReusedLoopAndCanBeRetried() {
+        List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
+                0, "0 /dev/loop3", "");
+        ContainerExecStubs.completeEveryExec(dockerClient, "guest", List.of(1L, 0L, 0L), "", "");
+        Volume volume = volume();
+        VolumeAttachment attachment = new VolumeAttachment();
+        attachment.setVolumeId(volume.getVolumeId());
+        attachment.setDevice("/dev/xvdf");
+        attachment.setState("attached");
+        volume.setState("in-use");
+        volume.getAttachments().add(attachment);
+        Instance instance = runningInstance();
+
+        assertDoesNotThrow(() -> manager.restoreInstanceVolumeDevices(instance, List.of(attachment),
+                id -> Optional.of(volume)));
+
+        assertEquals(1, helperCommands.size(), "restoration must not detach a pre-existing loop");
+        assertEquals("in-use", volume.getState());
+        assertEquals("attached", attachment.getState());
+        assertEquals(Optional.of("/dev/xvdf"), manager.attachVolume(volume, instance, "/dev/xvdf"));
+        assertEquals(2, helperCommands.size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void helperReportsWhetherItAllocatedOrReusedTheLoop(boolean reused, @TempDir Path directory) throws Exception {
+        List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
+                0, "1 /dev/loop3", "");
+        ContainerExecStubs.completeEveryExec(dockerClient, "guest", 0, "", "");
+        manager.attachVolume(volume(), runningInstance(), "/dev/xvdf");
+        String script = helperCommands.getFirst().get(2);
+        String fakeCommands = "losetup() {\n"
+                + "  case \"$1\" in\n"
+                + "    -j) " + (reused ? "echo \"/dev/loop3: 0 $2\"" : ":") + ";;\n"
+                + "    -f) echo /dev/loop3;;\n"
+                + "    /dev/loop3) :;;\n"
+                + "    *) return 1;;\n"
+                + "  esac\n"
+                + "}\n"
+                + "mknod() { :; }\n";
+        Path rawFile = Files.createFile(directory.resolve("volume.raw"));
+        int exitCode = HelperShellFixture.run(
+                new String[]{"sh", "-c", fakeCommands + script, "helper", rawFile.toString(), "1"}, directory, Map.of());
+        String output = HelperShellFixture.output(directory).trim();
+        assertEquals(0, exitCode, output);
+        assertEquals((reused ? "0" : "1") + " /dev/loop3", output);
     }
 
     @Test
     void cleanupFailureStillReportsTheOriginalAttachmentError() {
         List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
-                List.of(0L, 1L), "/dev/loop3", "");
+                List.of(0L, 1L), "1 /dev/loop3", "");
         ContainerExecStubs.completeEveryExec(dockerClient, "guest", 1, "", "permission denied");
 
         AwsException error = assertThrows(AwsException.class,
@@ -118,7 +172,7 @@ class Ec2VolumeBlockDeviceManagerTest {
 
         assertEquals("InternalError", error.getErrorCode());
         assertEquals(2, helperCommands.size());
-        assertEquals("detach", helperCommands.getLast().get(3));
+        assertEquals(List.of("losetup", "-d", "/dev/loop3"), helperCommands.getLast());
     }
 
     @Test
