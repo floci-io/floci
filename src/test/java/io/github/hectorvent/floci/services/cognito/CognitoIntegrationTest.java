@@ -1171,6 +1171,26 @@ class CognitoIntegrationTest {
         assertThat(text, containsString("CODE "));
         assertFalse(text.contains("confirmUser"));
         assertTrue(email.path("Body").path("html_part").isNull());
+        String signupCode = fetchLatestSesVerificationCode(username);
+
+        given().delete("/_aws/ses").then().statusCode(200);
+        cognitoAction("ResendConfirmationCode", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(codeClientId, username))
+                .then()
+                .statusCode(200);
+
+        JsonNode resend = latestEmailTo(username);
+        assertEquals("Code subject", resend.path("Subject").asText());
+        String resendText = resend.path("Body").path("text_part").asText();
+        assertThat(resendText, containsString("CODE "));
+        assertFalse(resendText.contains("confirmUser"));
+        assertTrue(resend.path("Body").path("html_part").isNull());
+        String resendCode = fetchLatestSesVerificationCode(username);
+        assertNotEquals(signupCode, resendCode);
 
         cognitoAction("ConfirmSignUp", """
                 {
@@ -1178,9 +1198,79 @@ class CognitoIntegrationTest {
                   "Username": "%s",
                   "ConfirmationCode": "%s"
                 }
-                """.formatted(codeClientId, username, fetchLatestSesVerificationCode(username)))
+                """.formatted(codeClientId, username, resendCode))
                 .then()
                 .statusCode(200);
+    }
+
+    @Test
+    void confirmWithLinkOnASharedHostConfirmsAUserOutsideTheDefaultAccount() throws Exception {
+        String accountId = "111122223333";
+        clearSes(accountId);
+
+        JsonNode poolResponse = CognitoCustomDomainFixtures.awsJsonAs(accountId,
+                CognitoCustomDomainFixtures.COGNITO, "CreateUserPool", """
+                {
+                  "PoolName": "OtherAccountLinkPool",
+                  "AutoVerifiedAttributes": ["email"],
+                  "VerificationMessageTemplate": {
+                    "DefaultEmailOption": "CONFIRM_WITH_LINK",
+                    "EmailSubjectByLink": "Confirm your account",
+                    "EmailMessageByLink": "Welcome. {##Click here##}"
+                  }
+                }
+                """);
+        String poolId = poolResponse.path("UserPool").path("Id").asText();
+        String clientId = CognitoCustomDomainFixtures.awsJsonAs(accountId, CognitoCustomDomainFixtures.COGNITO,
+                "CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "other-account-link-client"
+                }
+                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+
+        String username = "other+" + UUID.randomUUID() + "@example.com";
+        CognitoCustomDomainFixtures.awsActionAs(accountId, CognitoCustomDomainFixtures.COGNITO, "SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(clientId, username, username))
+                .then()
+                .statusCode(200);
+
+        JsonNode email = latestEmailTo(accountId, username);
+        String link = confirmUserPath(email.path("Body").path("text_part").asText());
+
+        given()
+                .urlEncodingEnabled(false)
+                .get(link)
+                .then()
+                .statusCode(200)
+                .body(containsString("Your account has been confirmed."));
+
+        cognitoAction("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username))
+                .then()
+                .statusCode(400);
+
+        JsonNode confirmed = CognitoCustomDomainFixtures.awsJsonAs(accountId, CognitoCustomDomainFixtures.COGNITO,
+                "AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username));
+        assertEquals("CONFIRMED", confirmed.path("UserStatus").asText());
+        assertEquals("true", attributeValue(confirmed, "email_verified"));
     }
 
     @Test
@@ -3818,6 +3908,40 @@ class CognitoIntegrationTest {
         JsonNode messages = SesMailbox.messagesTo(recipient);
         assertTrue(messages.size() > 0, "expected an email to " + recipient);
         return messages.get(messages.size() - 1);
+    }
+
+    /** SES stores the message in the account that sent it, which a credential-free read cannot see. */
+    private static JsonNode latestEmailTo(String accountId, String recipient) throws Exception {
+        String body = given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
+                        + "/20260905/us-east-1/email/aws4_request")
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .extract()
+                .asString();
+        JsonNode latest = null;
+        for (JsonNode message : OBJECT_MAPPER.readTree(body).path("messages")) {
+            for (JsonNode to : message.path("Destination").path("ToAddresses")) {
+                if (recipient.equals(to.asText())) {
+                    latest = message;
+                    break;
+                }
+            }
+        }
+        assertNotNull(latest, "expected an email to " + recipient + " in account " + accountId);
+        return latest;
+    }
+
+    private static void clearSes(String accountId) {
+        given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
+                        + "/20260905/us-east-1/email/aws4_request")
+                .when()
+                .delete("/_aws/ses")
+                .then()
+                .statusCode(200);
     }
 
     private static String confirmUserPath(String body) {

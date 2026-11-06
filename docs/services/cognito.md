@@ -337,8 +337,10 @@ When `VerificationMessageTemplate.DefaultEmailOption` is `CONFIRM_WITH_LINK`, `S
 `ResendConfirmationCode` email `EmailSubjectByLink` and `EmailMessageByLink` (or Cognito's default
 link message when those are unset). The `{##link text##}` placeholder becomes a link to
 `/cognito-idp/confirmUser?client_id&user_name&confirmation_code`, or to `/confirmUser` on a custom
-domain. Opening it confirms the user. A prefix domain is not used in the link, because Floci does
-not serve that hostname. `CONFIRM_WITH_CODE`, and a pool with no verification type, keep the
+domain. Opening it confirms the user. A shared-host link carries no AWS credential, so the client
+id is resolved across accounts and the user is confirmed in the account that owns the client. A
+custom domain still confirms in the account that owns the domain. A prefix domain is not used in
+the link, because Floci does not serve that hostname. `CONFIRM_WITH_CODE`, and a pool with no verification type, keep the
 `{####}` code template. Password reset, attribute verification and sign-in codes stay on that code
 template either way. SMS stays a code.
 

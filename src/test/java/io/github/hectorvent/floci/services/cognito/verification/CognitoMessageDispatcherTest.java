@@ -13,6 +13,8 @@ import org.mockito.ArgumentCaptor;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -354,6 +356,86 @@ class CognitoMessageDispatcherTest {
         assertEquals("Custom code", content.subject());
         assertEquals("code 123456", content.bodyText());
         assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithCode_doesNotBuildTheConfirmationLink() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_CODE",
+            "EmailMessage", "Your code is {####}.",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"), null, linkThatMustNotBeBuilt());
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Your code is 123456.", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_smsDoesNotBuildTheConfirmationLink() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "SmsMessage", "Signup: {####}",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", "+5215551234567"),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "654321", List.of("SMS"), null,
+            linkThatMustNotBeBuilt());
+
+        verify(sns).publish(isNull(), isNull(), eq("+5215551234567"), eq("Signup: 654321"),
+            isNull(), isNull(), eq("us-east-1"));
+        verifyNoInteractions(ses);
+    }
+
+    @Test
+    void dispatch_confirmWithLink_customCodeMessageDoesNotBuildTheConfirmationLink() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailMessageByLink", "Pool link {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"),
+            Map.of("emailSubject", "Custom code", "emailMessage", "code {####}"),
+            linkThatMustNotBeBuilt());
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("code 123456", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_buildsTheConfirmationLinkOnce() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailMessageByLink", "Go {##O'Hara & <friends>##}"
+        ));
+        String link = "http://localhost/confirmUser?user_name=a'b&c=\"d\"";
+        AtomicInteger builds = new AtomicInteger();
+        Supplier<String> confirmationLink = () -> {
+            builds.incrementAndGet();
+            return link;
+        };
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"), null, confirmationLink);
+
+        assertEquals(1, builds.get());
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Go " + link, content.bodyText());
+        assertEquals("Go <a href=\"http://localhost/confirmUser?user_name=a&#39;b&amp;c=&quot;d&quot;\">"
+            + "O&#39;Hara &amp; &lt;friends&gt;</a>", content.bodyHtml());
+    }
+
+    /** A link builder that fails the test if a code or SMS delivery reads it. */
+    private static Supplier<String> linkThatMustNotBeBuilt() {
+        return () -> {
+            throw new AssertionError("confirmation link was built");
+        };
     }
 
     @Test

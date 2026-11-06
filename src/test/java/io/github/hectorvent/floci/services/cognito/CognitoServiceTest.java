@@ -38,6 +38,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -69,6 +70,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.*;
@@ -2359,7 +2361,7 @@ class CognitoServiceTest {
                 .thenReturn("123456");
         doThrow(new RuntimeException("SES unavailable")).when(messageDispatcher)
                 .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any(), any(),
-                        any());
+                        ArgumentMatchers.<Supplier<String>>any());
 
         CognitoService serviceWithVerification = new CognitoService(
                 new InMemoryStorage<>(),

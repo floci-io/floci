@@ -18,7 +18,9 @@ import java.util.Map;
 /**
  * The page a {@code CONFIRM_WITH_LINK} sign-up email links to. On AWS this is the hosted UI
  * {@code /confirmUser} endpoint: it confirms the user with the code in the query string and shows
- * the result. A custom domain is rewritten onto this path by {@link CognitoCustomDomainFilter}.
+ * the result. A custom domain is rewritten onto this path by {@link CognitoCustomDomainFilter},
+ * which pins that domain's account. A shared-host link carries no AWS credential, so the client
+ * id is resolved across accounts and the user is confirmed in the account that owns the client.
  */
 @ApplicationScoped
 @Path("/")
@@ -43,12 +45,16 @@ public class CognitoConfirmUserController {
                     "client_id, user_name, and confirmation_code are required.");
         }
         try {
-            UserPoolClient client = cognitoService.findClientById(clientId);
             String domainPoolId = (String) requestContext.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY);
-            if (domainPoolId != null && !domainPoolId.equals(client.getUserPoolId())) {
-                return page(400, "Confirmation failed", "Client not found.");
+            if (domainPoolId != null) {
+                UserPoolClient client = cognitoService.findClientById(clientId);
+                if (!domainPoolId.equals(client.getUserPoolId())) {
+                    return page(400, "Confirmation failed", "Client not found.");
+                }
+                cognitoService.confirmSignUp(clientId, username, confirmationCode, Map.of());
+            } else {
+                cognitoService.confirmSignUpFromSharedHost(clientId, username, confirmationCode);
             }
-            cognitoService.confirmSignUp(clientId, username, confirmationCode, Map.of());
             return page(200, "Account confirmed", "Your account has been confirmed.");
         } catch (AwsException e) {
             return page(400, "Confirmation failed", e.getMessage());
@@ -56,19 +62,12 @@ public class CognitoConfirmUserController {
     }
 
     private static Response page(int status, String title, String message) {
-        String html = "<!DOCTYPE html><html><head><title>" + escape(title) + "</title></head><body><h1>"
-                + escape(title) + "</h1><p>" + escape(message) + "</p></body></html>";
+        String html = "<!DOCTYPE html><html><head><title>" + CognitoHtml.escape(title) + "</title></head><body><h1>"
+                + CognitoHtml.escape(title) + "</h1><p>" + CognitoHtml.escape(message) + "</p></body></html>";
         return Response.status(status).type(MediaType.TEXT_HTML_TYPE.withCharset("UTF-8")).entity(html).build();
     }
 
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
-    }
-
-    private static String escape(String value) {
-        if (value == null) {
-            return "";
-        }
-        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 }

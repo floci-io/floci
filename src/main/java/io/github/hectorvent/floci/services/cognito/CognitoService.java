@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -3594,7 +3595,7 @@ public class CognitoService implements ResourceProvider {
                             pool, client, triggerUser, "CustomMessage_SignUp", clientMetadata);
                     messageDispatcher.dispatch(pool, triggerUser, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
                             code, List.of(deliveryTarget.deliveryMedium()), customMessage,
-                            signUpConfirmationLink(client, triggerUser, code));
+                            () -> signUpConfirmationLink(client, triggerUser, code));
                 }
             } catch (VerificationCodeException e) {
                 rollbackSignUpConfirmationArtifacts(user);
@@ -3651,6 +3652,24 @@ public class CognitoService implements ResourceProvider {
         }
         authFlowHandler.firePostConfirmation(pool, client, triggerUser,
                 clientMetadata, "PostConfirmation_ConfirmSignUp");
+    }
+
+    /**
+     * Confirms a sign-up opened from a shared-host link. The request carries no AWS credential,
+     * so it arrives in the default account. The client id is unique across accounts, and the
+     * confirmation runs in the account that owns that client. A custom domain pins its account
+     * before the controller calls {@link #confirmSignUp} instead of this method.
+     */
+    void confirmSignUpFromSharedHost(String clientId, String username, String confirmationCode) {
+        if (clientStore instanceof AccountAwareStorageBackend<UserPoolClient> aware) {
+            String accountId = aware.findAnyAccountEntry(clientId)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400))
+                    .account();
+            RequestScopes.runAs(accountId, () ->
+                    confirmSignUp(clientId, username, confirmationCode, Map.of()));
+            return;
+        }
+        confirmSignUp(clientId, username, confirmationCode, Map.of());
     }
 
     private CognitoUser confirmSignUpUnderUserLock(UserPoolClient client, UserPool pool, String username,
@@ -3733,7 +3752,7 @@ public class CognitoService implements ResourceProvider {
                         pool, client, user, "CustomMessage_ResendCode", clientMetadata);
                 messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
                         code, List.of(deliveryTarget.deliveryMedium()), customMessage,
-                        signUpConfirmationLink(client, user, code));
+                        () -> signUpConfirmationLink(client, user, code));
             }
         } catch (VerificationCodeException e) {
             throw mapVerificationCodeException(e);
