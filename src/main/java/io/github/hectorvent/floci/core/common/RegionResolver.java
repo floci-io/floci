@@ -104,6 +104,13 @@ public class RegionResolver {
         if (authorizationHeader == null || authorizationHeader.isEmpty()) {
             return defaultRegion;
         }
+        String region = SigV4CredentialScope.segment(authorizationHeader, SigV4CredentialScope.Segment.THIRD);
+        if (region != null) {
+            return withoutPseudoRegion(region);
+        }
+        if (!SigV4CredentialScope.hasCredential(authorizationHeader)) {
+            return defaultRegion;
+        }
         Matcher matcher = CREDENTIAL_REGION_PATTERN.matcher(authorizationHeader);
         return matcher.find() ? withoutPseudoRegion(matcher.group(1)) : defaultRegion;
     }
@@ -188,6 +195,13 @@ public class RegionResolver {
      */
     public String resolveRegionFromAuthOrNull(String authorizationHeader) {
         if (authorizationHeader == null || authorizationHeader.isEmpty()) {
+            return null;
+        }
+        String region = SigV4CredentialScope.segment(authorizationHeader, SigV4CredentialScope.Segment.THIRD);
+        if (region != null) {
+            return withoutPseudoRegion(region);
+        }
+        if (!SigV4CredentialScope.hasCredential(authorizationHeader)) {
             return null;
         }
         Matcher matcher = CREDENTIAL_REGION_PATTERN.matcher(authorizationHeader);

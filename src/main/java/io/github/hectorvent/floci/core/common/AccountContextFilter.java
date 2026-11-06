@@ -296,7 +296,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
      */
     private String resolveAccount(String akid, String resolvedDefault) {
         if (akid != null) {
-            if (akid.matches("\\d{12}")) {
+            if (AccountResolver.isAccountId(akid)) {
                 return akid;
             }
             Optional<String> credentialAccount = sessionAccountLookup.resolveAccountId(akid);

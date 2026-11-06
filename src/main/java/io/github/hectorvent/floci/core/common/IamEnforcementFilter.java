@@ -1617,7 +1617,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * default account when neither resolves.
      */
     private String resolveCredentialAccountId(String akid, String authorizationHeader) {
-        if (akid != null && !akid.matches("\\d{12}")) {
+        if (akid != null && !AccountResolver.isAccountId(akid)) {
             Optional<String> credentialAccount = sessionAccountLookup.resolveAccountId(akid);
             if (credentialAccount.isPresent()) {
                 return credentialAccount.get();

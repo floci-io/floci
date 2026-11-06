@@ -5,7 +5,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class AccountResolverTest {
 
@@ -122,5 +124,80 @@ class AccountResolverTest {
     void extractPresignedAccessKeyIdReturnsNullWhenAbsent() {
         assertNull(resolver.extractPresignedAccessKeyId(null));
         assertNull(resolver.extractPresignedAccessKeyId(""));
+    }
+
+    @Test
+    void extractAccessKeyIdReadsHeadersWithoutSpacesAfterCommas() {
+        assertEquals("000000000001", resolver.extractAccessKeyId(
+                "AWS4-HMAC-SHA256 Credential=000000000001/20260617/us-east-1/s3/aws4_request,SignedHeaders=host,Signature=a"));
+    }
+
+    @Test
+    void extractAccessKeyIdWithTwoCredentialsUsesTheFirstKey() {
+        assertEquals("first", resolver.extractAccessKeyId(
+                "AWS4-HMAC-SHA256 Credential=first/20260617/us-east-1/s3/aws4_request, "
+                        + "Credential=second/20260617/us-east-1/s3/aws4_request"));
+    }
+
+    @Test
+    void extractAccessKeyIdStopsAtTheFirstSlashOfAKeyWithSlashes() {
+        assertEquals("a", resolver.extractAccessKeyId(
+                "AWS4-HMAC-SHA256 Credential=a/b/20260617/us-east-1/s3/aws4_request, SignedHeaders=host"));
+    }
+
+    @Test
+    void extractAccessKeyIdWithASlashLaterInTheHeader() {
+        assertEquals("AKID", resolver.extractAccessKeyId(
+                "AWS4-HMAC-SHA256 Credential=AKID/20260617/us-east-1/s3/aws4_request, "
+                        + "SignedHeaders=host, Signature=a/b"));
+    }
+
+    @Test
+    void extractAccessKeyIdWithAnEightDigitRegion() {
+        assertEquals("AKID", resolver.extractAccessKeyId(
+                "AWS4-HMAC-SHA256 Credential=AKID/20260617/12345678/s3/aws4_request, SignedHeaders=host"));
+    }
+
+    @Test
+    void extractAccessKeyIdOfASigV4aHeader() {
+        assertEquals("AKID", resolver.extractAccessKeyId(
+                "AWS4-ECDSA-P256-SHA256 Credential=AKID/20260617/s3/aws4_request, SignedHeaders=host"));
+    }
+
+    @Test
+    void extractAccessKeyIdKeepsSpacesAndCommasInsideTheKey() {
+        assertEquals("AK ID", resolver.extractAccessKeyId(
+                "AWS4-HMAC-SHA256 Credential=AK ID/20260617/us-east-1/s3/aws4_request"));
+        assertEquals("A,B", resolver.extractAccessKeyId(
+                "AWS4-HMAC-SHA256 Credential=A,B/20260617/us-east-1/s3/aws4_request"));
+    }
+
+    @Test
+    void extractAccessKeyIdWithLeadingSpaceAndTrailingControlCharacter() {
+        assertEquals("AKID", resolver.extractAccessKeyId(
+                "  AWS4-HMAC-SHA256 Credential=AKID/20260617/us-east-1/s3/aws4_request\u0001"));
+    }
+
+    @Test
+    void isAccountIdNeedsExactlyTwelveAsciiDigits() {
+        assertTrue(AccountResolver.isAccountId("000000000001"));
+        assertFalse(AccountResolver.isAccountId(null));
+        assertFalse(AccountResolver.isAccountId(""));
+        assertFalse(AccountResolver.isAccountId("00000000000"));
+        assertFalse(AccountResolver.isAccountId("0000000000012"));
+        assertFalse(AccountResolver.isAccountId("00000000000a"));
+        assertFalse(AccountResolver.isAccountId("00000000000\n"));
+        assertFalse(AccountResolver.isAccountId("٠٠٠٠٠٠٠٠٠٠٠٠"));
+    }
+
+    @Test
+    void extractAccessKeyIdSkipsAFirstCredentialFollowedDirectlyBySlash() {
+        assertEquals("AKID", resolver.extractAccessKeyId(
+                "AWS4-HMAC-SHA256 Credential=/x Credential=AKID/20260101/us-east-1/s3/aws4_request"));
+    }
+
+    @Test
+    void extractAccessKeyIdWithoutASlashIsNull() {
+        assertNull(resolver.extractAccessKeyId("AWS4-HMAC-SHA256 Credential=AKID"));
     }
 }

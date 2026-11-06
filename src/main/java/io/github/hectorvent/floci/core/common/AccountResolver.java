@@ -10,7 +10,6 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class AccountResolver {
 
-    private static final Pattern AKID_PATTERN = Pattern.compile("Credential=([^/]+)/");
     private static final Pattern S3_SIGV2_AKID_PATTERN = Pattern.compile("AWS ([^\\s:]+):[^\\s:]+");
     public static final String SIGV4_SCHEME = "AWS4-HMAC-SHA256";
     private static final String SIGV4_PREFIX = SIGV4_SCHEME + " ";
@@ -27,6 +26,19 @@ public class AccountResolver {
         this.defaultAccountId = defaultAccountId;
     }
 
+    static boolean isAccountId(String value) {
+        if (value == null || value.length() != 12) {
+            return false;
+        }
+        for (int i = 0; i < 12; i++) {
+            char c = value.charAt(i);
+            if (c < '0' || '9' < c) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * Returns the account ID for the given Authorization header.
      * When the access key ID is exactly 12 digits it is used directly as the account ID,
@@ -35,7 +47,7 @@ public class AccountResolver {
      */
     public String resolve(String authorizationHeader) {
         String akid = extractAccessKeyId(authorizationHeader);
-        if (akid != null && akid.matches("\\d{12}")) {
+        if (isAccountId(akid)) {
             return akid;
         }
         return defaultAccountId;
@@ -53,8 +65,18 @@ public class AccountResolver {
         if (!trimmed.startsWith(SIGV4_PREFIX) && !trimmed.startsWith(SIGV4A_PREFIX)) {
             return null;
         }
-        Matcher m = AKID_PATTERN.matcher(trimmed);
-        return m.find() ? m.group(1) : null;
+        for (int credential = trimmed.indexOf(SigV4CredentialScope.CREDENTIAL); credential >= 0;
+                credential = trimmed.indexOf(SigV4CredentialScope.CREDENTIAL, credential + 1)) {
+            int start = credential + SigV4CredentialScope.CREDENTIAL.length();
+            int slash = trimmed.indexOf('/', start);
+            if (slash < 0) {
+                return null;
+            }
+            if (start < slash) {
+                return trimmed.substring(start, slash);
+            }
+        }
+        return null;
     }
 
     /** Extracts S3 routing metadata without adding SigV2 authentication support. */
@@ -81,7 +103,7 @@ public class AccountResolver {
             return defaultAccountId;
         }
         String akid = extractPresignedAccessKeyId(credentialValue);
-        if (akid != null && akid.matches("\\d{12}")) {
+        if (isAccountId(akid)) {
             return akid;
         }
         return defaultAccountId;
