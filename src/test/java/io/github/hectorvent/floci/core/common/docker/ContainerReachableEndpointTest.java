@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common.docker;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsCertificateManager;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import org.junit.jupiter.api.Test;
 
@@ -24,11 +25,12 @@ class ContainerReachableEndpointTest {
     private final DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
     private final EmbeddedDnsServer embeddedDnsServer = mock(EmbeddedDnsServer.class);
     private final EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
+    private final TlsCertificateManager tlsCertificates = mock(TlsCertificateManager.class);
     private final ContainerReachableEndpoint endpoint = endpoint(4566);
 
     private ContainerReachableEndpoint endpoint(int httpPort) {
         when(config.tls()).thenReturn(tls);
-        return new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, httpPort);
+        return new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, tlsCertificates, httpPort);
     }
 
     private void hostMappedTo4811() {
@@ -99,5 +101,42 @@ class ContainerReachableEndpointTest {
 
         assertEquals("http://172.18.0.2:4566", endpoint(4510).baseUrl());
         assertEquals("http://172.18.0.2:4566", endpoint(4510).baseUrl(false));
+    }
+
+    @Test
+    void customResourceResponseUrlIsHttpsForAHostTheCertificateNames() {
+        // TlsProxyServer serves https on floci.port, and a custom resource's handler PUTs to its
+        // ResponseURL with https, as it does to AWS's presigned S3 URL.
+        when(tls.enabled()).thenReturn(true);
+        when(config.port()).thenReturn(4566);
+        when(config.hostname()).thenReturn(Optional.empty());
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.2"));
+        when(tlsCertificates.serves(EmbeddedDnsServer.DEFAULT_SUFFIX)).thenReturn(true);
+
+        assertEquals("https://" + EmbeddedDnsServer.DEFAULT_SUFFIX + ":4566",
+                endpoint(4510).customResourceResponseBaseUrl());
+    }
+
+    @Test
+    void customResourceResponseUrlStaysHttpForAnIpTheCertificateDoesNotName() {
+        // The container-IP fallback when the embedded DNS server cannot start, or an IP set as
+        // docker-host-override: the leaf does not name it, so a handler verifying the certificate
+        // would refuse https where http works.
+        when(tls.enabled()).thenReturn(true);
+        when(config.port()).thenReturn(4566);
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
+        when(tlsCertificates.serves("172.18.0.2")).thenReturn(false);
+
+        assertEquals("http://172.18.0.2:4566", endpoint(4510).customResourceResponseBaseUrl());
+    }
+
+    @Test
+    void customResourceResponseUrlIsHttpWithoutTls() {
+        hostMappedTo4811();
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
+
+        assertEquals("http://172.18.0.2:4566", endpoint(4566).customResourceResponseBaseUrl());
     }
 }

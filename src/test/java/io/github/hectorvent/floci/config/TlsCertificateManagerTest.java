@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.config;
 
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.tls.CertificateUpdatedEvent;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -167,6 +169,55 @@ class TlsCertificateManagerTest extends TlsCertificateManagerFixture {
         assertArrayEquals(certBefore, servedCertificate());
         assertEquals(Set.of(), m.knownHostnames());
         verify(defaultTls, never()).reload();
+    }
+
+    @Test
+    void servesTheNamesTheLeafCarriesAndNoOther() {
+        TlsCertificateManager m = manager();
+
+        assertTrue(m.serves("localhost"));
+        assertTrue(m.serves("LOCALHOST.floci.io."), "case and a trailing dot are not part of the name");
+        assertTrue(m.serves("sqs.localhost.floci.io"), "under the one-label wildcard");
+        assertFalse(m.serves("a.b.localhost.floci.io"), "a wildcard covers one label");
+        assertFalse(m.serves("172.18.0.2"), "an IP the leaf does not list");
+    }
+
+    @Test
+    void servesANameOnceTheLeafLearnedIt() {
+        TlsCertificateManager m = manager();
+        String learned = "orders.example.internal";
+        assertFalse(m.serves(learned));
+
+        m.ensureHost(learned);
+
+        assertTrue(m.serves(learned));
+    }
+
+    @Test
+    void servesNothingWithTlsOff() {
+        when(config.tls().enabled()).thenReturn(false);
+
+        assertFalse(manager().serves("localhost"));
+    }
+
+    @Test
+    void servesTheNamesOfAUserProvidedCertificate() throws Exception {
+        Path userCert = tempDir.resolve("user.crt");
+        Files.writeString(userCert, ca.issueServerCertificate("floci", List.of("floci", "10.0.0.5"), KeyAlgorithm.RSA_2048, null)
+                .certificatePem());
+        when(config.tls().certPath()).thenReturn(Optional.of(userCert.toString()));
+        TlsCertificateManager m = manager();
+
+        assertTrue(m.serves("floci"));
+        assertTrue(m.serves("10.0.0.5"));
+        assertFalse(m.serves("localhost"), "the managed leaf on disk is not the one served");
+    }
+
+    @Test
+    void servesNothingWhenAUserProvidedCertificateCannotBeRead() {
+        when(config.tls().certPath()).thenReturn(Optional.of(tempDir.resolve("missing.crt").toString()));
+
+        assertFalse(manager().serves("localhost"));
     }
 
     @Test

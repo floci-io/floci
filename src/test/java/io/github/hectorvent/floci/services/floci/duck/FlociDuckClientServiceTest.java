@@ -58,7 +58,7 @@ class FlociDuckClientServiceTest {
         when(config.tls()).thenReturn(mock(EmulatorConfig.TlsConfig.class));
 
         FlociDuckClient client = new FlociDuckClient(duckManager, config,
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566), mapper);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566), mapper);
         client.execute("CREATE VIEW example AS SELECT 1", "", null);
 
         assertEquals("CREATE VIEW example AS SELECT 1", requestBody.get().path("sql").asText());
@@ -90,7 +90,7 @@ class FlociDuckClientServiceTest {
         when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
 
         FlociDuckClient client = new FlociDuckClient(duckManager, config,
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566), mapper);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566), mapper);
         client.execute("SELECT 1", "", null);
 
         assertEquals("http://172.18.0.2:4566", requestBody.get().path("s3_endpoint").asText());
@@ -120,7 +120,7 @@ class FlociDuckClientServiceTest {
         when(dockerHostResolver.resolve()).thenReturn("127.0.0.1");
 
         FlociDuckClient client = new FlociDuckClient(duckManager, config,
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566), mapper);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566), mapper);
         client.execute("SELECT 1", "INSTALL iceberg;", "s3://bucket/out.csv",
                 "ASIAEXAMPLE", "secretKey123", "tokenXYZ");
 
@@ -159,7 +159,7 @@ class FlociDuckClientServiceTest {
         when(dockerHostResolver.resolve()).thenReturn("127.0.0.1");
 
         FlociDuckClient client = new FlociDuckClient(duckManager, config,
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566), mapper);
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566), mapper);
         client.query("SELECT 1 AS col", "", "ASIAEXAMPLE", "secretKey123", "tokenXYZ");
 
         JsonNode body = requestBody.get();

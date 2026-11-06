@@ -64,7 +64,7 @@ class CodeBuildRunnerTest {
         when(config.tls()).thenReturn(mock(EmulatorConfig.TlsConfig.class));
         when(config.port()).thenReturn(4566);
         ContainerDetector containerDetector = mock(ContainerDetector.class);
-        ContainerReachableEndpoint endpoint = new ContainerReachableEndpoint(config, null, null, 4811);
+        ContainerReachableEndpoint endpoint = new ContainerReachableEndpoint(config, null, null, null, 4811);
         CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null,
                 config, containerDetector, null, endpoint);
 
