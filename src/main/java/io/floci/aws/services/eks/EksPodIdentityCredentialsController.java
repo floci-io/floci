@@ -1,0 +1,205 @@
+package io.floci.aws.services.eks;
+
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.WebIdentityToken;
+import io.floci.aws.core.common.WebIdentityTokenVerifier;
+import io.floci.aws.core.common.WebIdentityTokenVerifier.ExpiredTokenException;
+import io.floci.aws.core.common.WebIdentityTokenVerifier.InvalidTokenException;
+import io.floci.aws.services.eks.model.Cluster;
+import io.floci.aws.services.eks.model.EksPodIdentityCredentialsResponse;
+import io.floci.aws.services.eks.model.PodIdentityAssociation;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.IamRole;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+
+import java.security.SecureRandom;
+import java.security.interfaces.RSAPublicKey;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.Optional;
+import java.util.concurrent.ThreadLocalRandom;
+
+/**
+ * Serves the link-local EKS Pod Identity credentials endpoint (169.254.170.23:80).
+ * <p>
+ * Pods running with projected service account tokens call this endpoint to exchange
+ * their token for temporary AWS IAM role credentials associated with the pod's service account.
+ */
+@ApplicationScoped
+@Path("/v1/credentials")
+public class EksPodIdentityCredentialsController {
+
+    private static final String POD_IDENTITY_AUDIENCE = "pods.eks.amazonaws.com"; // partition-literal: pod-identity token audience; no source outside the commercial partition (P9)
+    private static final String SERVICE_ACCOUNT_PREFIX = "system:serviceaccount:";
+    private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    private static final String ALPHANUMERIC = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    /** CSPRNG for session secret keys and session tokens; ordinary IDs keep using {@link ThreadLocalRandom}. */
+    private final SecureRandom secureRandom = new SecureRandom();
+
+    private final EksService eksService;
+    private final EksOidcService oidcService;
+    private final EksPodIdentityAssociationService associationService;
+    private final IamService iamService;
+    private final WebIdentityTokenVerifier tokenVerifier;
+
+    @Inject
+    public EksPodIdentityCredentialsController(EksService eksService,
+                                               EksOidcService oidcService,
+                                               EksPodIdentityAssociationService associationService,
+                                               IamService iamService,
+                                               WebIdentityTokenVerifier tokenVerifier) {
+        this.eksService = eksService;
+        this.oidcService = oidcService;
+        this.associationService = associationService;
+        this.iamService = iamService;
+        this.tokenVerifier = tokenVerifier;
+    }
+
+    @GET
+    @Produces(MediaType.APPLICATION_JSON)
+    public Response getCredentials(@HeaderParam("Authorization") String authHeader) {
+        if (authHeader == null || authHeader.isBlank()) {
+            return error(400, "Service account token cannot be empty\n");
+        }
+
+        String token = authHeader.trim();
+        if (token.regionMatches(true, 0, "Bearer", 0, 6)) {
+            token = token.substring(6).trim();
+        }
+        if (token.isEmpty()) {
+            return error(400, "Service account token cannot be empty\n");
+        }
+
+        Optional<String> maybeIssuer = tokenVerifier.peekIssuer(token);
+        if (maybeIssuer.isEmpty()) {
+            return error(400, "Service account token cannot be parsed\n");
+        }
+        String issuer = maybeIssuer.get();
+
+        Optional<Cluster> maybeCluster = eksService.findClusterByIssuer(issuer);
+        Optional<RSAPublicKey> maybeKey = oidcService.findVerificationKey(issuer);
+        if (maybeCluster.isEmpty() || maybeKey.isEmpty()) {
+            return error(400, "The web identity token issuer is not recognized\n");
+        }
+
+        Cluster cluster = maybeCluster.get();
+        RSAPublicKey publicKey = maybeKey.get();
+
+        WebIdentityToken verified;
+        try {
+            verified = tokenVerifier.verify(token, publicKey, issuer, POD_IDENTITY_AUDIENCE);
+        } catch (ExpiredTokenException e) {
+            return error(400, "The web identity token that was passed is expired\n");
+        } catch (InvalidTokenException e) {
+            return error(400, "InvalidToken: " + e.getMessage() + "\n");
+        } catch (Exception e) {
+            return error(400, "Service account token cannot be parsed: " + e.getMessage() + "\n");
+        }
+
+        String sub = verified.subject();
+        if (sub == null || !sub.startsWith(SERVICE_ACCOUNT_PREFIX)) {
+            return error(400, "Service account token subject is invalid\n");
+        }
+        String rest = sub.substring(SERVICE_ACCOUNT_PREFIX.length());
+        int colon = rest.indexOf(':');
+        if (colon <= 0 || colon == rest.length() - 1) {
+            return error(400, "Service account token subject is invalid\n");
+        }
+        String namespace = rest.substring(0, colon);
+        String serviceAccount = rest.substring(colon + 1);
+
+        String callerAccountId = AwsArnUtils.accountOrDefault(cluster.getArn(), cluster.getAccountId());
+        Optional<PodIdentityAssociation> maybeAssociation = RequestScopes.callAs(callerAccountId,
+                () -> associationService.findAssociation(cluster, namespace, serviceAccount));
+        if (maybeAssociation.isEmpty()) {
+            return error(404, "ResourceNotFoundException: No association found for service account: "
+                    + serviceAccount + "\n");
+        }
+
+        PodIdentityAssociation association = maybeAssociation.get();
+        String roleArn = association.roleArn();
+        String roleAccountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
+
+        String accessKeyId = "ASIA" + randomId(16);
+        String secretAccessKey = randomSecret(40);
+        String sessionToken = randomSecret(200);
+        Instant expiration = Instant.now().plus(Duration.ofHours(1));
+
+        String sessionName = podIdentitySessionName(cluster.getName(), association.serviceAccount());
+        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
+        // EKS Auth assumes the association's role through STS, so a role that is gone gets no
+        // credentials. The lookup is by name only, and enforcement loads a session's policies the
+        // same way, so a role recreated under another path is refused too: it is not the role the
+        // association names.
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName)
+                .filter(found -> IamService.roleArnMatches(roleArn, found));
+        if (role.isEmpty()) {
+            return error(400, "AccessDeniedException: The role of the association cannot be assumed: "
+                    + roleArn + "\n");
+        }
+        String assumedRoleId = role.map(IamRole::getRoleId).filter(id -> !id.isBlank())
+                .map(id -> id + ":" + sessionName)
+                .orElse(null);
+
+        // Like STS AssumeRole, store the session in the minting account while its role ARN names
+        // the assumed role, including the role's AWS partition when that differs.
+        String sessionRoleArn = role.map(IamRole::getArn).filter(AwsArnUtils::isArn).orElse(roleArn);
+        RequestScopes.runAs(callerAccountId, () -> iamService.registerSession(
+                accessKeyId, secretAccessKey, sessionToken, sessionRoleArn,
+                expiration, association.policy(), callerAccountId, sessionName, assumedRoleId));
+
+        EksPodIdentityCredentialsResponse response = new EksPodIdentityCredentialsResponse(
+                accessKeyId,
+                secretAccessKey,
+                sessionToken,
+                roleAccountId,
+                DateTimeFormatter.ISO_INSTANT.format(expiration)
+        );
+
+        return Response.ok(response, MediaType.APPLICATION_JSON).build();
+    }
+
+    private Response error(int status, String message) {
+        return Response.status(status)
+                .entity(message)
+                .type(MediaType.TEXT_PLAIN)
+                .build();
+    }
+
+    private String randomId(int length) {
+        StringBuilder sb = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            sb.append(ALPHANUMERIC.charAt(ThreadLocalRandom.current().nextInt(ALPHANUMERIC.length())));
+        }
+        return sb.toString();
+    }
+
+    private String randomSecret(int length) {
+        StringBuilder sb = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            sb.append(CHARS.charAt(secureRandom.nextInt(CHARS.length())));
+        }
+        return sb.toString();
+    }
+
+    private String podIdentitySessionName(String clusterName, String serviceAccount) {
+        String randomSuffix = randomId(8);
+        String prefix = "eks-";
+        String base = prefix + (clusterName != null && !clusterName.isBlank() ? clusterName + "-" : "") + serviceAccount;
+        int maxBaseLen = 64 - 1 - randomSuffix.length();
+        if (base.length() > maxBaseLen) {
+            base = base.substring(0, maxBaseLen);
+        }
+        return base + "-" + randomSuffix;
+    }
+}

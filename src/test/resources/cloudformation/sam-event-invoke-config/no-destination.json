@@ -1,0 +1,35 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "Properties": {
+        "DestinationConfig": {},
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "MaximumRetryAttempts": 2,
+        "Qualifier": "$LATEST"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    },
+    "FnRole": {
+      "Policies": null,
+      "Type": "AWS::IAM::Role"
+    }
+  },
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "MaximumRetryAttempts": 2
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

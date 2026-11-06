@@ -1,0 +1,213 @@
+// Package testutil provides shared test utilities and AWS client factories.
+package testutil
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"net/url"
+	"os"
+	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/acm"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
+	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/ecr"
+	"github.com/aws/aws-sdk-go-v2/service/glue"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
+	"github.com/aws/aws-sdk-go-v2/service/iot"
+	"github.com/aws/aws-sdk-go-v2/service/iotdataplane"
+	"github.com/aws/aws-sdk-go-v2/service/iotjobsdataplane"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/lambdaweb"
+	"github.com/aws/aws-sdk-go-v2/service/neptune"
+	"github.com/aws/aws-sdk-go-v2/service/pipes"
+	"github.com/aws/aws-sdk-go-v2/service/rds"
+	"github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/aws/aws-sdk-go-v2/service/sns"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
+)
+
+// Endpoint returns the Floci endpoint from environment or default.
+func Endpoint() string {
+	if ep := os.Getenv("FLOCI_ENDPOINT"); ep != "" {
+		return ep
+	}
+	return "http://localhost:4566"
+}
+
+// Config returns an AWS config configured for the Floci endpoint.
+func Config() aws.Config {
+	ctx := context.Background()
+	cfg, err := config.LoadDefaultConfig(ctx,
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
+		config.WithBaseEndpoint(Endpoint()),
+	)
+	if err != nil {
+		panic("failed to create AWS config: " + err.Error())
+	}
+	return cfg
+}
+
+// SSMClient returns a new SSM client.
+func SSMClient() *ssm.Client {
+	return ssm.NewFromConfig(Config())
+}
+
+// SQSClient returns a new SQS client.
+func SQSClient() *sqs.Client {
+	return sqs.NewFromConfig(Config())
+}
+
+// SNSClient returns a new SNS client.
+func SNSClient() *sns.Client {
+	return sns.NewFromConfig(Config())
+}
+
+// S3Client returns a new S3 client with path-style addressing.
+func S3Client() *s3.Client {
+	return s3.NewFromConfig(Config(), func(o *s3.Options) {
+		o.UsePathStyle = true
+	})
+}
+
+// DynamoDBClient returns a new DynamoDB client.
+func DynamoDBClient() *dynamodb.Client {
+	return dynamodb.NewFromConfig(Config())
+}
+
+// LambdaClient returns a new Lambda client.
+func LambdaClient() *lambda.Client {
+	return lambda.NewFromConfig(Config())
+}
+
+// LambdaWebClient returns a new Lambda Web Functions client.
+func LambdaWebClient() *lambdaweb.Client {
+	return lambdaweb.NewFromConfig(Config())
+}
+
+// GlueClient returns a new Glue client.
+func GlueClient() *glue.Client {
+	return glue.NewFromConfig(Config())
+}
+
+// IAMClient returns a new IAM client.
+func IAMClient() *iam.Client {
+	return iam.NewFromConfig(Config())
+}
+
+// STSClient returns a new STS client.
+func STSClient() *sts.Client {
+	return sts.NewFromConfig(Config())
+}
+
+// SecretsManagerClient returns a new Secrets Manager client.
+func SecretsManagerClient() *secretsmanager.Client {
+	return secretsmanager.NewFromConfig(Config())
+}
+
+// KMSClient returns a new KMS client.
+func KMSClient() *kms.Client {
+	return kms.NewFromConfig(Config())
+}
+
+// KinesisClient returns a new Kinesis client.
+func KinesisClient() *kinesis.Client {
+	return kinesis.NewFromConfig(Config())
+}
+
+// CloudWatchClient returns a new CloudWatch client.
+func CloudWatchClient() *cloudwatch.Client {
+	return cloudwatch.NewFromConfig(Config())
+}
+
+// ResourceGroupsTaggingAPIClient returns a new Resource Groups Tagging API client.
+func ResourceGroupsTaggingAPIClient() *resourcegroupstaggingapi.Client {
+	return resourcegroupstaggingapi.NewFromConfig(Config())
+}
+
+// ACMClient returns a new ACM client.
+func ACMClient() *acm.Client {
+	return acm.NewFromConfig(Config())
+}
+
+// ECRClient returns a new ECR client.
+func ECRClient() *ecr.Client {
+	return ecr.NewFromConfig(Config())
+}
+
+// PipesClient returns a new EventBridge Pipes client.
+func PipesClient() *pipes.Client {
+	return pipes.NewFromConfig(Config())
+}
+
+// IoTClient returns a new AWS IoT client.
+func IoTClient() *iot.Client {
+	return iot.NewFromConfig(Config())
+}
+
+// IoTDataClient returns a new AWS IoT Data Plane client.
+func IoTDataClient() *iotdataplane.Client {
+	return iotdataplane.NewFromConfig(Config())
+}
+
+// IoTJobsDataClient returns a new AWS IoT Jobs Data Plane client.
+func IoTJobsDataClient() *iotjobsdataplane.Client {
+	return iotjobsdataplane.NewFromConfig(Config())
+}
+
+// RDSClient returns a new RDS client.
+func RDSClient() *rds.Client {
+	return rds.NewFromConfig(Config())
+}
+
+// NeptuneClient returns a new Neptune client.
+func NeptuneClient() *neptune.Client {
+	return neptune.NewFromConfig(Config())
+}
+
+// CognitoClient returns a new Cognito Identity Provider client.
+func CognitoClient() *cognitoidentityprovider.Client {
+	return cognitoidentityprovider.NewFromConfig(Config())
+}
+
+// ProxyHost returns the host to use for direct TCP connections to RDS/ElastiCache proxies.
+func ProxyHost() string {
+	ep := Endpoint()
+	parsed, err := url.Parse(ep)
+	if err != nil {
+		return ep
+	}
+	if parsed.Hostname() == "" && !strings.Contains(ep, "://") {
+		parsed, err = url.Parse("//" + ep)
+	}
+	if err == nil && parsed.Hostname() != "" {
+		return parsed.Hostname()
+	}
+	return ep
+}
+
+// MinimalZip returns a minimal Lambda deployment zip with a Node.js handler.
+func MinimalZip() []byte {
+	code := `exports.handler = async (event) => {
+  const name = (event && event.name) ? event.name : "World";
+  return { statusCode: 200, body: JSON.stringify({ message: "Hello, " + name + "!" }) };
+};`
+	var buf bytes.Buffer
+	w := zip.NewWriter(&buf)
+	f, _ := w.Create("index.js")
+	f.Write([]byte(code))
+	w.Close()
+	return buf.Bytes()
+}

@@ -1,0 +1,6 @@
+[
+  {"Value": "General Purpose"},
+  {"Value": "Infrequent Access"},
+  {"Value": "Archive"},
+  {"Value": "Intelligent-Tiering"}
+]

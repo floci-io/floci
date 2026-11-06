@@ -1,0 +1,226 @@
+# Docker Images
+
+Floci publishes images to [Docker Hub (`floci/floci`)](https://hub.docker.com/r/floci/floci).
+
+Every image tag combines two independent choices: **what's inside** (variant) and **how stable it is** (channel).
+
+## Axis 1: Variant (what's inside)
+
+| Variant | Contents | When to use |
+|---|---|---|
+| **Standard** | Floci native binary only | General use: CI, local dev, Testcontainers **(recommended)** |
+| **Baseline** | Floci native binary compiled for ARMv8.0 (`armv8-a`) | ARM64 hosts without LSE, including Raspberry Pi 4-class CPUs |
+| **Compat** | Floci + Python 3.12 + AWS CLI + boto3 | Workflows that need AWS tooling available inside the container |
+
+The compat image runs the same native binary as the standard image, so startup time and memory footprint are identical. Only the image size increases. The baseline image is different: it is an ARM64-only release artifact compiled for the ARMv8.0 ISA floor and is not published on nightly channels.
+
+The standard image is built on Red Hat UBI 9 micro. Besides Floci it contains only bash and coreutils. There is no package manager, curl, grep or sed inside. Pick the compat image when you need tools inside the container.
+
+## Axis 2: Channel (how stable)
+
+| Channel | Source | Published |
+|---|---|---|
+| **Release** | Tagged version (e.g. `x.y.z`) | 15th and last day of each month, 00:30 CT |
+| **Nightly** | Tip of `main` | Every night at 23:00 CT |
+
+Release images are stable and recommended for most use cases. Between trains, `nightly` carries every merged fix from the following morning. Nightly images track active development and may include unreleased changes.
+
+## Full Tag Matrix
+
+Combining both axes gives the complete set of published tags:
+
+|  | Standard | Baseline (ARM64 only) | Compat |
+|---|---|---|---|
+| **Release (latest)** | `latest` ✅ | `latest-baseline` | `latest-compat` |
+| **Release (pinned)** | `x.y.z` | `x.y.z-baseline` | `x.y.z-compat` |
+| **Nightly (floating)** | `nightly` | — | `nightly-compat` |
+| **Nightly (dated)** | `nightly-mmddyyyy` | — | `nightly-mmddyyyy-compat` |
+
+Dated nightly tags (e.g. `nightly-05022026`) name one night's build of `main`. A same-day rerun of the nightly workflow republishes that day's tag, so for a build you can rely on not changing, pin a release version.
+
+!!! warning
+    Nightly images may include unreleased or experimental changes. Use release tags in production-like environments.
+
+## Quick Reference
+
+```yaml title="docker-compose.yml"
+# Standard release : recommended
+image: floci/floci:latest
+
+# Compat release : includes AWS CLI and boto3
+image: floci/floci:latest-compat
+
+# ARM64 baseline release : Raspberry Pi 4 / pre-LSE AArch64 cores
+image: floci/floci:latest-baseline
+
+# Pinned release : reproducible builds
+image: floci/floci:x.y.z
+
+# Nightly : track main
+image: floci/floci:nightly
+```
+
+## Multi-Architecture
+
+Standard and compat images are published as multi-arch manifests supporting `linux/amd64` and `linux/arm64`. Baseline images are intentionally `linux/arm64` only.
+
+## Verifying Image Signatures
+
+Release images are signed with [cosign](https://docs.sigstore.dev/) in keyless mode: the release workflow trades its GitHub Actions OIDC token for a short-lived Fulcio certificate and records the signature in the Rekor transparency log. There is no public key to distribute: you verify *who* produced the image instead of *which key* signed it.
+
+```sh
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/floci-io/floci/\.github/workflows/release\.yml@refs/tags/' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  floci/floci:x.y.z
+```
+
+The signing identity is the release workflow's own ref, so the regexp above accepts any release tag. To accept exactly one release, drop the regexp and pin the identity:
+
+```sh
+--certificate-identity 'https://github.com/floci-io/floci/.github/workflows/release.yml@refs/tags/x.y.z'
+```
+
+Both registries carry the same signatures: substitute `public.ecr.aws/floci/floci:x.y.z` and the command is otherwise identical. Tags are mutable, so for a check you can rely on, verify a digest (`floci/floci@sha256:...`) rather than a tag.
+
+Only release images are signed. Nightly images are not.
+
+!!! note "Requires cosign v2.6.3 or later"
+    These signatures use the standardized Sigstore bundle format. cosign v2.6.3 and later (including v3) read it automatically. Older versions cannot verify these signatures.
+
+### Provenance and SBOM Attestations
+
+Release images carry BuildKit provenance (SLSA) and SPDX SBOM attestations, attached to the manifest index as separate manifests. Signing is recursive, so the index, every per-platform image, and every attestation manifest are each signed individually. Tampering with an attestation changes its digest, which changes the index descriptor pointing at it, which changes the signed index digest.
+
+List the attached manifests and verify one by its own digest:
+
+```sh
+docker buildx imagetools inspect floci/floci:x.y.z --format '{{json .Manifest}}'
+
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/floci-io/floci/\.github/workflows/release\.yml@refs/tags/' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  floci/floci@sha256:<attestation-manifest-digest>
+```
+
+Use `cosign verify`, not `cosign verify-attestation`. The latter targets cosign's own DSSE-wrapped attestations; BuildKit's attestations are plain in-toto manifests with no signature envelope of their own, so they are signed, and verified, by digest.
+
+## Raspberry Pi 4 and older ARM64 CPUs
+
+If the standard ARM64 image exits with `CPU features [FP, ASIMD, CRC32, LSE] not supported`, use the `-baseline` release tag. The baseline image is compiled with GraalVM `-march=armv8-a`, so it does not require LSE. For example, use `floci/floci:latest-baseline` or pin `floci/floci:x.y.z-baseline`.
+
+The same build is published as the standalone binary `floci-aws-linux-arm64-baseline`; see [Native binary](../getting-started/installation.md#native-binary).
+
+## Reusable Image Publishing
+
+The `Build Floci Images` reusable workflow publishes a JVM image for an exact
+branch, tag, or commit by default. This matches the ordinary Maven package and
+the repository's local-development Docker image. A calling repository owns the
+trigger, destination registry, credentials, and package permissions; the shared
+workflow owns the multi-architecture manifest, image labels, and provenance
+output.
+
+For example, a fork can keep this small manual caller on its default branch:
+
+```yaml title=".github/workflows/publish-images.yml"
+name: Publish Floci Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      source-ref:
+        description: Floci branch, tag, or commit to publish
+        required: true
+        type: string
+        default: main
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    uses: floci-io/floci/.github/workflows/build-images.yml@main
+    with:
+      source-ref: ${{ inputs.source-ref }}
+      image: ghcr.io/${{ github.repository_owner }}/floci
+```
+
+Pin the reusable workflow to a trusted tag or full commit SHA when the caller
+requires a stable build contract. The caller's `GITHUB_TOKEN` publishes a GHCR
+image only below the caller's repository owner. Calls targeting another OCI
+registry must pass `REGISTRY_USERNAME` and `REGISTRY_TOKEN` through the reusable
+workflow's declared secrets.
+
+The default workflow publishes a build-and-commit-derived convenience tag:
+
+- `<YYYYMMDD.HHMMSS>.<commit-sha-8>` for the JVM image
+
+Callers that also need native artifacts can pass `publish-native: true`. This
+adds `<YYYYMMDD.HHMMSS>.<commit-sha-8>-native` and
+`<YYYYMMDD.HHMMSS>.<commit-sha-8>-native-compat`; it does not change the
+unqualified JVM tag. Timestamps are generated in UTC.
+
+Each workflow invocation produces a new timestamped tag. The workflow returns
+the digest-qualified JVM reference (plus native references when requested) and
+uploads them in a provenance JSON artifact. Downstream tests should use a
+digest-qualified reference when they require an immutable image:
+
+```text
+ghcr.io/example/floci@sha256:...
+```
+
+## What's in the Compat Image
+
+The compat image adds the following to the standard image contents:
+
+- Python 3.12 + pip (`python3`, `python`, `pip3` and `pip` all point at 3.12)
+- [AWS CLI](https://pypi.org/project/awscli/) (via pip)
+- [boto3](https://pypi.org/project/boto3/) (via pip)
+
+The AWS CLI is pre-configured to talk to the local Floci endpoint, so no `--endpoint-url` flag is needed in hook scripts:
+
+```sh
+#!/bin/sh
+aws sqs create-queue --queue-name my-queue   # works without --endpoint-url
+aws s3 mb s3://my-bucket
+```
+
+The following environment variables are set in both the standard and compat images:
+
+| Variable | Value |
+|---|---|
+| `AWS_DEFAULT_REGION` | `us-east-1` |
+| `AWS_ACCESS_KEY_ID` | `test` |
+| `AWS_SECRET_ACCESS_KEY` | `test` |
+| `AWS_CONFIG_FILE` | `/etc/floci/aws/config` |
+
+The compat image additionally sets:
+
+| Variable | Value |
+|---|---|
+| `AWS_ENDPOINT_URL` | `http://localhost:4566` |
+
+Override any of them at runtime via `docker run -e` or the Compose `environment` block.
+
+## Local Development
+
+The project ships a `docker-compose.yml` at the repository root configured for local development.
+By default it uses `docker/Dockerfile`, a fast Ubuntu Noble/glibc JVM image suited for iteration
+with Java 25. The release and nightly images use the native Dockerfiles described above. Switch the
+`dockerfile` entry to test the native image locally:
+
+```yaml title="docker-compose.yml"
+build:
+  context: .
+  dockerfile: docker/Dockerfile.native   # or docker/Dockerfile for fast JVM dev build
+```
+
+Faster for iteration: `make native native-image` builds the binary once and packages it as
+`floci:local-native`, and `make native-up` runs that image through the `docker/compose.native.yml`
+overlay, which also sets the variables the compatibility workflow passes. `make compat
+SUITES="sdk-test-java compat-cdk"` then runs the named suites from `compatibility-tests/` in Docker
+against it. The suites expect a fresh emulator: `make clean-sidecars clean-volumes` first removes
+the containers and named volumes Floci left behind (the ECR registry's volume in particular, whose
+repositories Floci re-adopts on the next start), and `make native-down` removes the containers
+after a run.

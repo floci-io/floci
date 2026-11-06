@@ -1,0 +1,24 @@
+{
+  "error": "Resource with id [Fn] is invalid. 'Type: sqs' must be one of ['SQS', 'SNS', 'EventBridge', 'Lambda', 'S3Bucket']",
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Destination": "arn:aws:sqs:us-east-1:123456789012:q",
+                "Type": "sqs"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

@@ -1,0 +1,1143 @@
+package com.floci.test;
+
+import org.junit.jupiter.api.*;
+import software.amazon.awssdk.regions.RegionMetadata;
+import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.*;
+import software.amazon.awssdk.services.ec2.model.Tag;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
+import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+import static org.assertj.core.api.Assertions.*;
+
+@DisplayName("EC2 Elastic Compute Cloud")
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+class Ec2Tests {
+
+    private static final Logger LOG = Logger.getLogger(Ec2Tests.class.getName());
+    private static Ec2Client ec2;
+    private static String vpcId;
+    private static String subnetId;
+    private static String sgId;
+    private static String keyName;
+    private static String igwId;
+    private static String rtId;
+    private static String rtbAssocId;
+    private static String allocationId;
+    private static String instanceId;
+    private static String fleetInstanceId;
+
+    @BeforeAll
+    static void setup() {
+        ec2 = TestFixtures.ec2Client();
+        keyName = "sdk-test-key";
+    }
+
+    @Test
+    @Order(-1)
+    void spotRequestsPreserveOriginalUserData() {
+        String encoded = "/w";
+        SpotInstanceRequest request = ec2.requestSpotInstances(RequestSpotInstancesRequest.builder()
+                .instanceCount(1)
+                .launchSpecification(RequestSpotLaunchSpecification.builder()
+                        .imageId("ami-0abcdef1234567890")
+                        .instanceType(InstanceType.T3_MICRO)
+                        .userData(encoded).build())
+                .build()).spotInstanceRequests().get(0);
+        try {
+            assertThat(request.launchSpecification().userData()).isEqualTo(encoded);
+            assertThat(ec2.describeSpotInstanceRequests(DescribeSpotInstanceRequestsRequest.builder()
+                    .spotInstanceRequestIds(request.spotInstanceRequestId()).build())
+                    .spotInstanceRequests().get(0).launchSpecification().userData()).isEqualTo(encoded);
+            assertThat(ec2.describeInstanceAttribute(DescribeInstanceAttributeRequest.builder()
+                    .instanceId(request.instanceId()).attribute(InstanceAttributeName.USER_DATA).build())
+                    .userData().value()).isEqualTo(encoded);
+        } finally {
+            ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(request.instanceId()).build());
+            ec2.cancelSpotInstanceRequests(CancelSpotInstanceRequestsRequest.builder()
+                    .spotInstanceRequestIds(request.spotInstanceRequestId()).build());
+        }
+    }
+
+    @Test
+    @Order(0)
+    @DisplayName("DescribeVpnGateways - empty when none exist")
+    void describeVpnGatewaysEmpty() {
+        assertThat(ec2.describeVpnGateways().vpnGateways()).isEmpty();
+        assertThat(ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
+                .filters(Filter.builder()
+                        .name("attachment.vpc-id")
+                        .values("vpc-0123456789abcdef0")
+                        .build())
+                .build()).vpnGateways()).isEmpty();
+        assertThat(ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
+                .filters(Filter.builder().name("tag-value").values("TeamA").build())
+                .build()).vpnGateways()).isEmpty();
+
+        assertThatThrownBy(() -> ec2.describeVpnGateways(DescribeVpnGatewaysRequest.builder()
+                .vpnGatewayIds("vgw-0123456789abcdef0")
+                .build()))
+                .isInstanceOfSatisfying(Ec2Exception.class, error -> {
+                    assertThat(error.statusCode()).isEqualTo(400);
+                    assertThat(error.awsErrorDetails().errorCode())
+                            .isEqualTo("InvalidVpnGatewayID.NotFound");
+                    assertThat(error.awsErrorDetails().errorMessage())
+                            .isEqualTo("The vpnGateway ID 'vgw-0123456789abcdef0' does not exist");
+                    assertThat(error.requestId()).isNotBlank();
+                });
+    }
+
+    @Test
+    @Order(0)
+    @DisplayName("DescribeEgressOnlyInternetGateways - empty when none exist")
+    void describeEgressOnlyInternetGatewaysEmpty() {
+        assertThat(ec2.describeEgressOnlyInternetGateways().egressOnlyInternetGateways()).isEmpty();
+        assertThat(ec2.describeEgressOnlyInternetGateways(
+                DescribeEgressOnlyInternetGatewaysRequest.builder()
+                        .filters(Filter.builder()
+                                .name("tag:Owner")
+                                .values("TeamA")
+                                .build())
+                        .build()).egressOnlyInternetGateways()).isEmpty();
+        assertThat(ec2.describeEgressOnlyInternetGateways(
+                DescribeEgressOnlyInternetGatewaysRequest.builder()
+                        .filters(Filter.builder().name("tag-value").values("TeamA").build())
+                        .build()).egressOnlyInternetGateways()).isEmpty();
+        DescribeEgressOnlyInternetGatewaysResponse paged =
+                ec2.describeEgressOnlyInternetGateways(
+                        DescribeEgressOnlyInternetGatewaysRequest.builder().maxResults(5).build());
+        assertThat(paged.egressOnlyInternetGateways()).isEmpty();
+        assertThat(paged.nextToken()).isNull();
+
+        assertThat(ec2.describeEgressOnlyInternetGateways(
+                DescribeEgressOnlyInternetGatewaysRequest.builder()
+                        .egressOnlyInternetGatewayIds("eigw-0123456789abcdef0")
+                        .build()).egressOnlyInternetGateways()).isEmpty();
+    }
+
+    @AfterAll
+    static void cleanup() {
+        if (ec2 != null) {
+            try {
+                if (fleetInstanceId != null) {
+                    ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(fleetInstanceId).build());
+                }
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "Failed to terminate CreateFleet test instance " + fleetInstanceId, e);
+            }
+            try {
+                if (instanceId != null) {
+                    ec2.terminateInstances(TerminateInstancesRequest.builder().instanceIds(instanceId).build());
+                }
+            } catch (Exception ignored) {}
+            try {
+                if (allocationId != null) {
+                    ec2.releaseAddress(ReleaseAddressRequest.builder().allocationId(allocationId).build());
+                }
+            } catch (Exception ignored) {}
+            try {
+                if (rtbAssocId != null) {
+                    ec2.disassociateRouteTable(DisassociateRouteTableRequest.builder().associationId(rtbAssocId).build());
+                }
+            } catch (Exception ignored) {}
+            try {
+                if (igwId != null && vpcId != null) {
+                    ec2.detachInternetGateway(DetachInternetGatewayRequest.builder().internetGatewayId(igwId).vpcId(vpcId).build());
+                    ec2.deleteInternetGateway(DeleteInternetGatewayRequest.builder().internetGatewayId(igwId).build());
+                }
+            } catch (Exception ignored) {}
+            try {
+                if (rtId != null) {
+                    ec2.deleteRouteTable(DeleteRouteTableRequest.builder().routeTableId(rtId).build());
+                }
+            } catch (Exception ignored) {}
+            try {
+                if (subnetId != null) {
+                    ec2.deleteSubnet(DeleteSubnetRequest.builder().subnetId(subnetId).build());
+                }
+            } catch (Exception ignored) {}
+            try {
+                if (sgId != null) {
+                    ec2.deleteSecurityGroup(DeleteSecurityGroupRequest.builder().groupId(sgId).build());
+                }
+            } catch (Exception ignored) {}
+            try {
+                if (keyName != null) {
+                    ec2.deleteKeyPair(DeleteKeyPairRequest.builder().keyName(keyName).build());
+                }
+            } catch (Exception ignored) {}
+            try {
+                if (vpcId != null) {
+                    ec2.deleteVpc(DeleteVpcRequest.builder().vpcId(vpcId).build());
+                }
+            } catch (Exception ignored) {}
+            ec2.close();
+        }
+    }
+
+    /** Polls DescribeInstances until the instance reaches the target state (up to 60 s). */
+    private static Instance waitForState(String id, InstanceStateName target) throws InterruptedException {
+        for (int i = 0; i < 60; i++) {
+            DescribeInstancesResponse resp = ec2.describeInstances(
+                    DescribeInstancesRequest.builder().instanceIds(id).build());
+            Instance inst = resp.reservations().get(0).instances().get(0);
+            if (inst.state().name() == target) {
+                return inst;
+            }
+            Thread.sleep(1000);
+        }
+        throw new AssertionError("Instance " + id + " did not reach state " + target + " within 60 s");
+    }
+
+    @Test
+    @Order(1)
+    @DisplayName("DescribeVpcs - default VPC exists")
+    void describeVpcsDefaultExists() {
+        DescribeVpcsResponse resp = ec2.describeVpcs();
+        boolean hasDefault = resp.vpcs().stream().anyMatch(Vpc::isDefault);
+        assertThat(hasDefault).isTrue();
+    }
+
+    @Test
+    @Order(2)
+    @DisplayName("DescribeSubnets - at least 3 default subnets")
+    void describeSubnetsDefaultCount() {
+        DescribeSubnetsResponse resp = ec2.describeSubnets();
+        long defaultCount = resp.subnets().stream().filter(Subnet::defaultForAz).count();
+        assertThat(defaultCount).isGreaterThanOrEqualTo(3);
+    }
+
+    @Test
+    @Order(3)
+    @DisplayName("DescribeSecurityGroups - default SG exists")
+    void describeSecurityGroupsDefault() {
+        DescribeSecurityGroupsResponse resp = ec2.describeSecurityGroups();
+        boolean hasDefault = resp.securityGroups().stream()
+                .anyMatch(sg -> "default".equals(sg.groupName()));
+        assertThat(hasDefault).isTrue();
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("DescribeAvailabilityZones - 3 zones")
+    void describeAvailabilityZones() {
+        DescribeAvailabilityZonesResponse resp = ec2.describeAvailabilityZones();
+        assertThat(resp.availabilityZones()).hasSize(3);
+        assertThat(resp.availabilityZones()).allSatisfy(zone ->
+                assertThat(zone.networkBorderGroup()).isEqualTo(TestFixtures.region().id()));
+    }
+
+    @Test
+    @Order(5)
+    @DisplayName("DescribeRegions - non-empty list")
+    void describeRegions() {
+        DescribeRegionsResponse resp = ec2.describeRegions();
+        assertThat(resp.regions()).isNotEmpty();
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("DescribeImages - static AMI list")
+    void describeImages() {
+        DescribeImagesResponse resp = ec2.describeImages();
+        assertThat(resp.images()).isNotEmpty();
+        assertThat(resp.images()).allMatch(img -> img.imageId().startsWith("ami-"));
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DescribeLaunchTemplateVersions - user data readback")
+    void describeLaunchTemplateVersionsReturnsEncodedUserData() {
+        String encodedUserData = Base64.getEncoder()
+                .encodeToString("#!/bin/sh\necho sdk-launch-template\n".getBytes(StandardCharsets.UTF_8));
+        String launchTemplateId = ec2.createLaunchTemplate(CreateLaunchTemplateRequest.builder()
+                .launchTemplateName("sdk-user-data-readback")
+                .launchTemplateData(RequestLaunchTemplateData.builder()
+                        .imageId("ami-0abcdef1234567890")
+                        .instanceType(InstanceType.T3_MICRO)
+                        .userData(encodedUserData)
+                        .build())
+                .build()).launchTemplate().launchTemplateId();
+
+        try {
+            DescribeLaunchTemplateVersionsResponse described = ec2.describeLaunchTemplateVersions(
+                    DescribeLaunchTemplateVersionsRequest.builder()
+                            .launchTemplateId(launchTemplateId)
+                            .versions("$Latest")
+                            .build());
+
+            assertThat(described.launchTemplateVersions()).hasSize(1);
+            assertThat(described.launchTemplateVersions().get(0).launchTemplateData().userData())
+                    .isEqualTo(encodedUserData);
+        }
+        finally {
+            ec2.deleteLaunchTemplate(DeleteLaunchTemplateRequest.builder()
+                    .launchTemplateId(launchTemplateId)
+                    .build());
+        }
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DescribeInstanceTypes - non-empty list")
+    void describeInstanceTypes() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(
+                DescribeInstanceTypesRequest.builder().build());
+        assertThat(resp.instanceTypes()).isNotEmpty();
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DescribeInstanceTypes - network compatibility metadata")
+    void describeInstanceTypeNetworkCompatibilityMetadata() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.M5_LARGE, InstanceType.fromValue("t4g.medium"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(2);
+        assertThat(resp.instanceTypes()).allSatisfy(instanceType -> {
+            assertThat(instanceType.networkInfo()).isNotNull();
+            assertThat(instanceType.networkInfo().encryptionInTransitSupported()).isNotNull();
+            assertThat(instanceType.networkInfo().defaultNetworkCardIndex()).isNotNull();
+            assertThat(instanceType.networkInfo().networkCards()).isNotEmpty();
+            assertThat(instanceType.networkInfo().ipv4AddressesPerInterface()).isNotNull();
+        });
+        assertThat(resp.instanceTypes()).allMatch(instanceType ->
+                !instanceType.networkInfo().encryptionInTransitSupported());
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DescribeInstanceTypes - network card capacity metadata")
+    void describeInstanceTypeNetworkCardCapacityMetadata() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.M5_LARGE, InstanceType.fromValue("t4g.medium"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(2);
+        assertThat(resp.instanceTypes()).anySatisfy(instanceType -> {
+            assertThat(instanceType.instanceType()).isEqualTo(InstanceType.M5_LARGE);
+            assertThat(instanceType.networkInfo().defaultNetworkCardIndex()).isEqualTo(0);
+            assertThat(instanceType.networkInfo().ipv4AddressesPerInterface()).isEqualTo(10);
+            assertThat(instanceType.networkInfo().networkCards()).singleElement().satisfies(networkCard -> {
+                assertThat(networkCard.networkCardIndex()).isEqualTo(0);
+                assertThat(networkCard.maximumNetworkInterfaces()).isEqualTo(3);
+            });
+        });
+        assertThat(resp.instanceTypes()).anySatisfy(instanceType -> {
+            assertThat(instanceType.instanceTypeAsString()).isEqualTo("t4g.medium");
+            assertThat(instanceType.networkInfo().defaultNetworkCardIndex()).isEqualTo(0);
+            assertThat(instanceType.networkInfo().ipv4AddressesPerInterface()).isEqualTo(6);
+            assertThat(instanceType.networkInfo().networkCards()).singleElement().satisfies(networkCard -> {
+                assertThat(networkCard.networkCardIndex()).isEqualTo(0);
+                assertThat(networkCard.maximumNetworkInterfaces()).isEqualTo(3);
+            });
+        });
+
+        DescribeInstanceTypesResponse largerArmResponse = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.fromValue("m8gd.2xlarge"))
+                .build());
+        assertThat(largerArmResponse.instanceTypes()).singleElement().satisfies(instanceType -> {
+            assertThat(instanceType.networkInfo().defaultNetworkCardIndex()).isEqualTo(0);
+            assertThat(instanceType.networkInfo().ipv4AddressesPerInterface()).isEqualTo(15);
+            assertThat(instanceType.networkInfo().networkCards()).singleElement().satisfies(networkCard -> {
+                assertThat(networkCard.networkCardIndex()).isEqualTo(0);
+                assertThat(networkCard.maximumNetworkInterfaces()).isEqualTo(4);
+            });
+        });
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DescribeInstanceTypes - processor architectures")
+    void describeInstanceTypeProcessorArchitectures() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.fromValue("m6gd.2xlarge"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(1);
+        assertThat(resp.instanceTypes().get(0).processorInfo().supportedArchitecturesAsStrings())
+                .containsExactly("arm64");
+    }
+
+    /** Regression coverage for the Karpenter instance-type compatibility contract. */
+    @Test
+    @Order(7)
+    @DisplayName("DescribeInstanceTypes - supported usage classes")
+    void describeInstanceTypeSupportedUsageClasses() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.M5_LARGE, InstanceType.fromValue("t4g.medium"),
+                        InstanceType.fromValue("m6gd.large"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(3);
+        assertThat(resp.instanceTypes()).allSatisfy(instanceType ->
+                assertThat(instanceType.supportedUsageClassesAsStrings())
+                        .containsExactlyInAnyOrder("on-demand", "spot"));
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("CreateFleet - dry-run and instant on-demand launch")
+    void createFleetDryRunAndLaunch() {
+        String launchTemplateId = ec2.createLaunchTemplate(CreateLaunchTemplateRequest.builder()
+                .launchTemplateName("sdk-create-fleet")
+                .launchTemplateData(RequestLaunchTemplateData.builder()
+                        .imageId("ami-0abcdef1234567890")
+                        .instanceType(InstanceType.T3_MICRO)
+                        .build())
+                .build()).launchTemplate().launchTemplateId();
+
+        FleetLaunchTemplateConfigRequest config = FleetLaunchTemplateConfigRequest.builder()
+                .launchTemplateSpecification(FleetLaunchTemplateSpecificationRequest.builder()
+                        .launchTemplateId(launchTemplateId)
+                        .version("1")
+                        .build())
+                .overrides(FleetLaunchTemplateOverridesRequest.builder()
+                        .instanceType(InstanceType.T3_MICRO)
+                        .imageId("ami-0abcdef1234567890")
+                        .build())
+                .build();
+        CreateFleetRequest request = CreateFleetRequest.builder()
+                .type(FleetType.INSTANT)
+                .launchTemplateConfigs(config)
+                .targetCapacitySpecification(TargetCapacitySpecificationRequest.builder()
+                        .totalTargetCapacity(1)
+                        .defaultTargetCapacityType(DefaultTargetCapacityType.ON_DEMAND)
+                        .build())
+                .build();
+
+        try {
+            assertThatThrownBy(() -> ec2.createFleet(request.toBuilder().dryRun(true).build()))
+                    .isInstanceOf(Ec2Exception.class)
+                    .satisfies(error -> assertThat(((Ec2Exception) error).awsErrorDetails().errorCode())
+                            .isEqualTo("DryRunOperation"));
+
+            CreateFleetResponse response = ec2.createFleet(request);
+            assertThat(response.fleetId()).startsWith("fleet-");
+            assertThat(response.instances()).hasSize(1);
+            assertThat(response.instances().get(0).instanceIds()).hasSize(1);
+            fleetInstanceId = response.instances().get(0).instanceIds().get(0);
+            assertThat(response.instances().get(0).instanceType()).isEqualTo(InstanceType.T3_MICRO);
+            assertThat(response.instances().get(0).lifecycle()).isEqualTo(InstanceLifecycle.ON_DEMAND);
+        }
+        finally {
+            ec2.deleteLaunchTemplate(DeleteLaunchTemplateRequest.builder()
+                    .launchTemplateId(launchTemplateId)
+                    .build());
+        }
+    }
+
+    @Test
+    @Order(8)
+    @DisplayName("CreateVpc - create VPC with CIDR")
+    void createVpc() {
+        CreateVpcResponse resp = ec2.createVpc(CreateVpcRequest.builder()
+                .cidrBlock("10.0.0.0/16").build());
+        vpcId = resp.vpc().vpcId();
+
+        assertThat(vpcId).isNotNull().startsWith("vpc-");
+        assertThat(resp.vpc().cidrBlock()).isEqualTo("10.0.0.0/16");
+        assertThat(resp.vpc().state()).isEqualTo(VpcState.AVAILABLE);
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("DescribeVpcs - by ID")
+    void describeVpcsById() {
+        DescribeVpcsResponse resp = ec2.describeVpcs(DescribeVpcsRequest.builder()
+                .vpcIds(vpcId).build());
+
+        assertThat(resp.vpcs()).hasSize(1);
+        assertThat(resp.vpcs().get(0).vpcId()).isEqualTo(vpcId);
+    }
+
+    @Test
+    @Order(10)
+    @DisplayName("DescribeVpcs - non-existent ID returns error")
+    void describeVpcsNotFound() {
+        assertThatThrownBy(() -> ec2.describeVpcs(DescribeVpcsRequest.builder()
+                .vpcIds("vpc-doesnotexist").build()))
+                .isInstanceOf(Ec2Exception.class)
+                .satisfies(e -> {
+                    Ec2Exception ec2Ex = (Ec2Exception) e;
+                    assertThat(ec2Ex.awsErrorDetails().errorCode()).isEqualTo("InvalidVpcID.NotFound");
+                });
+    }
+
+    @Test
+    @Order(11)
+    @DisplayName("CreateSubnet - create subnet in VPC")
+    void createSubnet() {
+        CreateSubnetResponse resp = ec2.createSubnet(CreateSubnetRequest.builder()
+                .vpcId(vpcId)
+                .cidrBlock("10.0.1.0/24")
+                .availabilityZone(TestFixtures.availabilityZone())
+                .tagSpecifications(
+                        TagSpecification.builder()
+                                .resourceType(ResourceType.SUBNET)
+                                .tags(Tag.builder().key("example.io:managed-by").value("sdk-test").build())
+                                .build(),
+                        TagSpecification.builder()
+                                .resourceType(ResourceType.SUBNET)
+                                .tags(
+                                        Tag.builder().key("Name").value("sdk-test-subnet").build(),
+                                        Tag.builder().key("omitted-value").build(),
+                                        Tag.builder().key("explicit-empty-value").value("").build())
+                                .build())
+                .build());
+        subnetId = resp.subnet().subnetId();
+
+        assertThat(subnetId).isNotNull().startsWith("subnet-");
+        assertThat(resp.subnet().vpcId()).isEqualTo(vpcId);
+        assertThat(resp.subnet().cidrBlock()).isEqualTo("10.0.1.0/24");
+        assertThat(resp.subnet().tags()).extracting(Tag::key, Tag::value)
+                .containsExactlyInAnyOrder(
+                        tuple("example.io:managed-by", "sdk-test"),
+                        tuple("Name", "sdk-test-subnet"),
+                        tuple("omitted-value", ""),
+                        tuple("explicit-empty-value", ""));
+    }
+
+    @Test
+    @Order(12)
+    @DisplayName("DescribeSubnets - by ID")
+    void describeSubnetsById() {
+        DescribeSubnetsResponse resp = ec2.describeSubnets(DescribeSubnetsRequest.builder()
+                .subnetIds(subnetId).build());
+
+        assertThat(resp.subnets()).hasSize(1);
+        assertThat(resp.subnets().get(0).subnetId()).isEqualTo(subnetId);
+        assertThat(resp.subnets().get(0).tags()).extracting(Tag::key, Tag::value)
+                .containsExactlyInAnyOrder(
+                        tuple("example.io:managed-by", "sdk-test"),
+                        tuple("Name", "sdk-test-subnet"),
+                        tuple("omitted-value", ""),
+                        tuple("explicit-empty-value", ""));
+        assertThat(ec2.describeTags(DescribeTagsRequest.builder()
+                        .filters(Filter.builder().name("resource-id").values(subnetId).build())
+                        .build()).tags())
+                .extracting(TagDescription::key, TagDescription::value)
+                .containsExactlyInAnyOrder(
+                        tuple("example.io:managed-by", "sdk-test"),
+                        tuple("Name", "sdk-test-subnet"),
+                        tuple("omitted-value", ""),
+                        tuple("explicit-empty-value", ""));
+    }
+
+    @Test
+    @Order(13)
+    @DisplayName("CreateSecurityGroup - create SG in VPC")
+    void createSecurityGroup() {
+        CreateSecurityGroupResponse resp = ec2.createSecurityGroup(
+                CreateSecurityGroupRequest.builder()
+                        .groupName("sdk-test-sg")
+                        .description("SDK test security group")
+                        .vpcId(vpcId)
+                        .build());
+        sgId = resp.groupId();
+
+        assertThat(sgId).isNotNull().startsWith("sg-");
+    }
+
+    @Test
+    @Order(14)
+    @DisplayName("AuthorizeSecurityGroupIngress - add SSH rule")
+    void authorizeSecurityGroupIngress() {
+        ec2.authorizeSecurityGroupIngress(AuthorizeSecurityGroupIngressRequest.builder()
+                .groupId(sgId)
+                .ipPermissions(IpPermission.builder()
+                        .ipProtocol("tcp")
+                        .fromPort(22)
+                        .toPort(22)
+                        .ipRanges(IpRange.builder().cidrIp("0.0.0.0/0").build())
+                        .build())
+                .build());
+    }
+
+    @Test
+    @Order(15)
+    @DisplayName("DescribeSecurityGroups - ingress rule present")
+    void describeSecurityGroupsIngressRule() {
+        DescribeSecurityGroupsResponse resp = ec2.describeSecurityGroups(
+                DescribeSecurityGroupsRequest.builder().groupIds(sgId).build());
+
+        boolean hasSshRule = resp.securityGroups().get(0).ipPermissions().stream()
+                .anyMatch(p -> p.fromPort() != null && p.fromPort() == 22);
+        assertThat(hasSshRule).isTrue();
+    }
+
+    @Test
+    @Order(16)
+    @DisplayName("CreateKeyPair - create SSH key pair")
+    void createKeyPair() {
+        CreateKeyPairResponse resp = ec2.createKeyPair(CreateKeyPairRequest.builder()
+                .keyName(keyName).build());
+
+        assertThat(resp.keyName()).isEqualTo(keyName);
+        assertThat(resp.keyPairId()).isNotNull();
+        assertThat(resp.keyMaterial()).isNotNull().isNotEmpty();
+    }
+
+    @Test
+    @Order(17)
+    @DisplayName("DescribeKeyPairs - key pair exists")
+    void describeKeyPairs() {
+        DescribeKeyPairsResponse resp = ec2.describeKeyPairs(DescribeKeyPairsRequest.builder()
+                .keyNames(keyName).build());
+
+        assertThat(resp.keyPairs()).hasSize(1);
+        assertThat(resp.keyPairs().get(0).keyName()).isEqualTo(keyName);
+    }
+
+    @Test
+    @Order(18)
+    @DisplayName("CreateKeyPair - duplicate returns error")
+    void createKeyPairDuplicate() {
+        assertThatThrownBy(() -> ec2.createKeyPair(CreateKeyPairRequest.builder()
+                .keyName(keyName).build()))
+                .isInstanceOf(Ec2Exception.class)
+                .satisfies(e -> {
+                    Ec2Exception ec2Ex = (Ec2Exception) e;
+                    assertThat(ec2Ex.awsErrorDetails().errorCode()).isEqualTo("InvalidKeyPair.Duplicate");
+                });
+    }
+
+    @Test
+    @Order(18)
+    @DisplayName("CreateKeyPair - missing KeyName returns MissingParameter")
+    void createKeyPairWithoutNameIsRejected() {
+        assertThatThrownBy(() -> ec2.createKeyPair(CreateKeyPairRequest.builder().build()))
+                .isInstanceOf(Ec2Exception.class)
+                .satisfies(e -> {
+                    Ec2Exception ec2Ex = (Ec2Exception) e;
+                    assertThat(ec2Ex.awsErrorDetails().errorCode()).isEqualTo("MissingParameter");
+                    assertThat(ec2Ex.statusCode()).isEqualTo(400);
+                });
+    }
+
+    @Test
+    @Order(19)
+    @DisplayName("CreateInternetGateway - create IGW")
+    void createInternetGateway() {
+        CreateInternetGatewayResponse resp = ec2.createInternetGateway(
+                CreateInternetGatewayRequest.builder().build());
+        igwId = resp.internetGateway().internetGatewayId();
+
+        assertThat(igwId).isNotNull().startsWith("igw-");
+    }
+
+    @Test
+    @Order(20)
+    @DisplayName("AttachInternetGateway - attach to VPC")
+    void attachInternetGateway() {
+        ec2.attachInternetGateway(AttachInternetGatewayRequest.builder()
+                .internetGatewayId(igwId)
+                .vpcId(vpcId)
+                .build());
+    }
+
+    @Test
+    @Order(21)
+    @DisplayName("DescribeInternetGateways - attachment reflected")
+    void describeInternetGatewaysAttached() {
+        DescribeInternetGatewaysResponse resp = ec2.describeInternetGateways(
+                DescribeInternetGatewaysRequest.builder()
+                        .internetGatewayIds(igwId).build());
+
+        boolean attached = resp.internetGateways().get(0).attachments().stream()
+                .anyMatch(a -> vpcId.equals(a.vpcId()));
+        assertThat(attached).isTrue();
+    }
+
+    @Test
+    @Order(22)
+    @DisplayName("CreateRouteTable - create route table")
+    void createRouteTable() {
+        CreateRouteTableResponse resp = ec2.createRouteTable(CreateRouteTableRequest.builder()
+                .vpcId(vpcId).build());
+        rtId = resp.routeTable().routeTableId();
+
+        assertThat(rtId).isNotNull().startsWith("rtb-");
+        assertThat(resp.routeTable().vpcId()).isEqualTo(vpcId);
+    }
+
+    @Test
+    @Order(23)
+    @DisplayName("CreateRoute - add default route to IGW")
+    void createRoute() {
+        ec2.createRoute(CreateRouteRequest.builder()
+                .routeTableId(rtId)
+                .destinationCidrBlock("0.0.0.0/0")
+                .gatewayId(igwId)
+                .build());
+    }
+
+    @Test
+    @Order(24)
+    @DisplayName("AssociateRouteTable - associate with subnet")
+    void associateRouteTable() {
+        AssociateRouteTableResponse resp = ec2.associateRouteTable(
+                AssociateRouteTableRequest.builder()
+                        .routeTableId(rtId)
+                        .subnetId(subnetId)
+                        .build());
+        rtbAssocId = resp.associationId();
+
+        assertThat(rtbAssocId).isNotNull().startsWith("rtbassoc-");
+    }
+
+    @Test
+    @Order(25)
+    @DisplayName("AllocateAddress - allocate EIP")
+    void allocateAddress() {
+        AllocateAddressResponse resp = ec2.allocateAddress(AllocateAddressRequest.builder()
+                .domain(DomainType.VPC).build());
+        allocationId = resp.allocationId();
+
+        assertThat(allocationId).isNotNull().startsWith("eipalloc-");
+        assertThat(resp.publicIp()).isNotNull();
+    }
+
+    @Test
+    @Order(26)
+    @DisplayName("DescribeAddresses - EIP exists")
+    void describeAddresses() {
+        DescribeAddressesResponse resp = ec2.describeAddresses(
+                DescribeAddressesRequest.builder()
+                        .allocationIds(allocationId).build());
+
+        assertThat(resp.addresses()).hasSize(1);
+        assertThat(resp.addresses().get(0).allocationId()).isEqualTo(allocationId);
+    }
+
+    @Test
+    @Order(27)
+    @DisplayName("RunInstances - launch EC2 instance")
+    void runInstances() {
+        RunInstancesResponse resp = ec2.runInstances(RunInstancesRequest.builder()
+                .imageId("ami-0abcdef1234567890")
+                .instanceType(InstanceType.T2_MICRO)
+                .minCount(1)
+                .maxCount(1)
+                .keyName(keyName)
+                .subnetId(subnetId)
+                .securityGroupIds(List.of(sgId))
+                .build());
+        instanceId = resp.instances().get(0).instanceId();
+        Instance launched = resp.instances().get(0);
+
+        assertThat(instanceId).isNotNull().startsWith("i-");
+        assertThat(launched.state().name()).isEqualTo(InstanceStateName.PENDING);
+        assertThat(launched.instanceType()).isEqualTo(InstanceType.T2_MICRO);
+        assertThat(launched.keyName()).isEqualTo(keyName);
+    }
+
+    @Test
+    @Order(28)
+    @DisplayName("DescribeInstances - by ID")
+    void describeInstancesById() throws InterruptedException {
+        Instance found = waitForState(instanceId, InstanceStateName.RUNNING);
+
+        assertThat(found.instanceId()).isEqualTo(instanceId);
+        assertThat(found.state().name()).isEqualTo(InstanceStateName.RUNNING);
+    }
+
+    @Test
+    @Order(29)
+    @DisplayName("DescribeInstances - filter by state")
+    void describeInstancesFilterByState() {
+        DescribeInstancesResponse resp = ec2.describeInstances(
+                DescribeInstancesRequest.builder()
+                        .filters(Filter.builder()
+                                .name("instance-state-name")
+                                .values("running")
+                                .build())
+                        .build());
+
+        boolean found = resp.reservations().stream()
+                .flatMap(r -> r.instances().stream())
+                .anyMatch(i -> instanceId.equals(i.instanceId()));
+        assertThat(found).isTrue();
+    }
+
+    @Test
+    @Order(30)
+    @DisplayName("DescribeInstanceStatus - instance status available")
+    void describeInstanceStatus() {
+        DescribeInstanceStatusResponse resp = ec2.describeInstanceStatus(
+                DescribeInstanceStatusRequest.builder().instanceIds(instanceId).build());
+
+        assertThat(resp.instanceStatuses()).isNotEmpty();
+        assertThat(resp.instanceStatuses().get(0).instanceId()).isEqualTo(instanceId);
+    }
+
+    @Test
+    @Order(31)
+    @DisplayName("AssociateAddress - associate EIP to instance")
+    void associateAddress() {
+        AssociateAddressResponse resp = ec2.associateAddress(
+                AssociateAddressRequest.builder()
+                        .allocationId(allocationId)
+                        .instanceId(instanceId)
+                        .build());
+        String assocId = resp.associationId();
+
+        assertThat(assocId).isNotNull().startsWith("eipassoc-");
+    }
+
+    @Test
+    @Order(32)
+    @DisplayName("DisassociateAddress - disassociate EIP")
+    void disassociateAddress() {
+        // Get the association ID first
+        DescribeAddressesResponse addrResp = ec2.describeAddresses(
+                DescribeAddressesRequest.builder().allocationIds(allocationId).build());
+        String assocId = addrResp.addresses().get(0).associationId();
+
+        if (assocId != null) {
+            ec2.disassociateAddress(DisassociateAddressRequest.builder()
+                    .associationId(assocId).build());
+        }
+    }
+
+    @Test
+    @Order(33)
+    @DisplayName("StopInstances - stop instance")
+    void stopInstances() {
+        StopInstancesResponse resp = ec2.stopInstances(StopInstancesRequest.builder()
+                .instanceIds(instanceId).build());
+
+        assertThat(resp.stoppingInstances().get(0).currentState().name())
+                .isEqualTo(InstanceStateName.STOPPING);
+    }
+
+    @Test
+    @Order(34)
+    @DisplayName("StartInstances - start instance")
+    void startInstances() throws InterruptedException {
+        waitForState(instanceId, InstanceStateName.STOPPED);
+
+        StartInstancesResponse resp = ec2.startInstances(StartInstancesRequest.builder()
+                .instanceIds(instanceId).build());
+
+        assertThat(resp.startingInstances().get(0).currentState().name())
+                .isEqualTo(InstanceStateName.PENDING);
+    }
+
+    @Test
+    @Order(35)
+    @DisplayName("RebootInstances - reboot instance")
+    void rebootInstances() {
+        ec2.rebootInstances(RebootInstancesRequest.builder()
+                .instanceIds(instanceId).build());
+    }
+
+    @Test
+    @Order(36)
+    @DisplayName("DescribeInstances - non-existent ID returns error")
+    void describeInstancesNotFound() {
+        assertThatThrownBy(() -> ec2.describeInstances(DescribeInstancesRequest.builder()
+                .instanceIds("i-0000000000000dead").build()))
+                .isInstanceOf(Ec2Exception.class)
+                .satisfies(e -> {
+                    Ec2Exception ec2Ex = (Ec2Exception) e;
+                    assertThat(ec2Ex.awsErrorDetails().errorCode()).isEqualTo("InvalidInstanceID.NotFound");
+                });
+    }
+
+    @Test
+    @Order(37)
+    @DisplayName("CreateTags - add tags to instance")
+    void createTags() {
+        ec2.createTags(CreateTagsRequest.builder()
+                .resources(instanceId)
+                .tags(Tag.builder().key("Name").value("sdk-test-instance").build())
+                .build());
+    }
+
+    @Test
+    @Order(52)
+    @DisplayName("DescribeTags - paginator pages with MaxResults and honours tag:<key>")
+    void describeTagsPaginatesAndFiltersByTagKey() {
+        String pagedVpcId = ec2.createVpc(CreateVpcRequest.builder().cidrBlock("10.98.0.0/16").build())
+                .vpc().vpcId();
+        try {
+            List<Tag> tags = new ArrayList<>();
+            for (int i = 1; i <= 12; i++) {
+                tags.add(Tag.builder().key(String.format("Page%02d", i)).value(i == 1 ? "TeamA" : "v").build());
+            }
+            ec2.createTags(CreateTagsRequest.builder().resources(pagedVpcId).tags(tags).build());
+            Filter byId = Filter.builder().name("resource-id").values(pagedVpcId).build();
+
+            List<DescribeTagsResponse> pages = ec2.describeTagsPaginator(DescribeTagsRequest.builder()
+                    .filters(byId).maxResults(5).build()).stream().toList();
+            assertThat(pages).extracting(page -> page.tags().size()).containsExactly(5, 5, 2);
+            assertThat(pages.get(2).nextToken()).isNull();
+            assertThat(pages.stream().flatMap(page -> page.tags().stream()).map(TagDescription::key).distinct())
+                    .hasSize(12);
+
+            assertThat(ec2.describeTags(DescribeTagsRequest.builder()
+                    .filters(byId, Filter.builder().name("tag:Page01").values("Team?").build())
+                    .build()).tags())
+                    .singleElement()
+                    .satisfies(tag -> {
+                        assertThat(tag.key()).isEqualTo("Page01");
+                        assertThat(tag.resourceType()).isEqualTo(ResourceType.VPC);
+                    });
+        } finally {
+            ec2.deleteVpc(DeleteVpcRequest.builder().vpcId(pagedVpcId).build());
+        }
+    }
+
+    @Test
+    @Order(38)
+    @DisplayName("DescribeInstances - tags reflected on instance")
+    void describeInstancesTagsReflected() {
+        DescribeInstancesResponse resp = ec2.describeInstances(
+                DescribeInstancesRequest.builder().instanceIds(instanceId).build());
+
+        boolean hasTag = resp.reservations().get(0).instances().get(0).tags().stream()
+                .anyMatch(t -> "Name".equals(t.key()) && "sdk-test-instance".equals(t.value()));
+        assertThat(hasTag).isTrue();
+    }
+
+    @Test
+    @Order(39)
+    @DisplayName("TerminateInstances - terminate instance")
+    void terminateInstances() throws InterruptedException {
+        waitForState(instanceId, InstanceStateName.RUNNING);
+
+        TerminateInstancesResponse resp = ec2.terminateInstances(
+                TerminateInstancesRequest.builder().instanceIds(instanceId).build());
+
+        assertThat(resp.terminatingInstances().get(0).currentState().name())
+                .isEqualTo(InstanceStateName.SHUTTING_DOWN);
+    }
+
+    @Test
+    @Order(40)
+    @DisplayName("ReleaseAddress - release EIP")
+    void releaseAddress() {
+        ec2.releaseAddress(ReleaseAddressRequest.builder()
+                .allocationId(allocationId).build());
+        allocationId = null;
+    }
+
+    @Test
+    @Order(41)
+    @DisplayName("DisassociateRouteTable - disassociate route table")
+    void disassociateRouteTable() {
+        ec2.disassociateRouteTable(DisassociateRouteTableRequest.builder()
+                .associationId(rtbAssocId).build());
+        rtbAssocId = null;
+    }
+
+    @Test
+    @Order(42)
+    @DisplayName("DetachAndDeleteInternetGateway - cleanup IGW")
+    void detachAndDeleteInternetGateway() {
+        ec2.detachInternetGateway(DetachInternetGatewayRequest.builder()
+                .internetGatewayId(igwId).vpcId(vpcId).build());
+        ec2.deleteInternetGateway(DeleteInternetGatewayRequest.builder()
+                .internetGatewayId(igwId).build());
+        igwId = null;
+    }
+
+    @Test
+    @Order(43)
+    @DisplayName("DeleteRouteTable - delete route table")
+    void deleteRouteTable() {
+        ec2.deleteRouteTable(DeleteRouteTableRequest.builder()
+                .routeTableId(rtId).build());
+        rtId = null;
+    }
+
+    @Test
+    @Order(44)
+    @DisplayName("DeleteSubnet - delete subnet")
+    void deleteSubnet() {
+        ec2.deleteSubnet(DeleteSubnetRequest.builder().subnetId(subnetId).build());
+        subnetId = null;
+    }
+
+    @Test
+    @Order(45)
+    @DisplayName("DeleteSecurityGroup - delete security group")
+    void deleteSecurityGroup() {
+        ec2.deleteSecurityGroup(DeleteSecurityGroupRequest.builder()
+                .groupId(sgId).build());
+        sgId = null;
+    }
+
+    @Test
+    @Order(46)
+    @DisplayName("DeleteKeyPair - delete key pair")
+    void deleteKeyPair() {
+        DeleteKeyPairResponse resp = ec2.deleteKeyPair(DeleteKeyPairRequest.builder().keyName(keyName).build());
+        assertThat(resp.returnValue()).isTrue();
+        assertThat(resp.keyPairId()).isNotNull().startsWith("key-");
+    }
+
+    @Test
+    @Order(47)
+    @DisplayName("ModifyVpcAttribute - set enableDnsSupport=false")
+    void modifyVpcAttributeDnsSupport() {
+        ec2.modifyVpcAttribute(r -> r.vpcId(vpcId)
+                .enableDnsSupport(a -> a.value(false)));
+    }
+
+    @Test
+    @Order(48)
+    @DisplayName("DescribeVpcAttribute - enableDnsSupport round-trip")
+    void describeVpcAttributeDnsSupport() {
+        DescribeVpcAttributeResponse resp = ec2.describeVpcAttribute(r -> r
+                .vpcId(vpcId)
+                .attribute(VpcAttributeName.ENABLE_DNS_SUPPORT));
+
+        assertThat(resp.vpcId()).isEqualTo(vpcId);
+        assertThat(resp.enableDnsSupport().value()).isFalse();
+    }
+
+    @Test
+    @Order(49)
+    @DisplayName("DescribeVpcEndpointServices - lists the common services with AZs")
+    void describeVpcEndpointServices() {
+        DescribeVpcEndpointServicesResponse resp = ec2.describeVpcEndpointServices(
+                DescribeVpcEndpointServicesRequest.builder().build());
+
+        // The S3 gateway keeps com.amazonaws everywhere. Outside the commercial partition and GovCloud,
+        // AWS names some interface services under the partition's DNS suffix reversed (cn.com.amazonaws,
+        // eu.amazonaws, gov.ic.c2s, ...): ecr.api in every China, EUSC and ISO region, S3 only in China,
+        // where the two S3 offerings therefore split.
+        String region = TestFixtures.region().id();
+        String reversedSuffix = reversedDnsSuffix();
+        String s3Gateway = "com.amazonaws." + region + ".s3";
+        String s3Interface = ("aws-cn".equals(TestFixtures.partition()) ? reversedSuffix : "com.amazonaws")
+                + "." + region + ".s3";
+        assertThat(resp.serviceNames()).contains(s3Gateway, s3Interface);
+        assertThat(resp.serviceDetails()).isNotEmpty();
+
+        if (s3Interface.equals(s3Gateway)) {
+            // S3 is the one service offering both endpoint types.
+            assertThat(serviceTypes(resp, s3Gateway)).containsExactlyInAnyOrder("Gateway", "Interface");
+        } else {
+            assertThat(serviceTypes(resp, s3Gateway)).containsExactly("Gateway");
+            assertThat(serviceTypes(resp, s3Interface)).containsExactly("Interface");
+        }
+        assertThat(serviceDetail(resp, s3Gateway).availabilityZones()).isNotEmpty();
+        assertThat(serviceTypes(resp, reversedSuffix + "." + region + ".ecr.api")).containsExactly("Interface");
+    }
+
+    private static String reversedDnsSuffix() {
+        RegionMetadata metadata = TestFixtures.region().metadata();
+        List<String> labels = new ArrayList<>(List.of(
+                (metadata == null ? "amazonaws.com" : metadata.partition().dnsSuffix()).split("\\.")));
+        Collections.reverse(labels);
+        return String.join(".", labels);
+    }
+
+    private static ServiceDetail serviceDetail(DescribeVpcEndpointServicesResponse resp, String name) {
+        return resp.serviceDetails().stream()
+                .filter(d -> d.serviceName().equals(name))
+                .findFirst()
+                .orElseThrow();
+    }
+
+    private static List<String> serviceTypes(DescribeVpcEndpointServicesResponse resp, String name) {
+        return serviceDetail(resp, name).serviceType().stream().map(ServiceTypeDetail::serviceTypeAsString).toList();
+    }
+
+    @Test
+    @Order(50)
+    @DisplayName("DescribeVpcEndpoints - an interface endpoint reports its network interfaces")
+    void describeVpcEndpointsReportsNetworkInterfaceIds() {
+        // The wire element is networkInterfaceIdSet, and the point of asserting it HERE
+        // rather than only over raw XML is that this proves the real Java SDK deserializes
+        // it into networkInterfaceIds(). A response can be well-formed XML and still not
+        // populate the SDK model -- a wrong element name or nesting fails silently, leaving
+        // an empty list rather than an error, which is exactly the symptom being fixed.
+        // OWNS ITS FIXTURES. The shared subnetId and security group this test originally
+        // used are destroyed before it runs -- @Order(44) deletes the subnet and sets
+        // subnetId to null, @Order(45) deletes the group -- so it was passing null as a
+        // subnet id and asserting on groups that no longer existed. Caught in review.
+        // An ordered suite sharing mutable fixtures makes "what exists here" a function of
+        // position, so a test placed late has to create what it needs.
+        String ownSubnetId = null;
+        String ownGroupId = null;
+        String endpointId = null;
+        try {
+            ownSubnetId = ec2.createSubnet(CreateSubnetRequest.builder()
+                    .vpcId(vpcId).cidrBlock("10.0.90.0/24").availabilityZone(TestFixtures.availabilityZone())
+                    .build()).subnet().subnetId();
+            ownGroupId = ec2.createSecurityGroup(CreateSecurityGroupRequest.builder()
+                    .groupName("vpce-eni-sdk-test").description("endpoint interface ids")
+                    .vpcId(vpcId).build()).groupId();
+
+            CreateVpcEndpointResponse created = ec2.createVpcEndpoint(
+                    CreateVpcEndpointRequest.builder()
+                            .vpcId(vpcId)
+                            .serviceName("com.amazonaws.us-east-1.ec2")
+                            .vpcEndpointType(VpcEndpointType.INTERFACE)
+                            .subnetIds(ownSubnetId)
+                            .securityGroupIds(ownGroupId)
+                            .build());
+            endpointId = created.vpcEndpoint().vpcEndpointId();
+            assertThat(created.vpcEndpoint().ipAddressType()).isEqualTo(IpAddressType.IPV4);
+            assertThat(created.vpcEndpoint().stateAsString()).isEqualTo("available");
+
+            // Asserted on the CREATE response and again on DESCRIBE, because Terraform
+            // reads the ids from one and then re-reads them from the other between plan
+            // and apply; both renderings have to agree.
+            assertThat(created.vpcEndpoint().networkInterfaceIds())
+                    .as("CreateVpcEndpoint response")
+                    .hasSize(1)
+                    .allMatch(id -> id.matches("eni-[0-9a-f]{17}"));
+
+            DescribeVpcEndpointsResponse described = ec2.describeVpcEndpoints(
+                    DescribeVpcEndpointsRequest.builder().vpcEndpointIds(endpointId).build());
+            VpcEndpoint ep = described.vpcEndpoints().get(0);
+            assertThat(ep.ipAddressType()).isEqualTo(IpAddressType.IPV4);
+            assertThat(ep.stateAsString()).isEqualTo("available");
+            ec2.modifyVpcEndpoint(ModifyVpcEndpointRequest.builder().vpcEndpointId(endpointId)
+                    .ipAddressType(IpAddressType.DUALSTACK).build());
+            assertThat(ec2.describeVpcEndpoints(DescribeVpcEndpointsRequest.builder()
+                    .vpcEndpointIds(endpointId).build()).vpcEndpoints().get(0).ipAddressType())
+                    .isEqualTo(IpAddressType.DUALSTACK);
+
+
+            assertThat(ep.networkInterfaceIds())
+                    .as("DescribeVpcEndpoints response")
+                    .isEqualTo(created.vpcEndpoint().networkInterfaceIds());
+            assertThat(ep.groups()).isNotEmpty();
+            assertThat(ep.dnsEntries()).isNotEmpty();
+        } finally {
+            if (endpointId != null) {
+                ec2.deleteVpcEndpoints(DeleteVpcEndpointsRequest.builder()
+                        .vpcEndpointIds(endpointId).build());
+            }
+            if (ownGroupId != null) {
+                ec2.deleteSecurityGroup(DeleteSecurityGroupRequest.builder()
+                        .groupId(ownGroupId).build());
+            }
+            if (ownSubnetId != null) {
+                ec2.deleteSubnet(DeleteSubnetRequest.builder()
+                        .subnetId(ownSubnetId).build());
+            }
+        }
+    }
+
+    @Test
+    @Order(51)
+    @DisplayName("DeleteVpc - delete VPC")
+    void deleteVpc() {
+        ec2.deleteVpc(DeleteVpcRequest.builder().vpcId(vpcId).build());
+        vpcId = null;
+    }
+}

@@ -1,0 +1,393 @@
+# SNS
+
+**Protocol:** Query (XML) and JSON 1.0 (both supported)
+**Endpoint:** `POST http://localhost:4566/`
+
+## Supported Actions
+
+| Action | Description |
+|---|---|
+| `CreateTopic` | Create a topic |
+| `DeleteTopic` | Delete a topic |
+| `ListTopics` | List all topics |
+| `GetTopicAttributes` | Get topic configuration |
+| `SetTopicAttributes` | Update topic configuration |
+| `AddPermission` | Add a labelled statement to a topic's access policy |
+| `RemovePermission` | Remove a labelled statement from a topic's access policy |
+| `GetSMSAttributes` | Read account SMS preferences in this region |
+| `SetSMSAttributes` | Set account SMS preferences in this region |
+| `GetSMSSandboxAccountStatus` | Report whether the account is in the SMS sandbox (always outside it) |
+| `CreateSMSSandboxPhoneNumber` | Add a sandbox destination number and text it a verification code |
+| `VerifySMSSandboxPhoneNumber` | Verify a sandbox number with the code it was sent |
+| `DeleteSMSSandboxPhoneNumber` | Remove a sandbox number |
+| `ListSMSSandboxPhoneNumbers` | List sandbox numbers and their verification status |
+| `CheckIfPhoneNumberIsOptedOut` | Check whether a number has opted out of SMS (never, in Floci) |
+| `ListPhoneNumbersOptedOut` | List numbers opted out of SMS (always empty) |
+| `OptInPhoneNumber` | Opt a number back in to SMS |
+| `Subscribe` | Subscribe an endpoint (SQS, HTTP, Lambda, email) |
+| `Unsubscribe` | Remove a subscription |
+| `ListSubscriptions` | List all subscriptions |
+| `ListSubscriptionsByTopic` | List subscriptions for a specific topic |
+| `GetSubscriptionAttributes` | Get subscription settings |
+| `SetSubscriptionAttributes` | Update subscription settings |
+| `ConfirmSubscription` | Confirm a pending subscription |
+| `Publish` | Publish a message to a topic |
+| `PublishBatch` | Publish up to 10 messages in one call |
+| `TagResource` | Tag a topic |
+| `UntagResource` | Remove tags from a topic |
+| `ListTagsForResource` | List tags on a topic |
+| `CreatePlatformApplication` | Create a mobile push platform app (iOS or Android) |
+| `DeletePlatformApplication` | Delete a platform app and its endpoints |
+| `GetPlatformApplicationAttributes` | Read platform app attributes |
+| `SetPlatformApplicationAttributes` | Update platform app attributes (e.g. `Enabled`) |
+| `ListPlatformApplications` | List platform applications in the region |
+| `CreatePlatformEndpoint` | Register a device token under a platform app |
+| `DeleteEndpoint` | Delete a platform endpoint |
+| `GetEndpointAttributes` | Read endpoint attributes |
+| `SetEndpointAttributes` | Update endpoint attributes (e.g. `Enabled=false` to simulate token expiry) |
+| `ListEndpointsByPlatformApplication` | List endpoints under a platform app |
+
+SMS preferences are stored per account and region. `GetSMSAttributes` can select individual
+names; omitting the list returns all configured preferences. In Floci, setting an empty value
+clears that preference. SMS delivery
+remains mocked, so these settings do not generate delivery
+reports or CloudWatch delivery logs.
+
+`AddPermission` and `RemovePermission` edit the topic's `Policy` attribute the way AWS does: the
+label becomes the statement's `Sid` and each account becomes its `root` principal. A topic with no
+policy set starts from the default one AWS gives a new topic, and `GetTopicAttributes` returns it.
+Under IAM enforcement the topic policy decides what AWS services may publish to the topic, such as
+[SES's event destinations and notifications](ses.md#iam-enforcement), and takes part in an IAM
+caller's request the way any [resource-based policy](iam.md#resource-based-policies) does when the
+request names the topic in a JSON-protocol body. A Query-protocol request carries the topic in its
+form body, which enforcement does not read yet, so the topic policy plays no part in it. A
+Query-protocol request that IAM enforcement refuses answers `AuthorizationError` (HTTP 403), the
+error every SNS operation lists for a caller denied access, which SDKs raise as
+`AuthorizationErrorException`.
+
+## SMS sandbox and opt-out
+
+A new AWS account starts in the SMS sandbox, where it can only text verified numbers. Floci
+delivers SMS to any number, so `GetSMSSandboxAccountStatus` reports `IsInSandbox: false`, which
+is how it actually behaves. The sandbox number calls still work, per account and region, without
+the limits AWS lifts once an account leaves the sandbox (ten verified numbers, and no deleting a
+number until 24 hours after its last verification attempt). `CreateSMSSandboxPhoneNumber` texts a
+six-digit code the way every SMS is sent here, so a test reads it back from the inspection
+endpoint and passes it to `VerifySMSSandboxPhoneNumber`:
+
+```bash
+aws sns create-sms-sandbox-phone-number --phone-number +15555550100 --endpoint-url $AWS_ENDPOINT_URL
+curl -s "$AWS_ENDPOINT_URL/_aws/sns?phone=%2B15555550100"   # {"messages":[{"Message":"Your verification code is 123456", ...}]}
+aws sns verify-sms-sandbox-phone-number --phone-number +15555550100 --one-time-password 123456 \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+A wrong code fails with `VerificationException` and the number stays `Pending`. AWS requires the
+error's `Status` member but documents no values for it, so Floci picks one: the number's verification
+status, `Pending`. `Pending` and `Verified` are the only statuses SNS publishes for a sandbox number,
+and the developer guide reads a number left `Pending` as an unsuccessful verification.
+
+AWS opts a number out when its owner replies STOP. Nothing reaches Floci that way, so no number is
+ever opted out: `CheckIfPhoneNumberIsOptedOut` answers `false`, `ListPhoneNumbersOptedOut` is
+empty, and `OptInPhoneNumber` only checks that the number is in E.164 format.
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_SNS_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_STORAGE_SERVICES_SNS_MODE` | *(global default)* | Storage mode override for SNS (`memory`, `persistent`, `hybrid`, `wal`) |
+| `FLOCI_STORAGE_SERVICES_SNS_FLUSH_INTERVAL_MS` | `5000` | Flush interval for `hybrid`/`wal` storage modes (milliseconds) |
+
+## Examples
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566
+
+# Create a topic
+TOPIC_ARN=$(aws sns create-topic --name notifications \
+  --query TopicArn --output text \
+  --endpoint-url $AWS_ENDPOINT_URL)
+
+# Subscribe an SQS queue
+QUEUE_ARN=$(aws sqs get-queue-attributes \
+  --queue-url $AWS_ENDPOINT_URL/000000000000/orders \
+  --attribute-names QueueArn \
+  --query Attributes.QueueArn --output text \
+  --endpoint-url $AWS_ENDPOINT_URL)
+
+aws sns subscribe \
+  --topic-arn $TOPIC_ARN \
+  --protocol sqs \
+  --notification-endpoint $QUEUE_ARN \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Publish a message
+aws sns publish \
+  --topic-arn $TOPIC_ARN \
+  --message '{"event":"user.registered"}' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Fan-out: publish and verify the SQS queue received the message
+aws sqs receive-message \
+  --queue-url $AWS_ENDPOINT_URL/000000000000/orders \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+## SNS → SQS Fan-Out
+
+Floci supports real SNS → SQS fan-out. When you publish to a topic, every SQS-subscribed queue receives the message.
+
+Supported subscription protocols:
+- `sqs`: delivers to a Floci SQS queue
+- `lambda`: invokes a Floci Lambda function
+- `firehose`: puts records to a Floci Firehose delivery stream; `Subscribe` requires a valid IAM
+  `SubscriptionRoleArn` attribute, which is returned by `GetSubscriptionAttributes`
+- `http` / `https`: posts to an HTTP endpoint
+- `application`: fans out to a mobile push platform endpoint (see [Mobile push](#mobile-push-mock))
+
+For `FilterPolicyScope=MessageBody`, nested policy objects descend into JSON objects and arrays.
+An object inside an array matches when one array element satisfies the complete nested policy.
+
+For SQS subscriptions, Floci retries a failed delivery up to three times total, with two immediate
+retries. If all attempts fail and the subscription has a `RedrivePolicy` containing a valid
+`deadLetterTargetArn` for an SQS queue, Floci sends the original notification to that queue. SNS
+`Publish` still returns its message ID after downstream delivery fails. This is a bounded local
+policy; it does not reproduce AWS delivery retry timing or scale.
+
+## HTTP and HTTPS endpoint addresses
+
+Floci posts the `SubscriptionConfirmation` and every notification to a subscribed `http`/`https`
+endpoint itself, so it screens where that request may go.
+
+`Subscribe` resolves the endpoint's host and refuses it with `InvalidParameter` when it resolves to
+a link-local or cloud instance-metadata address (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`).
+This is the check that judges a hostname. Loopback and private addresses stay allowed, since
+delivering to a neighbouring container is the normal case here. An endpoint whose host does not
+resolve yet is accepted, as it is on AWS.
+
+Delivery screens only an endpoint that names an address outright, an IPv4 or bracketed IPv6
+literal, which covers a subscription stored before `Subscribe` began refusing them. **It does not
+resolve a hostname again**, so a hostname that passed `Subscribe` and later resolves to a metadata
+address is not screened at delivery: Floci's HTTP client resolves the name itself when it connects
+and cannot be given the result of an earlier check, so a lookup there could not decide where the
+request goes. Treat the `Subscribe` check as the boundary, not the delivery one.
+
+## Message signatures
+
+Floci signs deliveries the way AWS does, so a consumer can keep its standard SNS signature check
+switched on locally. Signed messages are HTTP/HTTPS notifications and `SubscriptionConfirmation`
+messages, Lambda records, and the JSON envelope SQS subscriptions receive without
+`RawMessageDelivery`.
+
+- `Signature` is the base64 RSA signature of the canonical string AWS documents: `Name\nValue\n`
+  for `Message`, `MessageId`, `Subject` (only when present), `Timestamp`, `TopicArn` and `Type` on a
+  notification, and `Message`, `MessageId`, `SubscribeURL`, `Timestamp`, `Token`, `TopicArn` and
+  `Type` on a confirmation.
+- `SignatureVersion` follows the topic attribute of the same name: `1` (default) is SHA1withRSA,
+  `2` is SHA256withRSA.
+- `SigningCertURL` (`SigningCertUrl` in Lambda records) points at a self-signed RSA 2048
+  certificate Floci serves itself:
+  `{base-url}/_aws/sns/SimpleNotificationService-<fingerprint>.pem`.
+
+The key is kept in SNS storage, so persistent storage keeps the same certificate across restarts
+and memory storage generates a new one per process. A state reset discards the key and the next
+delivery generates a new one. The fingerprint in the file name changes with
+the key, so a consumer that caches certificates by URL never verifies against a stale one. A
+consumer that also requires the certificate host to be an AWS SNS domain must relax that check
+locally.
+
+## Message size
+
+`MaximumMessageSize` is the per-topic limit, in bytes, on a published payload. It accepts `1024`
+to `1048576` (1 MiB) and defaults to `262144` (256 KiB). AWS raised the maximum in September 2026
+but left the default alone, so a topic that never sets the attribute behaves exactly as it did
+before. `GetTopicAttributes` omits the attribute until it is set rather than reporting the
+default.
+
+```bash
+aws sns set-topic-attributes --topic-arn $TOPIC_ARN \
+  --attribute-name MaximumMessageSize --attribute-value 1048576 \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+The limit counts the message body plus, per message attribute, its name, data type and value.
+`Subject` is not counted. `PublishBatch` counts the sum of all its entries against the same
+limit and fails the whole call rather than individual entries.
+
+A topic above `262144` is restricted: at most 100 subscriptions, every one of them `sqs`,
+`firehose` or `lambda`. Floci enforces the protocol rule on `Subscribe` and `SetTopicAttributes`
+alike, and the subscription count on `SetTopicAttributes` only — matching AWS, which lets an
+already-raised topic drift past 100 and catches it the next time the attribute is set. Pending
+confirmations count towards both.
+
+| Action | Condition | Error code | HTTP |
+|---|---|---|---|
+| `CreateTopic`, `SetTopicAttributes` | `MaximumMessageSize` not an integer between 1024 and 1048576 | `InvalidParameter` | 400 |
+| `SetTopicAttributes` | Raised above 262144 with a subscription that is not `sqs`, `firehose` or `lambda` | `InvalidParameter` | 400 |
+| `SetTopicAttributes` | Raised above 262144 with more than 100 subscriptions | `InvalidParameter` | 400 |
+| `Subscribe` | Unsupported protocol on a topic above 262144 | `InvalidParameter` | 400 |
+| `Publish` | Payload exceeds the topic's `MaximumMessageSize` | `InvalidParameter` | 400 |
+| `PublishBatch` | Entries sum to more than the topic's `MaximumMessageSize` | `BatchRequestTooLong` | 400 |
+
+CloudFormation carries the setting through: `AWS::SNS::Topic` forwards `MaximumMessageSize`, and
+an update that drops the property returns the topic to the default.
+
+A raised topic fanning out to SQS needs headroom. The notification envelope wraps the body in a
+few hundred bytes of JSON, so a publish at 1 MiB no longer fits a queue at the SQS maximum and is
+dropped on delivery — silently, as any delivery failure is. Keep the topic below the queue's own
+`MaximumMessageSize`, or subscribe with `RawMessageDelivery=true` so the body is forwarded
+unwrapped.
+
+## FIFO topics
+
+A topic whose name ends in `.fifo` is a FIFO topic. `Publish` and `PublishBatch` require a
+`MessageGroupId`, and a message is deduplicated against its `MessageDeduplicationId` for five
+minutes. Set `ContentBasedDeduplication` on the topic to derive that id from the message body.
+
+The `FifoThroughputScope` attribute decides how wide that deduplication reaches:
+
+| Value | Deduplication scope |
+|---|---|
+| `Topic` (default) | Across the whole topic: the same `MessageDeduplicationId` is a duplicate no matter which message group it arrives under |
+| `MessageGroup` | Within a single message group: the same `MessageDeduplicationId` under two different `MessageGroupId`s is two distinct messages |
+
+`MessageGroup` is what a fan-out that reuses one deduplication id per group needs, for example
+publishing the same event to a topic once per tenant with the tenant as the message group.
+
+```bash
+aws sns create-topic --name events.fifo \
+  --attributes FifoTopic=true,FifoThroughputScope=MessageGroup \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+When the topic forwards to an SQS FIFO queue, set the matching queue attributes
+(`DeduplicationScope=messageGroup` and `FifoThroughputLimit=perMessageGroupId`), otherwise the
+queue deduplicates topic-wide on the way in.
+
+CloudFormation carries both settings through: `AWS::SNS::Topic` forwards `FifoThroughputScope` and
+`ContentBasedDeduplication`, and a FIFO topic left unnamed gets a generated name ending in `.fifo`.
+
+## Control Tower managed topic
+
+AWS Control Tower creates the regional
+`aws-controltower-AggregateSecurityNotifications` topic before Landing Zone
+Accelerator deploys its audit notification forwarder. Floci lazily materializes that
+exact same-account managed topic when `Subscribe` first references it, matching the
+Control Tower prerequisite without weakening normal SNS validation. Subscribing to
+any other missing topic still returns `NotFound`.
+
+## Mobile push (mock)
+
+Floci mocks SNS mobile push for iOS and Android. No real APNS or FCM connection is
+made — every push is captured in memory so tests can assert what would have been sent.
+
+**Supported platforms:** `APNS`, `APNS_SANDBOX`, `GCM`, `FCM`. Any other platform
+value returns `InvalidParameter`.
+
+### End-to-end flow
+
+```bash
+APP_ARN=$(aws sns create-platform-application \
+  --name ios-app --platform APNS \
+  --attributes PlatformCredential=fake-cert \
+  --endpoint-url http://localhost:4566 --query PlatformApplicationArn --output text)
+
+ENDPOINT_ARN=$(aws sns create-platform-endpoint \
+  --platform-application-arn $APP_ARN \
+  --token ios-device-token-abc \
+  --endpoint-url http://localhost:4566 --query EndpointArn --output text)
+
+# Plain string payload
+aws sns publish --target-arn $ENDPOINT_ARN --message '{"aps":{"alert":"hi"}}' \
+  --endpoint-url http://localhost:4566
+
+# Platform-specific payloads with MessageStructure=json
+aws sns publish --target-arn $ENDPOINT_ARN --message-structure json \
+  --message '{"default":"fallback","APNS":"{\"aps\":{\"alert\":\"ios\"}}","GCM":"{\"notification\":{\"body\":\"android\"}}"}' \
+  --endpoint-url http://localhost:4566
+```
+
+When `MessageStructure="json"`, Floci picks the key matching the endpoint's platform
+(`APNS`, `APNS_SANDBOX`, `GCM`, or `FCM`), falling back to `default`. The envelope
+must be a JSON object and must include `default` — otherwise `InvalidParameter`.
+
+### Broadcast to devices via a topic
+
+Subscribe platform endpoints to a topic with `Protocol="application"`, then publish to
+the topic to fan out to every subscribed device — each endpoint is captured exactly as
+if you had published to it directly (same platform-payload resolution, same `Enabled`
+gating). A disabled endpoint in the fan-out is skipped; the rest still receive the push.
+
+```bash
+aws sns subscribe --topic-arn $TOPIC_ARN \
+  --protocol application --notification-endpoint $ENDPOINT_ARN \
+  --endpoint-url http://localhost:4566
+
+aws sns publish --topic-arn $TOPIC_ARN --message-structure json \
+  --message '{"default":"market open","GCM":"{\"notification\":{\"body\":\"market alert\"}}"}' \
+  --endpoint-url http://localhost:4566
+```
+
+Broadcast pushes surface in the same retrospection API, keyed by `EndpointArn`.
+
+### Per-protocol payloads on topic publish
+
+`MessageStructure="json"` resolves per subscriber, not just for mobile endpoints. Each
+subscription receives the value under its own protocol key — `sqs`, `lambda`, `http`,
+`https`, `email`, `email-json`, `sms`, or the push platform (`APNS`, `GCM`, …) for
+`application` — falling back to `default` when that key is absent.
+
+```bash
+aws sns publish --topic-arn $TOPIC_ARN --message-structure json \
+  --message '{"default":"hello","sqs":"hi sqs","GCM":"{\"notification\":{\"body\":\"hi device\"}}"}' \
+  --endpoint-url http://localhost:4566
+```
+
+The SQS subscriber receives `hi sqs`, the platform endpoint receives the `GCM` payload,
+and every other subscriber receives `hello`. As with any topic publish, the envelope must
+be a JSON object carrying `default`, validated before fan-out begins.
+
+### Inspecting captured pushes
+
+```bash
+# All captured pushes (newest first), or filtered by endpoint
+curl http://localhost:4566/_aws/sns/push-notifications
+curl "http://localhost:4566/_aws/sns/push-notifications?EndpointArn=$ENDPOINT_ARN"
+
+# Reset between tests
+curl -X DELETE http://localhost:4566/_aws/sns/push-notifications
+```
+
+### Simulating expired tokens
+
+Two ways to make `Publish` fail with `EndpointDisabledException`:
+
+1. **Explicit** — call `SetEndpointAttributes` with `Enabled=false`. Matches the
+   real AWS flow after an async APNS/FCM failure.
+2. **Sentinel** — create an endpoint whose token contains `EXPIRED`
+   (case-insensitive). Floci marks it `Enabled=false` on creation, so the first
+   publish fails. Lets you exercise the unhappy path with a single API call.
+
+### Error codes
+
+| Action | Condition | Error code | HTTP |
+|---|---|---|---|
+| `CreatePlatformApplication` | Missing `Name` | `InvalidParameter` | 400 |
+| `CreatePlatformApplication` | Unsupported `Platform` (e.g. `WNS`, `ADM`) | `InvalidParameter` | 400 |
+| `CreatePlatformEndpoint` | Missing `Token` | `InvalidParameter` | 400 |
+| `CreatePlatformEndpoint` | Unknown `PlatformApplicationArn` | `NotFound` | 404 |
+| `CreatePlatformEndpoint` | Same `Token`, different `CustomUserData` or attrs | `InvalidParameter` | 400 |
+| `CreatePlatformEndpoint` | Platform app disabled | `PlatformApplicationDisabledException` | 400 |
+| `Publish` | Unknown endpoint ARN | `NotFound` | 404 |
+| `Publish` | `TargetArn` is a platform application ARN | `InvalidParameter` | 400 |
+| `Publish` | Endpoint `Enabled=false` | `EndpointDisabledException` | 400 |
+| `Publish` | Platform application `Enabled=false` | `PlatformApplicationDisabledException` | 400 |
+| `Publish` | `MessageStructure=json` missing `default` key | `InvalidParameter` | 400 |
+| `Publish` | `MessageStructure=json` message is not valid JSON | `InvalidParameter` | 400 |
+| `GetPlatformApplicationAttributes` | Unknown ARN | `NotFound` | 404 |
+| `GetEndpointAttributes` | Unknown ARN | `NotFound` | 404 |
+| `SetEndpointAttributes` | Unknown ARN | `NotFound` | 404 |
+
+`DeletePlatformApplication` and `DeleteEndpoint` are idempotent — they succeed
+silently if the resource does not exist, matching real SNS behavior.

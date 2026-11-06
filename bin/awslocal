@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+
+_ENDPOINT="${FLOCI_ENDPOINT:-http://localhost:4566}"
+_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
+
+if [[ "${1:-}" == "env" ]]; then
+    if [[ "${2:-}" == "--unset" ]]; then
+        echo 'unset AWS_ENDPOINT_URL'
+        echo 'unset AWS_ACCESS_KEY_ID'
+        echo 'unset AWS_SECRET_ACCESS_KEY'
+        echo 'unset AWS_DEFAULT_REGION'
+        echo '# Run this command to unset floci env vars:'
+        echo '# eval $(awslocal env --unset)'
+    else
+        echo "export AWS_ENDPOINT_URL=\"${_ENDPOINT}\""
+        echo "export AWS_ACCESS_KEY_ID=\"${AWS_ACCESS_KEY_ID:-test}\""
+        echo "export AWS_SECRET_ACCESS_KEY=\"${AWS_SECRET_ACCESS_KEY:-test}\""
+        echo "export AWS_DEFAULT_REGION=\"${_REGION}\""
+        echo '# Run this command to configure your shell:'
+        echo '# eval $(awslocal env)'
+    fi
+    exit 0
+fi
+
+export AWS_ENDPOINT_URL="${_ENDPOINT}"
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
+export AWS_DEFAULT_REGION="${_REGION}"
+
+# Pass --endpoint-url explicitly: a few SDKs/services (notably SQS in older
+# botocore) silently bypass AWS_ENDPOINT_URL via service-specific endpoint
+# resolvers, sending the call to public AWS instead of Floci.
+exec aws --endpoint-url "${_ENDPOINT}" "$@"

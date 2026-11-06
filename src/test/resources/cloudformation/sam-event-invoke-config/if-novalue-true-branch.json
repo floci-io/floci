@@ -1,0 +1,99 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::If": [
+                "UseOwn",
+                {
+                  "Fn::GetAtt": [
+                    "FnEventInvokeConfigOnFailureQueue",
+                    "Arn"
+                  ]
+                },
+                "arn:aws:sqs:us-east-1:123456789012:q"
+              ]
+            }
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "Qualifier": "$LATEST"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    },
+    "FnEventInvokeConfigOnFailureQueue": {
+      "Condition": "UseOwn",
+      "Properties": {},
+      "Type": "AWS::SQS::Queue"
+    },
+    "FnRole": {
+      "Policies": [
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "sqs:SendMessage",
+                "Effect": "Allow",
+                "Resource": {
+                  "Fn::If": [
+                    "UseOwn",
+                    {
+                      "Fn::GetAtt": [
+                        "FnEventInvokeConfigOnFailureQueue",
+                        "Arn"
+                      ]
+                    },
+                    "arn:aws:sqs:us-east-1:123456789012:q"
+                  ]
+                }
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnFailureSQSPolicy"
+        }
+      ],
+      "Type": "AWS::IAM::Role"
+    }
+  },
+  "input": {
+    "Conditions": {
+      "UseOwn": {
+        "Fn::Equals": [
+          "a",
+          "b"
+        ]
+      }
+    },
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Destination": {
+                  "Fn::If": [
+                    "UseOwn",
+                    {
+                      "Ref": "AWS::NoValue"
+                    },
+                    "arn:aws:sqs:us-east-1:123456789012:q"
+                  ]
+                },
+                "Type": "SQS"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

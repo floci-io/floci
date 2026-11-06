@@ -1,0 +1,199 @@
+{
+ "Parameters": {
+  "BackendUrl": {
+   "Type": "String"
+  }
+ },
+ "Resources": {
+  "ZoneA5DE4B68": {
+   "Type": "AWS::Route53::HostedZone",
+   "Properties": {
+    "Name": "apigwv2-domain-cfn-it.example.com."
+   }
+  },
+  "Certificate4E7ABB08": {
+   "Type": "AWS::CertificateManager::Certificate",
+   "Properties": {
+    "DomainName": "cdk.apigwv2-domain-cfn-it.example.com",
+    "DomainValidationOptions": [
+     {
+      "DomainName": "cdk.apigwv2-domain-cfn-it.example.com",
+      "HostedZoneId": {
+       "Ref": "ZoneA5DE4B68"
+      }
+     }
+    ],
+    "Tags": [
+     {
+      "Key": "Name",
+      "Value": "HttpApiDomain/Certificate"
+     }
+    ],
+    "ValidationMethod": "DNS"
+   }
+  },
+  "Domain66AC69E0": {
+   "Type": "AWS::ApiGatewayV2::DomainName",
+   "Properties": {
+    "DomainName": "cdk.apigwv2-domain-cfn-it.example.com",
+    "DomainNameConfigurations": [
+     {
+      "CertificateArn": {
+       "Ref": "Certificate4E7ABB08"
+      },
+      "EndpointType": "REGIONAL"
+     }
+    ]
+   }
+  },
+  "HttpApiF5A9A8A7": {
+   "Type": "AWS::ApiGatewayV2::Api",
+   "Properties": {
+    "Name": "HttpApi",
+    "ProtocolType": "HTTP"
+   }
+  },
+  "HttpApiDefaultRouteBackendAF181430": {
+   "Type": "AWS::ApiGatewayV2::Integration",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "IntegrationMethod": "ANY",
+    "IntegrationType": "HTTP_PROXY",
+    "IntegrationUri": {
+     "Ref": "BackendUrl"
+    },
+    "PayloadFormatVersion": "1.0"
+   }
+  },
+  "HttpApiDefaultRoute146696CE": {
+   "Type": "AWS::ApiGatewayV2::Route",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "AuthorizationType": "NONE",
+    "RouteKey": "$default",
+    "Target": {
+     "Fn::Join": [
+      "",
+      [
+       "integrations/",
+       {
+        "Ref": "HttpApiDefaultRouteBackendAF181430"
+       }
+      ]
+     ]
+    }
+   }
+  },
+  "HttpApiDefaultStage3EEB07D6": {
+   "Type": "AWS::ApiGatewayV2::Stage",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "AutoDeploy": true,
+    "StageName": "$default"
+   },
+   "DependsOn": [
+    "Domain66AC69E0"
+   ]
+  },
+  "HttpApiDefaultStageHttpApiDomainDomainundefined7285D8B3": {
+   "Type": "AWS::ApiGatewayV2::ApiMapping",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "DomainName": {
+     "Ref": "Domain66AC69E0"
+    },
+    "Stage": "$default"
+   },
+   "DependsOn": [
+    "Domain66AC69E0",
+    "HttpApiDefaultStage3EEB07D6"
+   ]
+  },
+  "HttpApiProdFCF6FCB2": {
+   "Type": "AWS::ApiGatewayV2::Stage",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "AutoDeploy": true,
+    "StageName": "prod"
+   }
+  },
+  "ProdMappingCD2A8E2B": {
+   "Type": "AWS::ApiGatewayV2::ApiMapping",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "ApiMappingKey": "prod",
+    "DomainName": {
+     "Ref": "Domain66AC69E0"
+    },
+    "Stage": "prod"
+   },
+   "DependsOn": [
+    "HttpApiProdFCF6FCB2"
+   ]
+  },
+  "Alias325C5727": {
+   "Type": "AWS::Route53::RecordSet",
+   "Properties": {
+    "AliasTarget": {
+     "DNSName": {
+      "Fn::GetAtt": [
+       "Domain66AC69E0",
+       "RegionalDomainName"
+      ]
+     },
+     "HostedZoneId": {
+      "Fn::GetAtt": [
+       "Domain66AC69E0",
+       "RegionalHostedZoneId"
+      ]
+     }
+    },
+    "HostedZoneId": {
+     "Ref": "ZoneA5DE4B68"
+    },
+    "Name": "cdk.apigwv2-domain-cfn-it.example.com.",
+    "Type": "A"
+   }
+  }
+ },
+ "Outputs": {
+  "ApiId": {
+   "Value": {
+    "Ref": "HttpApiF5A9A8A7"
+   }
+  },
+  "ZoneId": {
+   "Value": {
+    "Ref": "ZoneA5DE4B68"
+   }
+  },
+  "RegionalDomainName": {
+   "Value": {
+    "Fn::GetAtt": [
+     "Domain66AC69E0",
+     "RegionalDomainName"
+    ]
+   }
+  },
+  "RegionalHostedZoneId": {
+   "Value": {
+    "Fn::GetAtt": [
+     "Domain66AC69E0",
+     "RegionalHostedZoneId"
+    ]
+   }
+  }
+ }
+}

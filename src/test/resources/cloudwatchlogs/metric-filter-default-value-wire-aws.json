@@ -1,0 +1,26 @@
+{
+  "provenance": {
+    "verification": "Verified on Live AWS",
+    "source": "Signed raw PutMetricFilter request reported by the coordinated AWS research agent",
+    "observationDate": "2026-09-16",
+    "region": "eu-west-1",
+    "endpoint": "https://logs.eu-west-1.amazonaws.com",
+    "reference": "https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_PutMetricFilter.html",
+    "scope": "Only the observed defaultValue member and response are reproduced. Other request fields and resource identities are omitted. CLI client-side type validation was bypassed."
+  },
+  "requestMember": "metricTransformations[0].defaultValue",
+  "requestValue": "7",
+  "response": {
+    "status": 400,
+    "body": {
+      "__type": "SerializationException",
+      "Message": "STRING_VALUE cannot be converted to Double"
+    }
+  },
+  "positiveControl": {
+    "requestValue": 7,
+    "responseStatus": 200,
+    "responseBody": ""
+  },
+  "unobserved": "Other string contents and null, boolean, object or array defaultValue nodes were not probed by this observation."
+}

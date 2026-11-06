@@ -1,0 +1,94 @@
+#!/bin/sh
+# Starts as root, reads the bind-mounted Docker socket's group so the
+# unprivileged `floci` user can reach it on any host, then re-executes this
+# script as `floci` via coreutils `chroot --userspec`, which also grants that
+# group as a supplementary group. The second invocation falls through to exec
+# the user's command. No gosu, no usermod: both would cost a package layer the
+# base image does not otherwise need.
+#
+# Why: on native Linux Docker, /var/run/docker.sock is owned by
+# root:docker with mode 660 and the docker GID varies by distro. On
+# Docker Desktop (macOS/Windows) the socket is typically root:root (GID
+# 0). Without the group fix-up below, floci (uid 1001, group 0) can open
+# the socket on Docker Desktop but not on native Linux — which breaks
+# ECR, Lambda, and RDS service emulation there. Discovering the GID at
+# runtime handles every host transparently.
+
+set -eu
+
+if [ "$(id -u)" = '0' ]; then
+    groups='0'
+    if [ -S /var/run/docker.sock ]; then
+        sock_gid="$(stat -c '%g' /var/run/docker.sock)"
+        if [ "$sock_gid" != '0' ]; then
+            groups="0,$sock_gid"
+        fi
+    fi
+
+    # Re-own the state dir for the case where a volume or host bind-mount
+    # arrives with ownership the floci user cannot write to. This is the same
+    # directory the writability probe below checks, so a volume mounted at a
+    # custom FLOCI_STORAGE_PERSISTENT_PATH is fixed up too. The path is resolved
+    # physically first, then compared by inode rather than by string: bash keeps a leading //
+    # (POSIX leaves it implementation-defined), so a string test would let // through.
+    # --preserve-root is the second guard. Ignore errors
+    # (read-only mounts, unusual filesystems) so the container still starts.
+    state_dir="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
+    if [ -d "$state_dir" ]; then
+        # CDPATH is cleared so a relative path cannot be looked up elsewhere (and echoed).
+        state_dir_physical="$(CDPATH= cd -P -- "$state_dir" 2>/dev/null && pwd -P)" || state_dir_physical=''
+        if [ "$state_dir_physical" -ef / ]; then
+            echo "WARNING: not changing ownership of $state_dir, it resolves to /." >&2
+        elif [ -n "$state_dir_physical" ]; then
+            chown --preserve-root -R floci:root "$state_dir_physical" 2>/dev/null || true
+        fi
+    fi
+
+    # `chroot /` changes nothing but the identity: uid 1001, primary gid 0, plus the socket's
+    # group. Supplementary groups are set by number, so the group needs no /etc/group entry.
+    # --skip-chdir keeps the working directory (/app, where relative data paths resolve); GNU
+    # chroot would otherwise chdir to the new root.
+    if [ "${FLOCI_RUN_AS_ROOT:-false}" != 'true' ]; then
+        exec chroot --userspec=1001:0 --groups="$groups" --skip-chdir / "$0" "$@"
+    fi
+fi
+
+# Probe the state dir as the unprivileged user and warn loudly when it is not
+# writable (read-only or root-owned bind mounts the chown above could not fix).
+# The container still starts: with the default in-memory storage the dir is
+# unused, and non-memory modes fail fast at boot with an actionable error.
+data_dir="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
+if [ -d "$data_dir" ]; then
+    probe="$data_dir/.floci-write-probe.$$"
+    if ! ( touch "$probe" && rm -f "$probe" ) 2>/dev/null; then
+        cat >&2 <<EOF
+**************************************************************************
+WARNING: $data_dir is not writable by $(id -un) (uid $(id -u)).
+Persisted state cannot be saved there. If FLOCI_STORAGE_MODE (or any
+per-service storage mode) is not 'memory', Floci will refuse to start.
+Fix the volume mount permissions (it may be read-only or root-owned) or
+set FLOCI_STORAGE_PERSISTENT_PATH to a writable directory.
+**************************************************************************
+EOF
+    fi
+fi
+
+# Fall back to the image's default command when invoked with no arguments.
+# Some tooling re-executes this entrypoint directly with an empty argv —
+# Testcontainers' LocalStackContainer does exactly that via its starter
+# script — and `exec "$@"` with no argv would make the script reach EOF
+# and exit 0 without ever starting the emulator. LocalStack's entrypoint
+# ignores its argv entirely, so this keeps drop-in parity.
+# The default matches the CMD of the image variant: native images ship
+# /app/application, JVM images ship /app/quarkus-app/quarkus-run.jar.
+# Both listen on 0.0.0.0 so a published port reaches Floci, which it only
+# accepts with explicit consent. The JVM reads -D options only before -jar.
+if [ $# -eq 0 ]; then
+    if [ -x /app/application ]; then
+        set -- /app/application -Dquarkus.http.host=0.0.0.0 -Dfloci.security.allow-unsafe-network-exposure=true
+    else
+        set -- java -Dquarkus.http.host=0.0.0.0 -Dfloci.security.allow-unsafe-network-exposure=true -jar /app/quarkus-app/quarkus-run.jar
+    fi
+fi
+
+exec "$@"

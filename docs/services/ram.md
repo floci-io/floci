@@ -1,0 +1,111 @@
+# AWS RAM
+
+**Protocol:** REST JSON
+**Endpoint:** `http://localhost:4566`
+**Signing name:** `ram`
+
+Floci implements the AWS Resource Access Manager calls AWS Landing Zone Accelerator makes
+while bootstrapping shared Transit Gateway attachments and other cross-account resources:
+the organization-sharing opt-in, resource-share CRUD, association management, principal
+listing, tagging, and invitation accept/reject (backing `aws_ram_resource_share_accepter`).
+Sharing is modeled as a flat in-memory store, not full RAM semantics: see Current Scope
+below for what's simplified.
+
+## Supported Actions
+
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `EnableSharingWithAwsOrganization` | Enables resource sharing within the organization; returns `{"returnValue": true}`. Also enables `ram.amazonaws.com` trusted access in Organizations and creates the `AWSServiceRoleForResourceAccessManager` IAM service-linked role when absent. Idempotent, no disable counterpart, matching real AWS (`POST /enablesharingwithawsorganization`) |
+| `CreateResourceShare` | Creates a resource share with the given name, principals, and resource ARNs (`POST /createresourceshare`) |
+| `GetResourceShares` | Lists resource shares visible to the caller, `SELF` owned or `OTHER-ACCOUNTS` shared in (`POST /getresourceshares`) |
+| `DeleteResourceShare` | Marks a share `DELETED`, a soft delete matching real AWS's async-then-terminal status (`DELETE /deleteresourceshare`) |
+| `UpdateResourceShare` | Renames a share and/or toggles `allowExternalPrincipals` (`POST /updateresourceshare`) |
+| `AssociateResourceShare` | Adds resource ARNs and/or principals to an existing share (`POST /associateresourceshare`) |
+| `DisassociateResourceShare` | Removes resource ARNs and/or principals from a share (`POST /disassociateresourceshare`) |
+| `GetResourceShareAssociations` | Lists active resource or principal associations for shares owned by the caller, with entity, share ARN, status, and pagination filters (`POST /getresourceshareassociations`) |
+| `ListPrincipals` | Lists principals associated with visible shares (`POST /listprincipals`) |
+| `ListResourceSharePermissions` | Lists the permissions associated with a share: one default AWS managed permission (`AWSRAMDefaultPermission<Type>`, `AWS_MANAGED`) per distinct resource type in the share; unknown share ARN is `UnknownResourceException` (`POST /listresourcesharepermissions`) |
+| `TagResource` | Adds/overwrites tags on a resource share (`POST /tagresource`) |
+| `UntagResource` | Removes tags by key from a resource share (`POST /untagresource`) |
+| `GetResourceShareInvitations` | Lists invitations received by the caller, filterable by `resourceShareArns`/`resourceShareInvitationArns`. Empty for organization/OU-principal shares, which never get one (`POST /getresourceshareinvitations`) |
+| `AcceptResourceShareInvitation` | Accepts a `PENDING` invitation; receiver-only (`POST /acceptresourceshareinvitation`) |
+| `RejectResourceShareInvitation` | Rejects a `PENDING` invitation; receiver-only (`POST /rejectresourceshareinvitation`) |
+| `ListResources` | Lists shared resource ARNs, with the RAM resource type derived from the ARN, e.g. `ec2:TransitGateway` (`POST /listresources`) |
+<!-- floci:actions:end -->
+
+## Configuration
+
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `FLOCI_SERVICES_RAM_ENABLED` | `true` | Enables the service |
+
+## Example
+
+```bash
+aws --endpoint-url http://localhost:4566 ram enable-sharing-with-aws-organization
+
+aws --endpoint-url http://localhost:4566 ram create-resource-share \
+  --name my-share \
+  --resource-arns arn:aws:ec2:us-east-1:000000000000:transit-gateway/tgw-0abc \
+  --principals arn:aws:organizations::000000000000:ou/o-abc/ou-infra
+
+aws --endpoint-url http://localhost:4566 ram delete-resource-share \
+  --resource-share-arn arn:aws:ram:us-east-1:000000000000:resource-share/...
+
+# Direct account principals (not an OU/organization ARN) get a real invitation to accept:
+aws --endpoint-url http://localhost:4566 ram get-resource-share-invitations
+aws --endpoint-url http://localhost:4566 ram accept-resource-share-invitation \
+  --resource-share-invitation-arn arn:aws:ram:us-east-1:000000000000:resource-share-invitation/...
+```
+
+## Current Scope
+
+- Visibility is simplified: `OTHER-ACCOUNTS` shows every non-owned share regardless of
+  principal targeting, since launched-container credentials all resolve to the same default
+  account and a principal-based check would hide shares from consumers that should see them.
+  LZA's `Custom::GetResourceShare` Lambda filters client-side by `owningAccountId` + `name`
+  anyway, so this doesn't affect that flow. This holds regardless of invitation status too:
+  unlike real AWS, a `PENDING` invitation does not hide the share or its resources from the
+  invited account.
+- Invitations exist for bookkeeping (`aws_ram_resource_share_accepter` needs somewhere to
+  Accept/Reject), not as a visibility gate. One is created only for a bare AWS account-id
+  principal added while `EnableSharingWithAwsOrganization` has not been called: an
+  organization/OU principal never gets one, matching real AWS's own auto-accept behavior for
+  org-based sharing, and neither does an account principal once organization sharing is
+  enabled. `AcceptResourceShareInvitation`/`RejectResourceShareInvitation` are receiver-only
+  (`OperationNotPermittedException` otherwise) and terminal once accepted or rejected
+  (`ResourceShareInvitationAlready{Accepted,Rejected}Exception` on a repeat call); floci does
+  not model time-based `EXPIRED` transitions, or what happens to an invitation after its share
+  is deleted. `GetResourceShareInvitations` only returns invitations the caller received, not
+  ones it sent, matching the API reference ("invitations that you have received"). A
+  syntactically invalid ARN passed to any of the three fails with `MalformedArnException`.
+- Mutations are owner-only: a caller that is not the share's owning account gets
+  `UnknownResourceException`, the same error an unknown ARN gets, since AWS resolves a share
+  ARN within the caller's own account. Visibility above is unaffected.
+- `resourceOwner` is required on `GetResourceShares`, `ListPrincipals` and `ListResources`: a
+  missing or unmodelled value is rejected with `InvalidParameterException` rather than defaulted
+  to `SELF`.
+- `GetResourceShares` applies the `name`, `resourceShareArns` and `resourceShareStatus` filters;
+  `maxResults`/`nextToken` page the matching shares. `tagFilters`, `permissionArn` and
+  `permissionVersion` are accepted but ignored.
+- Operations outside the table above are not routed. RAM's paths are matched literally, so an
+  unimplemented operation falls through to S3's `/{bucket}` route and comes back as an S3
+  `NoSuchBucket` XML body where the SDK expects JSON, not a modeled `UnknownOperationException`.
+  If a client reports an XML parse error against a RAM call, that is the cause, not credentials.
+- `GetResourceShareAssociations` reports current `ASSOCIATED` resource and principal entries
+  for caller-owned shares. There are no persisted per-association transitions or source entries,
+  so `SOURCE` and other status filters return an empty page. Association creation and update
+  times use the containing share's times; `external` is always false.
+- `AssociateResourceShare`/`DisassociateResourceShare` responses synthesize one
+  `resourceShareAssociation` row per requested ARN/principal rather than tracking real
+  per-association status transitions (e.g. no `ASSOCIATING`/`DISASSOCIATING` intermediate
+  state, everything completes synchronously).
+- `TagResource`/`UntagResource` only support tagging by `resourceShareArn`; tagging an
+  individual shared resource via `resourceArn` is not modeled (RAM's `TagResource` accepts
+  either, but LZA only tags shares).
+- Only `ListResourceSharePermissions` of the permission family is implemented; `CreatePermission`,
+  `AssociateResourceSharePermission`, `ListPermissions`, and the permission-version
+  family are not, and `nextToken`/`maxResults` are accepted but ignored. Shares created here
+  always use RAM's default managed permission implicitly: there is no explicit permission model
+  to associate or version.

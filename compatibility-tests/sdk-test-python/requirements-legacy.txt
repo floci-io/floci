@@ -1,0 +1,6 @@
+boto==2.49.0
+boto3==1.37.1
+botocore==1.37.1
+cryptography>=42.0.0
+pytest>=8.0.0,<9.0.0
+pytest-timeout>=2.3.0

@@ -1,0 +1,85 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "DependsOn": [
+        "FnAliaslive"
+      ],
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "Dlq",
+                "Arn"
+              ]
+            }
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "MaximumRetryAttempts": 0,
+        "Qualifier": "live"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    },
+    "FnRole": {
+      "Policies": [
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "sqs:SendMessage",
+                "Effect": "Allow",
+                "Resource": {
+                  "Fn::GetAtt": [
+                    "Dlq",
+                    "Arn"
+                  ]
+                }
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnFailureSQSPolicy"
+        }
+      ],
+      "Type": "AWS::IAM::Role"
+    }
+  },
+  "expectedAttributesByType": {
+    "AWS::Lambda::Version": {
+      "DeletionPolicy": "Retain"
+    }
+  },
+  "input": {
+    "Resources": {
+      "Dlq": {
+        "Type": "AWS::SQS::Queue"
+      },
+      "Fn": {
+        "Properties": {
+          "AutoPublishAlias": "live",
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Destination": {
+                  "Fn::GetAtt": [
+                    "Dlq",
+                    "Arn"
+                  ]
+                },
+                "Type": "SQS"
+              }
+            },
+            "MaximumRetryAttempts": 0
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

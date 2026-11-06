@@ -1,0 +1,253 @@
+# EventBridge Scheduler
+
+**Protocol:** REST JSON
+**Endpoint:** `http://localhost:4566/`
+
+## Supported Actions
+
+| Action | Method | Path | Description |
+|---|---|---|---|
+| `CreateScheduleGroup` | `POST` | `/schedule-groups/{Name}` | Create a schedule group |
+| `GetScheduleGroup` | `GET` | `/schedule-groups/{Name}` | Get schedule group details |
+| `DeleteScheduleGroup` | `DELETE` | `/schedule-groups/{Name}` | Delete a schedule group and its schedules |
+| `ListScheduleGroups` | `GET` | `/schedule-groups` | List schedule groups |
+| `CreateSchedule` | `POST` | `/schedules/{Name}` | Create a schedule |
+| `GetSchedule` | `GET` | `/schedules/{Name}` | Get schedule details |
+| `UpdateSchedule` | `PUT` | `/schedules/{Name}` | Update a schedule |
+| `DeleteSchedule` | `DELETE` | `/schedules/{Name}` | Delete a schedule |
+| `ListSchedules` | `GET` | `/schedules` | List schedules |
+| `TagResource` | `POST` | `/tags/{ResourceArn}` | Add tags to a schedule group |
+| `UntagResource` | `DELETE` | `/tags/{ResourceArn}?TagKeys=...` | Remove tags from a schedule group |
+| `ListTagsForResource` | `GET` | `/tags/{ResourceArn}` | List tags on a schedule group |
+
+## Schedule Invocation
+
+When `floci.services.scheduler.invocation-enabled` is `true` (the default), a
+background dispatcher fires schedule targets on time. Supported expressions:
+
+- `at(YYYY-MM-DDTHH:mm:ss)`: one-time fire; honors `ScheduleExpressionTimezone`
+  (default UTC) and `ActionAfterCompletion=DELETE`.
+- `rate(N unit)`: repeating fire (`minutes`, `hours`, `days`). The first
+  occurrence uses `StartDate`, or creation time when `StartDate` is omitted,
+  and is delivered on the first eligible dispatcher tick. Later occurrences
+  retain the interval from the previous actual dispatch time.
+- `cron(minute hour day-of-month month day-of-week year)`: AWS 6-field cron;
+  honors `ScheduleExpressionTimezone`. Day-of-week is `1-7` or `SUN-SAT`, so
+  `2` is Monday and `cron(30 2 ? * 2#1 *)` is the first Monday of the month.
+
+`CreateSchedule` and `UpdateSchedule` validate expression syntax and require
+`Target.RoleArn` to be an IAM role ARN. Invalid values return HTTP 400 with
+`ValidationException`, including when a Step Functions task calls Scheduler.
+
+`State=DISABLED` schedules and schedules outside their `StartDate`/`EndDate`
+window are skipped. The dispatcher ticks every
+`floci.services.scheduler.tick-interval-seconds` (default `10`).
+
+Rate schedules use the same dispatcher whether created or updated directly or
+through Step Functions. A changed future `StartDate` takes effect before the
+first dispatch. The dispatcher keeps its last-fire state in memory; past dates,
+restart, post-dispatch updates and re-enable timing have not been verified
+against live AWS. Fixed-anchor recurrence is not implemented.
+
+Supported target types: SQS, Lambda, SNS, ECS `RunTask`, EventBridge
+`PutEvents`, and unqualified Step Functions state machine ARNs. Templated
+targets receive the schedule target's `Input`. When `Input` is absent, Floci
+delivers the default notification AWS sends: an EventBridge-style event with
+`detail-type` `Scheduled Event`, `source` `aws.scheduler`, the schedule's
+account, region, and ARN (in `resources`), the occurrence time, and `detail`
+set to the string `"{}"`. The event `id` is stable per occurrence, so retries
+and the dead-letter body carry the same event. A Step Functions target starts
+an asynchronous execution with that payload as its input. Scheduler delivery
+succeeds when `StartExecution` is accepted; a later workflow failure does not
+trigger Scheduler retries.
+
+When `Input` is present, Floci replaces the Scheduler context attributes in it
+on every invocation, for templated and universal (`aws-sdk`) targets alike:
+`<aws.scheduler.schedule-arn>` with the schedule ARN,
+`<aws.scheduler.scheduled-time>` with the occurrence's scheduled time in UTC
+to the second (for example `2026-04-21T09:17:54Z`), `<aws.scheduler.execution-id>`
+with a 16-character hex id, and `<aws.scheduler.attempt-number>` with the
+1-based attempt number. Each attempted invocation, retries included, gets its
+own execution id and increments the attempt number; a dead-letter message
+reports the last attempt's id as `EXECUTION_ID`. The dead-letter body carries
+the last attempt's request, with matching context attributes.
+
+`CreateSchedule` and `UpdateSchedule` reject a non-JSON `Input` for Lambda,
+Step Functions, and EventBridge targets with a `ValidationException`, as AWS
+does. A blank `Input`, or one with text after the JSON value such as
+`{} garbage`, is rejected the same way. SQS and SNS targets accept any text,
+and the `Input` of a universal (`aws-sdk`) target is only checked when the
+schedule is invoked.
+
+Universal targets (`arn:aws:scheduler:::aws-sdk:<service>:<action>`) deliver `sns:publish`,
+`sqs:sendMessage`, `redshiftdata:executeStatement` and `redshiftdata:batchExecuteStatement`; any
+other action fails when the schedule fires. The Redshift Data targets take the Data API request
+as `Input` (PascalCase) and run the SQL against a provisioned cluster (`ClusterIdentifier`) or a
+Serverless workgroup (`WorkgroupName`). The SQL runs on the shared bounded Data API worker pool, so a slow statement does not
+delay other schedules. Pool saturation rejects admission and follows Scheduler retries.
+`WithEvent=true` emits a terminal EventBridge event in the schedule account and region,
+with the target role ARN as `principal`. Delivery succeeds once the Data API accepts the request;
+a SQL error is recorded on the statement and does not trigger Scheduler retries, while a request
+the Data API rejects (an unknown cluster, a malformed request) is retried like any failed
+delivery. When `redshift` or `redshift-data` is disabled the target fails with
+`ServiceNotAvailableException`.
+
+### Retries and dead-letter queues
+
+A failed invocation is retried after a deterministic capped exponential delay
+until the target's `RetryPolicy` is exhausted. The delay starts at 60 seconds
+and is capped at 86400 seconds. Missing fields use the AWS defaults:
+`MaximumEventAgeInSeconds=86400` and `MaximumRetryAttempts=185`. Retries run
+when due, without undocumented AWS jitter. Each occurrence retries
+independently, so a failing occurrence does not delay later `rate` or `cron`
+fires. Pending retries are in memory and are dropped when the process restarts,
+or when a schedule is disabled, updated, or deleted. Targets Floci cannot
+deliver to count as failed invocations. Lambda targets are invoked
+asynchronously, so function errors are not retried by the scheduler.
+
+When an occurrence is exhausted and `DeadLetterConfig.Arn` names a standard SQS
+queue, Floci sends the fully materialized target request as a JSON body to that
+queue with the message attributes
+`ERROR_CODE`, `ERROR_MESSAGE`, `EXECUTION_ID`, `EXHAUSTED_RETRY_CONDITION`,
+`IS_PAYLOAD_TRUNCATED`, `RETRY_ATTEMPTS`, `SCHEDULED_TIME`, `SCHEDULE_ARN`, and
+`TARGET_ARN`. FIFO queues and non-SQS ARNs are logged and skipped. An `at`
+schedule with `ActionAfterCompletion=DELETE` is deleted once its occurrence is
+delivered or exhausted. The body uses the request fields of the target
+service's API: SQS `MessageBody` and `QueueUrl` (plus `MessageGroupId` for FIFO
+queues), Lambda `FunctionName`, `InvocationType`, and `Payload`, SNS `TopicArn`
+and `Message`, Step Functions `stateMachineArn` and `input`, EventBridge
+`Entries`, and ECS `cluster`, `taskDefinition`, and `count` with the configured
+launch type, group, and network configuration. Non-JSON input of a universal
+target is encoded as a JSON string field.
+
+## CloudFormation
+
+`AWS::Scheduler::Schedule` creates a real schedule. `Ref` returns its name and
+`Fn::GetAtt Arn` returns its Scheduler ARN. An omitted `Name` is generated once
+and kept on updates. Expression, state, dates, timezone, time window, KMS key and
+target changes update the schedule in place. A `Name` change creates a replacement;
+`GroupName` changes keep the same `Ref` and move the schedule to the requested group.
+The group must already exist or be declared as an `AWS::Scheduler::ScheduleGroup`.
+
+The displaced schedule stays until the stack update commits, then is deleted.
+`UpdateReplacePolicy: Retain` keeps a schedule displaced by a name replacement;
+it does not retain the old address of a group move. A failed stack update restores
+the original schedule configuration and removes a replacement or group-move destination.
+During a group move the old schedule is disabled before creating the destination,
+so the stored schedules are not both enabled. A rollback disables the destination
+before restoring the original state. A name replacement can briefly leave both
+schedules enabled until commit, following the existing replacement lifecycle.
+
+If restoring a failed update also fails, the original configuration snapshot is
+kept. A later schedule update retries that restoration before taking a new snapshot
+or applying its desired configuration. If Floci skips the failed schedule during an
+otherwise unrelated stack update, cleanup preserves the snapshot and leaves the
+stack in `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS` with an explicit reason. Further
+updates are blocked, and `DeleteStack` is the available recovery path. This is a
+Floci recovery limitation; AWS requires `ContinueUpdateRollback` to complete a failed
+rollback before accepting another stack update.
+
+Target parameters are limited to those the Scheduler API currently models:
+retry/dead-letter configuration, SQS, ECS and EventBridge parameters. Kinesis and
+SageMaker pipeline parameters are rejected instead of silently discarded.
+Invocation support and time-window limitations are the same as the Scheduler API.
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_SCHEDULER_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_SCHEDULER_INVOCATION_ENABLED` | `true` | Run the background dispatcher that fires scheduled targets (`false` = CRUD-only) |
+| `FLOCI_SERVICES_SCHEDULER_TICK_INTERVAL_SECONDS` | `10` | How often the dispatcher scans for due schedules (seconds) |
+
+## Not Yet Supported
+
+- `FlexibleTimeWindow` jitter (fires deterministically at the scheduled time)
+- `NextToken`-based pagination for List operations
+
+## Examples
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566
+
+# Create a schedule group
+aws scheduler create-schedule-group \
+  --name my-group \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# List schedule groups
+aws scheduler list-schedule-groups \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Create a schedule in the default group
+aws scheduler create-schedule \
+  --name my-schedule \
+  --schedule-expression "rate(1 hour)" \
+  --flexible-time-window '{"Mode":"OFF"}' \
+  --target '{
+    "Arn": "arn:aws:lambda:us-east-1:000000000000:function:my-func",
+    "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role"
+  }' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Create a schedule with retry policy and dead-letter queue
+aws scheduler create-schedule \
+  --name my-resilient-schedule \
+  --schedule-expression "rate(5 minutes)" \
+  --flexible-time-window '{"Mode":"FLEXIBLE","MaximumWindowInMinutes":10}' \
+  --target '{
+    "Arn": "arn:aws:sqs:us-east-1:000000000000:my-queue",
+    "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+    "RetryPolicy": {"MaximumEventAgeInSeconds":3600,"MaximumRetryAttempts":5},
+    "DeadLetterConfig": {"Arn":"arn:aws:sqs:us-east-1:000000000000:my-dlq"}
+  }' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Get a schedule
+aws scheduler get-schedule \
+  --name my-schedule \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Update a schedule
+aws scheduler update-schedule \
+  --name my-schedule \
+  --schedule-expression "rate(30 minutes)" \
+  --flexible-time-window '{"Mode":"OFF"}' \
+  --target '{
+    "Arn": "arn:aws:lambda:us-east-1:000000000000:function:my-func",
+    "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role"
+  }' \
+  --state DISABLED \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Delete a schedule
+aws scheduler delete-schedule \
+  --name my-schedule \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Delete a schedule group (cascades to all schedules in the group)
+aws scheduler delete-schedule-group \
+  --name my-group \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Add tags to a schedule group (tags apply to schedule groups only)
+aws scheduler tag-resource \
+  --resource-arn arn:aws:scheduler:us-east-1:000000000000:schedule-group/my-group \
+  --tags Key=env,Value=prod Key=owner,Value=Alice \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# List tags on a schedule group
+aws scheduler list-tags-for-resource \
+  --resource-arn arn:aws:scheduler:us-east-1:000000000000:schedule-group/my-group \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# Remove tags from a schedule group
+aws scheduler untag-resource \
+  --resource-arn arn:aws:scheduler:us-east-1:000000000000:schedule-group/my-group \
+  --tag-keys env owner \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+## Default Schedule Group
+
+A `default` schedule group is automatically created on first access. Schedules created without specifying a group are placed in the default group. The default group cannot be deleted.

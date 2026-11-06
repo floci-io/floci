@@ -1,0 +1,1539 @@
+package io.floci.aws.services.redshiftserverless;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.redshift.SnapshotDumpCopier;
+import io.floci.aws.services.redshift.TempCredential;
+import io.floci.aws.services.redshift.model.Endpoint;
+import io.floci.aws.services.redshiftserverless.RedshiftServerlessSnapshotCopyService.CopyRule;
+import io.floci.aws.services.redshiftserverless.model.ConfigParameter;
+import io.floci.aws.services.redshiftserverless.model.Namespace;
+import io.floci.aws.services.redshiftserverless.model.PricePerformanceTarget;
+import io.floci.aws.services.redshiftserverless.model.RedshiftServerlessSnapshot;
+import io.floci.aws.services.redshiftserverless.model.Workgroup;
+import io.floci.aws.services.secretsmanager.model.Secret;
+import io.quarkus.runtime.StartupEvent;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+import jakarta.annotation.Priority;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
+import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
+import org.jboss.logging.Logger;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+@ApplicationScoped
+public class RedshiftServerlessService implements Resettable {
+    private static final Logger LOG = Logger.getLogger(RedshiftServerlessService.class);
+
+    public static final String DEFAULT_DB_NAME = "dev";
+    public static final String AWS_OWNED_KMS_KEY = "AWS_OWNED_KMS_KEY";
+
+    private static final Pattern NAMESPACE_NAME = Pattern.compile("[a-z0-9-]+");
+    private static final Pattern DB_NAME = Pattern.compile("[a-zA-Z][a-zA-Z_0-9+.@-]*");
+    private static final Set<String> LOG_EXPORTS = Set.of("useractivitylog", "userlog", "connectionlog");
+
+    /**
+     * Amazon Redshift's SQL reserved words, which CreateNamespace rejects as namespace names even
+     * though they satisfy the length and character rules. Held lowercase because a namespace name
+     * is already constrained to lowercase letters, digits and hyphens, so a direct lookup suffices.
+     * Transcribed from https://docs.aws.amazon.com/redshift/latest/dg/r_pg_keywords.html
+     */
+    private static final Set<String> RESERVED_WORDS = Set.of(
+            "aes128", "aes256", "all", "allowoverwrite", "analyse", "analyze",
+            "and", "any", "array", "as", "asc", "authorization",
+            "az64", "backup", "between", "binary", "blanksasnull", "both",
+            "bytedict", "bzip2", "case", "cast", "check", "collate",
+            "column", "constraint", "create", "credentials", "cross", "current_date",
+            "current_time", "current_timestamp", "current_user", "current_user_id", "default", "deferrable",
+            "deflate", "defrag", "delta", "delta32k", "desc", "disable",
+            "distinct", "do", "else", "emptyasnull", "enable", "encode",
+            "encrypt", "encryption", "end", "except", "explicit", "false",
+            "for", "foreign", "freeze", "from", "full", "globaldict256",
+            "globaldict64k", "grant", "group", "gzip", "having", "identity",
+            "ignore", "ilike", "in", "initially", "inner", "intersect",
+            "interval", "into", "is", "isnull", "join", "leading",
+            "left", "like", "limit", "localtime", "localtimestamp", "lun",
+            "luns", "lzo", "lzop", "minus", "mostly16", "mostly32",
+            "mostly8", "natural", "new", "not", "notnull", "null",
+            "nulls", "off", "offline", "offset", "oid", "old",
+            "on", "only", "open", "or", "order", "outer",
+            "overlaps", "parallel", "partition", "percent", "permissions", "pivot",
+            "placing", "primary", "raw", "readratio", "recover", "references",
+            "rejectlog", "resort", "respect", "restore", "right", "select",
+            "session_user", "similar", "snapshot", "some", "sysdate", "system",
+            "table", "tag", "tdes", "text255", "text32k", "then",
+            "timestamp", "to", "top", "trailing", "true", "truncatecolumns",
+            "union", "unique", "unnest", "unpivot", "user", "using",
+            "verbose", "wallet", "when", "where", "with", "without");
+
+    public static final int DEFAULT_BASE_CAPACITY = 128;
+    public static final int DEFAULT_PORT = 5439;
+    public static final String DEFAULT_TRACK_NAME = "current";
+    public static final List<String> TRACK_NAMES = List.of("current", "trailing");
+    public static final String DEFAULT_IP_ADDRESS_TYPE = "ipv4";
+    public static final String DEFAULT_ADMIN_USERNAME = "admin";
+    public static final int DEFAULT_CREDENTIAL_DURATION_SECONDS = 900;
+    public static final int MIN_CREDENTIAL_DURATION_SECONDS = 900;
+    public static final int MAX_CREDENTIAL_DURATION_SECONDS = 3600;
+
+    private static final int MAX_RETENTION_DAYS = 3653;
+    private static final Pattern SNAPSHOT_NAME = Pattern.compile("[a-z0-9-]+");
+    private static final Pattern WORKGROUP_NAME = Pattern.compile("[a-z0-9-]+");
+    private static final Set<String> IP_ADDRESS_TYPES = Set.of("ipv4", "dualstack");
+    private static final Set<String> PERFORMANCE_TARGET_STATUSES = Set.of("ENABLED", "DISABLED");
+
+    private final AccountAwareStorageBackend<Namespace> namespaces;
+    private final AccountAwareStorageBackend<Workgroup> workgroups;
+    private final AccountAwareStorageBackend<RedshiftServerlessSnapshot> snapshots;
+    private final RegionResolver regionResolver;
+    private final RedshiftServerlessEndpoints endpoints;
+    private final RedshiftServerlessRuntime runtime;
+    private final EmulatorConfig config;
+    private final RedshiftServerlessAdminSecrets adminSecrets;
+
+    public RedshiftServerlessService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                     RedshiftServerlessEndpoints endpoints, RedshiftServerlessRuntime runtime,
+                                     EmulatorConfig config) {
+        this(storageFactory, regionResolver, endpoints, runtime, config, null);
+    }
+
+    @Inject
+    public RedshiftServerlessService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                     RedshiftServerlessEndpoints endpoints, RedshiftServerlessRuntime runtime,
+                                     EmulatorConfig config, RedshiftServerlessAdminSecrets adminSecrets) {
+        this.namespaces = storageFactory.create("redshiftserverless", "redshiftserverless-namespaces.json",
+                new TypeReference<Map<String, Namespace>>() {});
+        this.workgroups = storageFactory.create("redshiftserverless", "redshiftserverless-workgroups.json",
+                new TypeReference<Map<String, Workgroup>>() {});
+        this.snapshots = storageFactory.create("redshiftserverless", "redshiftserverless-snapshots.json",
+                new TypeReference<Map<String, RedshiftServerlessSnapshot>>() {});
+        this.regionResolver = regionResolver;
+        this.endpoints = endpoints;
+        this.runtime = runtime;
+        this.config = config;
+        this.adminSecrets = adminSecrets;
+    }
+
+    /**
+     * A persisted workgroup keeps its endpoint across restarts. The port is claimed again in the
+     * shared pool; if a provisioned cluster already took it, the workgroup gets a new endpoint and the
+     * change is stored. The priority places this after the default-priority observers, which includes
+     * {@code RedshiftService}, so every persisted cluster has reserved its own port by then and the
+     * two services cannot be handed the same one.
+     */
+    void onStart(@Observes @Priority(Interceptor.Priority.APPLICATION + 600) StartupEvent event) {
+        for (AccountAwareStorageBackend.AccountEntry<Workgroup> entry : workgroups.scanAllAccountEntries(key -> true)) {
+            Workgroup workgroup = new Workgroup(entry.value());
+            workgroup.setEndpoint(endpoints.restore(workgroup.getEndpoint()));
+            recoverRuntime(entry.accountId(), regionOf(entry.key()), workgroup);
+            workgroups.putForAccount(entry.accountId(), entry.key(), workgroup);
+        }
+    }
+
+    /**
+     * Re-attaches to the workgroup's container, or starts a fresh one when it did not survive, and
+     * restarts the proxy on the persisted port. A failure is logged and the runtime coordinates are
+     * cleared rather than the status changed: the status enum has no failed member, and a Data API
+     * call against a workgroup with no runtime reports that clearly.
+     */
+    private void recoverRuntime(String accountId, String region, Workgroup workgroup) {
+        Optional<Namespace> namespace = namespaces.getForAccount(accountId,
+                storageKey(region, workgroup.getNamespaceName()));
+        if (namespace.isEmpty() || namespace.get().getAdminUserPassword() == null) {
+            clearRuntime(workgroup);
+            LOG.warnv("Workgroup {0} has no namespace admin credentials to restore its runtime with", workgroup.getWorkgroupName());
+            return;
+        }
+        try {
+            startRuntime(accountId, region, workgroup, namespace.get(), true);
+        } catch (RuntimeException e) {
+            clearRuntime(workgroup);
+            LOG.warnv(e, "Failed to recover the runtime of workgroup {0}", workgroup.getWorkgroupName());
+        }
+    }
+
+    private static void clearRuntime(Workgroup workgroup) {
+        workgroup.setRuntimeHost(null);
+        workgroup.setRuntimePort(0);
+    }
+
+    /**
+     * Starts the workgroup's container and proxy with the namespace admin pair and records where the
+     * container listens. The master role is the namespace admin user, or a role it was originally
+     * created with when the namespace was renamed since.
+     */
+    private void startRuntime(String accountId, String region, Workgroup workgroup, Namespace namespace,
+                              boolean adopt) {
+        String masterUsername = workgroup.getMasterUsername() != null
+                ? workgroup.getMasterUsername() : adminUserOf(namespace);
+        RedshiftServerlessRuntime.Backend backend = runtime.start(accountId, region, workgroup.getWorkgroupName(),
+                masterUsername, namespace.getAdminUserPassword(), namespace.getDbName(), workgroup.getEndpoint(),
+                adopt, adminSupplier(accountId, region, namespace.getNamespaceName()));
+        workgroup.setMasterUsername(masterUsername);
+        workgroup.setRuntimeHost(backend.host());
+        workgroup.setRuntimePort(backend.port());
+    }
+
+    private Supplier<Optional<RedshiftServerlessRuntime.AdminCredentials>> adminSupplier(
+            String accountId, String region, String namespaceName) {
+        return () -> namespaces.getForAccount(accountId, storageKey(region, namespaceName))
+                .filter(namespace -> namespace.getAdminUserPassword() != null)
+                .map(namespace -> new RedshiftServerlessRuntime.AdminCredentials(
+                        adminUserOf(namespace), namespace.getAdminUserPassword()));
+    }
+
+    private static String adminUserOf(Namespace namespace) {
+        String adminUsername = namespace.getAdminUsername();
+        return adminUsername == null || adminUsername.isBlank() ? DEFAULT_ADMIN_USERNAME : adminUsername;
+    }
+
+    private static String regionOf(String storageKey) {
+        return storageKey.substring(0, storageKey.indexOf("::"));
+    }
+
+    public synchronized Namespace createNamespace(String namespaceName, String adminUsername, String dbName,
+                                                  String kmsKeyId, String defaultIamRoleArn, List<String> iamRoles,
+                                                  List<String> logExports, Map<String, String> tags, String region) {
+        return createNamespace(namespaceName, adminUsername, null, dbName, kmsKeyId, defaultIamRoleArn, iamRoles,
+                logExports, tags, region);
+    }
+
+    public synchronized Namespace createNamespace(String namespaceName, String adminUsername,
+                                                  String adminUserPassword, String dbName, String kmsKeyId,
+                                                  String defaultIamRoleArn, List<String> iamRoles,
+                                                  List<String> logExports, Map<String, String> tags, String region) {
+        return createNamespace(namespaceName, adminUsername, adminUserPassword, dbName, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, tags, null, null, region);
+    }
+
+    public synchronized Namespace createNamespace(String namespaceName, String adminUsername,
+                                                  String adminUserPassword, String dbName, String kmsKeyId,
+                                                  String defaultIamRoleArn, List<String> iamRoles,
+                                                  List<String> logExports, Map<String, String> tags,
+                                                  Boolean manageAdminPassword, String adminPasswordSecretKmsKeyId,
+                                                  String region) {
+        validateManagedPassword(manageAdminPassword, adminUserPassword, adminPasswordSecretKmsKeyId);
+        validateNamespaceName(namespaceName);
+        String key = storageKey(region, namespaceName);
+        if (namespaces.get(key).isPresent()) {
+            throw ServerlessSupport.conflict("The namespace " + namespaceName + " already exists.");
+        }
+
+        Namespace namespace = new Namespace();
+        namespace.setNamespaceName(namespaceName);
+        namespace.setNamespaceId(UUID.randomUUID().toString());
+        namespace.setNamespaceArn(regionResolver.buildArn("redshift-serverless", region,
+                "namespace/" + namespace.getNamespaceId()));
+        namespace.setAdminUsername(adminUsername);
+        namespace.setAdminUserPassword(blankToNull(adminUserPassword));
+        namespace.setDbName(validateDbName(dbName));
+        namespace.setKmsKeyId(kmsKeyId == null || kmsKeyId.isBlank() ? AWS_OWNED_KMS_KEY : kmsKeyId);
+        namespace.setDefaultIamRoleArn(defaultIamRoleArn);
+        namespace.setIamRoles(copyOf(iamRoles));
+        namespace.setLogExports(validateLogExports(logExports));
+        namespace.setStatus("AVAILABLE");
+        namespace.setCreationDate(Instant.now());
+        namespace.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
+        if (Boolean.TRUE.equals(manageAdminPassword)) {
+            namespace.setAdminUsername(adminUserOf(namespace));
+            namespace.setAdminUserPassword(runtime.generatePassword());
+            requireAdminSecrets().create(namespace, adminPasswordSecretKmsKeyId, region);
+        }
+        try {
+            namespaces.put(key, namespace);
+        } catch (RuntimeException failure) {
+            if (namespace.getAdminPasswordSecretArn() != null) {
+                compensate(() -> namespaces.delete(key), failure, "remove namespace after failed create");
+                compensate(() -> requireAdminSecrets().delete(namespace, region), failure, "delete orphaned admin secret");
+            }
+            throw failure;
+        }
+        return namespace;
+    }
+
+    public Namespace getNamespace(String namespaceName, String region) {
+        validateNamespaceName(namespaceName);
+        return namespaces.get(storageKey(region, namespaceName))
+                .orElseThrow(() -> notFound(namespaceName));
+    }
+
+    public PaginatedResult<Namespace> listNamespaces(String region, Integer maxResults, String nextToken) {
+        List<Namespace> all = namespaces.scan(key -> key.startsWith(region + "::"));
+        return Pagination.paginate(all, Namespace::getNamespaceName, maxResults, nextToken,
+                100, 100, "ValidationException");
+    }
+
+    public synchronized Namespace updateNamespace(String namespaceName, String adminUsername, String kmsKeyId,
+                                                  String defaultIamRoleArn, List<String> iamRoles,
+                                                  List<String> logExports, String region) {
+        return updateNamespace(namespaceName, adminUsername, null, kmsKeyId, defaultIamRoleArn, iamRoles,
+                logExports, region);
+    }
+
+    /**
+     * A new {@code adminUserPassword} is applied to the running workgroup backend last, once every
+     * other field has validated, and rolled back if the namespace cannot be stored. The backend
+     * therefore never holds a password the stored namespace does not.
+     */
+    public synchronized Namespace updateNamespace(String namespaceName, String adminUsername,
+                                                  String adminUserPassword, String kmsKeyId,
+                                                  String defaultIamRoleArn, List<String> iamRoles,
+                                                  List<String> logExports, String region) {
+        return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, null, null, region, false, false);
+    }
+
+    public synchronized Namespace updateNamespace(String namespaceName, String adminUsername,
+                                                  String adminUserPassword, String kmsKeyId,
+                                                  String defaultIamRoleArn, List<String> iamRoles,
+                                                  List<String> logExports, Boolean manageAdminPassword,
+                                                  String adminPasswordSecretKmsKeyId, String region) {
+        return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, manageAdminPassword, adminPasswordSecretKmsKeyId, region, false,
+                false);
+    }
+
+    /**
+     * As {@link #updateNamespace} for CloudFormation, which drives a namespace to the template: an
+     * omitted {@code kmsKeyId} returns to the AWS-owned key and an omitted {@code defaultIamRoleArn}
+     * is cleared, where the API call would keep the stored value.
+     */
+    public synchronized Namespace reconcileNamespace(String namespaceName, String adminUsername,
+                                                     String adminUserPassword, String kmsKeyId,
+                                                     String defaultIamRoleArn, List<String> iamRoles,
+                                                     List<String> logExports, String region) {
+        return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, null, null, region, true, false);
+    }
+
+    public synchronized Namespace reconcileNamespace(String namespaceName, String adminUsername,
+                                                     String adminUserPassword, String kmsKeyId,
+                                                     String defaultIamRoleArn, List<String> iamRoles,
+                                                     List<String> logExports, Boolean manageAdminPassword,
+                                                     String adminPasswordSecretKmsKeyId, String region) {
+        return applyNamespaceUpdate(namespaceName, adminUsername, adminUserPassword, kmsKeyId,
+                defaultIamRoleArn, iamRoles, logExports, manageAdminPassword, adminPasswordSecretKmsKeyId, region, true,
+                false);
+    }
+
+    /**
+     * Builds the new state on a copy and stores that, rather than mutating the stored instance.
+     * Reads do not take the monitor the callers hold, so an in-place mutation lets a concurrent
+     * GetNamespace or ListNamespaces observe a torn object: some fields updated, some not.
+     */
+    private Namespace applyNamespaceUpdate(String namespaceName, String adminUsername,
+                                           String adminUserPassword, String kmsKeyId,
+                                           String defaultIamRoleArn, List<String> iamRoles,
+                                           List<String> logExports, Boolean manageAdminPassword,
+                                           String adminPasswordSecretKmsKeyId, String region, boolean resetOmitted,
+                                           boolean forceManagedPasswordRotation) {
+        validateManagedPassword(manageAdminPassword, adminUserPassword, adminPasswordSecretKmsKeyId);
+        String key = storageKey(region, namespaceName);
+        Namespace current = getNamespace(namespaceName, region);
+        Namespace updated = new Namespace(current);
+        if (adminUsername != null) {
+            updated.setAdminUsername(adminUsername);
+        }
+        if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+            updated.setKmsKeyId(kmsKeyId);
+        } else if (resetOmitted) {
+            updated.setKmsKeyId(AWS_OWNED_KMS_KEY);
+        }
+        if (defaultIamRoleArn != null || resetOmitted) {
+            updated.setDefaultIamRoleArn(defaultIamRoleArn);
+        }
+        if (iamRoles != null) {
+            updated.setIamRoles(copyOf(iamRoles));
+        }
+        if (logExports != null) {
+            updated.setLogExports(validateLogExports(logExports));
+        }
+        boolean wasManaged = current.getAdminPasswordSecretArn() != null;
+        boolean managed = manageAdminPassword == null ? wasManaged : manageAdminPassword;
+        if (managed && adminUserPassword != null) {
+            throw ServerlessSupport.validation("adminUserPassword cannot be supplied while admin credentials are managed.");
+        }
+        if (!managed && wasManaged && blankToNull(adminUserPassword) == null) {
+            throw ServerlessSupport.validation("adminUserPassword is required when disabling managed admin credentials.");
+        }
+        if (managed) {
+            updated.setAdminUsername(adminUserOf(updated));
+            if (!wasManaged || forceManagedPasswordRotation) {
+                updated.setAdminUserPassword(runtime.generatePassword());
+            }
+            if (adminPasswordSecretKmsKeyId != null) {
+                updated.setAdminPasswordSecretKmsKeyId(adminPasswordSecretKmsKeyId);
+            }
+        } else if (blankToNull(adminUserPassword) != null) {
+            updated.setAdminUserPassword(adminUserPassword);
+        }
+        if (!managed) {
+            updated.setAdminPasswordSecretArn(null);
+            updated.setAdminPasswordSecretKmsKeyId(null);
+        }
+        boolean rotated = !Objects.equals(current.getAdminUserPassword(), updated.getAdminUserPassword());
+        boolean secretUpdated = managed && wasManaged
+                && (!Objects.equals(current.getAdminUsername(), updated.getAdminUsername())
+                || !Objects.equals(current.getAdminPasswordSecretKmsKeyId(), updated.getAdminPasswordSecretKmsKeyId())
+                || !Objects.equals(current.getAdminUserPassword(), updated.getAdminUserPassword()));
+        boolean backendChanged = false;
+        boolean storeAttempted = false;
+        try {
+            if (managed && !wasManaged) {
+                requireAdminSecrets().create(updated, adminPasswordSecretKmsKeyId, region);
+            } else if (secretUpdated) {
+                requireAdminSecrets().update(updated, region);
+            }
+            if (rotated) {
+                applyNewAdminPassword(current, updated.getAdminUserPassword(), region);
+                backendChanged = true;
+            }
+            storeAttempted = true;
+            namespaces.put(key, updated);
+            if (wasManaged && !managed) {
+                requireAdminSecrets().delete(current, region);
+            }
+        } catch (RuntimeException failure) {
+            if (storeAttempted) {
+                compensate(() -> namespaces.put(key, current), failure, "restore namespace credentials");
+            }
+            if (backendChanged) {
+                compensate(() -> restoreAdminPassword(current, region), failure, "restore backend admin password");
+            }
+            if (managed && !wasManaged && updated.getAdminPasswordSecretArn() != null) {
+                compensate(() -> requireAdminSecrets().delete(updated, region), failure, "delete orphaned admin secret");
+            } else if (secretUpdated) {
+                compensate(() -> requireAdminSecrets().update(current, region), failure, "restore managed admin secret");
+            }
+            throw failure;
+        }
+        return updated;
+    }
+
+    @RegisterForReflection
+    public record NamespaceUpdateSnapshot(Namespace namespace, Secret secret) {}
+
+    public synchronized NamespaceUpdateSnapshot snapshotNamespaceUpdate(String namespaceName, String region) {
+        Namespace current = new Namespace(getNamespace(namespaceName, region));
+        Secret secret = current.getAdminPasswordSecretArn() == null ? null
+                : requireAdminSecrets().snapshot(current, region);
+        return new NamespaceUpdateSnapshot(current, secret);
+    }
+
+    /** Restores a CloudFormation update's credentials without generating a new password or secret ARN. */
+    public synchronized void restoreNamespaceUpdate(NamespaceUpdateSnapshot snapshot, String region) {
+        Namespace previous = new Namespace(snapshot.namespace());
+        Namespace current = getNamespace(previous.getNamespaceName(), region);
+        if (snapshot.secret() != null) {
+            requireAdminSecrets().restore(snapshot.secret(), region);
+        }
+        boolean passwordChanged = !Objects.equals(current.getAdminUserPassword(), previous.getAdminUserPassword());
+        if (passwordChanged) {
+            applyNewAdminPassword(current, previous.getAdminUserPassword(), region);
+        }
+        if (current.getAdminPasswordSecretArn() != null
+                && !Objects.equals(current.getAdminPasswordSecretArn(), previous.getAdminPasswordSecretArn())) {
+            try {
+                requireAdminSecrets().delete(current, region);
+            } catch (RuntimeException failure) {
+                if (passwordChanged) {
+                    compensate(() -> restoreAdminPassword(current, region), failure,
+                            "restore current backend admin password after blocked rollback");
+                }
+                throw failure;
+            }
+        }
+        namespaces.put(storageKey(region, previous.getNamespaceName()), previous);
+    }
+
+    public synchronized Namespace deleteNamespace(String namespaceName, String region) {
+        Namespace current = getNamespace(namespaceName, region);
+        Namespace deleted = new Namespace(current);
+        // A workgroup cannot outlive its namespace; the model lists ConflictException for this call
+        // but not its trigger, so this guard is the single place to relax if AWS turns out to differ.
+        if (workgroupOf(namespaceName, region).isPresent()) {
+            throw ServerlessSupport.conflict("The namespace " + namespaceName + " still has a workgroup. Delete the workgroup first.");
+        }
+        String key = storageKey(region, namespaceName);
+        try {
+            namespaces.delete(key);
+            if (deleted.getAdminPasswordSecretArn() != null) {
+                requireAdminSecrets().delete(deleted, region);
+            }
+        } catch (RuntimeException failure) {
+            compensate(() -> namespaces.put(key, current), failure, "restore namespace after failed deletion");
+            throw failure;
+        }
+        deleted.setStatus("DELETING");
+        return deleted;
+    }
+
+    /**
+     * Creates a snapshot directly in {@code region}. Real {@code CreateSnapshot} always creates
+     * in the source namespace's own region; a snapshot that should appear as a cross-region copy
+     * is created by calling this in the standby region, where it is immediately AVAILABLE. When
+     * the namespace's workgroup has a live database its contents are dumped with pg_dump, the way
+     * provisioned Redshift snapshots work; with no live database the snapshot is metadata only.
+     */
+    public synchronized RedshiftServerlessSnapshot createSnapshot(String snapshotName, String namespaceName,
+                                                                  Integer retentionPeriod,
+                                                                  Map<String, String> tags, String region) {
+        validateSnapshotName(snapshotName);
+        Integer retentionDays = validateRetentionPeriod(retentionPeriod);
+        Namespace namespace = getNamespace(namespaceName, region);
+        String key = storageKey(region, snapshotName);
+        if (snapshots.get(key).isPresent()) {
+            throw ServerlessSupport.conflict("The snapshot " + snapshotName + " already exists.");
+        }
+        RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot();
+        snapshot.setSnapshotName(snapshotName);
+        snapshot.setNamespaceName(namespaceName);
+        snapshot.setNamespaceArn(namespace.getNamespaceArn());
+        snapshot.setRegion(region);
+        snapshot.setAccountId(regionResolver.getAccountId());
+        snapshot.setOwnerAccount(regionResolver.getAccountId());
+        snapshot.setSnapshotArn(regionResolver.buildArn("redshift-serverless", region, "snapshot/" + snapshotName));
+        snapshot.setStatus("AVAILABLE");
+        snapshot.setSnapshotCreateTime(Instant.now());
+        snapshot.setAdminUsername(adminUserOf(namespace));
+        snapshot.setAdminUserPassword(namespace.getAdminUserPassword());
+        snapshot.setKmsKeyId(namespace.getKmsKeyId());
+        snapshot.setRetentionPeriod(retentionDays);
+        snapshot.setTags(tags);
+        dumpDatabase(snapshot, namespace, region);
+        snapshots.put(key, snapshot);
+        return snapshot;
+    }
+
+    private static Integer validateRetentionPeriod(Integer retentionPeriod) {
+        if (retentionPeriod == null || retentionPeriod == -1) {
+            return null;
+        }
+        if (retentionPeriod < 1 || retentionPeriod > MAX_RETENTION_DAYS) {
+            throw ServerlessSupport.validation("retentionPeriod must be -1 (indefinite) or between 1 and " + MAX_RETENTION_DAYS + ".");
+        }
+        return retentionPeriod;
+    }
+
+    private void dumpDatabase(RedshiftServerlessSnapshot snapshot, Namespace namespace, String region) {
+        Optional<Workgroup> attached = workgroupOf(namespace.getNamespaceName(), region);
+        if (attached.isEmpty() || !hasLiveRuntime(attached.get())) {
+            return;
+        }
+        Path dumpFile = dumpFileOf(snapshot.getSnapshotName(), region);
+        try {
+            Files.createDirectories(dumpFile.getParent());
+            runtime.takeSnapshot(workgroups.accountId(), region, attached.get().getWorkgroupName(),
+                    attached.get().getMasterUsername(), namespace.getDbName(), dumpFile);
+            snapshot.setSqlDump(dumpFile.toString());
+        } catch (IOException e) {
+            throw new AwsException("InternalServerException",
+                    "Failed to take snapshot " + snapshot.getSnapshotName() + ": " + e.getMessage(), 500);
+        } catch (RuntimeException e) {
+            deleteDumpQuietly(dumpFile);
+            throw e;
+        }
+    }
+
+    private static boolean hasLiveRuntime(Workgroup workgroup) {
+        return workgroup.getRuntimeHost() != null && workgroup.getRuntimePort() > 0;
+    }
+
+    /** Absolute, normalised {@code <persistentPath>/redshift-serverless-dumps/<accountId>/<region>} directory. */
+    private Path dumpDir(String region) {
+        return dumpDir(workgroups.accountId(), region);
+    }
+
+    private Path dumpDir(String accountId, String region) {
+        return Paths.get(config.storage().persistentPath())
+                .resolve("redshift-serverless-dumps")
+                .resolve(accountId)
+                .resolve(region)
+                .toAbsolutePath()
+                .normalize();
+    }
+
+    private Path dumpFileOf(String snapshotName, String region) {
+        Path dir = dumpDir(region);
+        Path file = dir.resolve(snapshotName + ".sql").normalize();
+        if (!file.startsWith(dir)) {
+            throw ServerlessSupport.validation("Invalid snapshotName.");
+        }
+        return file;
+    }
+
+    /** A stored dump path is trusted only while it still resolves inside this account's dump directory. */
+    private Optional<Path> trustedDump(RedshiftServerlessSnapshot snapshot, String region) {
+        String stored = snapshot.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return Optional.empty();
+        }
+        Path file = Paths.get(stored).toAbsolutePath().normalize();
+        return file.startsWith(dumpDir(region)) ? Optional.of(file) : Optional.empty();
+    }
+
+    private static void deleteDumpQuietly(Path dumpFile) {
+        try {
+            Files.deleteIfExists(dumpFile);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not delete the snapshot dump {0}", dumpFile);
+        }
+    }
+
+    public RedshiftServerlessSnapshot getSnapshot(String snapshotName, String region) {
+        requireSnapshotName(snapshotName);
+        return snapshots.get(storageKey(region, snapshotName))
+                .orElseThrow(() -> snapshotNotFound(snapshotName));
+    }
+
+    /**
+     * Recovers the snapshot name from a snapshot ARN, rejecting one that names another account,
+     * Region or resource type rather than resolving it to a local snapshot of the same name.
+     */
+    public String snapshotNameFromArn(String snapshotArn, String region) {
+        return snapshotNameFromArn(snapshotArn, region, "snapshotArn");
+    }
+
+    public String snapshotNameFromArn(String snapshotArn, String region, String memberName) {
+        String prefix = regionResolver.buildArn("redshift-serverless", region, "snapshot/");
+        if (snapshotArn == null || !snapshotArn.startsWith(prefix) || snapshotArn.length() == prefix.length()) {
+            throw ServerlessSupport.validation(memberName + " does not identify a snapshot in this account and Region.");
+        }
+        return snapshotArn.substring(prefix.length());
+    }
+
+    /** Whether {@code namespaceName} names a namespace in {@code region}; never throws for an unknown name. */
+    public boolean namespaceExists(String namespaceName, String region) {
+        return namespaceName != null && namespaces.get(storageKey(region, namespaceName)).isPresent();
+    }
+
+    /** The workgroup called {@code workgroupName} in {@code region}, empty when there is none. */
+    public Optional<Workgroup> findWorkgroup(String workgroupName, String region) {
+        return workgroupName == null ? Optional.empty() : workgroups.get(storageKey(region, workgroupName));
+    }
+
+    /** The namespace called {@code namespaceName} in {@code region}, empty when there is none. */
+    public Optional<Namespace> findNamespace(String namespaceName, String region) {
+        return namespaceName == null ? Optional.empty() : namespaces.get(storageKey(region, namespaceName));
+    }
+
+    /** Like {@link #findNamespace}, for a background sweep that acts for an account other than the ambient one. */
+    Optional<Namespace> findNamespaceForAccount(String accountId, String namespaceName, String region) {
+        return namespaceName == null ? Optional.empty()
+                : namespaces.getForAccount(accountId, storageKey(region, namespaceName));
+    }
+
+    /** The snapshot called {@code snapshotName} in {@code region}, empty when there is none. */
+    public Optional<RedshiftServerlessSnapshot> findSnapshot(String snapshotName, String region) {
+        return snapshotName == null ? Optional.empty() : snapshots.get(storageKey(region, snapshotName));
+    }
+
+    /**
+     * Changes a snapshot's retention. An omitted period leaves the snapshot as it is, and -1 makes
+     * it indefinite. {@code snapshotRemainingDays} keeps counting from the creation time, because
+     * the snapshot carries no separate retention start.
+     */
+    public synchronized RedshiftServerlessSnapshot updateSnapshot(String snapshotName, Integer retentionPeriod,
+                                                                  String region) {
+        RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot(getSnapshot(snapshotName, region));
+        requireAvailableSnapshot(snapshot);
+        if (retentionPeriod != null) {
+            snapshot.setRetentionPeriod(validateRetentionPeriod(retentionPeriod));
+            snapshots.put(storageKey(region, snapshotName), snapshot);
+        }
+        return snapshot;
+    }
+
+    public synchronized RedshiftServerlessSnapshot deleteSnapshot(String snapshotName, String region) {
+        RedshiftServerlessSnapshot deleted = getSnapshot(snapshotName, region);
+        requireAvailableSnapshot(deleted);
+        snapshots.delete(storageKey(region, snapshotName));
+        trustedDump(deleted, region).ifPresent(RedshiftServerlessService::deleteDumpQuietly);
+        return deleted;
+    }
+
+    /** The monitor also protects restore, retention changes and snapshot creation from cleanup. */
+    synchronized void expireSnapshots(Instant now,
+            Consumer<AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot>> deletePolicy) {
+        for (AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot> entry
+                : snapshots.scanAllAccountEntries(key -> true)) {
+            try {
+                // The scan assigns unprefixed entries to the default account; never claim them for another account.
+                RedshiftServerlessSnapshot snapshot = snapshots.getForAccountMigratingLegacy(
+                        entry.accountId(), entry.key(), legacy -> snapshots
+                                .getLegacyForAccount(entry.accountId(), entry.key()).isPresent())
+                        .orElse(null);
+                if (snapshot == null || !isExpired(snapshot, now)) {
+                    continue;
+                }
+                RedshiftServerlessSnapshot deleting = new RedshiftServerlessSnapshot(snapshot);
+                deleting.setStatus("DELETED");
+                snapshots.putAllAtomicallyForAccount(entry.accountId(), Map.of(entry.key(), deleting));
+                deleteExpiredDump(deleting, entry.accountId(), regionOf(entry.key()));
+                deletePolicy.accept(new AccountAwareStorageBackend.AccountEntry<>(
+                        entry.accountId(), entry.key(), deleting));
+                snapshots.deleteAllAtomicallyForAccounts(Map.of(entry.accountId(), Set.of(entry.key())));
+            } catch (IOException | RuntimeException e) {
+                LOG.warnv(e, "Could not expire Redshift Serverless snapshot {0} for account {1}; will retry",
+                        entry.key(), entry.accountId());
+            }
+        }
+    }
+
+    /**
+     * Copies the snapshots each rule has not yet carried to its destination Region. One snapshot
+     * failing is logged and retried by the next sweep without stopping the rest. The monitor keeps
+     * a copy from racing a delete, a retention change or an expiration of the same snapshot.
+     */
+    synchronized void copySnapshots(Instant now, List<CopyRule> rules) {
+        for (CopyRule rule : rules) {
+            boolean sameNamespace = findNamespaceForAccount(rule.accountId(), rule.namespaceName(), rule.sourceRegion())
+                    .map(namespace -> Objects.equals(namespace.getNamespaceId(), rule.namespaceId())).orElse(false);
+            if (!sameNamespace) {
+                continue;
+            }
+            for (RedshiftServerlessSnapshot snapshot : snapshots.scanForAccount(rule.accountId(),
+                    key -> key.startsWith(rule.sourceRegion() + "::"))) {
+                if (!isCopyCandidate(snapshot, rule)) {
+                    continue;
+                }
+                try {
+                    copyToRegion(snapshot, rule, now);
+                } catch (IOException | RuntimeException e) {
+                    // Without the stack: a snapshot that cannot be copied fails again every sweep.
+                    LOG.warnv("Could not copy Redshift Serverless snapshot {0} of account {1} to {2}; will retry: {3}",
+                            snapshot.getSnapshotName(), rule.accountId(), rule.destinationRegion(), e.getMessage());
+                    LOG.debugv(e, "Copy failure of snapshot {0}", snapshot.getSnapshotName());
+                }
+            }
+        }
+    }
+
+    /** A copy is never copied on, and a snapshot taken before the configuration existed stays where it is. */
+    private static boolean isCopyCandidate(RedshiftServerlessSnapshot snapshot, CopyRule rule) {
+        return "AVAILABLE".equals(snapshot.getStatus())
+                && snapshot.getCopiedFromSnapshotArn() == null
+                && rule.namespaceName().equals(snapshot.getNamespaceName())
+                && !snapshot.getCopiedToRegions().contains(rule.destinationRegion())
+                && (rule.createdAt() == null || (snapshot.getSnapshotCreateTime() != null
+                        && !snapshot.getSnapshotCreateTime().isBefore(rule.createdAt())));
+    }
+
+    private void copyToRegion(RedshiftServerlessSnapshot source, CopyRule rule, Instant now) throws IOException {
+        String name = source.getSnapshotName();
+        String destinationKey = storageKey(rule.destinationRegion(), name);
+        RedshiftServerlessSnapshot existing = snapshots.getForAccount(rule.accountId(), destinationKey).orElse(null);
+        if (existing != null) {
+            boolean copyOfThisName = source.getSnapshotArn().equals(existing.getCopiedFromSnapshotArn());
+            if (copyOfThisName && Objects.equals(source.getSnapshotCreateTime(),
+                    existing.getCopiedFromSnapshotCreateTime())) {
+                // A previous sweep committed this very copy and died before marking the source.
+                markCopied(rule, name);
+                return;
+            }
+            if (!copyOfThisName) {
+                // The name belongs to a snapshot someone else made there, which the copy must not overwrite.
+                LOG.warnv("Snapshot {0} of account {1} was not copied to {2}: a snapshot of that name is already there",
+                        name, rule.accountId(), rule.destinationRegion());
+                markCopied(rule, name);
+                return;
+            }
+            // Otherwise it is the copy of an earlier snapshot that had the same name: replace it.
+        }
+
+        Path destinationDump = copyDump(source, rule);
+        RedshiftServerlessSnapshot copy = new RedshiftServerlessSnapshot(source);
+        copy.setRegion(rule.destinationRegion());
+        copy.setSnapshotArn(AwsArnUtils.Arn.of("redshift-serverless", rule.destinationRegion(), rule.accountId(),
+                "snapshot/" + name).toString());
+        copy.setStatus("AVAILABLE");
+        copy.setSnapshotCreateTime(now);
+        copy.setKmsKeyId(rule.destinationKmsKeyId());
+        copy.setRetentionPeriod(rule.retentionPeriod() == null || rule.retentionPeriod() == -1
+                ? null : rule.retentionPeriod());
+        copy.setSqlDump(destinationDump == null ? null : destinationDump.toString());
+        copy.setCopiedFromSnapshotArn(source.getSnapshotArn());
+        copy.setCopiedFromSnapshotCreateTime(source.getSnapshotCreateTime());
+        copy.setCopiedToRegions(Set.of());
+        try {
+            snapshots.putAllAtomicallyForAccount(rule.accountId(), Map.of(destinationKey, copy));
+        } catch (RuntimeException e) {
+            if (destinationDump != null) {
+                deleteDumpQuietly(destinationDump);
+            }
+            throw e;
+        }
+        if (existing != null) {
+            // Only now that the new record is saved is the replaced copy's dump unreferenced.
+            deleteReplacedDump(existing, rule, destinationDump);
+        }
+        markCopied(rule, name);
+    }
+
+    /** Removes the dump of a replaced copy, if it still lies in the rule account's destination directory. */
+    private void deleteReplacedDump(RedshiftServerlessSnapshot replaced, CopyRule rule, Path keep) {
+        String stored = replaced.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return;
+        }
+        Path old = Paths.get(stored).toAbsolutePath().normalize();
+        if (old.startsWith(dumpDir(rule.accountId(), rule.destinationRegion())) && !old.equals(keep)) {
+            deleteDumpQuietly(old);
+        }
+    }
+
+    /** Copies the source dump beside the destination snapshot, or returns {@code null} for a metadata-only snapshot. */
+    private Path copyDump(RedshiftServerlessSnapshot source, CopyRule rule) throws IOException {
+        String stored = source.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return null;
+        }
+        return SnapshotDumpCopier.copy(Paths.get(stored), dumpDir(rule.accountId(), rule.sourceRegion()),
+                dumpDir(rule.accountId(), rule.destinationRegion()));
+    }
+
+    /** Records that the snapshot has been carried to the rule's Region, so a deleted or expired copy stays gone. */
+    private void markCopied(CopyRule rule, String snapshotName) {
+        String key = storageKey(rule.sourceRegion(), snapshotName);
+        RedshiftServerlessSnapshot current = snapshots.getForAccount(rule.accountId(), key).orElse(null);
+        if (current == null || !"AVAILABLE".equals(current.getStatus())) {
+            return;
+        }
+        RedshiftServerlessSnapshot marked = new RedshiftServerlessSnapshot(current);
+        marked.getCopiedToRegions().add(rule.destinationRegion());
+        snapshots.putAllAtomicallyForAccount(rule.accountId(), Map.of(key, marked));
+    }
+
+    private static boolean isExpired(RedshiftServerlessSnapshot snapshot, Instant now) {
+        if ("DELETED".equals(snapshot.getStatus())) {
+            return true;
+        }
+        Integer retention = snapshot.getRetentionPeriod();
+        return "AVAILABLE".equals(snapshot.getStatus()) && retention != null && retention > 0
+                && snapshot.getSnapshotCreateTime() != null
+                && !now.isBefore(snapshot.getSnapshotCreateTime().plus(retention, ChronoUnit.DAYS));
+    }
+
+    private void deleteExpiredDump(RedshiftServerlessSnapshot snapshot, String accountId, String region)
+            throws IOException {
+        String stored = snapshot.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return;
+        }
+        Path dump = Paths.get(stored).toAbsolutePath().normalize();
+        Path directory = dumpDir(accountId, region);
+        if (!dump.startsWith(directory) || dump.equals(directory)) {
+            throw new IOException("Snapshot dump is outside its account and Region directory: " + dump);
+        }
+        Files.deleteIfExists(dump);
+    }
+
+    private static void requireAvailableSnapshot(RedshiftServerlessSnapshot snapshot) {
+        if (!"AVAILABLE".equals(snapshot.getStatus())) {
+            throw ServerlessSupport.conflict("The snapshot " + snapshot.getSnapshotName() + " is not available.");
+        }
+    }
+
+    /**
+     * Lists the Region's snapshots, narrowed by every filter that is supplied: the namespace by
+     * name or ARN, the owning account, and a creation-time window that includes both ends.
+     */
+    public PaginatedResult<RedshiftServerlessSnapshot> listSnapshots(String namespaceName, String namespaceArn,
+                                                                     String ownerAccount, Instant startTime,
+                                                                     Instant endTime, String region,
+                                                                     Integer maxResults, String nextToken) {
+        List<RedshiftServerlessSnapshot> all = snapshots.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(snapshot -> namespaceName == null || namespaceName.isBlank()
+                        || namespaceName.equals(snapshot.getNamespaceName()))
+                .filter(snapshot -> namespaceArn == null || namespaceArn.isBlank()
+                        || namespaceArn.equals(snapshot.getNamespaceArn()))
+                .filter(snapshot -> ownerAccount == null || ownerAccount.isBlank()
+                        || ownerAccount.equals(snapshot.getOwnerAccount()))
+                .filter(snapshot -> startTime == null || !snapshot.getSnapshotCreateTime().isBefore(startTime))
+                .filter(snapshot -> endTime == null || !snapshot.getSnapshotCreateTime().isAfter(endTime))
+                .toList();
+        return Pagination.paginate(all, RedshiftServerlessSnapshot::getSnapshotName, maxResults, nextToken,
+                100, 100, "ValidationException");
+    }
+
+    /**
+     * Restores into the already-existing namespace and workgroup in {@code region} and never
+     * creates either, mirroring real {@code RestoreFromSnapshot}. A snapshot that carries a dump
+     * replaces the workgroup's database contents with it; a metadata-only snapshot leaves the
+     * database untouched and only reports the namespace {@code AVAILABLE}.
+     */
+    public synchronized RestoreResult restoreFromSnapshot(String namespaceName, String workgroupName,
+                                                          String snapshotName, String ownerAccount,
+                                                          String region) {
+        return restoreFromSnapshot(namespaceName, workgroupName, snapshotName, ownerAccount, null, null, region);
+    }
+
+    public synchronized RestoreResult restoreFromSnapshot(String namespaceName, String workgroupName,
+                                                          String snapshotName, String ownerAccount,
+                                                          Boolean manageAdminPassword,
+                                                          String adminPasswordSecretKmsKeyId, String region) {
+        validateManagedPassword(manageAdminPassword, null, adminPasswordSecretKmsKeyId);
+        validateNamespaceName(namespaceName);
+        RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
+        requireAvailableSnapshot(snapshot);
+        if (ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(snapshot.getOwnerAccount())) {
+            throw snapshotNotFound(snapshotName);
+        }
+        Workgroup workgroup = getWorkgroup(workgroupName, region);
+        if (!namespaceName.equals(workgroup.getNamespaceName())) {
+            throw ServerlessSupport.validation("The workgroup " + workgroupName + " does not belong to the namespace "
+                    + namespaceName + ".");
+        }
+        Namespace namespace = getNamespace(namespaceName, region);
+        Runnable restoreCredentials = () -> restoreSnapshotCredentials(namespace, snapshot, manageAdminPassword,
+                adminPasswordSecretKmsKeyId, region);
+        if (snapshot.getSqlDump() != null && hasLiveRuntime(workgroup)) {
+            Path dump = trustedDump(snapshot, region).filter(Files::exists).orElseThrow(() -> new AwsException(
+                    "InternalServerException", "The data of snapshot " + snapshotName + " is no longer available.",
+                    500));
+            runtime.restoreSnapshot(workgroups.accountId(), region, workgroupName, workgroup.getMasterUsername(),
+                    namespace.getDbName(), dump, restoreCredentials);
+        } else {
+            restoreCredentials.run();
+        }
+        return new RestoreResult(getNamespace(namespaceName, region), snapshot);
+    }
+
+    private void restoreSnapshotCredentials(Namespace namespace, RedshiftServerlessSnapshot snapshot,
+                                            Boolean manageAdminPassword, String adminPasswordSecretKmsKeyId,
+                                            String region) {
+        if (Boolean.TRUE.equals(manageAdminPassword)) {
+            applyNamespaceUpdate(namespace.getNamespaceName(), null, null, null, null, null, null,
+                    true, adminPasswordSecretKmsKeyId, region, false, true);
+        } else if (snapshot.getAdminUserPassword() != null) {
+            applyNamespaceUpdate(namespace.getNamespaceName(), snapshot.getAdminUsername(), snapshot.getAdminUserPassword(),
+                    null, null, null, null, false, null, region, false, false);
+        } else {
+            Namespace restored = new Namespace(namespace);
+            restored.setStatus("AVAILABLE");
+            namespaces.put(storageKey(region, namespace.getNamespaceName()), restored);
+        }
+    }
+
+    public record RestoreResult(Namespace namespace, RedshiftServerlessSnapshot snapshot) {}
+
+    public Map<String, String> listTagsForResource(String resourceArn, String region) {
+        requireResourceArn(resourceArn);
+        Optional<Namespace> namespace = namespaceByArn(resourceArn, region);
+        if (namespace.isPresent()) {
+            return new LinkedHashMap<>(namespace.get().getTags());
+        }
+        Optional<Workgroup> workgroup = workgroupByArn(resourceArn, region);
+        if (workgroup.isPresent()) {
+            return new LinkedHashMap<>(workgroup.get().getTags());
+        }
+        return new LinkedHashMap<>(snapshotByArn(resourceArn, region).orElseThrow(
+                () -> resourceNotFound(resourceArn)).getTags());
+    }
+
+    public synchronized Map<String, String> tagResource(String resourceArn, Map<String, String> tags, String region) {
+        return retag(resourceArn, region, tagMap -> {
+            if (tags != null) {
+                tagMap.putAll(tags);
+            }
+        });
+    }
+
+    public synchronized Map<String, String> untagResource(String resourceArn, List<String> tagKeys, String region) {
+        requireResourceArn(resourceArn);
+        if (namespaceByArn(resourceArn, region).isEmpty() && workgroupByArn(resourceArn, region).isEmpty()
+                && snapshotByArn(resourceArn, region).isEmpty()) {
+            throw resourceNotFound(resourceArn);
+        }
+        if (tagKeys == null) {
+            throw ServerlessSupport.validation("tagKeys is required.");
+        }
+        return retag(resourceArn, region, tagMap -> tagKeys.forEach(tagMap::remove));
+    }
+
+    /**
+     * Redshift Serverless tags whatever the ARN names, so the lookup is by ARN rather than by name.
+     * Namespaces, workgroups and snapshots are the taggable resources in Floci, so any other Redshift Serverless
+     * ARN resolves to nothing and is reported as absent rather than as an unsupported resource type.
+     * The change is applied to a copy and stored, never to the instance readers may hold.
+     */
+    private Map<String, String> retag(String resourceArn, String region, Consumer<Map<String, String>> change) {
+        requireResourceArn(resourceArn);
+        Optional<Namespace> namespace = namespaceByArn(resourceArn, region);
+        if (namespace.isPresent()) {
+            Namespace updated = new Namespace(namespace.get());
+            change.accept(updated.getTags());
+            namespaces.put(storageKey(region, updated.getNamespaceName()), updated);
+            return new LinkedHashMap<>(updated.getTags());
+        }
+        Optional<Workgroup> workgroup = workgroupByArn(resourceArn, region);
+        if (workgroup.isPresent()) {
+            Workgroup updated = new Workgroup(workgroup.get());
+            change.accept(updated.getTags());
+            workgroups.put(storageKey(region, updated.getWorkgroupName()), updated);
+            return new LinkedHashMap<>(updated.getTags());
+        }
+        RedshiftServerlessSnapshot snapshot = snapshotByArn(resourceArn, region)
+                .orElseThrow(() -> resourceNotFound(resourceArn));
+        RedshiftServerlessSnapshot updated = new RedshiftServerlessSnapshot(snapshot);
+        change.accept(updated.getTags());
+        snapshots.put(storageKey(region, updated.getSnapshotName()), updated);
+        return new LinkedHashMap<>(updated.getTags());
+    }
+
+    private Optional<RedshiftServerlessSnapshot> snapshotByArn(String resourceArn, String region) {
+        return snapshots.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(snapshot -> resourceArn.equals(snapshot.getSnapshotArn()))
+                .findFirst();
+    }
+
+    private Optional<Namespace> namespaceByArn(String resourceArn, String region) {
+        return namespaces.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(namespace -> resourceArn.equals(namespace.getNamespaceArn()))
+                .findFirst();
+    }
+
+    public Optional<Workgroup> findWorkgroupByArn(String resourceArn, String region) {
+        return workgroupByArn(resourceArn, region);
+    }
+
+    /** ARNs of every workgroup in the Region, for callers that test many resources against them at once. */
+    public Set<String> workgroupArns(String region) {
+        return workgroups.scan(key -> key.startsWith(region + "::")).stream()
+                .map(Workgroup::getWorkgroupArn)
+                .collect(Collectors.toSet());
+    }
+
+    private Optional<Workgroup> workgroupByArn(String resourceArn, String region) {
+        return workgroups.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(workgroup -> resourceArn.equals(workgroup.getWorkgroupArn()))
+                .findFirst();
+    }
+
+    private static void requireResourceArn(String resourceArn) {
+        if (resourceArn == null || resourceArn.isBlank()) {
+            throw ServerlessSupport.validation("resourceArn is required.");
+        }
+    }
+
+    private static AwsException resourceNotFound(String resourceArn) {
+        return ServerlessSupport.notFound("The resource " + resourceArn + " was not found.");
+    }
+
+    public synchronized Workgroup createWorkgroup(String workgroupName, String namespaceName,
+                                                  WorkgroupSettings settings, Map<String, String> tags,
+                                                  String region) {
+        validateWorkgroupName(workgroupName);
+        validateSettings(settings);
+        Namespace namespace = getNamespace(namespaceName, region);
+        String key = storageKey(region, workgroupName);
+        if (workgroups.get(key).isPresent()) {
+            throw ServerlessSupport.conflict("The workgroup " + workgroupName + " already exists.");
+        }
+        if (workgroupOf(namespaceName, region).isPresent()) {
+            throw ServerlessSupport.conflict("The namespace " + namespaceName + " already has a workgroup.");
+        }
+
+        Workgroup workgroup = new Workgroup();
+        workgroup.setWorkgroupName(workgroupName);
+        workgroup.setWorkgroupId(UUID.randomUUID().toString());
+        workgroup.setWorkgroupArn(regionResolver.buildArn("redshift-serverless", region,
+                "workgroup/" + workgroup.getWorkgroupId()));
+        workgroup.setNamespaceName(namespaceName);
+        workgroup.setBaseCapacity(orDefault(settings.baseCapacity(), DEFAULT_BASE_CAPACITY));
+        workgroup.setMaxCapacity(settings.maxCapacity());
+        workgroup.setEnhancedVpcRouting(Boolean.TRUE.equals(settings.enhancedVpcRouting()));
+        workgroup.setPubliclyAccessible(Boolean.TRUE.equals(settings.publiclyAccessible()));
+        workgroup.setExtraComputeForAutomaticOptimization(
+                Boolean.TRUE.equals(settings.extraComputeForAutomaticOptimization()));
+        workgroup.setConfigParameters(copyOf(settings.configParameters()));
+        workgroup.setSecurityGroupIds(copyOf(settings.securityGroupIds()));
+        workgroup.setSubnetIds(copyOf(settings.subnetIds()));
+        workgroup.setPort(orDefault(settings.port(), DEFAULT_PORT));
+        workgroup.setIpAddressType(orDefault(settings.ipAddressType(), DEFAULT_IP_ADDRESS_TYPE));
+        workgroup.setTrackName(orDefault(settings.trackName(), DEFAULT_TRACK_NAME));
+        workgroup.setPricePerformanceTarget(settings.pricePerformanceTarget() != null
+                ? settings.pricePerformanceTarget() : new PricePerformanceTarget("DISABLED", null));
+        workgroup.setStatus("AVAILABLE");
+        workgroup.setCreationDate(Instant.now());
+        workgroup.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
+        workgroup.setEndpoint(endpoints.allocate());
+        try {
+            startRuntime(workgroups.accountId(), region, workgroup, ensureAdminPassword(namespace, region), false);
+            workgroups.put(key, workgroup);
+        } catch (RuntimeException e) {
+            // The runtime may have started before the failure (a failed put), so tear it down; a
+            // runtime that failed to start has already rolled itself back and this is then a no-op.
+            try {
+                runtime.stop(workgroups.accountId(), region, workgroupName);
+            } catch (RuntimeException stopFailure) {
+                LOG.warnv(stopFailure, "Could not stop the runtime of workgroup {0} after a failed create",
+                        workgroupName);
+                e.addSuppressed(stopFailure);
+            }
+            endpoints.release(workgroup.getEndpoint());
+            throw e;
+        }
+        return workgroup;
+    }
+
+    public Workgroup getWorkgroup(String workgroupName, String region) {
+        validateWorkgroupName(workgroupName);
+        return workgroups.get(storageKey(region, workgroupName))
+                .orElseThrow(() -> workgroupNotFound(workgroupName));
+    }
+
+    public PaginatedResult<Workgroup> listWorkgroups(String region, Integer maxResults, String nextToken) {
+        List<Workgroup> all = workgroups.scan(key -> key.startsWith(region + "::"));
+        return Pagination.paginate(all, Workgroup::getWorkgroupName, maxResults, nextToken,
+                100, 100, "ValidationException");
+    }
+
+    /**
+     * Applies the supplied settings to a copy and stores that. A {@code trackName} that differs from
+     * the current one is recorded as {@code pendingTrackName} and the current track is left alone,
+     * as AWS switches tracks only on the next release. {@code port} updates the configured value
+     * that is echoed; the endpoint keeps the port the emulator allocated.
+     */
+    public synchronized Workgroup updateWorkgroup(String workgroupName, WorkgroupSettings settings, String region) {
+        validateSettings(settings);
+        Workgroup updated = new Workgroup(getWorkgroup(workgroupName, region));
+        if (settings.baseCapacity() != null) {
+            updated.setBaseCapacity(settings.baseCapacity());
+        }
+        if (settings.maxCapacity() != null) {
+            updated.setMaxCapacity(settings.maxCapacity());
+        }
+        if (settings.enhancedVpcRouting() != null) {
+            updated.setEnhancedVpcRouting(settings.enhancedVpcRouting());
+        }
+        if (settings.publiclyAccessible() != null) {
+            updated.setPubliclyAccessible(settings.publiclyAccessible());
+        }
+        if (settings.extraComputeForAutomaticOptimization() != null) {
+            updated.setExtraComputeForAutomaticOptimization(settings.extraComputeForAutomaticOptimization());
+        }
+        if (settings.configParameters() != null) {
+            updated.setConfigParameters(copyOf(settings.configParameters()));
+        }
+        if (settings.securityGroupIds() != null) {
+            updated.setSecurityGroupIds(copyOf(settings.securityGroupIds()));
+        }
+        if (settings.subnetIds() != null) {
+            updated.setSubnetIds(copyOf(settings.subnetIds()));
+        }
+        if (settings.port() != null) {
+            updated.setPort(settings.port());
+        }
+        if (settings.ipAddressType() != null) {
+            updated.setIpAddressType(settings.ipAddressType());
+        }
+        if (settings.pricePerformanceTarget() != null) {
+            updated.setPricePerformanceTarget(settings.pricePerformanceTarget());
+        }
+        if (settings.trackName() != null) {
+            if (settings.trackName().equals(updated.getTrackName())) {
+                updated.setPendingTrackName(null);
+            } else {
+                updated.setPendingTrackName(settings.trackName());
+            }
+        }
+        workgroups.put(storageKey(region, workgroupName), updated);
+        return updated;
+    }
+
+    public synchronized Workgroup deleteWorkgroup(String workgroupName, String region) {
+        Workgroup deleted = new Workgroup(getWorkgroup(workgroupName, region));
+        // The proxy goes first and its failure aborts the delete: a listener that could not be closed
+        // keeps its port, so the workgroup must stay on record and the call can be retried.
+        try {
+            runtime.stop(workgroups.accountId(), region, workgroupName);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Failed to stop the runtime of workgroup {0}", workgroupName);
+            throw new AwsException("InternalServerException",
+                    "Failed to stop workgroup " + workgroupName + "; it was not deleted", 500);
+        }
+        workgroups.delete(storageKey(region, workgroupName));
+        endpoints.release(deleted.getEndpoint());
+        deleted.setStatus("DELETING");
+        return deleted;
+    }
+
+    /**
+     * Resolves a workgroup name or workgroup ARN, as the Data API accepts either, to the live
+     * connection details of its backend.
+     */
+    public WorkgroupTarget getWorkgroupTarget(String nameOrArn, String region) {
+        Workgroup workgroup = resolveWorkgroup(nameOrArn, region);
+        Namespace namespace = getNamespace(workgroup.getNamespaceName(), region);
+        if (workgroup.getRuntimeHost() == null || workgroup.getRuntimePort() <= 0
+                || namespace.getAdminUserPassword() == null) {
+            throw ServerlessSupport.validation("Workgroup runtime is not available for Data API execution.");
+        }
+        return new WorkgroupTarget(workgroup.getWorkgroupArn(), workgroup.getWorkgroupName(),
+                workgroup.getRuntimeHost(), workgroup.getRuntimePort(), namespace.getDbName(),
+                workgroup.getMasterUsername(), namespace.getAdminUserPassword(), adminUserOf(namespace),
+                namespace.getIamRoles(), namespace.getAdminPasswordSecretArn(), workgroup.getEndpoint());
+    }
+
+    /** Connection details of a workgroup's backend; {@code adminUsername} is the name clients log in with. */
+    public record WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
+                                  String masterUsername, String masterPassword, String adminUsername,
+                                  List<String> iamRoleArns, String adminPasswordSecretArn, Endpoint endpoint) {
+        public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
+                               String masterUsername, String masterPassword, String adminUsername,
+                               List<String> iamRoleArns, String adminPasswordSecretArn) {
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
+                    iamRoleArns, adminPasswordSecretArn, null);
+        }
+
+        public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
+                               String masterUsername, String masterPassword, String adminUsername,
+                               List<String> iamRoleArns) {
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
+                    iamRoleArns, null, null);
+        }
+
+        public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
+                               String masterUsername, String masterPassword, String adminUsername) {
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
+                    List.of(), null, null);
+        }
+
+        public WorkgroupTarget {
+            iamRoleArns = iamRoleArns == null ? List.of() : List.copyOf(iamRoleArns);
+        }
+    }
+
+    /** The namespace a namespace ARN names in the Region, empty when there is none. */
+    public Optional<Namespace> findNamespaceByArn(String namespaceArn, String region) {
+        return namespaceArn == null ? Optional.empty() : namespaceByArn(namespaceArn, region);
+    }
+
+    /**
+     * The live connection details of the workgroup that serves the namespace a namespace ARN names. A
+     * namespace has at most one workgroup, so this is how a zero-ETL integration that targets a
+     * namespace reaches its database.
+     */
+    public WorkgroupTarget getNamespaceWorkgroupTarget(String namespaceArn, String region) {
+        Namespace namespace = findNamespaceByArn(namespaceArn, region)
+                .orElseThrow(() -> resourceNotFound(namespaceArn));
+        Workgroup workgroup = workgroups.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(candidate -> namespace.getNamespaceName().equals(candidate.getNamespaceName()))
+                .findFirst()
+                .orElseThrow(() -> ServerlessSupport.validation(
+                        "Namespace " + namespace.getNamespaceName() + " has no workgroup."));
+        return getWorkgroupTarget(workgroup.getWorkgroupName(), region);
+    }
+
+    /**
+     * Sets, or with {@code null} removes, the Redshift resource policy of the namespace an ARN names,
+     * and returns the namespace; empty when the Region holds no such namespace.
+     */
+    public synchronized Optional<Namespace> setNamespaceResourcePolicy(String namespaceArn, String region,
+                                                                       String policy) {
+        Optional<Namespace> namespace = findNamespaceByArn(namespaceArn, region);
+        namespace.ifPresent(found -> {
+            found.setResourcePolicy(policy);
+            namespaces.put(storageKey(region, found.getNamespaceName()), found);
+        });
+        return namespace;
+    }
+
+    /** The workgroup a workgroup name or ARN names in the Region, as the Data API reads either; empty when none. */
+    public Optional<Workgroup> findWorkgroupByNameOrArn(String nameOrArn, String region) {
+        return AwsArnUtils.looksLikeArn(nameOrArn) ? workgroupByArn(nameOrArn, region)
+                : findWorkgroup(nameOrArn, region);
+    }
+
+    private Workgroup resolveWorkgroup(String nameOrArn, String region) {
+        if (nameOrArn == null || nameOrArn.isBlank()) {
+            throw ServerlessSupport.validation("workgroupName is required.");
+        }
+        if (!AwsArnUtils.looksLikeArn(nameOrArn)) {
+            validateWorkgroupName(nameOrArn);
+        }
+        return findWorkgroupByNameOrArn(nameOrArn, region).orElseThrow(() -> workgroupNotFound(nameOrArn));
+    }
+
+    /**
+     * Mints a temporary credential for the caller's database user. It is master-equivalent on the
+     * backend leg, exactly like GetClusterCredentials, so the user name is nominal.
+     */
+    public TempCredential getCredentials(String workgroupName, String dbName, Integer durationSeconds,
+                                         String dbUser, String region) {
+        Workgroup workgroup = resolveWorkgroup(workgroupName, region);
+        Namespace namespace = getNamespace(workgroup.getNamespaceName(), region);
+        if (dbName != null && !dbName.equals(namespace.getDbName())) {
+            throw ServerlessSupport.validation("dbName must be " + namespace.getDbName() + ", the only database in this workgroup.");
+        }
+        int duration = durationSeconds == null ? DEFAULT_CREDENTIAL_DURATION_SECONDS : durationSeconds;
+        if (duration < MIN_CREDENTIAL_DURATION_SECONDS || duration > MAX_CREDENTIAL_DURATION_SECONDS) {
+            throw ServerlessSupport.validation("durationSeconds must be between " + MIN_CREDENTIAL_DURATION_SECONDS + " and "
+                    + MAX_CREDENTIAL_DURATION_SECONDS + ".");
+        }
+        if (workgroup.getRuntimeHost() == null) {
+            throw ServerlessSupport.validation("Workgroup runtime is not available.");
+        }
+        return runtime.issueCredential(workgroups.accountId(), region, workgroup.getWorkgroupName(), dbUser,
+                duration);
+    }
+
+    private Namespace ensureAdminPassword(Namespace namespace, String region) {
+        if (namespace.getAdminUserPassword() != null) {
+            return namespace;
+        }
+        Namespace withPassword = new Namespace(namespace);
+        withPassword.setAdminUserPassword(runtime.generatePassword());
+        namespaces.put(storageKey(region, namespace.getNamespaceName()), withPassword);
+        return withPassword;
+    }
+
+    private void applyNewAdminPassword(Namespace namespace, String newPassword, String region) {
+        Optional<Workgroup> attached = workgroupOf(namespace.getNamespaceName(), region);
+        if (attached.isEmpty() || attached.get().getRuntimeHost() == null) {
+            return;
+        }
+        try {
+            runtime.changeMasterPassword(workgroups.accountId(), region, attached.get().getWorkgroupName(),
+                    attached.get().getMasterUsername(), namespace.getDbName(), namespace.getAdminUserPassword(),
+                    newPassword);
+        } catch (AwsException e) {
+            if ("InvalidParameterValue".equals(e.getErrorCode())) {
+                throw ServerlessSupport.validation(e.getMessage());
+            }
+            throw e;
+        }
+    }
+
+    private void restoreAdminPassword(Namespace previous, String region) {
+        Optional<Workgroup> attached = workgroupOf(previous.getNamespaceName(), region);
+        if (attached.isEmpty() || attached.get().getRuntimeHost() == null
+                || previous.getAdminUserPassword() == null) {
+            return;
+        }
+        runtime.restoreMasterPassword(workgroups.accountId(), region, attached.get().getWorkgroupName(),
+                attached.get().getMasterUsername(), previous.getDbName(), previous.getAdminUserPassword());
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private RedshiftServerlessAdminSecrets requireAdminSecrets() {
+        if (adminSecrets == null) {
+            throw new AwsException("InternalServerException", "Secrets Manager is unavailable.", 500);
+        }
+        return adminSecrets;
+    }
+
+    private static void validateManagedPassword(Boolean manage, String password, String secretKey) {
+        if (Boolean.TRUE.equals(manage) && password != null) {
+            throw ServerlessSupport.validation("adminUserPassword cannot be supplied when manageAdminPassword is true.");
+        }
+        if (secretKey != null) {
+            if (!Boolean.TRUE.equals(manage)) {
+                throw ServerlessSupport.validation("adminPasswordSecretKmsKeyId requires manageAdminPassword to be true.");
+            }
+            ServerlessSupport.requireText(secretKey, "adminPasswordSecretKmsKeyId");
+        }
+    }
+
+    private static void compensate(Runnable action, RuntimeException failure, String operation) {
+        try {
+            action.run();
+        } catch (RuntimeException rollbackFailure) {
+            LOG.errorv(rollbackFailure, "Could not {0}", operation);
+            if (rollbackFailure != failure) {
+                failure.addSuppressed(rollbackFailure);
+            }
+        }
+    }
+
+    private Optional<Workgroup> workgroupOf(String namespaceName, String region) {
+        return workgroups.scan(key -> key.startsWith(region + "::")).stream()
+                .filter(workgroup -> namespaceName.equals(workgroup.getNamespaceName()))
+                .findFirst();
+    }
+
+    @Override
+    public void clear() {
+        for (AccountAwareStorageBackend.AccountEntry<Workgroup> entry : workgroups.scanAllAccountEntries(key -> true)) {
+            try {
+                runtime.stop(entry.accountId(), regionOf(entry.key()), entry.value().getWorkgroupName());
+                endpoints.release(entry.value().getEndpoint());
+            } catch (RuntimeException e) {
+                // The listener may still be bound, so the endpoint stays reserved rather than being
+                // handed to a later cluster or workgroup whose proxy could not bind it.
+                LOG.warnv(e, "Could not stop the runtime of workgroup {0} while clearing state; "
+                        + "its endpoint stays reserved", entry.value().getWorkgroupName());
+            }
+        }
+        namespaces.clear();
+        workgroups.clear();
+        snapshots.clear();
+        deleteDumpTree();
+    }
+
+    /**
+     * Reset empties the stores before it calls {@link #clear()}, so no snapshot is left to name a
+     * dump. Every dump lives under this one directory, copies included.
+     */
+    private void deleteDumpTree() {
+        Path root = Paths.get(config.storage().persistentPath()).resolve("redshift-serverless-dumps")
+                .toAbsolutePath().normalize();
+        if (!Files.isDirectory(root)) {
+            return;
+        }
+        try (Stream<Path> paths = Files.walk(root)) {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(path);
+            }
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not delete the snapshot dump directory {0} while clearing state", root);
+        }
+    }
+
+    private static void requireSnapshotName(String snapshotName) {
+        if (snapshotName == null || snapshotName.isBlank()) {
+            throw ServerlessSupport.validation("snapshotName is required.");
+        }
+    }
+
+    static void validateSnapshotName(String snapshotName) {
+        requireSnapshotName(snapshotName);
+        if (snapshotName.length() < 3 || snapshotName.length() > 255 || !SNAPSHOT_NAME.matcher(snapshotName).matches()) {
+            throw ServerlessSupport.validation("snapshotName must be 3-255 characters of lowercase letters, numbers, and hyphens.");
+        }
+    }
+
+    private static void validateNamespaceName(String namespaceName) {
+        if (namespaceName == null || namespaceName.length() < 3 || namespaceName.length() > 64
+                || !NAMESPACE_NAME.matcher(namespaceName).matches()) {
+            throw ServerlessSupport.validation("namespaceName must be 3-64 characters of lowercase letters, numbers, and hyphens.");
+        }
+        if (RESERVED_WORDS.contains(namespaceName)) {
+            throw ServerlessSupport.validation("namespaceName must not be an Amazon Redshift reserved word.");
+        }
+    }
+
+    private static String validateDbName(String dbName) {
+        if (dbName == null || dbName.isBlank()) {
+            return DEFAULT_DB_NAME;
+        }
+        if (dbName.length() > 127 || !DB_NAME.matcher(dbName).matches()) {
+            throw ServerlessSupport.validation("dbName must start with a letter and be at most 127 characters.");
+        }
+        return dbName;
+    }
+
+    private static List<String> validateLogExports(List<String> logExports) {
+        List<String> validated = copyOf(logExports);
+        for (String logExport : validated) {
+            if (!LOG_EXPORTS.contains(logExport)) {
+                throw ServerlessSupport.validation("logExports must contain only useractivitylog, userlog, and connectionlog.");
+            }
+        }
+        return validated;
+    }
+
+    private static <T> List<T> copyOf(List<T> values) {
+        return values == null ? new ArrayList<>() : new ArrayList<>(values);
+    }
+
+    private static <T> T orDefault(T value, T fallback) {
+        return value != null ? value : fallback;
+    }
+
+    private static void validateWorkgroupName(String workgroupName) {
+        if (workgroupName == null || workgroupName.length() < 3 || workgroupName.length() > 64
+                || !WORKGROUP_NAME.matcher(workgroupName).matches()) {
+            throw ServerlessSupport.validation("workgroupName must be 3-64 characters of lowercase letters, numbers, and hyphens.");
+        }
+    }
+
+    private static void validateSettings(WorkgroupSettings settings) {
+        requirePositive(settings.baseCapacity(), "baseCapacity");
+        requirePositive(settings.maxCapacity(), "maxCapacity");
+        if (settings.port() != null && !isAllowedPort(settings.port())) {
+            throw ServerlessSupport.validation("port must be in the range 5431-5455 or 8191-8215.");
+        }
+        if (settings.ipAddressType() != null && !IP_ADDRESS_TYPES.contains(settings.ipAddressType())) {
+            throw ServerlessSupport.validation("ipAddressType must be ipv4 or dualstack.");
+        }
+        if (settings.trackName() != null && !TRACK_NAMES.contains(settings.trackName())) {
+            throw ServerlessSupport.validation("trackName must be one of " + TRACK_NAMES + ".");
+        }
+        PricePerformanceTarget target = settings.pricePerformanceTarget();
+        if (target != null) {
+            if (target.getStatus() != null && !PERFORMANCE_TARGET_STATUSES.contains(target.getStatus())) {
+                throw ServerlessSupport.validation("pricePerformanceTarget.status must be ENABLED or DISABLED.");
+            }
+            if (target.getLevel() != null && (target.getLevel() < 1 || target.getLevel() > 100)) {
+                throw ServerlessSupport.validation("pricePerformanceTarget.level must be between 1 and 100.");
+            }
+        }
+        if (settings.configParameters() != null) {
+            for (ConfigParameter parameter : settings.configParameters()) {
+                if (parameter.getParameterKey() == null || parameter.getParameterKey().isBlank()) {
+                    throw ServerlessSupport.validation("configParameters entries require a parameterKey.");
+                }
+            }
+        }
+    }
+
+    private static void requirePositive(Integer value, String field) {
+        if (value != null && value < 1) {
+            throw ServerlessSupport.validation(field + " must be a positive integer.");
+        }
+    }
+
+    private static boolean isAllowedPort(int port) {
+        return (port >= 5431 && port <= 5455) || (port >= 8191 && port <= 8215);
+    }
+
+    private static AwsException workgroupNotFound(String workgroupName) {
+        return ServerlessSupport.notFound("The workgroup " + workgroupName + " was not found.");
+    }
+
+    private static String storageKey(String region, String namespaceName) {
+        return region + "::" + namespaceName;
+    }
+
+    private static AwsException notFound(String namespaceName) {
+        return ServerlessSupport.notFound("The namespace " + namespaceName + " was not found.");
+    }
+
+    private static AwsException snapshotNotFound(String snapshotName) {
+        return ServerlessSupport.notFound("The snapshot " + snapshotName + " was not found.");
+    }
+}

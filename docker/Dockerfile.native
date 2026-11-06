@@ -1,0 +1,57 @@
+# Stage 1: Build native executable
+FROM quay.io/quarkus/ubi-quarkus-mandrel-builder-image:jdk-25 AS build
+USER root
+WORKDIR /app
+
+# Install Maven 3.9.x (system Maven is too old for Quarkus 3.31)
+# The SHA-512 is Apache's published checksum for apache-maven-3.9.12-bin.tar.gz.
+RUN curl -fsSL -o /tmp/maven.tar.gz https://archive.apache.org/dist/maven/maven-3/3.9.12/binaries/apache-maven-3.9.12-bin.tar.gz \
+    && echo "0a1be79f02466533fc1a80abbef8796e4f737c46c6574ede5658b110899942a94db634477dfd3745501c80aef9aac0d4f841d38574373f7e2d24cce89d694f70  /tmp/maven.tar.gz" | sha512sum -c - \
+    && tar xzf /tmp/maven.tar.gz -C /opt \
+    && rm /tmp/maven.tar.gz \
+    && ln -sf /opt/apache-maven-3.9.12/bin/mvn /usr/local/bin/mvn
+
+COPY pom.xml .
+RUN mvn dependency:go-offline -B
+COPY src ./src
+
+# Quarkus 3.39 switches on -H:+AOTSingleCallsiteInline for Mandrel 25.0.4+. The generated
+# REST invokers for AwsQueryController.dispatch and AwsJson11Controller.handle are each the
+# single call site of a very large method; inlined, the method outgrows the aarch64
+# conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
+# The flag only exists on Mandrel, so it is passed here rather than in application.yml,
+# the same way the workflow native builds pass it.
+RUN mvn clean package -Dnative -DskipTests -B \
+    -Dquarkus.native.additional-build-args-append=-H:-AOTSingleCallsiteInline
+
+# Stage 2: Minimal runtime. Same base and user setup as Dockerfile.native-package.
+FROM registry.access.redhat.com/ubi9-micro:9.8
+
+WORKDIR /app
+RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd \
+    && mkdir -p /app/data \
+    && chown -R 1001:root /app \
+    && chmod -R g+rwX /app
+VOLUME /app/data
+
+EXPOSE 4566
+
+# Probe every 50 ms while Floci starts, so a wait for "healthy" ends right after startup instead of
+# at the first 5 s check. The start period must stay above the 5 s fallback in healthcheck.sh.
+# Docker Engine before 25.0 ignores --start-interval when it runs the image, and cannot build this file.
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 --start-period=10s --start-interval=50ms CMD ["/usr/local/bin/healthcheck.sh"]
+
+ARG VERSION=latest
+ENV FLOCI_VERSION=${VERSION}
+ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+
+# The builder image has no zlib-static, so native-image links zlib dynamically and the
+# runner needs libz.so.1, which ubi9-micro does not ship. Take it from the builder image.
+COPY --from=build /usr/lib64/libz.so.1 /usr/lib64/libz.so.1
+COPY --chmod=755 --from=build /app/target/*-runner /app/application
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=755 docker/healthcheck.sh /usr/local/bin/
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# A published port needs 0.0.0.0 inside the container, which Floci only accepts with explicit consent.
+CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0", "-Dfloci.security.allow-unsafe-network-exposure=true"]

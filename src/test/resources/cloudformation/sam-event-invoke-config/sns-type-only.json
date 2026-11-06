@@ -1,0 +1,63 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnSuccess": {
+            "Destination": {
+              "Ref": "FnEventInvokeConfigOnSuccessTopic"
+            }
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "Qualifier": "$LATEST"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    },
+    "FnEventInvokeConfigOnSuccessTopic": {
+      "Properties": {},
+      "Type": "AWS::SNS::Topic"
+    },
+    "FnRole": {
+      "Policies": [
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "sns:publish",
+                "Effect": "Allow",
+                "Resource": {
+                  "Ref": "FnEventInvokeConfigOnSuccessTopic"
+                }
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnSuccessSNSPolicy"
+        }
+      ],
+      "Type": "AWS::IAM::Role"
+    }
+  },
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnSuccess": {
+                "Type": "SNS"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

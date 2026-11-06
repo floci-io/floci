@@ -1,0 +1,9 @@
+# Resource addresses allowed to exist ONLY in compat-opentofu/main.tf (not
+# in compat-terraform/main.tf), checked by compat-opentofu-drift-check.py.
+# One "type.name" per line; `#` starts a trailing comment. The reverse
+# direction -- addresses allowed only in compat-terraform -- lives in
+# compat-opentofu-allowlist-tf-only.txt; an address moving from one side to
+# the other must move between these files or CI fails it as unreviewed drift.
+#
+# Empty for now: every currently-accepted gap runs the other way (see
+# compat-opentofu-allowlist-tf-only.txt).

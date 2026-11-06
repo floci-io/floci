@@ -1,0 +1,126 @@
+# AWS managed KMS keys.
+#
+# Every AWS account has a per-region AWS managed key for each service listed here, reachable
+# under the reserved alias/aws/<service> alias. No customer ever creates them, so nothing in a
+# Terraform or CloudFormation template declares them, yet a module that leaves a service's
+# encryption at its default resolves one: a data source reading alias/aws/s3 succeeds against
+# any real account and must succeed here too.
+#
+# One entry mints one key and one alias the first time a region's key or alias namespace is read.
+#
+# ---------------------------------------------------------------------------------------------
+# BEFORE ADDING A LINE: an AWS managed key is not the same thing as an AWS owned key, and only
+# the first belongs here.
+#
+#   AWS MANAGED key  lives in the customer's account. It appears in ListKeys and ListAliases,
+#                    reports KeyManager: AWS, and has an alias/aws/<service> alias. Seed it.
+#
+#   AWS OWNED key    lives in an AWS-owned account, not the customer's. It appears in neither
+#                    ListKeys nor ListAliases, and DescribeKey on alias/aws/<service> fails
+#                    against a real account. Do NOT seed it.
+#
+# Seeding an owned-key service would make DescribeKey succeed here and fail against AWS, which
+# is the worst failure this emulator can produce: a module looks compatible when it is not, and
+# nothing reports the error. A service we failed to seed is a visible gap someone files a bug
+# about; a service we wrongly seeded is a lie nobody notices. So the bar is asymmetric on
+# purpose: add a line only when AWS itself shows or documents the alias aws/<service> as a key
+# selectable or defaulted in *your* account, and prefer dropping an entry to guessing.
+#
+# ElastiCache is the worked example of a line that was dropped: its at-rest encryption guide
+# describes the default as a service managed key, and serverless caches as using an AWS owned
+# key, and never names alias/aws/elasticache. That is not evidence the alias exists, so it is
+# not seeded.
+#
+# The alias always takes the form aws/<service-name>, following the service's API namespace
+# rather than its brand name: EFS is alias/aws/elasticfilesystem, OpenSearch Service is
+# alias/aws/es and MSK is alias/aws/kafka. That pattern constrains the spelling but is NOT
+# evidence the key exists, which is the trap: alias/aws/eks fits it perfectly and no account
+# has one, because EKS API-data envelope encryption uses an AWS owned key by default and a
+# customer managed key otherwise.
+#
+# WHAT EACH ENTRY RESTS ON. The entries are grouped below by the strength of their evidence, so
+# a future editor knows which lines are safe to trust and which deserve a second look. Keep the
+# grouping accurate when you add or move a line.
+#
+#   cited          AWS documentation names the alias: elasticfilesystem, kinesisvideo, glue,
+#                  acm, ebs, s3, sqs, sns, ses.
+#   corroborated   production code in this repository already names the alias, independently of
+#                  any external source: ssm, redshift, codeartifact.
+#   recollection   not doc-verified. Believed correct, and each was checked against the test
+#                  above (does the service's own encryption selector offer this key in your
+#                  account?), but nobody has read an AWS page that prints the alias. If you are
+#                  touching one of these and can cite it, move it up a group.
+#
+# The descriptions follow the template AWS uses for these keys, "Default master key that
+# protects my <resources> when no other key is defined". AWS has reworded individual entries
+# over the years and a given account may show slightly different phrasing. Each description must
+# stay unique and should not be reworded casually: when kms-aliases.json is lost, the surviving
+# keys are re-aliased by matching their description, and a reworded entry mints a second key.
+# ---------------------------------------------------------------------------------------------
+keys:
+
+  # ---- cited: AWS documentation names the alias ----
+
+  - alias: "alias/aws/elasticfilesystem"
+    description: "Default master key that protects my EFS file systems when no other key is defined"
+  - alias: "alias/aws/kinesisvideo"
+    description: "Default master key that protects my Kinesis Video streams when no other key is defined"
+  - alias: "alias/aws/glue"
+    description: "Default master key that protects my Glue data when no other key is defined"
+  # The KMS ListAliases API reference prints alias/aws/acm with a TargetKeyId in its example
+  # output: https://docs.aws.amazon.com/kms/latest/APIReference/API_ListAliases.html
+  - alias: "alias/aws/acm"
+    description: "Default master key that protects my ACM private keys when no other key is defined"
+  # The ECS guide describes a default AWS managed key with the alias alias/aws/ebs, unique per account per Region.
+  - alias: "alias/aws/ebs"
+    description: "Default master key that protects my EBS volumes when no other key is defined"
+  # The CodeBuild guide shows "encryptionKey": "arn:aws:kms:region-ID:account-ID:alias/aws/s3".
+  - alias: "alias/aws/s3"
+    description: "Default master key that protects my S3 objects when no other key is defined"
+  # The SQS guide names the "AWS managed default key (alias/aws/sqs)".
+  - alias: "alias/aws/sqs"
+    description: "Default master key that protects my SQS queues when no other key is defined"
+  # The SNS guide: "the alias of the AWS managed AWS KMS for Amazon SNS is always alias/aws/sns".
+  - alias: "alias/aws/sns"
+    description: "Default master key that protects my SNS data when no other key is defined"
+  # The SES guide shows the default key as arn:aws:kms:REGION:AWSACCOUNTID:alias/aws/ses.
+  - alias: "alias/aws/ses"
+    description: "Default master key that protects my SES messages when no other key is defined"
+
+  # ---- corroborated: named by production code in this repository ----
+
+  - alias: "alias/aws/ssm"
+    description: "Default master key that protects my Systems Manager data when no other key is defined"
+  - alias: "alias/aws/redshift"
+    description: "Default master key that protects my Redshift clusters when no other key is defined"
+  - alias: "alias/aws/codeartifact"
+    description: "Default master key that protects my CodeArtifact packages when no other key is defined"
+
+  # ---- recollection: not doc-verified ----
+
+  - alias: "alias/aws/rds"
+    description: "Default master key that protects my RDS database volumes when no other key is defined"
+  - alias: "alias/aws/dynamodb"
+    description: "Default master key that protects my DynamoDB table storage when no other key is defined"
+  - alias: "alias/aws/lambda"
+    description: "Default master key that protects my Lambda functions when no other key is defined"
+  - alias: "alias/aws/secretsmanager"
+    description: "Default master key that protects my Secrets Manager secrets when no other key is defined"
+  - alias: "alias/aws/es"
+    description: "Default master key that protects my OpenSearch domains when no other key is defined"
+  - alias: "alias/aws/kinesis"
+    description: "Default master key that protects my Kinesis data when no other key is defined"
+  - alias: "alias/aws/kafka"
+    description: "Default master key that protects my MSK clusters when no other key is defined"
+  - alias: "alias/aws/backup"
+    description: "Default master key that protects my AWS Backup data when no other key is defined"
+  - alias: "alias/aws/ecr"
+    description: "Default master key that protects my ECR images when no other key is defined"
+  - alias: "alias/aws/fsx"
+    description: "Default master key that protects my FSx file systems when no other key is defined"
+  - alias: "alias/aws/dms"
+    description: "Default master key that protects my DMS replication instance storage when no other key is defined"
+  - alias: "alias/aws/codecommit"
+    description: "Default master key that protects my CodeCommit repositories when no other key is defined"
+  - alias: "alias/aws/workspaces"
+    description: "Default master key that protects my WorkSpaces volumes when no other key is defined"

@@ -1,0 +1,59 @@
+name: CloudFormation Schema Drift
+# Checks the vendored CloudFormation property types, and the schema surface CfnSchemaCoverageTest
+# reads, against the resource schemas AWS publishes.
+# They come from AWS's live schema archive rather than from a pinned dependency, so, as with the
+# IAM data in iam-data-drift.yml, this check can fail without anything in the repository having
+# changed, and it runs on its own, never as part of a job that ordinary changes trigger.
+#
+# Two triggers, for two different failures:
+#
+#   - On a pull request that touches the vendored file or its generator, where a hand-edited type
+#     would enter the repository.
+#   - Weekly, because the file also goes stale without anyone touching it: AWS changes resource
+#     schemas, and a property Floci types by an old schema would refuse a template AWS accepts.
+#
+# The fix for a real failure is `make cfn-property-types-sync` and committing the result. The
+# offline shape check is hermetic and runs per pull request in partition-literals.yml instead.
+on:
+  pull_request:
+    paths:
+      - 'src/main/resources/aws/cfn-property-types.json'
+      - 'tools/aws/regen_cfn_property_types.py'
+      - 'tools/aws/test_regen_cfn_property_types.py'
+      - 'src/test/resources/cloudformation/schema-surface.tsv'
+      - 'tools/aws/regen_cfn_schema_surface.py'
+      - 'tools/aws/test_regen_cfn_schema_surface.py'
+      - '.github/workflows/cfn-schema-drift.yml'
+  schedule:
+    # Mondays at 06:10 UTC, beside the IAM data drift check.
+    - cron: '10 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cfn-schema-drift:
+    name: Vendored CloudFormation property types and schema surface still match AWS
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+
+      # No dependency install: the generator is stdlib-only.
+      - name: Check the vendored property types still match AWS's schemas
+        run: make cfn-property-types-verify
+
+      # Runs even when the property types check failed, so one run reports both drifts.
+      - name: Check the committed schema surface still matches AWS's schemas
+        if: always()
+        run: make cfn-schema-surface-verify

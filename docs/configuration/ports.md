@@ -1,0 +1,190 @@
+# Ports Reference
+
+## Port Overview
+
+| Port / Range | Protocol | Purpose | docker-compose mapping required? |
+|---|---|---|---|
+| `4566` | HTTP | AWS APIs and ECR Docker Distribution | Yes |
+| `4500` | HTTP | Web console sidecar, bound directly by the console container | **No** (see note) |
+| `5100–5199` | HTTP | ECR Registry backing container, loopback-only implementation ports | No |
+| `5672–5699` | AMQP | Amazon MQ (RabbitMQ) AMQP listener, bound directly by each broker container | **No** |
+| `6379–6399` | TCP | ElastiCache Redis proxy (inside Floci) | Yes |
+| `6400–6419` | TCP | MemoryDB proxy (inside Floci) | Yes |
+| `6500–6599` | HTTPS | EKS k3s API server — bound directly by each k3s container | **No** |
+| `7001–7099` | TCP | RDS proxy (inside Floci) | Yes |
+| `8182–8282` | TCP | Neptune Gremlin proxy (inside Floci) | Yes |
+| `8700–8799` | HTTP | MWAA Airflow webserver proxy (inside Floci) | Yes |
+| `9400–9499` | HTTP | OpenSearch data-plane — bound directly by each OpenSearch container | **No** |
+| `12000–12499` | HTTP | Lambda Runtime API (internal, Docker-network only) | **No** |
+| `15672–15699` | HTTP | Amazon MQ (RabbitMQ) management console, bound directly by each broker container | **No** |
+
+## Why some ports don't need docker-compose mapping
+
+There are two distinct patterns Floci uses to expose container ports:
+
+### Proxy-in-Floci (ElastiCache, MemoryDB, RDS, Neptune, MWAA)
+
+Floci runs a **proxy process inside its own container**. The proxy listens on the host port and forwards traffic to the backend container.
+
+```
+host:6379  →  [docker-compose ports mapping]  →  Floci container:6379  →  Redis container:6379
+```
+
+Because the listener is inside the Floci container, `ports:` in `docker-compose.yml` is required to make it reachable from the host.
+
+### Direct container binding (web console, EKS, OpenSearch, Amazon MQ)
+
+Floci tells the Docker daemon to start a sidecar/service container and bind its port **directly on the host**. Floci itself communicates with the container via the shared Docker network (container name + internal port). The host port is bound by Docker, not by Floci.
+
+```
+host:9400  ←──  opensearch container:9200  (Docker binds 9400 directly on the host)
+                        ↑
+       Floci reaches it via Docker network: floci-aws-opensearch-{name}:9200
+```
+
+No `docker-compose.yml` `ports:` mapping is needed — the port is already on the host.
+
+## Port 4566 — AWS API
+
+Every AWS SDK and CLI call goes to port `4566`. This includes all management-plane operations: creating queues, putting items, invoking Lambdas, etc.
+
+```bash
+aws s3 ls --endpoint-url http://localhost:4566
+aws sqs list-queues --endpoint-url http://localhost:4566
+aws lambda list-functions --endpoint-url http://localhost:4566
+```
+
+## Ports 6379–6399 — ElastiCache
+
+When you create an ElastiCache replication group, Floci starts a Valkey/Redis Docker container and creates a TCP proxy on the next available port in the `6379–6399` range. The proxy runs inside the Floci container, so this range must be mapped in `docker-compose.yml`.
+
+```bash
+# Create a replication group
+aws elasticache create-replication-group \
+  --replication-group-id my-redis \
+  --replication-group-description "dev cache" \
+  --endpoint-url http://localhost:4566
+
+# Connect directly on the proxied port (returned in DescribeReplicationGroups Endpoint.Port)
+redis-cli -h localhost -p 6379
+```
+
+!!! note
+    Configure the range with `FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT` and `FLOCI_SERVICES_ELASTICACHE_PROXY_MAX_PORT`.
+
+## Ports 6500–6599 — EKS (real mode)
+
+When you create an EKS cluster in real mode, Floci asks the Docker daemon to start a k3s container and bind its API server port (6443) to the next available host port in `6500–6599`. The port is bound directly on the host by Docker — no `docker-compose.yml` mapping is needed.
+
+The `endpoint` field returned by `DescribeCluster` points to `https://localhost:<hostPort>` when running outside a container, or `https://floci-aws-eks-<name>:6443` when Floci is running inside Docker.
+
+```bash
+aws eks create-cluster \
+  --name my-cluster \
+  --role-arn arn:aws:iam::000000000000:role/eks-role \
+  --resources-vpc-config subnetIds=[],securityGroupIds=[] \
+  --endpoint-url http://localhost:4566
+
+# DescribeCluster returns the API server address, e.g. https://localhost:6500
+```
+
+!!! note
+    Configure the range with `FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT` and `FLOCI_SERVICES_EKS_API_SERVER_MAX_PORT`.
+
+## Ports 7001–7099 — RDS
+
+When you create an RDS DB instance, Floci starts a PostgreSQL or MySQL Docker container and creates a TCP proxy on the next available port in the `7001–7099` range. The proxy runs inside the Floci container, so this range must be mapped in `docker-compose.yml`.
+
+```bash
+aws rds create-db-instance \
+  --db-instance-identifier mydb \
+  --db-instance-class db.t3.micro \
+  --engine postgres \
+  --master-username admin \
+  --master-user-password secret \
+  --endpoint-url http://localhost:4566
+
+# Connect using the proxied port (returned in DescribeDBInstances Endpoint.Port)
+psql -h localhost -p 7001 -U admin
+```
+
+!!! note
+    Configure the range with `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` and `FLOCI_SERVICES_RDS_PROXY_MAX_PORT`.
+
+## Ports 12000–12499 — Lambda Runtime API (internal)
+
+Floci binds a Runtime API port in `12000–12499` for each warm Lambda container to poll. These ports are consumed by containers on the shared Docker network only — they are never accessed from the host and must **not** be mapped in `docker-compose.yml`.
+
+One port is held for the lifetime of each running Lambda container, so the width of this range is a hard ceiling on **concurrent Lambda executions** — 500 with the default. This range was previously `9200–9299`; if you pinned that in your own configuration, raise it.
+
+Configure the range with `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` and `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT`.
+
+## Ports 9400–9499 — OpenSearch (real mode)
+
+When you create an OpenSearch domain in real mode, Floci asks the Docker daemon to start an `opensearchproject/opensearch` container and bind its REST port (9200) to the next available host port in `9400–9499`. The port is bound directly on the host by Docker — no `docker-compose.yml` mapping is needed.
+
+The `endpoint` field returned by `DescribeDomain` points to `http://localhost:<hostPort>` when running outside a container, or `http://floci-aws-opensearch-<name>:9200` when Floci is running inside Docker.
+
+```bash
+aws opensearch create-domain \
+  --domain-name my-search \
+  --engine-version OpenSearch_2.11 \
+  --endpoint-url http://localhost:4566
+
+# DescribeDomain returns the data-plane address, e.g. http://localhost:9400
+curl http://localhost:9400/_cluster/health
+```
+
+!!! note
+    Configure the range with `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` and `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT`.
+
+## Ports 5672–5699 and 15672–15699: Amazon MQ (RabbitMQ, real mode)
+
+When you create an Amazon MQ broker in real mode, Floci starts a `rabbitmq:3-management` container and binds its AMQP port (5672) to the next available host port in `5672–5699`, and its management console (15672) to the next available host port in `15672–15699`. Both are bound directly on the host by Docker, in every topology. No `docker-compose.yml` mapping is needed, and adding one on the `floci` service would only conflict with the broker container's binding.
+
+The `BrokerInstances[].Endpoints` returned by `DescribeBroker` point to `amqp://localhost:<hostPort>` when Floci runs outside a container, or to the broker container's Docker-network IP when Floci runs inside Docker. In the second case, host clients should use the published host port instead (`docker ps` shows it); the first broker normally lands on `5672` / `15672`.
+
+```bash
+aws mq create-broker --broker-name my-broker --engine-type RABBITMQ \
+  --engine-version "3.13" --deployment-mode SINGLE_INSTANCE \
+  --host-instance-type mq.t3.micro --no-publicly-accessible --auto-minor-version-upgrade \
+  --users '[{"Username":"admin","Password":"AdminPass123","ConsoleAccess":true}]' \
+  --endpoint-url http://localhost:4566
+
+# From the host, once the broker is RUNNING:
+#   amqp://admin:AdminPass123@localhost:5672/
+#   http://localhost:15672  (management console)
+```
+
+!!! note
+    Configure the ranges with `FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_BASE` / `_MAX` and `FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_BASE` / `_MAX`.
+
+## Ports 5100–5199: ECR Registry backing ports
+
+ECR uses the Floci `4566` listener for Docker Distribution and AWS API traffic. The `registry:2`
+backing container binds a loopback-only implementation port in `5100-5199`; clients must use the
+repository URI returned by `CreateRepository`, for example
+`000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo`.
+
+## Exposing Ports in Docker Compose
+
+Only the proxy-based services (ElastiCache, MemoryDB, RDS, Neptune, MWAA) need port mappings in `docker-compose.yml`. Direct-binding services (EKS, OpenSearch, Amazon MQ) bind their ports on the host automatically via Docker:
+
+```yaml
+services:
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "4566:4566"           # All AWS API calls
+      - "6379-6399:6379-6399" # ElastiCache / Redis proxy (proxy in Floci)
+      - "6400-6419:6400-6419" # MemoryDB proxy (proxy in Floci)
+      - "7001-7099:7001-7099" # RDS proxy (proxy in Floci)
+      - "8182-8282:8182-8282" # Neptune Gremlin proxy (proxy in Floci)
+      - "8700-8799:8700-8799" # MWAA webserver proxy (proxy in Floci)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+```
+
+EKS (6500–6599), OpenSearch (9400–9499) and Amazon MQ (5672–5699, 15672–15699) ports are bound directly on the host by Docker and are accessible without any `ports:` entry. ECR uses the existing `4566` mapping.
+
+If your application runs inside the same Docker Compose network, it can reach Floci directly on container port `4566` — the host port mapping is only needed for tools running on the host (CLI, IDE plugins, etc.).

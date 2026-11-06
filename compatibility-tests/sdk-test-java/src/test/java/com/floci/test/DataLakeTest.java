@@ -1,0 +1,227 @@
+package com.floci.test;
+
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.services.athena.AthenaClient;
+import software.amazon.awssdk.services.athena.model.*;
+import software.amazon.awssdk.services.firehose.FirehoseClient;
+import software.amazon.awssdk.services.firehose.model.BufferingHints;
+import software.amazon.awssdk.services.firehose.model.CreateDeliveryStreamRequest;
+import software.amazon.awssdk.services.firehose.model.ExtendedS3DestinationConfiguration;
+import software.amazon.awssdk.services.firehose.model.PutRecordRequest;
+import software.amazon.awssdk.services.firehose.model.Record;
+import software.amazon.awssdk.services.glue.GlueClient;
+import software.amazon.awssdk.services.glue.model.*;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
+@DisplayName("Data Lake (Athena + Glue + Firehose)")
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("floci-duck")
+class DataLakeTest {
+
+    private static AthenaClient athena;
+    private static GlueClient glue;
+    private static FirehoseClient firehose;
+    private static S3Client s3;
+
+    private static final String DB_NAME = TestFixtures.uniqueName("test_db");
+    private static final String TABLE_NAME = "orders";
+    private static final String STREAM_NAME = TestFixtures.uniqueName("orders_stream");
+
+    @BeforeAll
+    static void setup() {
+        athena = TestFixtures.athenaClient();
+        glue = TestFixtures.glueClient();
+        firehose = TestFixtures.firehoseClient();
+        s3 = TestFixtures.s3Client();
+    }
+
+    @Test
+    @org.junit.jupiter.api.Order(1)
+    void setupInfrastructure() {
+        // 1. Glue Database
+        glue.createDatabase(CreateDatabaseRequest.builder()
+                .databaseInput(DatabaseInput.builder().name(DB_NAME).build())
+                .build());
+
+        // 2. Glue Table — standard AWS JSON table config: TextInputFormat + JsonSerDe
+        glue.createTable(CreateTableRequest.builder()
+                .databaseName(DB_NAME)
+                .tableInput(TableInput.builder()
+                        .name(TABLE_NAME)
+                        .storageDescriptor(StorageDescriptor.builder()
+                                .location("s3://floci-firehose-results/" + STREAM_NAME + "/")
+                                .inputFormat("org.apache.hadoop.mapred.TextInputFormat")
+                                .outputFormat("org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat")
+                                .serdeInfo(SerDeInfo.builder()
+                                        .serializationLibrary("org.openx.data.jsonserde.JsonSerDe")
+                                        .parameters(Map.of("serialization.format", "1"))
+                                        .build())
+                                .columns(
+                                        software.amazon.awssdk.services.glue.model.Column.builder().name("id").type("int").build(),
+                                        software.amazon.awssdk.services.glue.model.Column.builder().name("amount").type("double").build()
+                                )
+                                .build())
+                        .build())
+                .build());
+
+        // 3. Firehose Stream delivering under the Glue table location. The static
+        // prefix gets yyyy/MM/dd/HH/ appended like real Firehose, which stays
+        // inside the table location since Athena reads it recursively.
+        firehose.createDeliveryStream(CreateDeliveryStreamRequest.builder()
+                .deliveryStreamName(STREAM_NAME)
+                .extendedS3DestinationConfiguration(ExtendedS3DestinationConfiguration.builder()
+                        .bucketARN("arn:aws:s3:::floci-firehose-results")
+                        .roleARN("arn:aws:iam::000000000000:role/datalake-firehose-role")
+                        .prefix(STREAM_NAME + "/")
+                        // Floci does not enforce AWS's 60s minimum interval, which keeps
+                        // the delivery wait short (would need 60+ against real AWS).
+                        .bufferingHints(BufferingHints.builder()
+                                .sizeInMBs(1)
+                                .intervalInSeconds(5)
+                                .build())
+                        .build())
+                .build());
+    }
+
+    @Test
+    @org.junit.jupiter.api.Order(2)
+    void ingestAndQuery() throws Exception {
+        // Ingest data
+        for (int i = 1; i <= 5; i++) {
+            String json = String.format("{\"id\": %d, \"amount\": %.2f}", i, i * 10.0);
+            firehose.putRecord(PutRecordRequest.builder()
+                    .deliveryStreamName(STREAM_NAME)
+                    .record(Record.builder().data(SdkBytes.fromString(json, StandardCharsets.UTF_8)).build())
+                    .build());
+        }
+
+        // Small records stay buffered until the stream's IntervalInSeconds
+        // elapses; wait for Firehose to deliver before querying, the same way a
+        // real AWS client would.
+        long deadline = System.currentTimeMillis() + 30_000;
+        boolean delivered = false;
+        while (!delivered && System.currentTimeMillis() < deadline) {
+            try {
+                delivered = !s3.listObjectsV2(ListObjectsV2Request.builder()
+                        .bucket("floci-firehose-results")
+                        .prefix(STREAM_NAME + "/")
+                        .build()).contents().isEmpty();
+            } catch (NoSuchBucketException e) {
+                // The bucket itself is only created on the first delivery.
+            }
+            if (!delivered) {
+                Thread.sleep(TestFixtures.isRealAws() ? 2_000 : 250);
+            }
+        }
+        assertThat(delivered)
+                .as("Firehose should deliver the buffered records within IntervalInSeconds")
+                .isTrue();
+
+        // Athena Query
+        StartQueryExecutionResponse startResp = athena.startQueryExecution(StartQueryExecutionRequest.builder()
+                .queryString("SELECT sum(amount) as total FROM " + TABLE_NAME)
+                .queryExecutionContext(QueryExecutionContext.builder().database(DB_NAME).build())
+                .build());
+
+        String queryId = startResp.queryExecutionId();
+
+        QueryExecutionStatus status = TestFixtures.awaitAthenaQueryTerminal(
+                athena, queryId, Duration.ofSeconds(60));
+        assertThat(status.state())
+                .as("Athena query did not succeed: %s", status.stateChangeReason())
+                .isEqualTo(QueryExecutionState.SUCCEEDED);
+
+        GetQueryResultsResponse results = athena.getQueryResults(GetQueryResultsRequest.builder()
+                .queryExecutionId(queryId)
+                .build());
+
+        assertThat(results.resultSet()).isNotNull();
+        // Athena GetQueryResults includes a header row + data rows
+        assertThat(results.resultSet().rows()).hasSizeGreaterThanOrEqualTo(2);
+
+        // Header row must contain the column name
+        List<String> header = results.resultSet().rows().get(0).data().stream()
+                .map(d -> d.varCharValue())
+                .collect(Collectors.toList());
+        assertThat(header).containsExactly("total");
+
+        // Data row: sum(amount) = 10+20+30+40+50 = 150
+        String total = results.resultSet().rows().get(1).data().get(0).varCharValue();
+        assertThat(Double.parseDouble(total)).isEqualTo(150.0);
+    }
+
+    @Test
+    @org.junit.jupiter.api.Order(3)
+    void glueUserDefinedFunctionsLifecycle() {
+        String functionName = "sdk_udf__integer";
+        glue.createUserDefinedFunction(CreateUserDefinedFunctionRequest.builder()
+                .databaseName(DB_NAME)
+                .functionInput(UserDefinedFunctionInput.builder()
+                        .functionName(functionName)
+                        .className("ExampleFunction")
+                        .ownerName("owner")
+                        .ownerType(PrincipalType.USER)
+                        .resourceUris(ResourceUri.builder()
+                                .resourceType(ResourceType.FILE)
+                                .uri("s3://floci-firehose-results/function.json")
+                                .build())
+                        .build())
+                .build());
+
+        UserDefinedFunction created = glue.getUserDefinedFunction(GetUserDefinedFunctionRequest.builder()
+                .databaseName(DB_NAME)
+                .functionName(functionName)
+                .build()).userDefinedFunction();
+        assertThat(created.functionName()).isEqualTo(functionName);
+        assertThat(created.databaseName()).isEqualTo(DB_NAME);
+        assertThat(created.ownerName()).isEqualTo("owner");
+        assertThat(created.createTime()).isNotNull();
+        assertThat(created.resourceUris()).hasSize(1);
+
+        assertThat(glue.getUserDefinedFunctions(GetUserDefinedFunctionsRequest.builder()
+                .databaseName(DB_NAME)
+                .pattern("sdk_udf__.*")
+                .build()).userDefinedFunctions())
+                .extracting(UserDefinedFunction::functionName)
+                .containsExactly(functionName);
+
+        glue.updateUserDefinedFunction(UpdateUserDefinedFunctionRequest.builder()
+                .databaseName(DB_NAME)
+                .functionName(functionName)
+                .functionInput(UserDefinedFunctionInput.builder()
+                        .functionName(functionName)
+                        .className("ExampleFunction")
+                        .ownerName("new-owner")
+                        .ownerType(PrincipalType.USER)
+                        .build())
+                .build());
+        UserDefinedFunction updated = glue.getUserDefinedFunction(GetUserDefinedFunctionRequest.builder()
+                .databaseName(DB_NAME)
+                .functionName(functionName)
+                .build()).userDefinedFunction();
+        assertThat(updated.ownerName()).isEqualTo("new-owner");
+
+        glue.deleteUserDefinedFunction(DeleteUserDefinedFunctionRequest.builder()
+                .databaseName(DB_NAME)
+                .functionName(functionName)
+                .build());
+        assertThrows(EntityNotFoundException.class, () -> glue.getUserDefinedFunction(
+                GetUserDefinedFunctionRequest.builder()
+                        .databaseName(DB_NAME)
+                        .functionName(functionName)
+                        .build()));
+    }
+}

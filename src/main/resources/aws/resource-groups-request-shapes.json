@@ -1,0 +1,253 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_resource_groups_shapes.py",
+    "botocore": "botocore 1.43.118 (local/aws/botocore)"
+  },
+  "operations": {
+    "CreateGroup": "CreateGroupInput",
+    "GetGroup": "GetGroupInput",
+    "DeleteGroup": "DeleteGroupInput",
+    "GroupResources": "GroupResourcesInput",
+    "ListGroupResources": "ListGroupResourcesInput"
+  },
+  "shapes": {
+    "CreateGroupInput": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "CreateGroupName",
+        "Description": "Description",
+        "ResourceQuery": "ResourceQuery",
+        "Tags": "Tags",
+        "Configuration": "GroupConfigurationList",
+        "Criticality": "Criticality",
+        "Owner": "Owner",
+        "DisplayName": "DisplayName"
+      }
+    },
+    "CreateGroupName": {
+      "type": "string",
+      "min": 1,
+      "max": 300,
+      "pattern": "[a-zA-Z0-9_\\.-]+"
+    },
+    "Criticality": {
+      "type": "integer",
+      "min": 1,
+      "max": 10
+    },
+    "DeleteGroupInput": {
+      "type": "structure",
+      "members": {
+        "GroupName": "GroupName",
+        "Group": "GroupStringV2"
+      }
+    },
+    "Description": {
+      "type": "string",
+      "max": 1024,
+      "pattern": "[\\sa-zA-Z0-9_\\.-]*"
+    },
+    "DisplayName": {
+      "type": "string",
+      "min": 0,
+      "max": 300,
+      "pattern": "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$"
+    },
+    "GetGroupInput": {
+      "type": "structure",
+      "members": {
+        "GroupName": "GroupName",
+        "Group": "GroupStringV2"
+      }
+    },
+    "GroupConfigurationItem": {
+      "type": "structure",
+      "required": [
+        "Type"
+      ],
+      "members": {
+        "Type": "GroupConfigurationType",
+        "Parameters": "GroupParameterList"
+      }
+    },
+    "GroupConfigurationList": {
+      "type": "list",
+      "max": 2,
+      "member": "GroupConfigurationItem"
+    },
+    "GroupConfigurationParameter": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "GroupConfigurationParameterName",
+        "Values": "GroupConfigurationParameterValueList"
+      }
+    },
+    "GroupConfigurationParameterName": {
+      "type": "string",
+      "min": 1,
+      "max": 80,
+      "pattern": "[a-z-]+"
+    },
+    "GroupConfigurationParameterValue": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[a-zA-Z0-9:\\/\\._-]+"
+    },
+    "GroupConfigurationParameterValueList": {
+      "type": "list",
+      "member": "GroupConfigurationParameterValue"
+    },
+    "GroupConfigurationType": {
+      "type": "string",
+      "max": 40,
+      "pattern": "AWS::[a-zA-Z0-9]+::[a-zA-Z0-9]+"
+    },
+    "GroupName": {
+      "type": "string",
+      "min": 1,
+      "max": 300,
+      "pattern": "[a-zA-Z0-9_\\.-]{1,300}|[a-zA-Z0-9_\\.-]{1,150}/[a-z0-9]{26}"
+    },
+    "GroupParameterList": {
+      "type": "list",
+      "member": "GroupConfigurationParameter"
+    },
+    "GroupResourcesInput": {
+      "type": "structure",
+      "required": [
+        "Group",
+        "ResourceArns"
+      ],
+      "members": {
+        "Group": "GroupStringV2",
+        "ResourceArns": "ResourceArnList"
+      }
+    },
+    "GroupStringV2": {
+      "type": "string",
+      "min": 1,
+      "max": 1600,
+      "pattern": "[a-zA-Z0-9_\\.-]{1,300}|[a-zA-Z0-9_\\.-]{1,150}/[a-z0-9]{26}|arn:aws(-[a-z]+)*:resource-groups:[a-z]{2}(-[a-z]+)+-\\d{1}:[0-9]{12}:group/([a-zA-Z0-9_\\.-]{1,300}|[a-zA-Z0-9_\\.-]{1,150}/[a-z0-9]{26})"
+    },
+    "ListGroupResourcesInput": {
+      "type": "structure",
+      "members": {
+        "GroupName": "GroupName",
+        "Group": "GroupStringV2",
+        "Filters": "ResourceFilterList",
+        "MaxResults": "MaxResults",
+        "NextToken": "NextToken"
+      }
+    },
+    "MaxResults": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "NextToken": {
+      "type": "string",
+      "min": 0,
+      "max": 8192,
+      "pattern": "^[a-zA-Z0-9+/]*={0,2}$"
+    },
+    "Owner": {
+      "type": "string",
+      "min": 0,
+      "max": 300,
+      "pattern": "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$"
+    },
+    "Query": {
+      "type": "string",
+      "max": 4096,
+      "pattern": "[\\s\\S]*"
+    },
+    "QueryType": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "^\\w+$",
+      "enum": [
+        "TAG_FILTERS_1_0",
+        "CLOUDFORMATION_STACK_1_0"
+      ]
+    },
+    "ResourceArn": {
+      "type": "string",
+      "pattern": "arn:aws(-[a-z]+)*:[a-z0-9\\-]*:([a-z]{2}(-[a-z]+)+-\\d{1})?:([0-9]{12})?:.+"
+    },
+    "ResourceArnList": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "ResourceArn"
+    },
+    "ResourceFilter": {
+      "type": "structure",
+      "required": [
+        "Name",
+        "Values"
+      ],
+      "members": {
+        "Name": "ResourceFilterName",
+        "Values": "ResourceFilterValues"
+      }
+    },
+    "ResourceFilterList": {
+      "type": "list",
+      "member": "ResourceFilter"
+    },
+    "ResourceFilterName": {
+      "type": "string",
+      "enum": [
+        "resource-type"
+      ]
+    },
+    "ResourceFilterValue": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "AWS::[a-zA-Z0-9]+::[a-zA-Z0-9]+"
+    },
+    "ResourceFilterValues": {
+      "type": "list",
+      "min": 1,
+      "max": 5,
+      "member": "ResourceFilterValue"
+    },
+    "ResourceQuery": {
+      "type": "structure",
+      "required": [
+        "Type",
+        "Query"
+      ],
+      "members": {
+        "Type": "QueryType",
+        "Query": "Query"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$"
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$"
+    },
+    "Tags": {
+      "type": "map",
+      "key": "TagKey",
+      "value": "TagValue"
+    }
+  }
+}

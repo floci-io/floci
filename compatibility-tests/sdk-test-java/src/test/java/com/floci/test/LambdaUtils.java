@@ -1,0 +1,394 @@
+package com.floci.test;
+
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+/**
+ * Shared Lambda deployment-package helpers for tests.
+ */
+public final class LambdaUtils {
+
+    private LambdaUtils() {}
+
+    /**
+     * ZIP containing a Node.js handler that greets by name and echoes the event.
+     */
+    public static byte[] handlerZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    const name = (event && event.name) ? event.name : 'World';
+                    console.log('[handler] invoked with event:', JSON.stringify(event));
+                    console.log('[handler] resolved name:', name);
+                    const response = {
+                        statusCode: 200,
+                        body: JSON.stringify({ message: `Hello, ${name}!`, input: event })
+                    };
+                    console.log('[handler] returning response:', JSON.stringify(response));
+                    return response;
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Node.js handler shaped like a Firehose transform: it uppercases each
+     * record, drops one whose payload says DROP, and reports one whose payload says FAIL,
+     * so a single invocation exercises all three result values.
+     */
+    public static byte[] firehoseTransformZip() {
+        String code = """
+                exports.handler = async (event) => ({
+                    records: (event.records || []).map((r) => {
+                        const data = Buffer.from(r.data, 'base64').toString('utf8');
+                        if (data.includes('DROP')) {
+                            return { recordId: r.recordId, result: 'Dropped' };
+                        }
+                        if (data.includes('FAIL')) {
+                            return { recordId: r.recordId, result: 'ProcessingFailed' };
+                        }
+                        return {
+                            recordId: r.recordId,
+                            result: 'Ok',
+                            data: Buffer.from(data.toUpperCase(), 'utf8').toString('base64')
+                        };
+                    })
+                });
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Ruby handler that greets by name.
+     */
+    public static byte[] rubyZip() {
+        String code = """
+                def lambda_handler(event:, context:)
+                  name = event['name'] || 'World'
+                  { statusCode: 200, body: "Hello, #{name}!" }
+                end
+                """;
+        return createZip("lambda_function.rb", code);
+    }
+
+    /**
+     * ZIP containing a bootstrap shell script for provided runtimes.
+     */
+    public static byte[] providedRuntimeZip() {
+        String bootstrap = """
+                #!/bin/sh
+                ENDPOINT="http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime"
+                while true; do
+                  HEADERS=$(mktemp)
+                  curl -sS -D "$HEADERS" -o /tmp/event.json "${ENDPOINT}/invocation/next"
+                  REQUEST_ID=$(grep -i 'lambda-runtime-aws-request-id' "$HEADERS" | tr -d '\\r' | awk '{print $2}')
+                  curl -sS -X POST "${ENDPOINT}/invocation/${REQUEST_ID}/response" \\
+                    -H 'Content-Type: application/json' \\
+                    -d '"hello from provided runtime"'
+                  rm -f "$HEADERS"
+                done
+                """;
+        return createZip("bootstrap", bootstrap);
+    }
+
+    /**
+     * ZIP containing a Node.js handler that always reports every SQS message as a batch item
+     * failure. Used to test {@code ReportBatchItemFailures} ESM behaviour.
+     */
+    public static byte[] batchItemFailuresZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    const failures = (event.Records || []).map(r => ({
+                        itemIdentifier: r.messageId
+                    }));
+                    console.log('[esm-failures] reporting failures:', JSON.stringify(failures));
+                    return { batchItemFailures: failures };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Node.js handler that always throws, for asynchronous failure handling tests.
+     */
+    public static byte[] failingZip() {
+        String code = """
+                exports.handler = async () => { throw new Error('boom'); };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * Minimal valid ZIP containing a stub index.js.
+     */
+    public static byte[] minimalZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    console.log('[esm-handler] invoked with event:', JSON.stringify(event));
+                    return { statusCode: 200, body: 'ok' };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Node.js handler that writes and reads a configured Lambda file-system mount.
+     */
+    public static byte[] fileSystemZip() {
+        String code = """
+                const fs = require('fs');
+                const file = '/mnt/shared/sdk-test.txt';
+                exports.handler = async (event) => {
+                    fs.writeFileSync(file, event.value, 'utf8');
+                    return {
+                        mounted: fs.existsSync(file),
+                        value: fs.readFileSync(file, 'utf8')
+                    };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Node.js handler that logs the first S3 event record.
+     */
+    public static byte[] s3NotificationLoggerZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    const record = (event && event.Records && event.Records[0]) ? event.Records[0] : null;
+                    const bucket = record?.s3?.bucket?.name || 'unknown-bucket';
+                    const key = record?.s3?.object?.key || 'unknown-key';
+                    console.log(`[s3-notification] received ${bucket}/${key}`);
+                    return { statusCode: 200, body: JSON.stringify({ bucket, key }) };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Node.js handler that checks whether a file at a deeply nested
+     * long path (> 100 chars) exists inside the container.
+     *
+     * Used to test that zip extraction correctly preserves long file paths.
+     * Regression test for: https://github.com/floci-io/floci/issues/232
+     *
+     * The nested file path is intentionally > 99 characters to exceed the legacy
+     * POSIX USTAR tar header name field limit, which is where truncation occurred.
+     */
+    public static byte[] longPathZip() {
+        // Relative path is 117 chars — well over the 99-char USTAR limit
+        String longPath = "vendor/bundle/ruby/3.3.0/gems/bundler-4.0.3/lib/bundler/vendor/thor/lib/thor/core_ext/hash_with_indifferent_access.txt";
+        String handler = """
+                const fs = require('fs');
+                exports.handler = async () => {
+                    const longPath = '/var/task/%s';
+                    const exists = fs.existsSync(longPath);
+                    return { exists, pathLength: longPath.length };
+                };
+                """.formatted(longPath);
+        String fileContent = "present";
+
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+                zos.putNextEntry(new ZipEntry("index.js"));
+                zos.write(handler.getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+
+                zos.putNextEntry(new ZipEntry(longPath));
+                zos.write(fileContent.getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+            }
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to build long-path ZIP", e);
+        }
+    }
+
+    /**
+     * ZIP containing a Node.js handler that fetches an S3 object via virtual-hosted URL.
+     * Receives {@code {bucket, key, endpoint}} in the event (endpoint = "host:port").
+     * Used to verify embedded DNS injection into Lambda containers.
+     */
+    public static byte[] s3VirtualHostFetchZip() {
+        String code = """
+                const http = require('http');
+                exports.handler = async (event) => {
+                    const { bucket, key, endpoint } = event;
+                    const url = `http://${bucket}.${endpoint}/${key}`;
+                    console.log('[dns-probe] fetching', url);
+                    return new Promise((resolve, reject) => {
+                        http.get(url, (res) => {
+                            let data = '';
+                            res.on('data', chunk => data += chunk);
+                            res.on('end', () => {
+                                console.log('[dns-probe] status', res.statusCode, 'body', data);
+                                resolve({ statusCode: res.statusCode, body: data });
+                            });
+                        }).on('error', e => reject(new Error(e.message)));
+                    });
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Node.js handler that returns a payload of {@code bytes} 'x' characters.
+     * Used to test response payload size limit enforcement.
+     */
+    public static byte[] largeResponseZip(int bytes) {
+        String code = """
+                exports.handler = async () => 'x'.repeat(%d);
+                """.formatted(bytes);
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Node.js handler that resolves a public hostname via {@code dns.lookup}
+     * (the same getaddrinfo path used by {@code fetch}). Receives {@code {host}} in the event.
+     * Used to verify Floci's embedded DNS forwards public lookups from inside Lambda containers
+     * (regression for https://github.com/floci-io/floci/issues/1110).
+     */
+    public static byte[] publicDnsLookupZip() {
+        String code = """
+                const dns = require('dns').promises;
+                exports.handler = async (event) => {
+                    const host = (event && event.host) ? event.host : 'example.com';
+                    console.log('[public-dns] resolving', host);
+                    const res = await dns.lookup(host);
+                    console.log('[public-dns] resolved', host, '->', res.address);
+                    return { resolved: true, host, address: res.address };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * A Python durable function that speaks the checkpoint protocol through the image's boto3
+     * client: one step, one wait of {@code event.wait} seconds (default 2), then a result. An input
+     * of {@code {"fail": true}} fails the execution instead.
+     */
+    public static byte[] durablePythonZip() {
+        String code = """
+                import json
+                import boto3
+
+                client = boto3.client("lambda")
+
+
+                def handler(event, context):
+                    operations = {op["Id"]: op for op in event["InitialExecutionState"]["Operations"]}
+                    root = next(op for op in operations.values() if op["Type"] == "EXECUTION")
+                    request = json.loads(root["ExecutionDetails"].get("InputPayload") or "{}")
+                    if request.get("fail"):
+                        return {"Status": "FAILED",
+                                "Error": {"ErrorMessage": "asked to fail", "ErrorType": "TestFailure"}}
+                    if request.get("chain"):
+                        if "chain" not in operations:
+                            client.checkpoint_durable_execution(
+                                DurableExecutionArn=event["DurableExecutionArn"],
+                                CheckpointToken=event["CheckpointToken"],
+                                Updates=[{"Id": "chain", "Name": "greet", "Type": "CHAINED_INVOKE",
+                                          "SubType": "ChainedInvoke", "Action": "START",
+                                          "Payload": json.dumps({"name": "Durable"}),
+                                          "ChainedInvokeOptions": {"FunctionName": request["chain"]}}])
+                            return {"Status": "PENDING"}
+                        chain = operations["chain"]
+                        if chain["Status"] == "STARTED":
+                            return {"Status": "PENDING"}
+                        details = chain.get("ChainedInvokeDetails", {})
+                        return {"Status": "SUCCEEDED",
+                                "Result": details.get("Result") or json.dumps(details.get("Error"))}
+                    if request.get("callback"):
+                        if "callback" not in operations:
+                            client.checkpoint_durable_execution(
+                                DurableExecutionArn=event["DurableExecutionArn"],
+                                CheckpointToken=event["CheckpointToken"],
+                                Updates=[{"Id": "callback", "Name": "approval", "Type": "CALLBACK",
+                                          "SubType": "Callback", "Action": "START",
+                                          "CallbackOptions": {"HeartbeatTimeoutSeconds": 60}}])
+                            return {"Status": "PENDING"}
+                        callback = operations["callback"]
+                        if callback["Status"] == "STARTED":
+                            return {"Status": "PENDING"}
+                        return {"Status": "SUCCEEDED", "Result": callback["CallbackDetails"].get("Result", "")}
+                    if "step" not in operations:
+                        client.checkpoint_durable_execution(
+                            DurableExecutionArn=event["DurableExecutionArn"],
+                            CheckpointToken=event["CheckpointToken"],
+                            Updates=[
+                                {"Id": "step", "Name": "validate", "Type": "STEP", "SubType": "Step",
+                                 "Action": "START"},
+                                {"Id": "step", "Name": "validate", "Type": "STEP", "SubType": "Step",
+                                 "Action": "SUCCEED", "Payload": json.dumps({"validated": True})},
+                                {"Id": "wait", "Type": "WAIT", "SubType": "Wait", "Action": "START",
+                                 "WaitOptions": {"WaitSeconds": request.get("wait", 2)}},
+                            ])
+                        return {"Status": "PENDING"}
+                    if operations["wait"]["Status"] != "SUCCEEDED":
+                        return {"Status": "PENDING"}
+                    step = json.loads(operations["step"]["StepDetails"]["Result"])
+                    return {"Status": "SUCCEEDED", "Result": json.dumps({"done": True, "step": step})}
+                """;
+        return createZip("lambda_function.py", code);
+    }
+
+    /**
+     * ZIP containing a Node.js handler that returns the Lambda proxy result its {@code mode} path
+     * parameter names: one that raises, one without a statusCode, one whose statusCode is not a
+     * number, one whose statusCode is text that spells one, one outside 100 to 599, and bodies an HTTP
+     * API cannot read (an object, base64 that is not, an isBase64Encoded of "yes") or reads ("True").
+     */
+    public static byte[] proxyResponseZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    const mode = (event.pathParameters || {}).mode;
+                    if (mode === 'raise') throw new Error('boom');
+                    if (mode === 'nostatus') return { body: 'x', headers: { 'x-probe': '1' } };
+                    if (mode === 'badstatus') return { statusCode: 'abc', body: 'x' };
+                    if (mode === 'textstatus') return { statusCode: '201', body: 'x' };
+                    if (mode === 'highstatus') return { statusCode: 600, body: 'x' };
+                    if (mode === 'badbase64') return { statusCode: 200, body: 'not base64!', isBase64Encoded: true };
+                    if (mode === 'bodyobject') return { statusCode: 200, body: { a: 1 } };
+                    if (mode === 'base64yes') return { statusCode: 200, body: 'aGVsbG8=', isBase64Encoded: 'yes' };
+                    if (mode === 'base64capital') return { statusCode: 200, body: 'aGVsbG8=', isBase64Encoded: 'True' };
+                    return { statusCode: 200, body: 'ok' };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Node.js Cognito CustomMessage handler that writes what its event carried into
+     * the email: the trigger source as the subject, and the code parameter, the user's email and
+     * name and the request's {@code source} metadata as the message.
+     */
+    public static byte[] cognitoCustomMessageZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    const attributes = event.request.userAttributes;
+                    const metadata = event.request.clientMetadata || {};
+                    event.response.emailSubject = event.triggerSource;
+                    event.response.emailMessage = `${event.request.codeParameter} for ${attributes.email}, `
+                        + `${attributes.name}, from ${metadata.source}`;
+                    return event;
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    private static byte[] createZip(String filename, String content) {
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+                zos.putNextEntry(new ZipEntry(filename));
+                zos.write(content.getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+            }
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to build ZIP for " + filename, e);
+        }
+    }
+}

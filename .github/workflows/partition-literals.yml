@@ -1,0 +1,154 @@
+name: Partition Literals
+
+# Keeps the commercial-partition assumption from growing back while floci moves to
+# serving every AWS partition. tools/partition/partition_literals.py inventories the
+# hardcoded arn:aws: prefixes, amazonaws.com hosts, hosted-zone ids and hand-rolled
+# partition regexes in src/main/java against the checked-in per-file baseline: a
+# literal in a new file fails, growth in an existing file fails, and a drop fails until
+# the baseline is regenerated so the remaining count stays exact. The second job checks
+# that the vendored AWS data (src/main/resources/aws/*.json) still matches what tools/aws/
+# produces from the pinned botocore release, and that the IAM managed-policy catalog keeps its
+# generated shape (its iam-dataset source lives only in local/aws, so CI checks shape, not
+# drift). Python-only, so both are fast and independent of the Java build job.
+
+on:
+  pull_request:
+    paths:
+      - 'src/main/java/**'
+      - 'src/main/resources/aws/**'
+      - 'src/main/resources/eks/addon-versions.json'
+      - 'tools/partition/**'
+      - 'tools/java_sources.py'
+      - 'tools/rename/**'
+      - 'tools/aws/**'
+      - 'tools/slr/**'
+      - 'src/main/resources/iam/service-linked-roles.tsv'
+      - 'src/main/resources/iam/managed-policy-documents.json'
+      - 'src/main/resources/iam/managed-policies.yaml'
+      - 'src/main/resources/iam/managed-policy-versions.json'
+      - 'Makefile'
+      - '.github/workflows/partition-literals.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'src/main/java/**'
+      - 'src/main/resources/aws/**'
+      - 'src/main/resources/eks/addon-versions.json'
+      - 'tools/partition/**'
+      - 'tools/java_sources.py'
+      - 'tools/rename/**'
+      - 'tools/aws/**'
+      - 'tools/slr/**'
+      - 'src/main/resources/iam/service-linked-roles.tsv'
+      - 'src/main/resources/iam/managed-policy-documents.json'
+      - 'src/main/resources/iam/managed-policies.yaml'
+      - 'src/main/resources/iam/managed-policy-versions.json'
+      - 'Makefile'
+      - '.github/workflows/partition-literals.yml'
+  # Runs each merge queue entry against main plus the PRs queued ahead of it. paths does not
+  # apply to merge_group, so a queued PR is always checked.
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel a superseded run only on pull requests; a run on main is left to finish (see ci.yml).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  partition-literals:
+    name: Partition literals match baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+
+      - name: Install tooling deps
+        run: pip install -r tools/partition/requirements.txt
+
+      - name: Run partition tooling tests
+        run: make partition-test
+
+      - name: Run package rename tool tests
+        run: make rename-test
+
+      - name: Check partition literals against the baseline
+        run: make partition-check
+
+      - name: Print the remaining-literal audit
+        if: always()
+        run: make partition-audit
+
+  aws-data:
+    name: Vendored AWS data in sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.x"
+
+      - name: Install the pinned botocore
+        run: pip install -r tools/aws/requirements.txt
+
+      - name: Run generator tests
+        run: make aws-data-test
+
+      - name: Check DynamoDB condition request members
+        run: make dynamodb-condition-keys-check
+
+      - name: Check IAM condition key request members
+        run: make iam-condition-keys-check
+      - name: Check S3 Control tag condition request members
+        run: make s3control-tag-condition-keys-check
+
+      - name: Check request condition key members
+        run: make request-condition-keys-check
+
+      - name: Check partitions.json against a fresh generation
+        run: make aws-data-check
+
+      # Offline and hermetic, so it is safe on a job this broadly triggered. The online check
+      # that needs AWS lives in iam-data-drift.yml, which only runs when the vendored file
+      # or its generator changes, so an outage cannot fail an unrelated Java pull request.
+      - name: Check the vendored IAM namespace list is well-formed
+        run: make iam-namespaces-check
+
+      # Same split for the IAM action resource map: shape here, the online check against AWS in
+      # iam-data-drift.yml. A malformed or hand-edited map would authorize IAM requests
+      # against the wrong resource, which is why its shape is gated on every pull request.
+      - name: Check the vendored IAM action resource map is well-formed
+        run: make iam-action-resources-check
+
+      # And for the map of operations AWS authorizes under another action's name: a malformed
+      # entry would authorize a request as an action AWS does not check for it.
+      - name: Check the vendored map of operations to their IAM actions is well-formed
+        run: make iam-authorized-actions-check
+
+      # And for the CloudFormation property types, which come from AWS's live resource schema
+      # archive: shape here, the online comparison in cfn-schema-drift.yml.
+      - name: Check the vendored CloudFormation property types are well-formed
+        run: make cfn-property-types-check
+
+      # Also offline: the service-linked role table is checked against the vendored managed
+      # policy documents in the repository, never against AWS. The half that comes from a
+      # recorded create cannot be re-derived without the snapshot, which is why every row in
+      # the table carries the source it rests on.
+      - name: Run the service-linked role generator tests
+        run: make slr-test
+
+      - name: Check the service-linked role table against the vendored policy documents
+        run: make slr-check
+

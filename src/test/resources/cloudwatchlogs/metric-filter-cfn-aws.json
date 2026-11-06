@@ -1,0 +1,70 @@
+{
+  "verification": "Verified on Live AWS",
+  "observedDate": "2026-09-16",
+  "region": "eu-west-1",
+  "awsCliVersion": "2.36.45",
+  "description": "Normalized observations from isolated CloudFormation updates of one explicitly named AWS::Logs::MetricFilter. Physical roles replace temporary resource names. No log events or new metric series were published.",
+  "identity": {
+    "Ref": "filter name only",
+    "PhysicalResourceId": "filter name only"
+  },
+  "validReplacement": {
+    "priorDefinition": {"FilterPattern": "ERROR", "MetricValue": "1"},
+    "newDefinition": {"FilterPattern": "WARN", "MetricValue": "2"},
+    "events": [
+      {"physicalRole": "prior", "status": "UPDATE_IN_PROGRESS"},
+      {"physicalRole": "prior", "status": "DELETE_IN_PROGRESS"},
+      {"physicalRole": "prior", "status": "DELETE_COMPLETE"},
+      {"physicalRole": "replacement", "status": "CREATE_IN_PROGRESS"},
+      {"physicalRole": "replacement", "status": "CREATE_COMPLETE"},
+      {"physicalRole": "replacement", "status": "UPDATE_COMPLETE"}
+    ],
+    "deletionReason": "Requested update requires the replacement of the existing resource; deleting existing resource, then creating a new one.",
+    "stackStatus": "UPDATE_COMPLETE"
+  },
+  "failedReplacement": {
+    "priorDefinition": {"FilterPattern": "WARN", "MetricValue": "2"},
+    "attemptedDefinition": {"FilterPattern": "{", "MetricValue": "9"},
+    "events": [
+      {"physicalRole": "prior", "status": "UPDATE_IN_PROGRESS"},
+      {"physicalRole": "prior", "status": "DELETE_IN_PROGRESS"},
+      {"physicalRole": "prior", "status": "DELETE_COMPLETE"},
+      {"physicalRole": "attempted", "status": "CREATE_IN_PROGRESS"},
+      {"physicalRole": "attempted", "status": "CREATE_FAILED"},
+      {"physicalRole": "attempted", "status": "UPDATE_FAILED"},
+      {"physicalRole": "attempted", "status": "UPDATE_IN_PROGRESS"},
+      {"physicalRole": "attempted", "status": "DELETE_IN_PROGRESS"},
+      {"physicalRole": "attempted", "status": "DELETE_COMPLETE"},
+      {"physicalRole": "attempted", "desiredDefinitionRole": "prior", "status": "CREATE_IN_PROGRESS"},
+      {"physicalRole": "prior", "status": "CREATE_COMPLETE"},
+      {"physicalRole": "prior", "status": "UPDATE_COMPLETE"}
+    ],
+    "stackStatus": "UPDATE_ROLLBACK_COMPLETE",
+    "restoredDefinition": {"FilterPattern": "WARN", "MetricValue": "2"},
+    "priorInstanceWasRecreated": true,
+    "attemptedFilterSurvived": false,
+    "storedTemplateRestored": true,
+    "qualification": "The intermediate rollback CREATE_IN_PROGRESS event retained the attempted physical ID while ResourceProperties already specified the restored definition. Completion carried the prior name. Direct Logs reads and a changed creationTime confirmed recreation."
+  },
+  "retainReplacement": {
+    "policyInstalledBeforeRename": "Retain",
+    "oldFilterSurvived": false,
+    "deleteSkippedEventObserved": false,
+    "emptyFilterListObservedBetweenDeleteAndCreate": true,
+    "finalSurvivorCount": 1,
+    "finalDefinition": {"FilterPattern": "INFO", "MetricValue": "3"},
+    "qualification": "This resource-specific experiment still deleted the old filter before creation despite UpdateReplacePolicy Retain. Do not generalize to other resource types or stack DeletionPolicy."
+  },
+  "notMeasured": [
+    "replacement at the 100-filter limit",
+    "collisions with a filter owned by another stack",
+    "all generated-name and changed-log-group combinations",
+    "all deletion and snapshot policies"
+  ],
+  "cleanup": {
+    "verifiedAt": "2026-09-16T10:25:44Z",
+    "stackAbsent": true,
+    "remainingOwnedLogGroups": 0,
+    "newMetricSeriesPublished": 0
+  }
+}

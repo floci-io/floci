@@ -1,0 +1,81 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "Condition": "Deploy",
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "FnEventInvokeConfigOnFailureQueue",
+                "Arn"
+              ]
+            }
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "Qualifier": "$LATEST"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    },
+    "FnEventInvokeConfigOnFailureQueue": {
+      "Condition": "Deploy",
+      "Properties": {},
+      "Type": "AWS::SQS::Queue"
+    },
+    "FnRole": {
+      "Condition": "Deploy",
+      "Policies": [
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "sqs:SendMessage",
+                "Effect": "Allow",
+                "Resource": {
+                  "Fn::GetAtt": [
+                    "FnEventInvokeConfigOnFailureQueue",
+                    "Arn"
+                  ]
+                }
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnFailureSQSPolicy"
+        }
+      ],
+      "Type": "AWS::IAM::Role"
+    }
+  },
+  "input": {
+    "Conditions": {
+      "Deploy": {
+        "Fn::Equals": [
+          "a",
+          "a"
+        ]
+      }
+    },
+    "Resources": {
+      "Fn": {
+        "Condition": "Deploy",
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Type": "SQS"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

@@ -1,0 +1,55 @@
+FROM registry.access.redhat.com/ubi9-micro:9.8
+
+# Automatically set by Docker BuildKit to "amd64" or "arm64"
+ARG TARGETARCH
+
+WORKDIR /app
+
+# ubi9-micro has no shadow-utils, so the runtime user is one /etc/passwd line.
+RUN echo 'floci:x:1001:0:Floci:/app:/sbin/nologin' >> /etc/passwd \
+    && mkdir -p /app/data \
+    && chown -R 1001:root /app \
+    && chmod -R g+rwX /app
+
+VOLUME /app/data
+
+COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY --chmod=755 docker/healthcheck.sh /usr/local/bin/
+
+ARG VERSION=latest
+ENV FLOCI_VERSION=${VERSION}
+ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+# A binary built in the Quarkus builder container (make native) links zlib dynamically, since
+# that image has no zlib-static, and ubi9-micro ships no libz.so.1; the Makefile stages the
+# library next to the binary and this is what lets the loader find it. The workflows build
+# with a host Mandrel that links zlib statically, so their images carry no such file.
+ENV LD_LIBRARY_PATH=/app
+COPY --chmod=755 --chown=1001:root native/${TARGETARCH}/ /app/
+
+LABEL org.opencontainers.image.title="Floci" \
+      org.opencontainers.image.description="Local AWS emulator — open-source alternative to LocalStack Community" \
+      org.opencontainers.image.url="https://floci.io" \
+      org.opencontainers.image.source="https://github.com/floci-io/floci" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Floci" \
+      description="Local AWS emulator — open-source alternative to LocalStack Community" \
+      io.k8s.description="Local AWS emulator — open-source alternative to LocalStack Community" \
+      io.k8s.display-name="Floci" \
+      io.openshift.expose-services="4566:tcp" \
+      io.openshift.tags="floci aws-emulator" \
+      maintainer="Floci <https://github.com/floci-io/floci>" \
+      name="floci/floci" \
+      summary="Local AWS emulator — open-source alternative to LocalStack Community" \
+      url="https://floci.io" \
+      vendor="Floci"
+
+EXPOSE 4566
+
+# Probe every 50 ms while Floci starts, so a wait for "healthy" ends right after startup instead of
+# at the first 5 s check. The start period must stay above the 5 s fallback in healthcheck.sh.
+# Docker Engine before 25.0 ignores --start-interval when it runs the image, and cannot build this file.
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 --start-period=10s --start-interval=50ms CMD ["/usr/local/bin/healthcheck.sh"]
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+# A published port needs 0.0.0.0 inside the container, which Floci only accepts with explicit consent.
+CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0", "-Dfloci.security.allow-unsafe-network-exposure=true"]

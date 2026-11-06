@@ -1,0 +1,36 @@
+{
+  "name": "sign-up.error.username-exists",
+  "capturedAt": "2026-05-16T05:10:19.745Z",
+  "request": {
+    "ClientId": "6h89qn2bfglbmvfebq9aaknqk0",
+    "Username": "fixture@example.com",
+    "Password": "Fixture1!Aa",
+    "UserAttributes": [
+      {
+        "Name": "email",
+        "Value": "fixture@example.com"
+      },
+      {
+        "Name": "phone_number",
+        "Value": "+5215555555555"
+      },
+      {
+        "Name": "given_name",
+        "Value": "Fixture"
+      },
+      {
+        "Name": "family_name",
+        "Value": "User"
+      }
+    ]
+  },
+  "response": null,
+  "error": {
+    "name": "UsernameExistsException",
+    "message": "User already exists",
+    "$metadata": {
+      "httpStatusCode": 400,
+      "requestId": "b3434b0c-42dd-42fc-82a6-995412164d66"
+    }
+  }
+}

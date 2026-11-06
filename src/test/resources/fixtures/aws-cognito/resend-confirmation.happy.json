@@ -1,0 +1,22 @@
+{
+  "name": "resend-confirmation.happy",
+  "capturedAt": "2026-05-16T05:10:21.597Z",
+  "request": {
+    "ClientId": "6h89qn2bfglbmvfebq9aaknqk0",
+    "Username": "fixture@example.com"
+  },
+  "response": {
+    "CodeDeliveryDetails": {
+      "Destination": "f***@e***",
+      "DeliveryMedium": "EMAIL",
+      "AttributeName": "email"
+    },
+    "$metadata": {
+      "httpStatusCode": 200,
+      "requestId": "30b85e7f-621c-413c-a294-25393a2964c6",
+      "attempts": 1,
+      "totalRetryDelay": 0
+    }
+  },
+  "error": null
+}

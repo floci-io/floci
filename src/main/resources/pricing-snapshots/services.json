@@ -1,0 +1,30 @@
+[
+  {
+    "ServiceCode": "AmazonEC2",
+    "AttributeNames": [
+      "instanceType",
+      "location",
+      "tenancy",
+      "operatingSystem",
+      "productFamily"
+    ]
+  },
+  {
+    "ServiceCode": "AmazonS3",
+    "AttributeNames": [
+      "storageClass",
+      "location",
+      "volumeType",
+      "productFamily"
+    ]
+  },
+  {
+    "ServiceCode": "AWSLambda",
+    "AttributeNames": [
+      "location",
+      "group",
+      "groupDescription",
+      "productFamily"
+    ]
+  }
+]

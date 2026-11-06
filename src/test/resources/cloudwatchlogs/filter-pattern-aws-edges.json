@@ -1,0 +1,1394 @@
+{
+  "provenance": {
+    "source": "AWS CloudWatch Logs TestMetricFilter",
+    "capturedAt": "2026-09-16T08:29:15.333461+00:00",
+    "region": "eu-west-1",
+    "endpoint": "https://logs.eu-west-1.amazonaws.com",
+    "inputs": "Synthetic only. No resource writes or user logs.",
+    "eventNumberBase": 1,
+    "reference": "https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_TestMetricFilter.html"
+  },
+  "cases": [
+    {
+      "id": "edge-decimal",
+      "request": {
+        "filterPattern": "{ $.a = 1.0 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":1.0}",
+          "{\"a\":1e0}",
+          "{\"a\":\"1\"}",
+          "{\"a\":\"1.0\"}",
+          "{\"a\":\"01\"}",
+          "{\"a\":0.0}",
+          "{\"a\":-0.0}",
+          "{\"a\":-1}",
+          "{\"a\":9007199254740992}",
+          "{\"a\":9007199254740993}",
+          "{\"a\":1e308}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":\"1e-999\"}",
+          "{\"a\":0}",
+          "{\"a\":true}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[null,2]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":1.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":1e0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":\"1.0\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-zero",
+      "request": {
+        "filterPattern": "{ $.a = 0 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":1.0}",
+          "{\"a\":1e0}",
+          "{\"a\":\"1\"}",
+          "{\"a\":\"1.0\"}",
+          "{\"a\":\"01\"}",
+          "{\"a\":0.0}",
+          "{\"a\":-0.0}",
+          "{\"a\":-1}",
+          "{\"a\":9007199254740992}",
+          "{\"a\":9007199254740993}",
+          "{\"a\":1e308}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":\"1e-999\"}",
+          "{\"a\":0}",
+          "{\"a\":true}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[null,2]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":0.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "{\"a\":-0.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":1e-999}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "{\"a\":0}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-negative-zero",
+      "request": {
+        "filterPattern": "{ $.a = -0.0 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":1.0}",
+          "{\"a\":1e0}",
+          "{\"a\":\"1\"}",
+          "{\"a\":\"1.0\"}",
+          "{\"a\":\"01\"}",
+          "{\"a\":0.0}",
+          "{\"a\":-0.0}",
+          "{\"a\":-1}",
+          "{\"a\":9007199254740992}",
+          "{\"a\":9007199254740993}",
+          "{\"a\":1e308}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":\"1e-999\"}",
+          "{\"a\":0}",
+          "{\"a\":true}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[null,2]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":0.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "{\"a\":-0.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":1e-999}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 17,
+            "eventMessage": "{\"a\":0}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-precise-long",
+      "request": {
+        "filterPattern": "{ $.a = 9007199254740993 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":1.0}",
+          "{\"a\":1e0}",
+          "{\"a\":\"1\"}",
+          "{\"a\":\"1.0\"}",
+          "{\"a\":\"01\"}",
+          "{\"a\":0.0}",
+          "{\"a\":-0.0}",
+          "{\"a\":-1}",
+          "{\"a\":9007199254740992}",
+          "{\"a\":9007199254740993}",
+          "{\"a\":1e308}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":\"1e-999\"}",
+          "{\"a\":0}",
+          "{\"a\":true}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[null,2]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 11,
+            "eventMessage": "{\"a\":9007199254740993}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-large-finite",
+      "request": {
+        "filterPattern": "{ $.a = 1e308 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":1.0}",
+          "{\"a\":1e0}",
+          "{\"a\":\"1\"}",
+          "{\"a\":\"1.0\"}",
+          "{\"a\":\"01\"}",
+          "{\"a\":0.0}",
+          "{\"a\":-0.0}",
+          "{\"a\":-1}",
+          "{\"a\":9007199254740992}",
+          "{\"a\":9007199254740993}",
+          "{\"a\":1e308}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":\"1e-999\"}",
+          "{\"a\":0}",
+          "{\"a\":true}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[null,2]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 12,
+            "eventMessage": "{\"a\":1e308}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-large-ordered",
+      "request": {
+        "filterPattern": "{ $.a > 1e307 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":1.0}",
+          "{\"a\":1e0}",
+          "{\"a\":\"1\"}",
+          "{\"a\":\"1.0\"}",
+          "{\"a\":\"01\"}",
+          "{\"a\":0.0}",
+          "{\"a\":-0.0}",
+          "{\"a\":-1}",
+          "{\"a\":9007199254740992}",
+          "{\"a\":9007199254740993}",
+          "{\"a\":1e308}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":\"1e-999\"}",
+          "{\"a\":0}",
+          "{\"a\":true}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[null,2]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 12,
+            "eventMessage": "{\"a\":1e308}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-underflow-ordered",
+      "request": {
+        "filterPattern": "{ $.a > 1e-999 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":1.0}",
+          "{\"a\":1e0}",
+          "{\"a\":\"1\"}",
+          "{\"a\":\"1.0\"}",
+          "{\"a\":\"01\"}",
+          "{\"a\":0.0}",
+          "{\"a\":-0.0}",
+          "{\"a\":-1}",
+          "{\"a\":9007199254740992}",
+          "{\"a\":9007199254740993}",
+          "{\"a\":1e308}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":\"1e-999\"}",
+          "{\"a\":0}",
+          "{\"a\":true}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[null,2]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":1.0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":1e0}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "{\"a\":9007199254740992}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "{\"a\":9007199254740993}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 12,
+            "eventMessage": "{\"a\":1e308}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-string-exponent",
+      "request": {
+        "filterPattern": "{ $.a = \"1e0\" }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":1.0}",
+          "{\"a\":1e0}",
+          "{\"a\":\"1\"}",
+          "{\"a\":\"1.0\"}",
+          "{\"a\":\"01\"}",
+          "{\"a\":0.0}",
+          "{\"a\":-0.0}",
+          "{\"a\":-1}",
+          "{\"a\":9007199254740992}",
+          "{\"a\":9007199254740993}",
+          "{\"a\":1e308}",
+          "{\"a\":1e309}",
+          "{\"a\":\"1e309\"}",
+          "{\"a\":1e-999}",
+          "{\"a\":\"1e-999\"}",
+          "{\"a\":0}",
+          "{\"a\":true}",
+          "{\"a\":\"true\"}",
+          "{\"a\":null}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[null,2]}"
+        ]
+      },
+      "response": {
+        "matches": []
+      }
+    },
+    {
+      "id": "edge-is-null",
+      "request": {
+        "filterPattern": "{ $.a IS NULL }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":null}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "{\"a\":[null,2]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-equals",
+      "request": {
+        "filterPattern": "{ $.a = 2 }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":2}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":\"2\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-not-equals",
+      "request": {
+        "filterPattern": "{ $.a != 2 }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-wildcard-not-equals",
+      "request": {
+        "filterPattern": "{ $.a[*] != 2 }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":null}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":2}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":\"2\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "{\"a\":[]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "{\"a\":[1]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "{\"a\":{}}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "{\"a\":[{\"b\":1},{\"b\":2}]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "{\"a\":[{\"b\":null}]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":[[1,2]]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "{\"a\":[true,false]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-wildcard-null",
+      "request": {
+        "filterPattern": "{ $.a[*] IS NULL }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 10,
+            "eventMessage": "{\"a\":[null,2]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-wildcard-missing",
+      "request": {
+        "filterPattern": "{ $.a[*] NOT EXISTS }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":null}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":2}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":\"2\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "{\"a\":[]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "{\"a\":{}}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-missing",
+      "request": {
+        "filterPattern": "{ $.a NOT EXISTS }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-child",
+      "request": {
+        "filterPattern": "{ $.a.b = 2 }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 12,
+            "eventMessage": "{\"a\":{\"b\":2}}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-child-missing",
+      "request": {
+        "filterPattern": "{ $.a.b NOT EXISTS }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":null}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":2}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":\"2\"}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "{\"a\":[]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":[1,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 8,
+            "eventMessage": "{\"a\":[2,1]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 9,
+            "eventMessage": "{\"a\":[1]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "{\"a\":[null,2]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 11,
+            "eventMessage": "{\"a\":{}}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 13,
+            "eventMessage": "{\"a\":[{\"b\":1},{\"b\":2}]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 14,
+            "eventMessage": "{\"a\":[{\"b\":null}]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 15,
+            "eventMessage": "{\"a\":[[1,2]]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 16,
+            "eventMessage": "{\"a\":[true,false]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-star",
+      "request": {
+        "filterPattern": "{ $.a = * }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":2}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":\"2\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-quoted-number",
+      "request": {
+        "filterPattern": "{ $.a = \"2\" }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":2}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":\"2\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-bare-null",
+      "request": {
+        "filterPattern": "{ $.a = null }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid metric filter pattern"
+      }
+    },
+    {
+      "id": "edge-is-not-null",
+      "request": {
+        "filterPattern": "{ $.a IS NOT NULL }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term 'NOT'"
+      }
+    },
+    {
+      "id": "edge-selector-root",
+      "request": {
+        "filterPattern": "{ $ = 2 }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '$ '"
+      }
+    },
+    {
+      "id": "edge-json-negative-regex",
+      "request": {
+        "filterPattern": "{ $.a != %2% }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-regex-text",
+      "request": {
+        "filterPattern": "ERROR %WARN%",
+        "logEventMessages": [
+          "ERROR WARN",
+          "ERROR",
+          "WARN"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '%'"
+      }
+    },
+    {
+      "id": "edge-regex-optional",
+      "request": {
+        "filterPattern": "?%WARN%",
+        "logEventMessages": [
+          "WARN",
+          "WARN INFO"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '%'"
+      }
+    },
+    {
+      "id": "edge-term-punctuation",
+      "request": {
+        "filterPattern": "a-b",
+        "logEventMessages": [
+          "a-b",
+          "a b"
+        ]
+      },
+      "response": {
+        "matches": []
+      }
+    },
+    {
+      "id": "edge-term-underscore",
+      "request": {
+        "filterPattern": "a_b",
+        "logEventMessages": [
+          "a_b",
+          "a b"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "a_b",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-term-dot",
+      "request": {
+        "filterPattern": "a.b",
+        "logEventMessages": [
+          "a.b",
+          "a b"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "a.b",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-term-question",
+      "request": {
+        "filterPattern": "a?b",
+        "logEventMessages": [
+          "a?b",
+          "a b"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "a?b",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "a b",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-regex-structured-two",
+      "request": {
+        "filterPattern": "{ $.a = %1% || $.a = %2% }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":2}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":1}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":\"2\"}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-regex-structured-three",
+      "request": {
+        "filterPattern": "{ $.a = %1% || $.a = %2% || $.a = %3% }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Your input has exceeded the maximum of 2 regular expressions per filter pattern."
+      }
+    },
+    {
+      "id": "edge-quoted-order-space",
+      "request": {
+        "filterPattern": "[a>\"1\", b]",
+        "logEventMessages": [
+          "2 x",
+          "0 x"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid metric filter pattern"
+      }
+    },
+    {
+      "id": "edge-json-keyword-case",
+      "request": {
+        "filterPattern": "{ $.a is null }",
+        "logEventMessages": [
+          "{}",
+          "{\"a\":null}",
+          "{\"a\":2}",
+          "{\"a\":1}",
+          "{\"a\":\"2\"}",
+          "{\"a\":[]}",
+          "{\"a\":[1,2]}",
+          "{\"a\":[2,1]}",
+          "{\"a\":[1]}",
+          "{\"a\":[null,2]}",
+          "{\"a\":{}}",
+          "{\"a\":{\"b\":2}}",
+          "{\"a\":[{\"b\":1},{\"b\":2}]}",
+          "{\"a\":[{\"b\":null}]}",
+          "{\"a\":[[1,2]]}",
+          "{\"a\":[true,false]}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":null}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 10,
+            "eventMessage": "{\"a\":[null,2]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-json-unquoted-symbol",
+      "request": {
+        "filterPattern": "{ $.a = a:b }",
+        "logEventMessages": [
+          "{\"a\":\"a:b\"}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term ':'"
+      }
+    },
+    {
+      "id": "edge-space-quote-trailing",
+      "request": {
+        "filterPattern": "[a, b]",
+        "logEventMessages": [
+          "x \"y\" ",
+          "x [y] ",
+          "x y ",
+          "x  ",
+          "x \"\"",
+          "x []"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "x \"y\" ",
+            "extractedValues": {
+              "$a": "x",
+              "$b": "y"
+            }
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "x [y] ",
+            "extractedValues": {
+              "$a": "x",
+              "$b": "y"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "x y ",
+            "extractedValues": {
+              "$a": "x",
+              "$b": "y"
+            }
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "x \"\"",
+            "extractedValues": {
+              "$a": "x",
+              "$b": ""
+            }
+          },
+          {
+            "eventNumber": 6,
+            "eventMessage": "x []",
+            "extractedValues": {
+              "$a": "x",
+              "$b": ""
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "edge-space-incomplete",
+      "request": {
+        "filterPattern": "[a, b, c]",
+        "logEventMessages": [
+          "x \"y z",
+          "x [y z",
+          "x \"y z q",
+          "x [y z q"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "x \"y z",
+            "extractedValues": {
+              "$a": "x",
+              "$b": "\"y",
+              "$c": "z"
+            }
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "x [y z",
+            "extractedValues": {
+              "$a": "x",
+              "$b": "[y",
+              "$c": "z"
+            }
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "x \"y z q",
+            "extractedValues": {
+              "$a": "x",
+              "$b": "\"y",
+              "$c": "z q"
+            }
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "x [y z q",
+            "extractedValues": {
+              "$a": "x",
+              "$b": "[y",
+              "$c": "z q"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

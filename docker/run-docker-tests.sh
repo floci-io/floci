@@ -1,0 +1,117 @@
+#!/bin/bash
+set -e
+
+# Environment:
+#   FLOCI_START=0       skip starting Floci; use the container already running under compose
+#                       (for example one started by `make native-up`)
+#   COMPAT_SUITES="..." space-separated subset of the suite directories below to run
+#                       (default: all of them), for example "sdk-test-java compat-cdk"
+
+# 1. Start Floci
+if [ "${FLOCI_START:-1}" != "0" ]; then
+  echo "=== Starting Floci with docker-compose ==="
+  docker compose up -d --build
+
+  # Wait for healthy
+  echo "Waiting for Floci to be healthy..."
+  # Portable wait without 'timeout' command
+  MAX_RETRIES=60
+  COUNT=0
+  until curl -sf http://localhost:4566/_floci/health >/dev/null 2>&1; do
+    if [ $COUNT -ge $MAX_RETRIES ]; then
+      echo "Floci failed to become healthy in time"
+      exit 1
+    fi
+    sleep 1
+    COUNT=$((COUNT + 1))
+    echo -n "."
+  done
+  echo " Floci is up!"
+else
+  echo "=== Using the Floci already running under compose (FLOCI_START=0) ==="
+fi
+
+# 2. Network setup (Floci uses floci_default from compose)
+NETWORK="floci_default"
+DOCKER_GID=$(stat -c '%g' /var/run/docker.sock 2>/dev/null || stat -f '%g' /var/run/docker.sock)
+
+# Floci's embedded DNS server resolves *.floci → Floci's IP.
+# Passing --dns <floci-ip> to test containers lets the S3 virtual-host client
+# send to <bucket>.floci:4566 which Floci DNS resolves correctly. Without this,
+# Docker's built-in DNS only resolves the exact service name "floci", not
+# wildcard subdomains like my-bucket.floci.
+FLOCI_CONTAINER=$(docker compose ps -q floci 2>/dev/null | head -1)
+FLOCI_IP=$(docker inspect -f "{{.NetworkSettings.Networks.${NETWORK}.IPAddress}}" "$FLOCI_CONTAINER" 2>/dev/null || true)
+
+# 3. Test suites
+ALL_SUITES=(
+  "sdk-test-python"
+  "sdk-test-node"
+  "sdk-test-java"
+  "sdk-test-go"
+  "sdk-test-awscli"
+  "compat-cdk"
+  "compat-terraform"
+  "compat-opentofu"
+)
+if [ -n "${COMPAT_SUITES:-}" ]; then
+  read -r -a SUITES <<< "$COMPAT_SUITES"
+  for suite in "${SUITES[@]}"; do
+    case " ${ALL_SUITES[*]} " in
+      *" $suite "*) ;;
+      *) echo "unknown suite: $suite (expected one of: ${ALL_SUITES[*]})"; exit 2 ;;
+    esac
+  done
+else
+  SUITES=("${ALL_SUITES[@]}")
+fi
+
+# results dir
+mkdir -p test-results
+FAILED=0
+
+for suite in "${SUITES[@]}"; do
+  echo "=== Running $suite in Docker ==="
+  
+  IMAGE_NAME="compat-$suite"
+  
+  # Build
+  if ! docker build -q -t "$IMAGE_NAME" "compatibility-tests/$suite"; then
+    echo "Test suite $suite failed to build"
+    FAILED=1
+    continue
+  fi
+  
+  # Build DNS args: if we resolved Floci's IP, inject it as the DNS server so
+  # wildcard subdomains like <bucket>.floci resolve inside test containers.
+  DNS_ARGS=()
+  if [ -n "$FLOCI_IP" ]; then
+    DNS_ARGS=(--dns "$FLOCI_IP")
+  fi
+
+  # Per-suite extra args, mirroring .github/workflows/compatibility.yml.
+  # sdk-test-java's Lambda hot-reload test needs a host directory that the Docker
+  # daemon can bind-mount into the hot-reload Lambda container.
+  EXTRA_ARGS=()
+  if [ "$suite" = "sdk-test-java" ]; then
+    mkdir -p /tmp/floci-hot-reload
+    EXTRA_ARGS=(-v /tmp/floci-hot-reload:/tmp/floci-hot-reload -e HOT_RELOAD_BASE_DIR=/tmp/floci-hot-reload)
+  fi
+
+  # Run
+  if ! docker run --rm --network "$NETWORK" \
+      "${DNS_ARGS[@]}" \
+      -e FLOCI_ENDPOINT=http://floci:4566 \
+      -e FLOCI_S3_VHOST_ENDPOINT=http://floci:4566 \
+      -v "$(pwd)/test-results:/results" \
+      -v /var/run/docker.sock:/var/run/docker.sock \
+      --group-add "$DOCKER_GID" \
+      "${EXTRA_ARGS[@]}" \
+      "$IMAGE_NAME"; then
+    echo "Test suite $suite failed"
+    FAILED=1
+  fi
+done
+
+echo "=== All Docker tests completed ==="
+exit "$FAILED"

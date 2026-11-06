@@ -1,0 +1,243 @@
+{
+ "Parameters": {
+  "BackendUrl": {
+   "Type": "String"
+  }
+ },
+ "Resources": {
+  "ZoneA5DE4B68": {
+   "Type": "AWS::Route53::HostedZone",
+   "Properties": {
+    "Name": "apigwv2-rest-cfn-it.example.com."
+   }
+  },
+  "Certificate4E7ABB08": {
+   "Type": "AWS::CertificateManager::Certificate",
+   "Properties": {
+    "DomainName": "rest.apigwv2-rest-cfn-it.example.com",
+    "DomainValidationOptions": [
+     {
+      "DomainName": "rest.apigwv2-rest-cfn-it.example.com",
+      "HostedZoneId": {
+       "Ref": "ZoneA5DE4B68"
+      }
+     }
+    ],
+    "Tags": [
+     {
+      "Key": "Name",
+      "Value": "RestApiMultiLevelDomain/Certificate"
+     }
+    ],
+    "ValidationMethod": "DNS"
+   }
+  },
+  "RestApi0C43BF4B": {
+   "Type": "AWS::ApiGateway::RestApi",
+   "Properties": {
+    "Name": "RestApi"
+   }
+  },
+  "RestApiCloudWatchRoleE3ED6605": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "apigateway.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "ManagedPolicyArns": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+       ]
+      ]
+     }
+    ]
+   },
+   "UpdateReplacePolicy": "Retain",
+   "DeletionPolicy": "Retain"
+  },
+  "RestApiAccount7C83CF5A": {
+   "Type": "AWS::ApiGateway::Account",
+   "Properties": {
+    "CloudWatchRoleArn": {
+     "Fn::GetAtt": [
+      "RestApiCloudWatchRoleE3ED6605",
+      "Arn"
+     ]
+    }
+   },
+   "DependsOn": [
+    "RestApi0C43BF4B"
+   ],
+   "UpdateReplacePolicy": "Retain",
+   "DeletionPolicy": "Retain"
+  },
+  "RestApiDeployment180EC503bf7e2070a8bd9afd3cc70fd4d322d3c1": {
+   "Type": "AWS::ApiGateway::Deployment",
+   "Properties": {
+    "Description": "Automatically created by the RestApi construct",
+    "RestApiId": {
+     "Ref": "RestApi0C43BF4B"
+    }
+   },
+   "DependsOn": [
+    "RestApiitemsGET2AAECCB8",
+    "RestApiitems0D5B6650"
+   ],
+   "Metadata": {
+    "aws:cdk:do-not-refactor": true
+   }
+  },
+  "RestApiDeploymentStageprod3855DE66": {
+   "Type": "AWS::ApiGateway::Stage",
+   "Properties": {
+    "DeploymentId": {
+     "Ref": "RestApiDeployment180EC503bf7e2070a8bd9afd3cc70fd4d322d3c1"
+    },
+    "RestApiId": {
+     "Ref": "RestApi0C43BF4B"
+    },
+    "StageName": "prod"
+   },
+   "DependsOn": [
+    "RestApiAccount7C83CF5A"
+   ]
+  },
+  "RestApiitems0D5B6650": {
+   "Type": "AWS::ApiGateway::Resource",
+   "Properties": {
+    "ParentId": {
+     "Fn::GetAtt": [
+      "RestApi0C43BF4B",
+      "RootResourceId"
+     ]
+    },
+    "PathPart": "items",
+    "RestApiId": {
+     "Ref": "RestApi0C43BF4B"
+    }
+   }
+  },
+  "RestApiitemsGET2AAECCB8": {
+   "Type": "AWS::ApiGateway::Method",
+   "Properties": {
+    "AuthorizationType": "NONE",
+    "HttpMethod": "GET",
+    "Integration": {
+     "IntegrationHttpMethod": "GET",
+     "Type": "HTTP_PROXY",
+     "Uri": {
+      "Ref": "BackendUrl"
+     }
+    },
+    "ResourceId": {
+     "Ref": "RestApiitems0D5B6650"
+    },
+    "RestApiId": {
+     "Ref": "RestApi0C43BF4B"
+    }
+   }
+  },
+  "Domain66AC69E0": {
+   "Type": "AWS::ApiGateway::DomainName",
+   "Properties": {
+    "DomainName": "rest.apigwv2-rest-cfn-it.example.com",
+    "EndpointConfiguration": {
+     "Types": [
+      "REGIONAL"
+     ]
+    },
+    "RegionalCertificateArn": {
+     "Ref": "Certificate4E7ABB08"
+    }
+   }
+  },
+  "DomainMapordersv1RestApiMultiLevelDomainRestApiDeploymentStageprodBABADAB2A4BBC31B": {
+   "Type": "AWS::ApiGatewayV2::ApiMapping",
+   "Properties": {
+    "ApiId": {
+     "Ref": "RestApi0C43BF4B"
+    },
+    "ApiMappingKey": "orders/v1",
+    "DomainName": {
+     "Ref": "Domain66AC69E0"
+    },
+    "Stage": {
+     "Ref": "RestApiDeploymentStageprod3855DE66"
+    }
+   }
+  },
+  "Alias325C5727": {
+   "Type": "AWS::Route53::RecordSet",
+   "Properties": {
+    "AliasTarget": {
+     "DNSName": {
+      "Fn::GetAtt": [
+       "Domain66AC69E0",
+       "RegionalDomainName"
+      ]
+     },
+     "HostedZoneId": {
+      "Fn::GetAtt": [
+       "Domain66AC69E0",
+       "RegionalHostedZoneId"
+      ]
+     }
+    },
+    "HostedZoneId": {
+     "Ref": "ZoneA5DE4B68"
+    },
+    "Name": "rest.apigwv2-rest-cfn-it.example.com.",
+    "Type": "A"
+   }
+  }
+ },
+ "Outputs": {
+  "RestApiEndpoint0551178A": {
+   "Value": {
+    "Fn::Join": [
+     "",
+     [
+      "https://",
+      {
+       "Ref": "RestApi0C43BF4B"
+      },
+      ".execute-api.",
+      {
+       "Ref": "AWS::Region"
+      },
+      ".",
+      {
+       "Ref": "AWS::URLSuffix"
+      },
+      "/",
+      {
+       "Ref": "RestApiDeploymentStageprod3855DE66"
+      },
+      "/"
+     ]
+    ]
+   }
+  },
+  "RestApiId": {
+   "Value": {
+    "Ref": "RestApi0C43BF4B"
+   }
+  }
+ }
+}

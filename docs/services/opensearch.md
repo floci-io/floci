@@ -1,0 +1,284 @@
+# OpenSearch Service
+
+**Protocol:** REST JSON
+**Endpoint:** `http://localhost:4566/2021-01-01/...`
+**Credential scope:** `es`
+
+## Implementation Modes
+
+OpenSearch supports two modes controlled by `FLOCI_SERVICES_OPENSEARCH_MOCK`.
+
+### Mock mode (`mock: true`)
+
+Domain metadata is stored in-process. No Docker containers are started. Domains appear `Created: true` and `Processing: false` immediately. Use this in CI or whenever you only need the management API shape, not a real search cluster.
+
+### Real mode (`mock: false`, default)
+
+Floci starts an **OpenSearch** Docker container per domain, choosing the image based on the requested `EngineVersion` (e.g. `OpenSearch_3.6` → `opensearchproject/opensearch:3.6.0`, `Elasticsearch_7.10` → `docker.elastic.co/elasticsearch/elasticsearch-oss:7.10.2`). The container is exposed on a host port from the configured range (`9400–9499`). Once `/_cluster/health` returns `green` or `yellow`, the domain transitions to `Created: true` and the `Endpoint` field is populated with the container's address.
+
+OpenSearch 2.12+ requires an initial admin password even when the security plugin is disabled; Floci sets `OPENSEARCH_INITIAL_ADMIN_PASSWORD=FlociAdmin1!` automatically for those versions. The security plugin itself stays disabled.
+
+!!! note "Docker socket required"
+    Real mode starts Docker containers. Mount the Docker socket and set the Docker network so containers can reach each other. For private registry authentication and other Docker settings see [Docker Configuration](../configuration/docker.md).
+
+```yaml
+services:
+  floci:
+    image: floci/floci:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "4566:4566"
+    environment:
+      FLOCI_SERVICES_DOCKER_NETWORK: my_project_default
+```
+
+## Supported Operations
+
+### Domain Lifecycle
+
+| Operation | Method + Path | Description |
+|---|---|---|
+| `CreateDomain` | `POST /2021-01-01/opensearch/domain` | Create a new domain |
+| `DescribeDomain` | `GET /2021-01-01/opensearch/domain/{name}` | Get domain details |
+| `DescribeDomains` | `POST /2021-01-01/opensearch/domain-info` | Batch describe domains |
+| `DescribeDomainConfig` | `GET /2021-01-01/opensearch/domain/{name}/config` | Get domain configuration |
+| `UpdateDomainConfig` | `POST /2021-01-01/opensearch/domain/{name}/config` | Update cluster config, EBS options, engine version, access policies |
+| `DeleteDomain` | `DELETE /2021-01-01/opensearch/domain/{name}` | Delete a domain |
+| `ListDomainNames` | `GET /2021-01-01/domain` | List the caller's Region's domains (supports `?engineType=` filter) |
+
+### Tags
+
+| Operation | Method + Path | Description |
+|---|---|---|
+| `AddTags` | `POST /2021-01-01/tags` | Add tags to a domain by ARN |
+| `ListTags` | `GET /2021-01-01/tags/?arn=` | List tags for a domain |
+| `RemoveTags` | `POST /2021-01-01/tags-removal` | Remove tag keys from a domain |
+
+### VPC Endpoints
+
+OpenSearch Service-managed VPC endpoints, which Terraform's `aws_opensearch_vpc_endpoint` manages.
+
+| Operation | Method + Path | Description |
+|---|---|---|
+| `CreateVpcEndpoint` | `POST /2021-01-01/opensearch/vpcEndpoints` | Create an endpoint for a domain, idempotent on `ClientToken` |
+| `DescribeVpcEndpoints` | `POST /2021-01-01/opensearch/vpcEndpoints/describe` | Describe endpoints by id; an unknown id is a `VpcEndpointErrors` entry |
+| `UpdateVpcEndpoint` | `POST /2021-01-01/opensearch/vpcEndpoints/update` | Replace an endpoint's subnets and security groups |
+| `DeleteVpcEndpoint` | `DELETE /2021-01-01/opensearch/vpcEndpoints/{id}` | Delete an endpoint |
+| `ListVpcEndpoints` | `GET /2021-01-01/opensearch/vpcEndpoints` | List the Region's endpoints |
+| `ListVpcEndpointsForDomain` | `GET /2021-01-01/opensearch/domain/{name}/vpcEndpoints` | List one domain's endpoints |
+
+### Legacy Elasticsearch Service API
+
+The `2015-01-01` API used by `aws es` and Terraform's `aws_elasticsearch_domain` is served over the same domains. It differs only in spelling: `ElasticsearchVersion` (bare, e.g. `7.10`, stored as `Elasticsearch_7.10`; `OS_2.11` and `OpenSearch_2.11` both store and report as `OpenSearch_2.11`) for `EngineVersion`, `ElasticsearchClusterConfig` for `ClusterConfig`, and instance types ending in `.elasticsearch`, for `InstanceType` and `DedicatedMasterType` (`t3.small.elasticsearch` is stored, and reported by the 2021 API, as `t3.small.search`). A domain created without `ElasticsearchVersion` gets `7.10`.
+
+| Operation | Method + Path |
+|---|---|
+| `CreateElasticsearchDomain` | `POST /2015-01-01/es/domain` |
+| `DescribeElasticsearchDomain` | `GET /2015-01-01/es/domain/{name}` |
+| `DescribeElasticsearchDomains` | `POST /2015-01-01/es/domain-info` |
+| `DescribeElasticsearchDomainConfig` | `GET /2015-01-01/es/domain/{name}/config` |
+| `UpdateElasticsearchDomainConfig` | `POST /2015-01-01/es/domain/{name}/config` |
+| `DeleteElasticsearchDomain` | `DELETE /2015-01-01/es/domain/{name}` |
+| `ListDomainNames` | `GET /2015-01-01/domain` |
+| `AddTags` / `ListTags` / `RemoveTags` | `POST /2015-01-01/tags`, `GET /2015-01-01/tags/?arn=`, `POST /2015-01-01/tags-removal` |
+
+### Versions & Instance Types
+
+| Operation | Method + Path | Description |
+|---|---|---|
+| `ListVersions` | `GET /2021-01-01/opensearch/versions` | List supported engine versions |
+| `GetCompatibleVersions` | `GET /2021-01-01/opensearch/compatibleVersions` | List valid upgrade paths |
+| `ListInstanceTypeDetails` | `GET /2021-01-01/opensearch/instanceTypeDetails/{version}` | List available instance types |
+| `DescribeInstanceTypeLimits` | `GET /2021-01-01/opensearch/instanceTypeLimits/{version}/{type}` | Get limits for an instance type |
+
+### Stubs (SDK-compatible, no-op responses)
+
+| Operation | Notes |
+|---|---|
+| `DescribeDomainChangeProgress` | Returns empty `ChangeProgressStatus` |
+| `DescribeDomainAutoTunes` | Returns empty `AutoTunes` list |
+| `DescribeDryRunProgress` | Returns empty `DryRunProgressStatus` |
+| `DescribeDomainHealth` | Returns `ClusterHealth: Green` |
+| `GetUpgradeHistory` | Returns empty list |
+| `GetUpgradeStatus` | Returns `StepStatus: SUCCEEDED` |
+| `UpgradeDomain` | Stores new engine version, returns immediately with a generated `UpgradeId` |
+| `CancelDomainConfigChange` | Returns empty `CancelledChangeIds` |
+| `StartServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
+| `CancelServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_OPENSEARCH_ENABLED` | `true` | Enable/disable the service |
+| `FLOCI_SERVICES_OPENSEARCH_MOCK` | `false` | `true` = metadata only (no Docker) |
+| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | *(unset)* | Optional fixed image used for every domain regardless of `EngineVersion`. Useful for private registry mirrors. When unset, images resolve per-version from the built-in version map. |
+| `FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME` | *(unset)* | Data volume for the spawned domain containers. An absolute path bind-mounts `<path>/<account-id>/<region>/<domain-name>` (nested under a `<namespace>` subdirectory when `FLOCI_DOCKER_RESOURCE_NAMESPACE` is set); any other value is a Docker volume name and each domain gets its own `<name>-<account-id>-<region>-<domain-name>` volume of it (`<name>-<namespace>-<account-id>-<region>-<domain-name>` when a resource namespace is set), so no two domains or namespaced deployments sharing a Docker daemon share a data directory. Storage named here is never removed on domain delete. When unset, each domain gets a Floci-managed volume. |
+| `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` | `9400` | Port range start for real mode |
+| `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT` | `9499` | Port range end for real mode |
+| `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave containers running after Floci stops |
+| `FLOCI_SERVICES_DOCKER_NETWORK` | *(unset)* | Shared Docker network for all container-based services including OpenSearch |
+| `FLOCI_STORAGE_SERVICES_OPENSEARCH_FLUSH_INTERVAL_MS` | `5000` | Flush interval (ms) |
+
+### Mock mode (CI / tests)
+
+Use `FLOCI_SERVICES_OPENSEARCH_MOCK=true` when you only need the API shape:
+
+```yaml
+# docker-compose.yml — CI / test environment
+services:
+  floci:
+    image: floci/floci:latest
+    environment:
+      FLOCI_SERVICES_OPENSEARCH_MOCK: "true"
+```
+
+## Emulation Behaviour
+
+- **Domain name validation:** 3–28 characters, must start with a lowercase letter, only lowercase letters, digits, and hyphens.
+- **Regional scoping:** a domain name is unique within one account and one Region, exactly as AWS scopes it. Describe, update, delete, upgrade and list resolve only in the Region the request is signed for, so the same name can exist in two Regions and one Region's requests never see, change or delete another Region's domain. Domain records persisted before regional scoping are migrated onto their Region on first use, taking it from the domain's ARN, which has always carried it.
+- **ARN format:** `arn:aws:es:{region}:{accountId}:domain/{domainName}`
+- **Domains in a VPC:** a domain created with `VPCOptions` reports its address under `Endpoints.vpc` and has no `Endpoint`, as AWS answers and as the Terraform AWS provider requires. In mock mode the address is `vpc-<domain>-<suffix>.<region>.es.amazonaws.com`; in real mode it is the container's address. `Endpoints` is left out until the address is known.
+- **VPC endpoints:**
+    - An id reads `aos-` followed by 12 hexadecimal digits, and endpoints are scoped to an account and a Region like domains.
+    - `CreateVpcEndpoint`, `UpdateVpcEndpoint` and `DeleteVpcEndpoint` answer `CREATING`, `UPDATING` and `DELETING`, and the next read sees the endpoint `ACTIVE` or gone: the change takes effect at once.
+    - `VPCId` and `AvailabilityZones` are filled from the EC2 subnets the request names; a subnet EC2 does not know stays unresolved. Without `SecurityGroupIds` the endpoint takes the VPC's default security group, as in AWS.
+    - `Endpoint` is the domain's own address, since Floci serves a domain at one address; no network interface is created.
+    - A list returns every endpoint in one page, without `NextToken`. A domain name that names no domain lists nothing.
+    - An unknown domain ARN on `CreateVpcEndpoint`, or the ARN of a domain in another Region, is a `ValidationException`, and an unknown id on `UpdateVpcEndpoint` or `DeleteVpcEndpoint` a `ResourceNotFoundException`, as the API reference lists for each operation. Deleting a domain does not delete its VPC endpoints.
+- **Domain ID format:** `{accountId}/{domainName}`
+- **`Created` flag:** `true` immediately in mock mode; set to `true` by the readiness poller in real mode once `/_cluster/health` reports `green` or `yellow`.
+- **`Processing` flag:** `false` immediately in mock mode; `true` until the container is ready in real mode.
+- **Engine version default:** `OpenSearch_2.19`
+- **Supported engine versions:** `OpenSearch_3.7`, `OpenSearch_3.6`, `OpenSearch_3.5`, `OpenSearch_3.4`, `OpenSearch_3.3`, `OpenSearch_3.2`, `OpenSearch_3.1`, `OpenSearch_3.0`, `OpenSearch_2.19`, `OpenSearch_2.17`, `OpenSearch_2.15`, `OpenSearch_2.13`, `OpenSearch_2.11`, `OpenSearch_2.9`, `OpenSearch_2.7`, `OpenSearch_2.5`, `OpenSearch_2.3`, `OpenSearch_1.3`, `OpenSearch_1.2`, `OpenSearch_1.1`, `OpenSearch_1.0`, `Elasticsearch_7.10`, `Elasticsearch_7.9`, `Elasticsearch_7.8`, `Elasticsearch_7.7`, `Elasticsearch_7.4`, `Elasticsearch_7.1`
+- **Elasticsearch 7.1, 7.4 and 7.7 images:** published for amd64 only, so on arm64 hosts Docker runs them under emulation (slower; emulation must be enabled).
+- **Version validation:** `CreateDomain`, `UpdateDomainConfig`, and `UpgradeDomain` reject unknown engine versions with `ValidationException`. `UpgradeDomain` also rejects targets that aren't reachable from the current version per AWS's documented upgrade matrix.
+- **Cluster defaults:** `m5.large.search`, 1 instance, EBS enabled with 10 GiB `gp2` volume.
+- **Stored settings:** `CreateDomain` and `UpdateDomainConfig` keep, and `DescribeDomain` and `DescribeDomainConfig` report, `ClusterConfig.ZoneAwarenessConfig`, `DedicatedMasterType` and `DedicatedMasterCount`, EBS `Iops` and `Throughput`, `AdvancedOptions`, `IPAddressType`, `OffPeakWindowOptions` and `SoftwareUpdateOptions`. An update changes only the members it gives; `AdvancedOptions` replaces the whole map. None of them changes how the domain's container runs.
+- **Defaults for those settings:** a domain created without them reports `IPAddressType` `ipv4`, an empty `AdvancedOptions`, automatic software updates off, and an enabled off-peak window starting at 22:00, as AWS does for a new domain. AWS reads 10:00 P.M. in the Region's local time; Floci keeps no time zone per Region and reports 22:00 UTC. A window enabled without a start time gets the same default.
+- **Instance type families:** `t3.*` / `m5/m6g/m7g.*` / `r5/r6g/r7g.*` / `c5/c6g/c7g.*` are EBS-backed (3584 GiB max). `i3.*` are local-NVMe instance-store. `or1.*` are S3-backed and surface a much larger volume ceiling on `DescribeInstanceTypeLimits` (8–36 TiB depending on size). Floci still boots one Docker container per domain regardless of family — the metadata fidelity matters for SDK clients that introspect, not for runtime data placement.
+- **Container identity:** containers are named `floci-aws-opensearch-<account-id>-<region>-<domain-name>`, or `floci-aws-<namespace>-opensearch-<account-id>-<region>-<domain-name>` when `FLOCI_DOCKER_RESOURCE_NAMESPACE` is set. Account and Region come from the domain's stored ARN and are also recorded in its container labels. Restarts remove older containers by their persisted container ID and preserve the stored volume name. Legacy names that omit account and Region are never removed solely by name, because another domain may own them.
+- **Container storage:** each domain gets a named Docker volume (`floci-aws-opensearch-{volumeId}`) created automatically. In memory mode the volume is removed on domain delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`. Set `FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME` to choose the storage yourself: an absolute path bind-mounts `<path>/<account-id>/<region>/<domain-name>` (a directory on the Docker daemon's host), and any other value is a Docker volume name the domain gets its own `<name>-<account-id>-<region>-<domain-name>` volume of. When `FLOCI_DOCKER_RESOURCE_NAMESPACE` is set, the namespace is inserted into both forms, so two namespaced deployments sharing a Docker daemon never converge on one data directory through the same configured base. Linux daemon paths starting with `/` retain Linux path syntax when Floci runs on Windows; native Windows absolute paths retain their native handling. Before a configured bind directory is mounted, a temporary root container using the selected OpenSearch image copies ownership from the image's data directory and grants the owner write access. Only the directory itself is adjusted; existing files retain their ownership and permissions. Preparation failures abort domain startup. Storage named that way is never removed on domain delete, and a volume created when absent carries no Floci label, so neither a floci-scoped volume prune nor a testcontainers run's labelled-children sweep collects it: the operator named it, so its lifecycle is theirs. Legacy host-path mode (`FLOCI_STORAGE_HOST_PERSISTENT_PATH` set to an absolute path) gives each domain its own `<host-path>/[<namespace>/]opensearch/floci-aws[-<namespace>]-opensearch-<account-id>-<region>-<domain-name>` directory, so two domains sharing a name across Regions or accounts never share one data directory; a domain whose record predates regional scoping keeps the bare `<domain-name>` directory while it still exists, since that is where its data lives.
+
+## Examples
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566
+export AWS_DEFAULT_REGION=us-east-1
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+
+# Create a domain
+aws opensearch create-domain \
+  --domain-name my-search \
+  --engine-version "OpenSearch_2.11" \
+  --cluster-config InstanceType=m5.large.search,InstanceCount=1 \
+  --ebs-options EBSEnabled=true,VolumeType=gp2,VolumeSize=10
+
+# Describe the domain
+aws opensearch describe-domain --domain-name my-search
+
+# List all domains
+aws opensearch list-domain-names
+
+# Update cluster config
+aws opensearch update-domain-config \
+  --domain-name my-search \
+  --cluster-config InstanceCount=3
+
+# Add tags
+aws opensearch add-tags \
+  --arn arn:aws:es:us-east-1:000000000000:domain/my-search \
+  --tag-list Key=env,Value=dev
+
+# List tags
+aws opensearch list-tags \
+  --arn arn:aws:es:us-east-1:000000000000:domain/my-search
+
+# Delete domain
+aws opensearch delete-domain --domain-name my-search
+```
+
+## SDK Example (Java)
+
+```java
+OpenSearchClient os = OpenSearchClient.builder()
+    .endpointOverride(URI.create("http://localhost:4566"))
+    .region(Region.US_EAST_1)
+    .credentialsProvider(StaticCredentialsProvider.create(
+        AwsBasicCredentials.create("test", "test")))
+    .build();
+
+// Create a domain
+CreateDomainResponse created = os.createDomain(req -> req
+    .domainName("my-search")
+    .engineVersion("OpenSearch_2.11")
+    .clusterConfig(c -> c
+        .instanceType(OpenSearchPartitionInstanceType.M5_LARGE_SEARCH)
+        .instanceCount(1))
+    .ebsOptions(e -> e
+        .ebsEnabled(true)
+        .volumeType(VolumeType.GP2)
+        .volumeSize(10)));
+
+System.out.println("ARN: " + created.domainStatus().arn());
+
+// Wait for domain to be ready (real mode)
+// created.domainStatus().created() == true when ready
+
+// Describe the domain
+DescribeDomainResponse desc = os.describeDomain(req -> req
+    .domainName("my-search"));
+
+System.out.println("Version: " + desc.domainStatus().engineVersion());
+System.out.println("Endpoint: " + desc.domainStatus().endpoint());
+
+// List domains
+os.listDomainNames(req -> req.build())
+    .domainNames()
+    .forEach(d -> System.out.println(d.domainName()));
+
+// Delete
+os.deleteDomain(req -> req.domainName("my-search"));
+```
+
+## SDK Example (Python)
+
+```python
+import boto3
+
+os_client = boto3.client(
+    "opensearch",
+    endpoint_url="http://localhost:4566",
+    region_name="us-east-1",
+    aws_access_key_id="test",
+    aws_secret_access_key="test"
+)
+
+# Create a domain
+response = os_client.create_domain(
+    DomainName="my-search",
+    EngineVersion="OpenSearch_2.11",
+    ClusterConfig={"InstanceType": "m5.large.search", "InstanceCount": 1},
+    EBSOptions={"EBSEnabled": True, "VolumeType": "gp2", "VolumeSize": 10}
+)
+print(response["DomainStatus"]["ARN"])
+
+# List domains
+domains = os_client.list_domain_names()
+for d in domains["DomainNames"]:
+    print(d["DomainName"])
+
+# Delete
+os_client.delete_domain(DomainName="my-search")
+```
+
+## Limitations
+
+- In mock mode, no data-plane endpoints (`/_search`, `/_index`, etc.) are served — only the management API is emulated.
+- No Elasticsearch-compatible management endpoints (`/2015-01-01/es/domain/...`).
+- `AccessPolicies`, `VPCOptions`, `AdvancedSecurityOptions`, `EncryptionAtRestOptions`, `NodeToNodeEncryptionOptions`, and `DomainEndpointOptions` round-trip on `CreateDomain` / `UpdateDomainConfig` / `DescribeDomain` / `DescribeDomainConfig`, but are not enforced by the running container — Floci serves the domain over plain HTTP with the security plugin disabled regardless, and `AccessPolicies` is stored verbatim without being evaluated. Round-tripping is enough for SDK clients (Terraform, CDK, Pulumi) to detect drift correctly.
+- Master passwords for `AdvancedSecurityOptions.MasterUserOptions` are accepted but never echoed back, matching AWS behavior.
+- Cross-cluster connections, packages, applications, and data sources are not supported and return `UnsupportedOperationException`.
+- The legacy `2015-01-01` API serves no VPC endpoint operations.

@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+target/
+.git/
+*.md
+test-results/
+.terraform/
+.terraform.lock.hcl

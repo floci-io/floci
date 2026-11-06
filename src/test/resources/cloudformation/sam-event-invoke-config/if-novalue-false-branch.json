@@ -1,0 +1,108 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::If": [
+                "NOTUseOwnef6eca6cf7",
+                {
+                  "Fn::GetAtt": [
+                    "FnEventInvokeConfigOnFailureQueue",
+                    "Arn"
+                  ]
+                },
+                "arn:aws:sqs:us-east-1:123456789012:q"
+              ]
+            }
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "Qualifier": "$LATEST"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    },
+    "FnEventInvokeConfigOnFailureQueue": {
+      "Condition": "NOTUseOwnef6eca6cf7",
+      "Properties": {},
+      "Type": "AWS::SQS::Queue"
+    },
+    "FnRole": {
+      "Policies": [
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "sqs:SendMessage",
+                "Effect": "Allow",
+                "Resource": {
+                  "Fn::If": [
+                    "NOTUseOwnef6eca6cf7",
+                    {
+                      "Fn::GetAtt": [
+                        "FnEventInvokeConfigOnFailureQueue",
+                        "Arn"
+                      ]
+                    },
+                    "arn:aws:sqs:us-east-1:123456789012:q"
+                  ]
+                }
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnFailureSQSPolicy"
+        }
+      ],
+      "Type": "AWS::IAM::Role"
+    }
+  },
+  "expectedConditions": {
+    "NOTUseOwnef6eca6cf7": {
+      "Fn::Not": [
+        {
+          "Condition": "UseOwn"
+        }
+      ]
+    }
+  },
+  "input": {
+    "Conditions": {
+      "UseOwn": {
+        "Fn::Equals": [
+          "a",
+          "b"
+        ]
+      }
+    },
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Destination": {
+                  "Fn::If": [
+                    "UseOwn",
+                    "arn:aws:sqs:us-east-1:123456789012:q",
+                    {
+                      "Ref": "AWS::NoValue"
+                    }
+                  ]
+                },
+                "Type": "SQS"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

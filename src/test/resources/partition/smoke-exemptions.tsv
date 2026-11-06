@@ -1,0 +1,30 @@
+# Service packages that mint ARNs or hosts but are not in PartitionCrossServiceSmokeIntegrationTest.
+# package<TAB>reason. PartitionSmokeInventoryTest fails on a minting package missing from both,
+# and on a row whose package no longer mints or is now covered. Shrink this file, never grow it
+# without a reason.
+appintegrations	no non-commercial partition publishes the service, so a case would be skipped in every partition
+cloudformation	covered by PartitionArnMintingIntegrationTest (all partitions)
+cloudhsmv2	the only ARN on the wire is the automatic backup's, and a backup is never removed (DeleteBackup only marks it), so a case would leak state into the shared emulator
+cloudtrail	covered by CloudTrailSelfDeliveryTest (one partition)
+codeartifact	no non-commercial partition publishes the service, so a case would be skipped in every partition
+codegurureviewer	no non-commercial partition publishes the service, so a case would be skipped in every partition
+cognitoidentity	identity pool ARN is never returned and ARN lookup ignores the partition, nothing to assert
+detective	the graph exists only once an organization admin is designated, and nothing removes it, so a case would leak state into the shared emulator
+docdb	CreateDBCluster starts a container under the test config and the package has no lighter resource; its parameter and subnet groups are RDS's, covered there
+globalaccelerator	no non-commercial partition publishes the service, so a case would be skipped in every partition
+iam	covered by IamPartitionArnIntegrationTest (all partitions)
+kms	covered by PartitionArnMintingIntegrationTest (all partitions)
+lightsail	no non-commercial partition publishes the service, so a case would be skipped in every partition
+macie2	no non-commercial partition publishes the service, so a case would be skipped in every partition
+marketplace	the ARN-minting calls are pinned to us-east-1 except ResolveCustomer, whose record nothing removes, so a case would leak state into the shared emulator
+neptune	CreateDBCluster starts a graph container whenever Docker is reachable, and the package has no container-free resource
+redshiftdata	the only ARN it mints is internal and never returned, and every action needs a running cluster container
+rum	no RUM response carries the app monitor ARN: it is minted only for Resource Explorer listings
+s3	covered by S3PartitionIntegrationTest (bucket rules, all partitions)
+securityhub	every ARN needs the hub enabled and DisableSecurityHub is not served, so a case would leave the hub enabled in each partition's region
+servicecatalog	covered by PartitionArnMintingIntegrationTest (all partitions)
+signin	the only ARN is the sub claim of an id token issued by the OAuth flow, and the session that flow registers cannot be removed
+ssm	covered by PartitionArnMintingIntegrationTest (all partitions)
+ssoadmin	one instance per account, minted in its primary region's partition, so a request signed in another partition sees that ARN (BL-243)
+ssoportal	no portal response carries the reserved role ARN, and a portal session cannot be built over HTTP under the test config
+swf	a registered domain can only be deprecated, never removed, so a case would leak state into the shared emulator

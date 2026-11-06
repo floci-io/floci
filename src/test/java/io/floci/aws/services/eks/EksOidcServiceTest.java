@@ -1,0 +1,251 @@
+package io.floci.aws.services.eks;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.eks.model.ClusterOidcKey;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
+import java.util.Base64;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class EksOidcServiceTest {
+
+    private static final String ISSUER =
+            "https://oidc.eks.us-east-1.amazonaws.com/id/ABCDEF0123456789ABCDEF0123456789";
+    private static final String CLUSTER = "irsa-test-cluster";
+
+    private EksOidcService oidcService;
+
+    @BeforeEach
+    void setUp() {
+        oidcService = new EksOidcService(new StorageFactory(null, null) {
+            @Override
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return AccountAwareStorageBackend.inMemory("000000000000");
+            }
+        }, new ObjectMapper());
+    }
+
+    private String decodePayload(String token) {
+        return new String(Base64.getUrlDecoder().decode(token.split("\\.", -1)[1]));
+    }
+
+    @Test
+    void newIssuerUrlIsAwsShapedAndUnique() {
+        String first = oidcService.newIssuerUrl("us-east-1");
+        String second = oidcService.newIssuerUrl("us-east-1");
+
+        assertTrue(first.matches("https://oidc\\.eks\\.us-east-1\\.amazonaws\\.com/id/[A-F0-9]{32}"),
+                "unexpected issuer shape: " + first);
+        assertNotEquals(first, second);
+        assertTrue(oidcService.newIssuerUrl("eu-west-2").contains("oidc.eks.eu-west-2."));
+    }
+
+    @Test
+    void ensureKeyIsIdempotentForTheSameIssuer() {
+        ClusterOidcKey first = oidcService.ensureKey(CLUSTER, ISSUER);
+        ClusterOidcKey second = oidcService.ensureKey(CLUSTER, ISSUER);
+
+        assertEquals(first.getKeyId(), second.getKeyId());
+        assertEquals(first.getPrivateKey(), second.getPrivateKey());
+    }
+
+    @Test
+    void ensureKeyRotatesWhenTheIssuerChanges() {
+        ClusterOidcKey original = oidcService.ensureKey(CLUSTER, ISSUER);
+        ClusterOidcKey rotated = oidcService.ensureKey(CLUSTER,
+                "https://oidc.eks.us-east-1.amazonaws.com/id/0000000000000000000000000000BEEF");
+
+        assertNotEquals(original.getPrivateKey(), rotated.getPrivateKey());
+        assertTrue(oidcService.findVerificationKey(ISSUER).isEmpty());
+    }
+
+    @Test
+    void findVerificationKeyResolvesAcrossAccounts() {
+        // STS must resolve an issuer regardless of which account owns the cluster: the caller need
+        // not be the owner, and an unresolved issuer is treated as a third-party provider — so the
+        // token would be accepted with no validation at all.
+        StorageBackend<String, ClusterOidcKey> raw = new InMemoryStorage<>();
+        AccountAwareStorageBackend<ClusterOidcKey> accountAware = new AccountAwareStorageBackend<>(raw, null, "000000000000");
+        EksOidcService service = new EksOidcService(new StorageFactory(null, null) {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
+                    TypeReference<Map<String, V>> typeReference) {
+                return (AccountAwareStorageBackend<V>) accountAware;
+            }
+        }, new ObjectMapper());
+
+        service.ensureKeyForAccount("999999999999", CLUSTER, ISSUER);
+
+        // The lookup runs outside any request context, so it resolves to the default account.
+        assertTrue(service.findVerificationKey(ISSUER).isPresent());
+    }
+
+    @Test
+    void findVerificationKeyResolvesOnlyKnownIssuers() {
+        oidcService.ensureKey(CLUSTER, ISSUER);
+
+        assertTrue(oidcService.findVerificationKey(ISSUER).isPresent());
+        assertTrue(oidcService.findVerificationKey("https://accounts.google.com").isEmpty());
+        assertTrue(oidcService.findVerificationKey(null).isEmpty());
+        assertTrue(oidcService.findVerificationKey("").isEmpty());
+    }
+
+    @Test
+    void deleteKeyRemovesSigningMaterial() {
+        oidcService.ensureKey(CLUSTER, ISSUER);
+        oidcService.deleteKey(CLUSTER);
+
+        assertTrue(oidcService.findKeyByCluster(CLUSTER).isEmpty());
+        assertTrue(oidcService.findVerificationKey(ISSUER).isEmpty());
+    }
+
+    @Test
+    void mintedTokenCarriesKubernetesServiceAccountClaims() {
+        oidcService.ensureKey(CLUSTER, ISSUER);
+        String payload = decodePayload(oidcService.mintServiceAccountToken(
+                CLUSTER, ISSUER, "my-namespace", "my-service-account", null, null));
+
+        assertTrue(payload.contains("\"sub\":\"system:serviceaccount:my-namespace:my-service-account\""));
+        assertTrue(payload.contains("\"kubernetes.io\""));
+        assertTrue(payload.contains("\"namespace\":\"my-namespace\""));
+        assertTrue(payload.contains("\"name\":\"my-service-account\""));
+    }
+
+    @Test
+    void mintRejectsMissingNamespaceOrServiceAccount() {
+        oidcService.ensureKey(CLUSTER, ISSUER);
+
+        assertThrows(AwsException.class, () -> oidcService.mintServiceAccountToken(
+                CLUSTER, ISSUER, null, "my-service-account", null, null));
+        assertThrows(AwsException.class, () -> oidcService.mintServiceAccountToken(
+                CLUSTER, ISSUER, "  ", "my-service-account", null, null));
+        assertThrows(AwsException.class, () -> oidcService.mintServiceAccountToken(
+                CLUSTER, ISSUER, "my-namespace", null, null, null));
+        assertThrows(AwsException.class, () -> oidcService.mintServiceAccountToken(
+                CLUSTER, ISSUER, "my-namespace", "  ", null, null));
+    }
+
+    @Test
+    void mintClampsLifetimeToTheMaximum() {
+        oidcService.ensureKey(CLUSTER, ISSUER);
+        long now = System.currentTimeMillis() / 1000;
+
+        String payload = decodePayload(oidcService.mintServiceAccountToken(
+                CLUSTER, ISSUER, "my-namespace", "my-service-account", null, Integer.MAX_VALUE));
+
+        long exp = Long.parseLong(payload.replaceAll(".*\"exp\":(\\d+).*", "$1"));
+        assertTrue(exp <= now + 604800, "expiry was not clamped to 7 days: " + exp);
+    }
+
+    @Test
+    void namespaceWithControlCharactersStillProducesAParseableToken() {
+        // Claims are serialized with Jackson, so a newline is escaped rather than breaking the JSON.
+        oidcService.ensureKey(CLUSTER, ISSUER);
+        String payload = decodePayload(oidcService.mintServiceAccountToken(
+                CLUSTER, ISSUER, "bad\nnamespace\"quote", "my-service-account", null, null));
+
+        assertFalse(payload.contains("\n"), "raw newline leaked into the JWT payload");
+        assertTrue(payload.contains("\\n"));
+    }
+
+    @Test
+    void exportSigningKeyPemProducesValidPkcs8MatchingClusterKey() throws Exception {
+        ClusterOidcKey key = oidcService.ensureKey(CLUSTER, ISSUER);
+        String pem = oidcService.exportSigningKeyPem(key);
+
+        assertTrue(pem.startsWith("-----BEGIN PRIVATE KEY-----\n"));
+        assertTrue(pem.endsWith("-----END PRIVATE KEY-----\n"));
+
+        String base64 = pem.replace("-----BEGIN PRIVATE KEY-----", "")
+                .replace("-----END PRIVATE KEY-----", "")
+                .replaceAll("\\s+", "");
+        assertEquals(key.getPrivateKey(), base64);
+
+        PKCS8EncodedKeySpec spec = new PKCS8EncodedKeySpec(Base64.getDecoder().decode(base64));
+        PrivateKey privateKey = KeyFactory.getInstance("RSA").generatePrivate(spec);
+        assertNotNull(privateKey);
+        assertEquals("PKCS#8", privateKey.getFormat());
+    }
+
+    @Test
+    void exportPublicKeyPemProducesValidX509MatchingClusterKey() throws Exception {
+        ClusterOidcKey key = oidcService.ensureKey(CLUSTER, ISSUER);
+        String pem = oidcService.exportPublicKeyPem(key);
+
+        assertTrue(pem.startsWith("-----BEGIN PUBLIC KEY-----\n"));
+        assertTrue(pem.endsWith("-----END PUBLIC KEY-----\n"));
+
+        String base64 = pem.replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s+", "");
+        assertEquals(key.getPublicKey(), base64);
+
+        X509EncodedKeySpec spec = new X509EncodedKeySpec(Base64.getDecoder().decode(base64));
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(spec);
+        assertNotNull(publicKey);
+        assertEquals("X.509", publicKey.getFormat());
+    }
+
+    @Test
+    void exportedKeyPairSignsAndVerifies() throws Exception {
+        ClusterOidcKey key = oidcService.ensureKey(CLUSTER, ISSUER);
+        String signingPem = oidcService.exportSigningKeyPem(key);
+        String publicPem = oidcService.exportPublicKeyPem(key);
+
+        String privateBase64 = signingPem.replace("-----BEGIN PRIVATE KEY-----", "")
+                .replace("-----END PRIVATE KEY-----", "")
+                .replaceAll("\\s+", "");
+        String publicBase64 = publicPem.replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s+", "");
+
+        PrivateKey privateKey = KeyFactory.getInstance("RSA").generatePrivate(
+                new PKCS8EncodedKeySpec(Base64.getDecoder().decode(privateBase64)));
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(
+                new X509EncodedKeySpec(Base64.getDecoder().decode(publicBase64)));
+
+        byte[] payload = "test-jwt-header.test-jwt-claims".getBytes(StandardCharsets.UTF_8);
+        Signature signer = Signature.getInstance("SHA256withRSA");
+        signer.initSign(privateKey);
+        signer.update(payload);
+        byte[] signature = signer.sign();
+
+        Signature verifier = Signature.getInstance("SHA256withRSA");
+        verifier.initVerify(publicKey);
+        verifier.update(payload);
+        assertTrue(verifier.verify(signature), "signature must verify against exported public key");
+    }
+
+    @Test
+    void exportThrowsOnNullKeyOrField() {
+        assertThrows(IllegalArgumentException.class, () -> oidcService.exportSigningKeyPem(null));
+        assertThrows(IllegalArgumentException.class, () -> oidcService.exportPublicKeyPem(null));
+
+        ClusterOidcKey incomplete = new ClusterOidcKey(ISSUER, "kid", null, null);
+        assertThrows(IllegalArgumentException.class, () -> oidcService.exportSigningKeyPem(incomplete));
+        assertThrows(IllegalArgumentException.class, () -> oidcService.exportPublicKeyPem(incomplete));
+    }
+}

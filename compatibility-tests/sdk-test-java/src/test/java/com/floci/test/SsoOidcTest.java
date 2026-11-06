@@ -1,0 +1,203 @@
+package com.floci.test;
+
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.core.document.Document;
+import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
+import software.amazon.awssdk.services.ssooidc.SsoOidcClient;
+import software.amazon.awssdk.services.ssooidc.model.CreateTokenResponse;
+import software.amazon.awssdk.services.ssooidc.model.CreateTokenWithIamResponse;
+import software.amazon.awssdk.services.ssooidc.model.RegisterClientResponse;
+import software.amazon.awssdk.services.ssooidc.model.StartDeviceAuthorizationResponse;
+
+import java.io.IOException;
+import java.net.URI;
+import java.net.URLDecoder;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.Base64;
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
+
+@DisplayName("IAM Identity Center OIDC")
+class SsoOidcTest {
+
+    @Test
+    @DisplayName("registers a public OIDC client through the AWS SDK")
+    void registerClientUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Uses emulator-only client registration");
+
+        try (SsoOidcClient oidc = TestFixtures.ssoOidcClient()) {
+            RegisterClientResponse response = oidc.registerClient(request -> request
+                    .clientName("Floci SDK CLI")
+                    .clientType("public")
+                    .grantTypes("authorization_code", "refresh_token")
+                    .redirectUris("http://127.0.0.1:8400/callback")
+                    .scopes("sso:account:access"));
+
+            assertThat(response.clientId()).matches("[0-9a-f]{32}");
+            assertThat(response.clientSecret()).matches("[0-9a-f]{64}");
+            assertThat(response.clientIdIssuedAt()).isPositive();
+            assertThat(response.clientSecretExpiresAt()).isGreaterThan(response.clientIdIssuedAt());
+            assertThat(response.authorizationEndpoint()).endsWith("/authorize");
+            assertThat(response.tokenEndpoint()).endsWith("/token");
+        }
+    }
+
+    @Test
+    @DisplayName("starts device authorization through the AWS SDK")
+    void startDeviceAuthorizationUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Uses emulator-only device authorization");
+
+        try (SsoOidcClient oidc = TestFixtures.ssoOidcClient()) {
+            RegisterClientResponse client = oidc.registerClient(request -> request
+                    .clientName("Floci Device SDK")
+                    .clientType("public")
+                    .grantTypes("urn:ietf:params:oauth:grant-type:device_code", "refresh_token"));
+            StartDeviceAuthorizationResponse response = oidc.startDeviceAuthorization(request -> request
+                    .clientId(client.clientId())
+                    .clientSecret(client.clientSecret())
+                    .startUrl("https://example.awsapps.com/start"));
+
+            assertThat(response.deviceCode()).matches("[0-9a-f]{64}");
+            assertThat(response.userCode()).matches("[0-9A-F]{4}-[0-9A-F]{4}");
+            assertThat(response.verificationUri()).endsWith("/device");
+            assertThat(response.verificationUriComplete()).contains("user_code=" + response.userCode());
+            assertThat(response.expiresIn()).isPositive();
+            assertThat(response.interval()).isEqualTo(5);
+
+            try {
+                URI advertisedUri = URI.create(response.verificationUriComplete());
+                URI uri = TestFixtures.endpoint().resolve(
+                        advertisedUri.getRawPath() + "?" + advertisedUri.getRawQuery());
+                HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
+                HttpResponse<String> browserResponse = TestFixtures.emulatorHttpClient().send(
+                        request, HttpResponse.BodyHandlers.ofString());
+                assertThat(browserResponse.statusCode()).isEqualTo(200);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+
+            CreateTokenResponse token = oidc.createToken(request -> request
+                    .clientId(client.clientId())
+                    .clientSecret(client.clientSecret())
+                    .grantType("urn:ietf:params:oauth:grant-type:device_code")
+                    .deviceCode(response.deviceCode()));
+            assertThat(token.tokenType()).isEqualTo("Bearer");
+            assertThat(token.accessToken()).isNotBlank();
+            assertThat(token.refreshToken()).isNotBlank();
+
+            CreateTokenResponse refreshed = oidc.createToken(request -> request
+                    .clientId(client.clientId())
+                    .clientSecret(client.clientSecret())
+                    .grantType("refresh_token")
+                    .refreshToken(token.refreshToken()));
+            assertThat(refreshed.accessToken()).isNotEqualTo(token.accessToken());
+        }
+    }
+
+    @Test
+    @DisplayName("creates IAM-authenticated tokens through the AWS SDK")
+    void createTokenWithIamUsesAwsSdk() {
+        assumeFalse(TestFixtures.isRealAws(), "Uses emulator IAM application configuration");
+
+        try (SsoAdminClient sso = TestFixtures.ssoAdminClient();
+             SsoOidcClient oidc = TestFixtures.ssoOidcClient()) {
+            String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
+            String applicationArn = sso.createApplication(request -> request
+                    .instanceArn(instanceArn)
+                    .applicationProviderArn(TestFixtures.globalArn("sso", "aws", "applicationProvider/custom"))
+                    .name("Floci IAM OIDC SDK"))
+                    .applicationArn();
+
+            Document statement = Document.mapBuilder()
+                    .putString("Effect", "Allow")
+                    .putDocument("Principal", Document.fromString("*"))
+                    .putString("Action", "sso-oauth:CreateTokenWithIAM")
+                    .putString("Resource", "*")
+                    .build();
+            Document actorPolicy = Document.mapBuilder()
+                    .putString("Version", "2012-10-17")
+                    .putDocument("Statement", Document.fromList(List.of(statement)))
+                    .build();
+            sso.putApplicationAuthenticationMethod(request -> request
+                    .applicationArn(applicationArn)
+                    .authenticationMethodType("IAM")
+                    .authenticationMethod(method -> method.iam(iam -> iam.actorPolicy(actorPolicy))));
+            String redirectUri = "http://127.0.0.1:8400/callback";
+            sso.putApplicationGrant(request -> request
+                    .applicationArn(applicationArn)
+                    .grantType("authorization_code")
+                    .grant(grant -> grant.authorizationCode(code -> code.redirectUris(redirectUri))));
+            sso.putApplicationAccessScope(request -> request
+                    .applicationArn(applicationArn)
+                    .scope("api:read")
+                    .authorizedTargets(applicationArn));
+
+            String verifier = "01234567890123456789012345678901234567890123456789";
+            String challenge = pkceChallenge(verifier);
+            String authorizeUrl = TestFixtures.endpoint().toString()
+                    + "/authorize?response_type=code&client_id="
+                    + URLEncoder.encode(applicationArn, StandardCharsets.UTF_8)
+                    + "&redirect_uri=" + URLEncoder.encode(redirectUri, StandardCharsets.UTF_8)
+                    + "&code_challenge=" + URLEncoder.encode(challenge, StandardCharsets.UTF_8)
+                    + "&code_challenge_method=S256";
+            String code;
+            try {
+                HttpResponse<String> browserResponse = HttpClient.newBuilder()
+                        .followRedirects(HttpClient.Redirect.NEVER)
+                        .build()
+                        .send(HttpRequest.newBuilder(URI.create(authorizeUrl)).GET().build(),
+                                HttpResponse.BodyHandlers.ofString());
+                assertThat(browserResponse.statusCode()).isEqualTo(303);
+                String[] params = URI.create(browserResponse.headers().firstValue("location").orElseThrow())
+                        .getRawQuery().split("&");
+                code = Arrays.stream(params)
+                        .filter(value -> value.startsWith("code="))
+                        .map(value -> URLDecoder.decode(value.substring(5), StandardCharsets.UTF_8))
+                        .findFirst().orElseThrow();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+
+            CreateTokenWithIamResponse response = oidc.createTokenWithIAM(request -> request
+                    .clientId(applicationArn)
+                    .grantType("authorization_code")
+                    .code(code)
+                    .codeVerifier(verifier)
+                    .redirectUri(redirectUri)
+                    .scope("api:read"));
+
+            assertThat(response.tokenType()).isEqualTo("Bearer");
+            assertThat(response.accessToken()).isNotBlank();
+            assertThat(response.refreshToken()).isNotBlank();
+            assertThat(response.idToken()).isNotBlank();
+            assertThat(response.scope()).containsExactly("api:read");
+            assertThat(response.awsAdditionalDetails().identityContext()).isNotBlank();
+        }
+    }
+
+    private static String pkceChallenge(String verifier) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(verifier.getBytes(StandardCharsets.US_ASCII));
+            return Base64.getUrlEncoder().withoutPadding().encodeToString(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+}

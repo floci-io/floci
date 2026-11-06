@@ -1,0 +1,91 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "DeletionPolicy": "Retain",
+      "DependsOn": [
+        "FnAliaslive"
+      ],
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "FnEventInvokeConfigOnFailureQueue",
+                "Arn"
+              ]
+            }
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "Qualifier": "live"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "FnEventInvokeConfigOnFailureQueue": {
+      "DeletionPolicy": "Retain",
+      "Properties": {},
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "FnRole": {
+      "DeletionPolicy": "Retain",
+      "Policies": [
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "sqs:SendMessage",
+                "Effect": "Allow",
+                "Resource": {
+                  "Fn::GetAtt": [
+                    "FnEventInvokeConfigOnFailureQueue",
+                    "Arn"
+                  ]
+                }
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnFailureSQSPolicy"
+        }
+      ],
+      "Type": "AWS::IAM::Role",
+      "UpdateReplacePolicy": "Retain"
+    }
+  },
+  "expectedAttributesByType": {
+    "AWS::Lambda::Alias": {
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "AWS::Lambda::Version": {
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    }
+  },
+  "input": {
+    "Resources": {
+      "Fn": {
+        "DeletionPolicy": "Retain",
+        "Properties": {
+          "AutoPublishAlias": "live",
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Type": "SQS"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function",
+        "UpdateReplacePolicy": "Retain"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

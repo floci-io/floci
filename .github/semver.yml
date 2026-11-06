@@ -1,0 +1,53 @@
+name: Semantic Release
+
+# Runs semantic-release when a maintainer pushes to a release/x.y branch.
+# semantic-release analyses commits since the last tag, bumps the version,
+# updates CHANGELOG.md + pom.xml, commits them, and pushes a vX.Y.Z tag.
+# That tag push then triggers the release.yml Docker publish workflow.
+#
+# Required secrets: GH_TOKEN (PAT with contents: write)
+
+on:
+  push:
+    branches:
+      - 'release/[0-9]+.x'
+      - 'release/[0-9]+.[0-9]+.x'
+    paths:
+      - 'src/**'
+      - 'pom.xml'
+      - 'docker/Dockerfile.native-package'
+      - 'docker/Dockerfile.compat'
+      - 'docker-compose.yml'
+      - '.releaserc.json'
+      - '.github/workflows/semver.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN }}
+          persist-credentials: true
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run semantic-release
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          extra_plugins: |
+            @semantic-release/changelog
+            @semantic-release/git
+            @semantic-release/exec
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}

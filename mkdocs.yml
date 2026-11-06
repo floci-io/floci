@@ -1,0 +1,242 @@
+site_name: Floci
+site_description: Fast, free, open-source local AWS emulator
+site_url: https://floci.io/floci/
+repo_url: https://github.com/floci-io/floci
+repo_name: floci-io/floci
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  custom_dir: overrides
+  logo: assets/floci-header.svg
+  favicon: assets/floci.svg
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - search.highlight
+    - search.suggest
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+
+# Fail the build on any warning so a docs page without a nav entry, or a broken link,
+# is caught in CI instead of silently shipping unreachable (see floci-io/floci: eleven
+# services/*.md pages went live without a nav line and nothing was red).
+strict: true
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    absolute_links: warn
+    unrecognized_links: warn
+not_in_nav: |
+  configuration/application-yml.md
+  design/*.md
+
+extra_css:
+  - assets/extra.css
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.inlinehilite
+  - tables
+  - attr_list
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Quick Start: getting-started/quick-start.md
+    - Installation: getting-started/installation.md
+    - AWS CLI & SDK Setup: getting-started/aws-setup.md
+    - Terraform: getting-started/terraform.md
+    - Migrate from LocalStack: getting-started/migrate-from-localstack.md
+  - Configuration:
+    - Environment Variables: configuration/environment-variables.md
+    - Docker Images: configuration/docker-images.md
+    - Docker Compose: configuration/docker-compose.md
+    - Docker Configuration: configuration/docker.md
+    - Ports Reference: configuration/ports.md
+    - Multi-Account Isolation: configuration/multi-account.md
+    - AWS Partitions: configuration/partitions.md
+    - Storage Modes: configuration/storage.md
+    - TLS / HTTPS: configuration/tls.md
+    - Initialization Hooks: configuration/initialization-hooks.md
+    - Advanced:
+      - application.yml Reference: configuration/advanced/application-yml.md
+  - Services:
+    - Overview: services/index.md
+    - SSM Parameter Store: services/ssm.md
+    - SQS: services/sqs.md
+    - SNS: services/sns.md
+    - SES: services/ses.md
+    - S3: services/s3.md
+    - S3 Tables: services/s3tables.md
+    - S3 Vectors: services/s3vectors.md
+    - EFS: services/efs.md
+    - DynamoDB: services/dynamodb.md
+    - Lambda: services/lambda.md
+    - Lambda MicroVMs: services/lambda-microvms.md
+    - Lambda Web Functions: services/lambda-web-functions.md
+    - API Gateway: services/api-gateway.md
+    - Cognito: services/cognito.md
+    - Cognito Identity: services/cognitoidentity.md
+    - Global Accelerator: services/globalaccelerator.md
+    - KMS: services/kms.md
+    - CloudHSM v2: services/cloudhsmv2.md
+    - Kinesis: services/kinesis.md
+    - Managed Service for Apache Flink: services/kinesisanalytics.md
+    - Secrets Manager: services/secrets-manager.md
+    - CloudFormation: services/cloudformation.md
+    - Cloud Control API: services/cloudcontrol.md
+    - Step Functions: services/step-functions.md
+    - SWF: services/swf.md
+    - IAM: services/iam.md
+    - STS: services/sts.md
+    - Organizations: services/organizations.md
+    - AWS Account Management: services/account.md
+    - IAM Access Analyzer: services/access-analyzer.md
+    - IAM Identity Center (SSO Admin): services/ssoadmin.md
+    - IAM Identity Center (OIDC): services/ssooidc.md
+    - IAM Identity Center (Access Portal): services/ssoportal.md
+    - Identity Store: services/identitystore.md
+    - AWS Budgets: services/budgets.md
+    - Amazon Macie: services/macie2.md
+    - Amazon Inspector: services/inspector2.md
+    - Security Hub: services/securityhub.md
+    - Amazon Detective: services/detective.md
+    - Amazon Verified Permissions: services/verifiedpermissions.md
+    - Control Catalog: services/controlcatalog.md
+    - AWS Marketplace: services/marketplace.md
+    - Control Tower: services/controltower.md
+    - AWS Service Catalog: services/service-catalog.md
+    - ElastiCache: services/elasticache.md
+    - MemoryDB: services/memorydb.md
+    - Aurora DSQL: services/dsql.md
+    - RDS: services/rds.md
+    - RDS Data API: services/rds-data.md
+    - Timestream for InfluxDB: services/timestream-influxdb.md
+    - MSK (Kafka): services/msk.md
+    - Amazon MQ: services/amazonmq.md
+    - Glue: services/glue.md
+    - Lake Formation: services/lakeformation.md
+    - Neptune: services/neptune.md
+    - DocumentDB: services/docdb.md
+    - DMS: services/dms.md
+    - Athena: services/athena.md
+    - QuickSight: services/quicksight.md
+    - Redshift: services/redshift.md
+    - Redshift Data API: services/redshift-data.md
+    - Redshift Serverless: services/redshift-serverless.md
+    - Data Firehose: services/firehose.md
+    - EventBridge: services/eventbridge.md
+    - EventBridge V2: services/eventbridgev2.md
+    - EventBridge Pipes: services/pipes.md
+    - EventBridge Scheduler: services/scheduler.md
+    - CloudWatch: services/cloudwatch.md
+    - CloudWatch Metric Filter Verification: services/cloudwatch-metric-filters-verification.md
+    - CloudWatch OAM: services/oam.md
+    - CloudWatch RUM: services/rum.md
+    - Managed Prometheus (AMP): services/managed-prometheus.md
+    - GuardDuty: services/guardduty.md
+    - Connect: services/connect.md
+    - AppIntegrations: services/appintegrations.md
+    - Amazon Data Lifecycle Manager: services/dlm.md
+    - ACM: services/acm.md
+    - Payment Cryptography: services/payment-cryptography.md
+    - ECS: services/ecs.md
+    - ECR: services/ecr.md
+    - AWS Resource Groups: services/resource-groups.md
+    - Resource Groups Tagging API: services/resource-groups-tagging.md
+    - Resource Explorer 2: services/resource-explorer.md
+    - EKS: services/eks.md
+    - MWAA: services/mwaa.md
+    - OpenSearch: services/opensearch.md
+    - EC2: services/ec2.md
+    - Lightsail: services/lightsail.md
+    - AppConfig: services/appconfig.md
+    - Bedrock: services/bedrock.md
+    - Bedrock Runtime: services/bedrock-runtime.md
+    - Bedrock AgentCore: services/bedrock-agentcore.md
+    - ELB v2: services/elb.md
+    - ELB Classic (v1): services/elb-classic.md
+    - Auto Scaling: services/autoscaling.md
+    - Application Auto Scaling: services/applicationautoscaling.md
+    - Elastic Beanstalk: services/elastic-beanstalk.md
+    - CodeBuild: services/codebuild.md
+    - AWS Batch: services/batch.md
+    - SageMaker: services/sagemaker.md
+    - CodeDeploy: services/codedeploy.md
+    - CodeGuru Reviewer: services/codegurureviewer.md
+    - CodeArtifact: services/codeartifact.md
+    - CodePipeline: services/codepipeline.md
+    - Service Quotas: services/servicequotas.md
+    - AWS RAM: services/ram.md
+    - AWS Backup: services/backup.md
+    - AWS FIS: services/fis.md
+    - CloudTrail: services/cloudtrail.md
+    - CloudFront: services/cloudfront.md
+    - CloudFront Private S3 Origin: services/cloudfront-private-origin.md
+    - Route53: services/route53.md
+    - Route 53 Resolver: services/route53resolver.md
+    - AWS Cloud Map: services/cloudmap.md
+    - AWS IoT Core: services/iot.md
+    - AppSync: services/appsync.md
+    - Transfer Family: services/transfer.md
+    - DataSync: services/datasync.md
+    - AWS Config: services/config.md
+    - EMR: services/emr.md
+    - EMR Serverless: services/emr-serverless.md
+    - WAF v2: services/wafv2.md
+    - AWS Network Firewall: services/network-firewall.md
+    - Textract: services/textract.md
+    - Transcribe: services/transcribe.md
+    - Comprehend: services/comprehend.md
+    - Rekognition: services/rekognition.md
+    - Translate: services/translate.md
+    - Pricing: services/pricing.md
+    - Cost Explorer: services/ce.md
+    - Cost and Usage Reports: services/cur.md
+    - BCM Pricing Calculator: services/bcm-pricing-calculator.md
+    - BCM Data Exports: services/bcm-data-exports.md
+  - Web Console:
+    - Overview: ui/index.md
+    - Console Contract v1: ui/console-contract.md
+  - Testcontainers:
+    - Overview: testcontainers/index.md
+    - Java: testcontainers/java.md
+    - Node.js / TypeScript: testcontainers/nodejs.md
+    - Python: testcontainers/python.md
+    - .NET: testcontainers/dotnet.md
+    - Go: testcontainers/go.md
+  - Development:
+    - Contributing: contributing.md
+    - Local concurrency primitives: concurrency.md

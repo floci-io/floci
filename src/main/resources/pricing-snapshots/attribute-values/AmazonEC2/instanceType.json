@@ -1,0 +1,10 @@
+[
+  {"Value": "t3.nano"},
+  {"Value": "t3.micro"},
+  {"Value": "t3.small"},
+  {"Value": "t3.medium"},
+  {"Value": "m5.large"},
+  {"Value": "m5.xlarge"},
+  {"Value": "c5.large"},
+  {"Value": "r5.large"}
+]

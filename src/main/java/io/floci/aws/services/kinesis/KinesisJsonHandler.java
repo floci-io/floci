@@ -1,0 +1,966 @@
+package io.floci.aws.services.kinesis;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsErrorResponse;
+import io.floci.aws.core.common.AwsEventStreamEncoder;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.services.kinesis.model.KinesisConsumer;
+import io.floci.aws.services.kinesis.model.KinesisRecord;
+import io.floci.aws.services.kinesis.model.KinesisShard;
+import io.floci.aws.services.kinesis.model.KinesisStream;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.core.Response;
+
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+@ApplicationScoped
+public class KinesisJsonHandler {
+
+    private static final String EXPLICIT_HASH_KEY_FIELD = "ExplicitHashKey";
+    private static final String EXPLICIT_HASH_KEY_NOT_STRING_MESSAGE =
+            "ExplicitHashKey must be a string.";
+
+    private final KinesisService service;
+    private final ObjectMapper objectMapper;
+    private final long nextTokenTtlMillis;
+
+    @Inject
+    public KinesisJsonHandler(KinesisService service, ObjectMapper objectMapper, EmulatorConfig config) {
+        this(service, objectMapper, config.services().kinesis().listShardsNextTokenTtlMillis());
+    }
+
+    KinesisJsonHandler(KinesisService service, ObjectMapper objectMapper, long nextTokenTtlMillis) {
+        this.service = service;
+        this.objectMapper = objectMapper;
+        this.nextTokenTtlMillis = nextTokenTtlMillis;
+    }
+
+    public Response handle(String action, JsonNode request, String region) {
+        return switch (action) {
+            case "CreateStream" -> handleCreateStream(request, region);
+            case "DeleteStream" -> handleDeleteStream(request, region);
+            case "ListStreams" -> handleListStreams(request, region);
+            case "DescribeStream" -> handleDescribeStream(request, region);
+            case "DescribeStreamSummary" -> handleDescribeStreamSummary(request, region);
+            case "RegisterStreamConsumer" -> handleRegisterStreamConsumer(request, region);
+            case "DeregisterStreamConsumer" -> handleDeregisterStreamConsumer(request, region);
+            case "DescribeStreamConsumer" -> handleDescribeStreamConsumer(request, region);
+            case "ListStreamConsumers" -> handleListStreamConsumers(request, region);
+            case "SubscribeToShard" -> handleSubscribeToShard(request, region);
+            case "AddTagsToStream" -> handleAddTagsToStream(request, region);
+            case "RemoveTagsFromStream" -> handleRemoveTagsFromStream(request, region);
+            case "ListTagsForStream" -> handleListTagsForStream(request, region);
+            case "StartStreamEncryption" -> handleStartStreamEncryption(request, region);
+            case "StopStreamEncryption" -> handleStopStreamEncryption(request, region);
+            case "SplitShard" -> handleSplitShard(request, region);
+            case "MergeShards" -> handleMergeShards(request, region);
+            case "PutRecord" -> handlePutRecord(request, region);
+            case "PutRecords" -> handlePutRecords(request, region);
+            case "GetShardIterator" -> handleGetShardIterator(request, region);
+            case "GetRecords" -> handleGetRecords(request, region);
+            case "ListShards" -> handleListShards(request, region);
+            case "IncreaseStreamRetentionPeriod" -> handleIncreaseStreamRetentionPeriod(request, region);
+            case "DecreaseStreamRetentionPeriod" -> handleDecreaseStreamRetentionPeriod(request, region);
+            case "EnableEnhancedMonitoring" -> handleEnableEnhancedMonitoring(request, region);
+            case "DisableEnhancedMonitoring" -> handleDisableEnhancedMonitoring(request, region);
+            case "UpdateStreamMode" -> handleUpdateStreamMode(request, region);
+            case "UpdateMaxRecordSize" -> handleUpdateMaxRecordSize(request, region);
+            case "UpdateShardCount" -> handleUpdateShardCount(request, region);
+            default -> Response.status(400)
+                    .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
+                    .build();
+        };
+    }
+
+    private String resolveStreamName(JsonNode request) {
+        String streamName = request.path("StreamName").asText(null);
+        if (streamName != null && !streamName.isBlank()) {
+            return streamName;
+        }
+
+        String streamArn = request.path("StreamARN").asText(null);
+        if (streamArn != null) {
+            String name = parseStreamNameFromArn(streamArn);
+            if (name != null) {
+                return name;
+            }
+        }
+
+        throw new AwsException("InvalidArgumentException",
+                "StreamName or valid StreamARN must be provided", 400);
+    }
+
+    private String parseStreamNameFromArn(String streamArn) {
+        int streamIdx = streamArn.indexOf(":stream/");
+        if (streamIdx < 0) {
+            return null;
+        }
+        String after = streamArn.substring(streamIdx + 8);
+        int slash = after.indexOf('/');
+        String name = slash >= 0 ? after.substring(0, slash) : after;
+        return name.isBlank() ? null : name;
+    }
+
+    private Response handleCreateStream(JsonNode request, String region) {
+        String streamName = request.path("StreamName").asText();
+        int shardCount = request.path("ShardCount").asInt(1);
+        String streamMode = null;
+        JsonNode modeDetails = request.path("StreamModeDetails");
+        if (modeDetails.isObject()) {
+            String mode = modeDetails.path("StreamMode").asText(null);
+            if (mode != null && !mode.isBlank()) {
+                streamMode = mode;
+            }
+        }
+        // CreateStream's optional Tags member was being dropped. That is invisible to a
+        // hand-written script but not to Terraform: aws_kinesis_stream sets tags at create
+        // time and then reads them back with ListTagsForStream, so an empty read produces a
+        // permanent "tags will be updated in-place" diff on an unchanged configuration.
+        // Parsed before the stream exists so a malformed Tags member rejects the whole
+        // request instead of leaving an untagged stream behind.
+        Map<String, String> tags = parseTags(request);
+        service.createStream(streamName, shardCount, streamMode,
+                optionalMaxRecordSize(request), region);
+        if (!tags.isEmpty()) {
+            service.addTagsToStream(streamName, tags, region);
+        }
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUpdateStreamMode(JsonNode request, String region) {
+        // UpdateStreamMode accepts only StreamARN per the AWS API; StreamName is not valid.
+        String streamArn = request.path("StreamARN").asText(null);
+        if (streamArn == null || streamArn.isBlank()) {
+            throw new AwsException("InvalidArgumentException", "StreamARN is required", 400);
+        }
+        JsonNode modeDetails = request.path("StreamModeDetails");
+        if (!modeDetails.isObject()) {
+            throw new AwsException("InvalidArgumentException", "StreamModeDetails is required", 400);
+        }
+        String streamMode = modeDetails.path("StreamMode").asText(null);
+        if (streamMode == null || streamMode.isBlank()) {
+            throw new AwsException("InvalidArgumentException", "StreamModeDetails.StreamMode is required", 400);
+        }
+        String streamName = extractStreamNameFromArn(streamArn);
+        service.updateStreamMode(streamName, streamMode, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * MaxRecordSizeInKiB is modelled as an integer, so a float or a value outside int range is a
+     * type error rather than something to truncate into the range check.
+     */
+    private Integer optionalMaxRecordSize(JsonNode request) {
+        JsonNode size = request.path("MaxRecordSizeInKiB");
+        if (size.isMissingNode() || size.isNull()) {
+            return null;
+        }
+        if (!size.isIntegralNumber() || !size.canConvertToInt()) {
+            throw new AwsException("InvalidArgumentException",
+                    "MaxRecordSizeInKiB must be an integer", 400);
+        }
+        return size.intValue();
+    }
+
+    private Response handleUpdateMaxRecordSize(JsonNode request, String region) {
+        // UpdateMaxRecordSize identifies the stream by StreamARN only per the AWS API; StreamName is not valid.
+        String streamArn = request.path("StreamARN").asText(null);
+        if (streamArn == null || streamArn.isBlank()) {
+            throw new AwsException("InvalidArgumentException", "StreamARN is required", 400);
+        }
+        Integer size = optionalMaxRecordSize(request);
+        if (size == null) {
+            throw new AwsException("InvalidArgumentException", "MaxRecordSizeInKiB is required", 400);
+        }
+        service.updateMaxRecordSize(extractStreamNameFromArn(streamArn), size, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUpdateShardCount(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        JsonNode targetNode = request.path("TargetShardCount");
+        if (!targetNode.isIntegralNumber() || !targetNode.canConvertToInt()) {
+            throw new AwsException("InvalidArgumentException", "TargetShardCount must be an integer", 400);
+        }
+        String scalingType = request.path("ScalingType").asText(null);
+        KinesisService.UpdateShardCountResult result =
+                service.updateShardCount(streamName, targetNode.intValue(), scalingType, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("StreamName", result.streamName());
+        response.put("StreamARN", result.streamArn());
+        response.put("CurrentShardCount", result.currentShardCount());
+        response.put("TargetShardCount", result.targetShardCount());
+        return Response.ok(response).build();
+    }
+
+    private String extractStreamNameFromArn(String streamArn) {
+        String name = parseStreamNameFromArn(streamArn);
+        if (name == null) {
+            throw new AwsException("InvalidArgumentException",
+                    "StreamARN does not contain a valid stream name: " + streamArn, 400);
+        }
+        return name;
+    }
+
+    private Response handleDeleteStream(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        service.deleteStream(streamName, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListStreams(JsonNode request, String region) {
+        int limit = 100;
+        if (request.hasNonNull("Limit")) {
+            JsonNode value = request.get("Limit");
+            if (!value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 1 || value.intValue() > 10000) {
+                throw new AwsException("InvalidArgumentException", "Limit must be an integer between 1 and 10000", 400);
+            }
+            limit = Math.min(value.intValue(), 100);
+        }
+        JsonNode start = request.path("ExclusiveStartStreamName");
+        String startName = start.asText(null);
+        if (!start.isMissingNode() && !start.isNull()
+                && (!start.isTextual() || !startName.matches("[a-zA-Z0-9_.-]{1,128}"))) {
+            throw new AwsException("InvalidArgumentException", "ExclusiveStartStreamName must be a valid stream name", 400);
+        }
+        JsonNode token = request.path("NextToken");
+        if (!token.isMissingNode() && !token.isNull() && !token.isTextual()) {
+            throw invalidNextToken();
+        }
+        String after = token.isTextual() ? streamCursorFromToken(decodeNextToken(token.textValue()), region) : startName;
+        List<KinesisStream> streams = service.listStreamDetails(region).stream()
+                .filter(stream -> after == null || stream.getStreamName().compareTo(after) > 0)
+                .toList();
+        List<KinesisStream> page = streams.stream().limit(limit).toList();
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode names = response.putArray("StreamNames");
+        ArrayNode summaries = response.putArray("StreamSummaries");
+        for (KinesisStream stream : page) {
+            names.add(stream.getStreamName());
+            ObjectNode summary = summaries.addObject();
+            summary.put("StreamName", stream.getStreamName());
+            summary.put("StreamARN", stream.getStreamArn());
+            summary.put("StreamStatus", stream.getStreamStatus());
+            addStreamModeDetailsNode(summary, stream);
+            summary.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
+        }
+        response.put("HasMoreStreams", streams.size() > limit);
+        if (streams.size() > limit) {
+            response.put("NextToken", encodeNextToken("ListStreams|" + region,
+                    Base64Url.encode(page.getLast().getStreamName()), System.currentTimeMillis()));
+        }
+        return Response.ok(response).build();
+    }
+
+    private String streamCursorFromToken(PaginationToken token, String region) {
+        if (!("ListStreams|" + region).equals(token.scope())) {
+            throw invalidNextToken();
+        }
+        try {
+            String cursor = Base64Url.decode(token.cursor());
+            if (!Base64Url.encode(cursor).equals(token.cursor())) {
+                throw invalidNextToken();
+            }
+            return cursor;
+        } catch (IllegalArgumentException e) {
+            throw invalidNextToken();
+        }
+    }
+
+    private Response handleDescribeStream(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        KinesisStream stream = service.describeStream(streamName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode desc = response.putObject("StreamDescription");
+        desc.put("StreamName", stream.getStreamName());
+        desc.put("StreamARN", stream.getStreamArn());
+        desc.put("StreamStatus", stream.getStreamStatus());
+        desc.put("HasMoreShards", false);
+        desc.put("RetentionPeriodHours", stream.getRetentionPeriodHours());
+        desc.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
+        desc.put("EncryptionType", stream.getEncryptionType());
+        if (stream.getKeyId() != null) {
+            desc.put("KeyId", stream.getKeyId());
+        }
+        addStreamModeDetailsNode(desc, stream);
+
+        addEnhancedMonitoringNode(desc, stream);
+
+        ArrayNode shards = desc.putArray("Shards");
+        for (KinesisShard shard : stream.getShards()) {
+            ObjectNode sNode = shards.addObject();
+            sNode.put("ShardId", shard.getShardId());
+            if (shard.getParentShardId() != null) {
+                sNode.put("ParentShardId", shard.getParentShardId());
+            }
+            if (shard.getAdjacentParentShardId() != null) {
+                sNode.put("AdjacentParentShardId", shard.getAdjacentParentShardId());
+            }
+            sNode.putObject("HashKeyRange")
+                    .put("StartingHashKey", shard.getHashKeyRange().startingHashKey())
+                    .put("EndingHashKey", shard.getHashKeyRange().endingHashKey());
+            ObjectNode seqRange = sNode.putObject("SequenceNumberRange");
+            seqRange.put("StartingSequenceNumber", shard.getSequenceNumberRange().startingSequenceNumber());
+            if (shard.getSequenceNumberRange().endingSequenceNumber() != null) {
+                seqRange.put("EndingSequenceNumber", shard.getSequenceNumberRange().endingSequenceNumber());
+            }
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeStreamSummary(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        KinesisStream stream = service.describeStream(streamName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode summary = response.putObject("StreamDescriptionSummary");
+        summary.put("StreamName", stream.getStreamName());
+        summary.put("StreamARN", stream.getStreamArn());
+        summary.put("StreamStatus", stream.getStreamStatus());
+        summary.put("RetentionPeriodHours", stream.getRetentionPeriodHours());
+        summary.put("StreamCreationTimestamp", epochSeconds(stream.getStreamCreationTimestamp()));
+        summary.put("OpenShardCount", (int) stream.getShards().stream().filter(s -> !s.isClosed()).count());
+        summary.put("EncryptionType", stream.getEncryptionType());
+        summary.put("MaxRecordSizeInKiB", stream.getMaxRecordSizeInKiB());
+        if (stream.getKeyId() != null) {
+            summary.put("KeyId", stream.getKeyId());
+        }
+        addStreamModeDetailsNode(summary, stream);
+
+        addEnhancedMonitoringNode(summary, stream);
+
+        return Response.ok(response).build();
+    }
+
+    private void addEnhancedMonitoringNode(ObjectNode parent, KinesisStream stream) {
+        ArrayNode shardLevelMetrics = parent.putArray("EnhancedMonitoring").addObject().putArray("ShardLevelMetrics");
+        stream.getEnhancedMonitoringMetrics().stream().sorted().forEach(shardLevelMetrics::add);
+    }
+
+    private void addStreamModeDetailsNode(ObjectNode parent, KinesisStream stream) {
+        parent.putObject("StreamModeDetails").put("StreamMode", stream.getStreamMode());
+    }
+
+    private BigDecimal epochSeconds(Instant timestamp) {
+        return BigDecimal.valueOf(timestamp.toEpochMilli(), 3);
+    }
+
+    private Response handleRegisterStreamConsumer(JsonNode request, String region) {
+        String streamArn = request.path("StreamARN").asText();
+        String consumerName = request.path("ConsumerName").asText();
+        KinesisConsumer consumer = service.registerStreamConsumer(streamArn, consumerName, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Consumer", consumerToNode(consumer));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeregisterStreamConsumer(JsonNode request, String region) {
+        String streamArn = request.has("StreamARN") ? request.path("StreamARN").asText() : null;
+        String consumerName = request.has("ConsumerName") ? request.path("ConsumerName").asText() : null;
+        String consumerArn = request.has("ConsumerARN") ? request.path("ConsumerARN").asText() : null;
+        service.deregisterStreamConsumer(streamArn, consumerName, consumerArn, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeStreamConsumer(JsonNode request, String region) {
+        String streamArn = request.has("StreamARN") ? request.path("StreamARN").asText() : null;
+        String consumerName = request.has("ConsumerName") ? request.path("ConsumerName").asText() : null;
+        String consumerArn = request.has("ConsumerARN") ? request.path("ConsumerARN").asText() : null;
+        KinesisConsumer consumer = service.describeStreamConsumer(streamArn, consumerName, consumerArn, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ConsumerDescription", consumerToNode(consumer));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListStreamConsumers(JsonNode request, String region) {
+        String streamArn = request.path("StreamARN").asText();
+        List<KinesisConsumer> consumers = service.listStreamConsumers(streamArn, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("Consumers");
+        consumers.forEach(c -> array.add(consumerToNode(c)));
+        return Response.ok(response).build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Response handleSubscribeToShard(JsonNode request, String region) {
+        String consumerArn = request.path("ConsumerARN").asText(null);
+        String shardId = request.path("ShardId").asText(null);
+        JsonNode startPos = request.path("StartingPosition");
+        String startType = startPos.path("Type").asText("TRIM_HORIZON");
+        String seqNumber = startPos.has("SequenceNumber") ? startPos.path("SequenceNumber").asText(null) : null;
+        Long timestampMs = startPos.has("Timestamp")
+                ? Math.round(startPos.path("Timestamp").asDouble() * 1000) : null;
+
+        KinesisConsumer consumer = service.describeStreamConsumer(null, null, consumerArn, region);
+        String streamName = parseStreamNameFromArn(consumer.getStreamArn());
+
+        String shardIterator = service.getShardIterator(streamName, shardId, startType, seqNumber, timestampMs, region);
+
+        Map<String, Object> result = service.getRecords(shardIterator, null, region);
+        List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
+        long millisBehind = ((Number) result.get("MillisBehindLatest")).longValue();
+
+        String continuationSeqNo = result.get("NextShardIterator") == null || records.isEmpty() ? null
+                : records.get(records.size() - 1).getSequenceNumber();
+
+        ObjectNode eventPayload = objectMapper.createObjectNode();
+        ArrayNode recordsNode = eventPayload.putArray("Records");
+        for (KinesisRecord rec : records) {
+            ObjectNode recordNode = recordsNode.addObject()
+                    .put("Data", Base64.getEncoder().encodeToString(rec.getData()))
+                    .put("PartitionKey", rec.getPartitionKey())
+                    .put("SequenceNumber", rec.getSequenceNumber());
+            if (rec.getApproximateArrivalTimestamp() != null) {
+                recordNode.put("ApproximateArrivalTimestamp", epochSeconds(rec.getApproximateArrivalTimestamp()));
+            }
+        }
+        if (continuationSeqNo != null) {
+            eventPayload.put("ContinuationSequenceNumber", continuationSeqNo);
+        }
+        eventPayload.put("MillisBehindLatest", millisBehind);
+        writeChildShards(eventPayload, result);
+
+        try {
+            // The Go SDK (and other SDKs) expect an initial-response message before
+            // SubscribeToShardEvent messages. Without it, HandleDeserialize blocks
+            // indefinitely waiting on the initialResponse channel.
+            LinkedHashMap<String, String> initialHeaders = new LinkedHashMap<>();
+            initialHeaders.put(":message-type", "event");
+            initialHeaders.put(":event-type", "initial-response");
+            initialHeaders.put(":content-type", "application/json");
+            byte[] initialMessage = AwsEventStreamEncoder.encodeMessage(initialHeaders, new byte[]{'{', '}'});
+
+            LinkedHashMap<String, String> eventHeaders = new LinkedHashMap<>();
+            eventHeaders.put(":message-type", "event");
+            eventHeaders.put(":event-type", "SubscribeToShardEvent");
+            eventHeaders.put(":content-type", "application/json");
+            byte[] eventPayloadBytes = objectMapper.writeValueAsBytes(eventPayload);
+            byte[] eventMessage = AwsEventStreamEncoder.encodeMessage(eventHeaders, eventPayloadBytes);
+
+            byte[] body = new byte[initialMessage.length + eventMessage.length];
+            System.arraycopy(initialMessage, 0, body, 0, initialMessage.length);
+            System.arraycopy(eventMessage, 0, body, initialMessage.length, eventMessage.length);
+
+            return Response.ok(body)
+                    .header("Content-Type", "application/vnd.amazon.eventstream")
+                    .build();
+        } catch (Exception e) {
+            throw new AwsException("InternalError", "Failed to encode SubscribeToShard response: " + e.getMessage(), 500);
+        }
+    }
+
+    private ObjectNode consumerToNode(KinesisConsumer c) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("ConsumerName", c.getConsumerName());
+        node.put("ConsumerARN", c.getConsumerArn());
+        node.put("ConsumerStatus", c.getConsumerStatus());
+        node.put("ConsumerCreationTimestamp", EpochSeconds.fromInstant(c.getConsumerCreationTimestamp()));
+        if (c.getStreamArn() != null) {
+            node.put("StreamARN", c.getStreamArn());
+        }
+        return node;
+    }
+
+    private Response handleAddTagsToStream(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        service.addTagsToStream(streamName, parseTags(request), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleRemoveTagsFromStream(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        JsonNode tagKeysNode = request.path("TagKeys");
+        List<String> tagKeys = new ArrayList<>();
+        if (!tagKeysNode.isMissingNode() && !tagKeysNode.isNull()) {
+            if (!tagKeysNode.isArray()) {
+                throw new AwsException("SerializationException", "TagKeys must be a list of strings.", 400);
+            }
+            for (JsonNode node : tagKeysNode) {
+                if (!node.isTextual()) {
+                    throw new AwsException("SerializationException", "TagKeys must be a list of strings.", 400);
+                }
+                tagKeys.add(node.textValue());
+            }
+        }
+        service.removeTagsFromStream(streamName, tagKeys, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListTagsForStream(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        Map<String, String> tags = service.listTagsForStream(streamName, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode tagsArray = response.putArray("Tags");
+        tags.forEach((k, v) -> {
+            ObjectNode tagNode = tagsArray.addObject();
+            tagNode.put("Key", k);
+            tagNode.put("Value", v);
+        });
+        response.put("HasMoreTags", false);
+        return Response.ok(response).build();
+    }
+
+    // Shared by CreateStream and AddTagsToStream so the two paths cannot drift: the same
+    // request shape has to produce the same stored tags whichever operation carries it.
+    // A missing or null Tags member yields an empty map; anything else that is not a map
+    // of strings is a wire deserialization error rather than a value to coerce, so a
+    // number or boolean is rejected instead of being stored as its text.
+    private Map<String, String> parseTags(JsonNode request) {
+        Map<String, String> tags = new HashMap<>();
+        JsonNode tagsNode = request.path("Tags");
+        if (tagsNode.isMissingNode() || tagsNode.isNull()) {
+            return tags;
+        }
+        if (!tagsNode.isObject()) {
+            throw new AwsException("SerializationException", "Tags must be a map of string values.", 400);
+        }
+        tagsNode.fields().forEachRemaining(entry -> {
+            if (!entry.getValue().isTextual()) {
+                throw new AwsException("SerializationException", "Tags must be a map of string values.", 400);
+            }
+            tags.put(entry.getKey(), entry.getValue().textValue());
+        });
+        return tags;
+    }
+
+    private Response handleStartStreamEncryption(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        String type = request.path("EncryptionType").asText();
+        String keyId = request.path("KeyId").asText();
+        service.startStreamEncryption(streamName, type, keyId, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleStopStreamEncryption(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        service.stopStreamEncryption(streamName, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleSplitShard(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        String shardId = request.path("ShardToSplit").asText();
+        String newStart = request.path("NewStartingHashKey").asText();
+        service.splitShard(streamName, shardId, newStart, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleMergeShards(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        String shard1 = request.path("ShardToMerge").asText();
+        String shard2 = request.path("AdjacentShardToMerge").asText();
+        service.mergeShards(streamName, shard1, shard2, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    // ExplicitHashKey is a string-shaped field in the AWS Kinesis JSON protocol. A JSON number
+    // such as 12345 is malformed input the real service rejects, so reject non-string nodes here
+    // rather than letting asText coerce them into an accepted decimal string. A missing or null
+    // node means the caller omitted the field and partition-key routing applies.
+    private String readExplicitHashKey(JsonNode record) {
+        JsonNode explicitHashKeyNode = record.path(EXPLICIT_HASH_KEY_FIELD);
+        if (explicitHashKeyNode.isMissingNode() || explicitHashKeyNode.isNull()) {
+            return null;
+        }
+        if (!explicitHashKeyNode.isTextual()) {
+            throw new AwsException("SerializationException", EXPLICIT_HASH_KEY_NOT_STRING_MESSAGE, 400);
+        }
+        return explicitHashKeyNode.asText();
+    }
+
+    private Response handlePutRecord(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        JsonNode dataNode = request.path("Data");
+        // The CBOR transports (the AWS SDK for Java's default for Kinesis) decode Data
+        // as a binary node rather than base64 text, so both blob shapes are accepted.
+        if (!dataNode.isTextual() && !dataNode.isBinary()) {
+            throw new AwsException("SerializationException", "Data must be a base64-encoded string.", 400);
+        }
+        byte[] data;
+        try {
+            data = Base64.getDecoder().decode(dataNode.asText());
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("SerializationException", "Data is not valid base64.", 400);
+        }
+        String partitionKey = request.path("PartitionKey").asText();
+        String explicitHashKey = readExplicitHashKey(request);
+
+        KinesisService.PutRecordResult result = service.putRecordWithShardId(
+                streamName, data, partitionKey, explicitHashKey, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("SequenceNumber", result.sequenceNumber());
+        response.put("ShardId", result.shardId());
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutRecords(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        KinesisStream stream = service.describeStream(streamName, region);
+        JsonNode recordsNode = request.path("Records");
+        service.validateRecordCount(recordsNode.size());
+
+        // An oversized record fails the whole request before anything is
+        // written — per-record ErrorCode is reserved for throughput/internal
+        // failures. Successful decodes are kept for the write loop; a Data
+        // that is not a decodable blob is left null and fails per-record
+        // there, with its partition key still counted by the record-size
+        // check. The count cap is checked upfront and the byte cap as the
+        // loop goes, so neither an over-long batch nor an oversized one is
+        // fully decoded before it is rejected.
+        record Entry(JsonNode node, byte[] data, String explicitHashKey) {}
+        List<Entry> entries = new ArrayList<>();
+        long totalBytes = 0;
+        for (JsonNode node : recordsNode) {
+            JsonNode dataNode = node.path("Data");
+            byte[] data = null;
+            if (dataNode.isTextual() || dataNode.isBinary()) {
+                try {
+                    data = Base64.getDecoder().decode(dataNode.asText());
+                } catch (IllegalArgumentException e) {
+                    data = null;
+                }
+            }
+            String partitionKey = node.path("PartitionKey").asText();
+            String explicitHashKey = readExplicitHashKey(node);
+            service.validateExplicitHashKey(explicitHashKey);
+            service.validateRecordSize(stream, data, partitionKey);
+            // Data that did not decode still travelled in the request, so it counts toward the
+            // request cap at the bytes the caller sent rather than as nothing — otherwise a batch
+            // of undecodable records could carry any payload past the limit. A Data that is
+            // neither text nor binary is measured the same way, since it is not a blob AWS
+            // would have accepted either.
+            totalBytes += KinesisService.recordSize(
+                    data != null ? data.length
+                            : dataNode.toString().getBytes(StandardCharsets.UTF_8).length,
+                    partitionKey);
+            service.validateRequestSize(totalBytes);
+            entries.add(new Entry(node, data, explicitHashKey));
+        }
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode results = response.putArray("Records");
+        int failed = 0;
+
+        for (Entry entry : entries) {
+            try {
+                byte[] data = entry.data();
+                if (data == null) {
+                    JsonNode dataNode = entry.node().path("Data");
+                    if (!dataNode.isTextual() && !dataNode.isBinary()) {
+                        throw new IllegalArgumentException("Data must be a base64-encoded string.");
+                    }
+                    data = Base64.getDecoder().decode(dataNode.asText());
+                }
+                String partitionKey = entry.node().path("PartitionKey").asText();
+                KinesisService.PutRecordResult result = service.putRecordWithShardId(
+                        streamName, data, partitionKey, entry.explicitHashKey(), region);
+                results.addObject()
+                        .put("SequenceNumber", result.sequenceNumber())
+                        .put("ShardId", result.shardId());
+            } catch (Exception e) {
+                failed++;
+                results.addObject()
+                        .put("ErrorCode", "InternalFailure")
+                        .put("ErrorMessage", e.getMessage());
+            }
+        }
+        response.put("FailedRecordCount", failed);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetShardIterator(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        String shardId = request.path("ShardId").asText();
+        String type = request.path("ShardIteratorType").asText();
+        String seq = request.has("StartingSequenceNumber") ? request.path("StartingSequenceNumber").asText() : null;
+        // AWS sends Timestamp as epoch seconds (double with fractional ms).
+        // Convert to long millis at the boundary; the emulator stores time in ms everywhere.
+        // Use Math.round to avoid 1ms drift from FP multiplication (e.g. X.999...).
+        Long timestampMillis = null;
+        if (request.has("Timestamp") && !request.path("Timestamp").isNull()) {
+            JsonNode tsNode = request.path("Timestamp");
+            if (!tsNode.isNumber()) {
+                throw new AwsException("InvalidArgumentException",
+                        "Timestamp must be a number (epoch seconds)", 400);
+            }
+            timestampMillis = Math.round(tsNode.asDouble() * 1000);
+        }
+        if ("AT_TIMESTAMP".equals(type) && timestampMillis == null) {
+            throw new AwsException("InvalidArgumentException",
+                    "ShardIteratorType AT_TIMESTAMP requires a Timestamp", 400);
+        }
+
+        String iterator = service.getShardIterator(streamName, shardId, type, seq, timestampMillis, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ShardIterator", iterator);
+        return Response.ok(response).build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Response handleGetRecords(JsonNode request, String region) {
+        String iterator = request.path("ShardIterator").asText();
+        Integer limit = request.has("Limit") ? request.path("Limit").asInt() : null;
+
+        Map<String, Object> result = service.getRecords(iterator, limit, region);
+        List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode recordsArray = response.putArray("Records");
+        for (KinesisRecord rec : records) {
+            ObjectNode rNode = recordsArray.addObject();
+            rNode.put("Data", Base64.getEncoder().encodeToString(rec.getData()));
+            rNode.put("PartitionKey", rec.getPartitionKey());
+            rNode.put("SequenceNumber", rec.getSequenceNumber());
+            if (rec.getApproximateArrivalTimestamp() != null) {
+                rNode.put("ApproximateArrivalTimestamp", epochSeconds(rec.getApproximateArrivalTimestamp()));
+            }
+        }
+        response.put("NextShardIterator", (String) result.get("NextShardIterator"));
+        writeChildShards(response, result);
+        response.put("MillisBehindLatest", ((Number) result.get("MillisBehindLatest")).longValue());
+        return Response.ok(response).build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void writeChildShards(ObjectNode response, Map<String, Object> result) {
+        List<KinesisService.ChildShard> children = (List<KinesisService.ChildShard>) result.get("ChildShards");
+        if (children == null) {
+            return;
+        }
+        ArrayNode childNodes = response.putArray("ChildShards");
+        for (KinesisService.ChildShard child : children) {
+            ObjectNode node = childNodes.addObject();
+            node.put("ShardId", child.shardId());
+            ArrayNode parents = node.putArray("ParentShards");
+            child.parentShards().forEach(parents::add);
+            node.putObject("HashKeyRange")
+                    .put("StartingHashKey", child.hashKeyRange().startingHashKey())
+                    .put("EndingHashKey", child.hashKeyRange().endingHashKey());
+        }
+    }
+
+    private Response handleIncreaseStreamRetentionPeriod(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        int retentionPeriodHours = request.path("RetentionPeriodHours").asInt();
+        service.increaseStreamRetentionPeriod(streamName, retentionPeriodHours, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDecreaseStreamRetentionPeriod(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        int retentionPeriodHours = request.path("RetentionPeriodHours").asInt();
+        service.decreaseStreamRetentionPeriod(streamName, retentionPeriodHours, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListShards(JsonNode request, String region) {
+        String nextToken = request.hasNonNull("NextToken") ? request.path("NextToken").asText() : null;
+        PaginationToken token = nextToken == null ? null : decodeNextToken(nextToken);
+        String resolvedStreamName = token == null
+                ? resolveStreamName(request)
+                : streamNameFromToken(request, token);
+
+        KinesisStream stream = service.describeStream(resolvedStreamName, region);
+
+        List<KinesisShard> shards = stream.getShards();
+        if (request.has("ShardFilter")) {
+            JsonNode filter = request.path("ShardFilter");
+            String filterType = filter.path("Type").asText(null);
+            if ("AT_LATEST".equals(filterType)) {
+                shards = shards.stream().filter(s -> !s.isClosed()).toList();
+            }
+        }
+
+        int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt(1000) : 1000;
+
+        List<KinesisShard> snapshot = List.copyOf(shards);
+        int start = token == null ? 0 : resumeShardIndex(token, snapshot);
+        List<KinesisShard> page = paginateShards(snapshot.subList(start, snapshot.size()), maxResults);
+        String nextCursor = start + page.size() < snapshot.size() && !page.isEmpty()
+                ? encodeNextToken(resolvedStreamName, page.get(page.size() - 1).getShardId(),
+                        System.currentTimeMillis())
+                : null;
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode shardsArray = response.putArray("Shards");
+        for (KinesisShard shard : page) {
+            ObjectNode sNode = shardsArray.addObject();
+            sNode.put("ShardId", shard.getShardId());
+            if (shard.getParentShardId() != null) {
+                sNode.put("ParentShardId", shard.getParentShardId());
+            }
+            if (shard.getAdjacentParentShardId() != null) {
+                sNode.put("AdjacentParentShardId", shard.getAdjacentParentShardId());
+            }
+            sNode.putObject("HashKeyRange")
+                    .put("StartingHashKey", shard.getHashKeyRange().startingHashKey())
+                    .put("EndingHashKey", shard.getHashKeyRange().endingHashKey());
+            ObjectNode seqRange = sNode.putObject("SequenceNumberRange");
+            seqRange.put("StartingSequenceNumber", shard.getSequenceNumberRange().startingSequenceNumber());
+            if (shard.getSequenceNumberRange().endingSequenceNumber() != null) {
+                seqRange.put("EndingSequenceNumber", shard.getSequenceNumberRange().endingSequenceNumber());
+            }
+        }
+
+        if (nextCursor != null) {
+            response.put("NextToken", nextCursor);
+        }
+
+        return Response.ok(response).build();
+    }
+
+    /**
+     * Opaque cursor shared by ListStreams and ListShards, bound to a scope and issue time.
+     * ListStreams scopes include the operation and region; ListShards scopes name the stream.
+     */
+    static String encodeNextToken(String scope, String cursor, long issuedAtEpochMilli) {
+        String raw = scope + "|" + cursor + "|" + issuedAtEpochMilli;
+        return Base64Url.encode(raw);
+    }
+
+    private PaginationToken decodeNextToken(String nextToken) {
+        if (nextToken.isEmpty() || nextToken.length() > 1_048_576) {
+            throw invalidNextToken();
+        }
+        String decoded;
+        try {
+            decoded = Base64Url.decode(nextToken);
+        } catch (IllegalArgumentException e) {
+            throw invalidNextToken();
+        }
+        int timestampSeparator = decoded.lastIndexOf('|');
+        int cursorSeparator = decoded.lastIndexOf('|', timestampSeparator - 1);
+        if (cursorSeparator < 1) {
+            throw invalidNextToken();
+        }
+        long issuedAtEpochMilli;
+        try {
+            issuedAtEpochMilli = Long.parseLong(decoded.substring(timestampSeparator + 1));
+        } catch (NumberFormatException e) {
+            throw invalidNextToken();
+        }
+        long now = System.currentTimeMillis();
+        if (issuedAtEpochMilli > now) {
+            throw invalidNextToken();
+        }
+        if (issuedAtEpochMilli <= now - nextTokenTtlMillis) {
+            throw new AwsException("ExpiredNextTokenException", "The NextToken has expired.", 400);
+        }
+        return new PaginationToken(decoded.substring(0, cursorSeparator),
+                decoded.substring(cursorSeparator + 1, timestampSeparator), issuedAtEpochMilli);
+    }
+
+    /**
+     * The reference says the {@code NextToken} unambiguously identifies the stream and that
+     * {@code StreamName} cannot be sent with it, so a lone token is the documented paging form. A
+     * {@code StreamARN} is tolerated when it names the same stream the token does, which keeps an
+     * SDK that fills the ARN in for routing working, and rejected when it names a different one.
+     */
+    private String streamNameFromToken(JsonNode request, PaginationToken token) {
+        if (token.scope().contains("|") || token.cursor().isEmpty()) {
+            throw invalidNextToken();
+        }
+        if (request.hasNonNull("StreamName")) {
+            throw new AwsException("InvalidArgumentException",
+                    "StreamName cannot be specified together with NextToken.", 400);
+        }
+        if (request.hasNonNull("StreamARN")) {
+            String arnStreamName = parseStreamNameFromArn(request.path("StreamARN").asText());
+            if (!token.scope().equals(arnStreamName)) {
+                throw new AwsException("InvalidArgumentException",
+                        "The NextToken does not belong to the stream named by StreamARN.", 400);
+            }
+        }
+        return token.scope();
+    }
+
+    private static int resumeShardIndex(PaginationToken token, List<KinesisShard> shards) {
+        for (int i = 0; i < shards.size(); i++) {
+            if (shards.get(i).getShardId().equals(token.cursor())) {
+                return i + 1;
+            }
+        }
+        throw invalidNextToken();
+    }
+
+    private static AwsException invalidNextToken() {
+        return new AwsException("InvalidArgumentException", "The NextToken is not valid.", 400);
+    }
+
+    /**
+     * Decoded scoped cursor and its issue time (epoch millis).
+     */
+    private record PaginationToken(String scope, String cursor, long issuedAtEpochMilli) {
+    }
+
+    /**
+     * Take a ListShards page, snapshotting first. The shard list is a live
+     * {@link java.util.concurrent.CopyOnWriteArrayList}: its {@code subList} view is NOT an independent
+     * snapshot. It stays bound to the backing array and throws {@link java.util.ConcurrentModificationException}
+     * the moment a concurrent split/merge appends a shard. Copying to an immutable list first gives a page
+     * that reads consistently regardless of concurrent resharding.
+     */
+    static List<KinesisShard> paginateShards(List<KinesisShard> shards, int maxResults) {
+        List<KinesisShard> snapshot = List.copyOf(shards);
+        return snapshot.size() > maxResults ? snapshot.subList(0, maxResults) : snapshot;
+    }
+
+    private Response handleEnableEnhancedMonitoring(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+
+        List<String> metrics = new ArrayList<>();
+        request.path("ShardLevelMetrics").forEach(m -> metrics.add(m.asText()));
+
+        Set<String> currentMetrics = service.enableEnhancedMonitoring(streamName, metrics, region);
+        KinesisStream updated = service.describeStream(streamName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("StreamName", streamName);
+        response.put("StreamARN", updated.getStreamArn());
+        ArrayNode current = response.putArray("CurrentShardLevelMetrics");
+        currentMetrics.stream().sorted().forEach(current::add);
+        ArrayNode desired = response.putArray("DesiredShardLevelMetrics");
+        updated.getEnhancedMonitoringMetrics().stream().sorted().forEach(desired::add);
+        return Response.ok(response).build();
+    }
+
+    private Response handleDisableEnhancedMonitoring(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+
+        List<String> metrics = new ArrayList<>();
+        request.path("ShardLevelMetrics").forEach(m -> metrics.add(m.asText()));
+
+        Set<String> currentMetrics = service.disableEnhancedMonitoring(streamName, metrics, region);
+        KinesisStream updated = service.describeStream(streamName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("StreamName", streamName);
+        response.put("StreamARN", updated.getStreamArn());
+        ArrayNode current = response.putArray("CurrentShardLevelMetrics");
+        currentMetrics.stream().sorted().forEach(current::add);
+        ArrayNode desired = response.putArray("DesiredShardLevelMetrics");
+        updated.getEnhancedMonitoringMetrics().stream().sorted().forEach(desired::add);
+        return Response.ok(response).build();
+    }
+
+}

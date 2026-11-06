@@ -1,0 +1,446 @@
+package com.floci.test;
+
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.rds.model.CreateDbInstanceRequest;
+import software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse;
+import software.amazon.awssdk.services.rds.model.DBInstance;
+import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
+import software.amazon.awssdk.services.rds.model.DeleteDbInstanceRequest;
+import software.amazon.awssdk.services.rds.model.DescribeDbInstancesRequest;
+import software.amazon.awssdk.services.rds.model.GenerateAuthenticationTokenRequest;
+import software.amazon.awssdk.services.rds.model.ModifyDbInstanceRequest;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.util.Properties;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+@DisplayName("RDS JDBC Proxy")
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+class RdsJdbcCompatTest {
+
+    private static final StaticCredentialsProvider CREDENTIALS =
+            StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
+    private static final Region REGION = TestFixtures.region();
+    private static final String USERNAME = "admin";
+    private static final String IAM_USERNAME = "iam_user";
+    private static final String PASSWORD = "secret123";
+    private static final String DATABASE = "app";
+    private static final int PROXY_PORT_MIN = 7000;
+    private static final int PROXY_PORT_MAX = 7099;
+
+    private static RdsClient rds;
+    private static String instanceId;
+    private static Integer proxyPort;
+    private static boolean instanceCreated;
+
+    @AfterAll
+    static void cleanup() {
+        if (rds != null && instanceCreated && instanceId != null) {
+            try {
+                rds.deleteDBInstance(DeleteDbInstanceRequest.builder()
+                        .dbInstanceIdentifier(instanceId)
+                        .skipFinalSnapshot(true)
+                        .build());
+            } catch (Exception ignored) {
+            }
+            rds.close();
+        }
+    }
+
+    @Test
+    @Order(1)
+    @DisplayName("Create instance with IAM enabled and connect with password")
+    void createDbInstanceAndConnectWithPassword() throws Exception {
+        rds = TestFixtures.rdsClient();
+        instanceId = TestFixtures.uniqueName("rds-pg");
+
+        try {
+            CreateDbInstanceResponse response = rds.createDBInstance(CreateDbInstanceRequest.builder()
+                    .dbInstanceIdentifier(instanceId)
+                    .dbInstanceClass("db.t3.micro")
+                    .engine("postgres")
+                    .masterUsername(USERNAME)
+                    .masterUserPassword(PASSWORD)
+                    .dbName(DATABASE)
+                    .allocatedStorage(20)
+                    .enableIAMDatabaseAuthentication(true)
+                    .build());
+
+            proxyPort = response.dbInstance().endpoint().port();
+            instanceCreated = true;
+        } catch (Exception e) {
+            Assumptions.assumeTrue(false, "RDS instance creation unavailable in this environment: " + e.getMessage());
+            return;
+        }
+
+        assertThat(proxyPort).isBetween(PROXY_PORT_MIN, PROXY_PORT_MAX);
+
+        Connection connection = awaitPostgresConnection(USERNAME, PASSWORD);
+        try {
+            assertThat(selectOne(connection)).isEqualTo(1);
+            createIamRole(connection);
+        } finally {
+            connection.close();
+        }
+    }
+
+    @Test
+    @Order(2)
+    @DisplayName("Connect with IAM auth token")
+    void connectWithIamAuthToken() throws Exception {
+        assumeInstanceCreated();
+
+        String ungrantedToken = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                .hostname(TestFixtures.proxyHost()).port(proxyPort).username(USERNAME).region(REGION)
+                .credentialsProvider(CREDENTIALS).build());
+        assertThatThrownBy(() -> openPostgresConnection(USERNAME, ungrantedToken))
+                .isInstanceOf(SQLException.class).hasMessageContaining("password authentication failed");
+
+        assertThatThrownBy(() -> openPostgresConnection(IAM_USERNAME, PASSWORD))
+                .isInstanceOfSatisfying(SQLException.class,
+                        exception -> assertThat(exception.getSQLState()).isEqualTo("28000"))
+                .hasMessageContaining("PAM authentication failed for user \"" + IAM_USERNAME + "\"");
+
+        String token = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                .hostname(TestFixtures.proxyHost())
+                .port(proxyPort)
+                .username(IAM_USERNAME)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build());
+
+        Connection connection = awaitPostgresConnection(IAM_USERNAME, token);
+        try {
+            assertThat(selectOne(connection)).isEqualTo(1);
+        } finally {
+            connection.close();
+        }
+    }
+
+    @Test
+    @Order(3)
+    @DisplayName("Tampered IAM auth token is rejected")
+    void rejectsTamperedIamAuthToken() {
+        assumeInstanceCreated();
+
+        String token = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                .hostname(TestFixtures.proxyHost())
+                .port(proxyPort)
+                .username(IAM_USERNAME)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build());
+
+        String tamperedToken = token.substring(0, token.length() - 1)
+                + (token.endsWith("a") ? "b" : "a");
+
+        assertThatThrownBy(() -> openPostgresConnection(IAM_USERNAME, tamperedToken))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("password authentication failed");
+    }
+
+    @Test
+    @Order(4)
+    @DisplayName("IAM auth token generated for another host is rejected")
+    void rejectsIamAuthTokenGeneratedForAnotherHost() {
+        assumeInstanceCreated();
+
+        // Correctly signed, unexpired, same user: only the endpoint differs, as when a token
+        // minted for one instance is replayed against another.
+        String token = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                .hostname("other-instance.example.local")
+                .port(proxyPort)
+                .username(IAM_USERNAME)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build());
+
+        assertThatThrownBy(() -> openPostgresConnection(IAM_USERNAME, token))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("password authentication failed");
+    }
+
+    @Test
+    @Order(5)
+    @DisplayName("IAM auth rejected on instance created without IAM")
+    void iamAuthRejectedWhenDisabledAtCreate() throws Exception {
+        assumeInstanceCreated();
+
+        // Create a separate instance with IAM disabled
+        String noIamId = TestFixtures.uniqueName("rds-noiam");
+        try {
+            CreateDbInstanceResponse response = rds.createDBInstance(CreateDbInstanceRequest.builder()
+                    .dbInstanceIdentifier(noIamId)
+                    .dbInstanceClass("db.t3.micro")
+                    .engine("postgres")
+                    .masterUsername(USERNAME)
+                    .masterUserPassword(PASSWORD)
+                    .dbName(DATABASE)
+                    .allocatedStorage(20)
+                    .enableIAMDatabaseAuthentication(false)
+                    .build());
+
+            Integer noIamPort = response.dbInstance().endpoint().port();
+            try (Connection admin = awaitPostgresConnection(USERNAME, PASSWORD, noIamPort)) {
+                createIamRole(admin);
+            }
+
+            String token = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                    .hostname(TestFixtures.proxyHost())
+                    .port(noIamPort)
+                    .username(IAM_USERNAME)
+                    .region(REGION)
+                    .credentialsProvider(CREDENTIALS)
+                    .build());
+
+            // Non-IAM instance rejects IAM tokens. The rejection may happen at the
+            // PostgreSQL auth layer ("password authentication failed") or at the TCP
+            // level if the proxy doesn't forward non-IAM connections ("connection attempt failed").
+            assertThatThrownBy(() -> openPostgresConnection(IAM_USERNAME, token, noIamPort))
+                    .isInstanceOf(SQLException.class);
+        } finally {
+            try {
+                rds.deleteDBInstance(DeleteDbInstanceRequest.builder()
+                        .dbInstanceIdentifier(noIamId)
+                        .skipFinalSnapshot(true)
+                        .build());
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    @Test
+    @Order(6)
+    @DisplayName("Toggle IAM via modify on a running instance")
+    void toggleIamViaModifyOnRunningInstance() throws Exception {
+        assumeInstanceCreated();
+
+        String toggleId = TestFixtures.uniqueName("rds-toggle");
+        try {
+            CreateDbInstanceResponse response = rds.createDBInstance(CreateDbInstanceRequest.builder()
+                    .dbInstanceIdentifier(toggleId)
+                    .dbInstanceClass("db.t3.micro")
+                    .engine("postgres")
+                    .masterUsername(USERNAME)
+                    .masterUserPassword(PASSWORD)
+                    .dbName(DATABASE)
+                    .allocatedStorage(20)
+                    .enableIAMDatabaseAuthentication(false)
+                    .build());
+
+            Integer togglePort = response.dbInstance().endpoint().port();
+
+            try (Connection admin = awaitPostgresConnection(USERNAME, PASSWORD, togglePort)) {
+                createIamRole(admin);
+            }
+
+            // Should reject IAM when disabled
+            String token1 = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                    .hostname(TestFixtures.proxyHost())
+                    .port(togglePort)
+                    .username(IAM_USERNAME)
+                    .region(REGION)
+                    .credentialsProvider(CREDENTIALS)
+                    .build());
+
+            assertThatThrownBy(() -> openPostgresConnection(IAM_USERNAME, token1, togglePort))
+                    .isInstanceOf(SQLException.class);
+
+            // Enable IAM via modify
+            rds.modifyDBInstance(ModifyDbInstanceRequest.builder()
+                    .dbInstanceIdentifier(toggleId)
+                    .enableIAMDatabaseAuthentication(true)
+                    .applyImmediately(true)
+                    .build());
+
+            // Should accept IAM after enable
+            String token2 = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                    .hostname(TestFixtures.proxyHost())
+                    .port(togglePort)
+                    .username(IAM_USERNAME)
+                    .region(REGION)
+                    .credentialsProvider(CREDENTIALS)
+                    .build());
+
+            Connection connection = awaitPostgresConnection(IAM_USERNAME, token2, togglePort);
+            try {
+                assertThat(selectOne(connection)).isEqualTo(1);
+            } finally {
+                connection.close();
+            }
+
+            rds.modifyDBInstance(ModifyDbInstanceRequest.builder()
+                    .dbInstanceIdentifier(toggleId)
+                    .enableIAMDatabaseAuthentication(false)
+                    .applyImmediately(true)
+                    .build());
+
+            String token3 = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                    .hostname(TestFixtures.proxyHost())
+                    .port(togglePort)
+                    .username(IAM_USERNAME)
+                    .region(REGION)
+                    .credentialsProvider(CREDENTIALS)
+                    .build());
+
+            assertThatThrownBy(() -> openPostgresConnection(IAM_USERNAME, token3, togglePort))
+                    .isInstanceOf(SQLException.class);
+        } finally {
+            try {
+                rds.deleteDBInstance(DeleteDbInstanceRequest.builder()
+                        .dbInstanceIdentifier(toggleId)
+                        .skipFinalSnapshot(true)
+                        .build());
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("Modify password keeps proxy reachable and delete releases port")
+    void modifyKeepsProxyReachableAndDeleteReleasesPort() throws Exception {
+        assumeInstanceCreated();
+
+        rds.modifyDBInstance(ModifyDbInstanceRequest.builder()
+                .dbInstanceIdentifier(instanceId)
+                .masterUserPassword("secret456")
+                .build());
+
+        // Old password must be rejected after modify
+        assertThatThrownBy(() -> openPostgresConnection(USERNAME, PASSWORD))
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("password authentication failed");
+
+        Connection modifiedPasswordConnection = awaitPostgresConnection(USERNAME, "secret456");
+        try {
+            assertThat(selectOne(modifiedPasswordConnection)).isEqualTo(1);
+        } finally {
+            modifiedPasswordConnection.close();
+        }
+
+        // IAM should still work after password change
+        String token = rds.utilities().generateAuthenticationToken(GenerateAuthenticationTokenRequest.builder()
+                .hostname(TestFixtures.proxyHost())
+                .port(proxyPort)
+                .username(IAM_USERNAME)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build());
+
+        Connection iamConnection = awaitPostgresConnection(IAM_USERNAME, token);
+        try {
+            assertThat(selectOne(iamConnection)).isEqualTo(1);
+        } finally {
+            iamConnection.close();
+        }
+
+        rds.deleteDBInstance(DeleteDbInstanceRequest.builder()
+                .dbInstanceIdentifier(instanceId)
+                .skipFinalSnapshot(true)
+                .build());
+        instanceCreated = false;
+
+        // Real AWS faults DBInstanceNotFound when describing a deleted instance by
+        // identifier — this is what lets the DBInstanceDeleted waiter complete.
+        String deletedId = instanceId;
+        assertThatThrownBy(() -> rds.describeDBInstances(DescribeDbInstancesRequest.builder()
+                .dbInstanceIdentifier(deletedId)
+                .build()))
+                .isInstanceOf(DbInstanceNotFoundException.class);
+
+        String replacementId = TestFixtures.uniqueName("rds-pg");
+        CreateDbInstanceResponse replacement = rds.createDBInstance(CreateDbInstanceRequest.builder()
+                .dbInstanceIdentifier(replacementId)
+                .dbInstanceClass("db.t3.micro")
+                .engine("postgres")
+                .masterUsername(USERNAME)
+                .masterUserPassword(PASSWORD)
+                .dbName(DATABASE)
+                .allocatedStorage(20)
+                .enableIAMDatabaseAuthentication(true)
+                .build());
+
+        instanceId = replacementId;
+        instanceCreated = true;
+        Integer replacementPort = replacement.dbInstance().endpoint().port();
+        proxyPort = replacementPort;
+
+        // Port should be within the configured RDS proxy range and the connection
+        // should succeed. Don't assert exact port reuse as allocation order is
+        // an implementation detail that can vary across environments.
+        assertThat(replacementPort).isBetween(PROXY_PORT_MIN, PROXY_PORT_MAX);
+
+        Connection replacementConnection = awaitPostgresConnection(USERNAME, PASSWORD);
+        try {
+            assertThat(selectOne(replacementConnection)).isEqualTo(1);
+        } finally {
+            replacementConnection.close();
+        }
+    }
+
+    private static void createIamRole(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("CREATE ROLE " + IAM_USERNAME + " LOGIN PASSWORD '" + PASSWORD + "'");
+            statement.execute("GRANT rds_iam TO " + IAM_USERNAME);
+        }
+    }
+
+    private static void assumeInstanceCreated() {
+        Assumptions.assumeTrue(instanceCreated && proxyPort != null,
+                "RDS JDBC tests require a created DB instance from the first step");
+    }
+
+    private static Connection awaitPostgresConnection(String username, String password) throws Exception {
+        return awaitPostgresConnection(username, password, proxyPort);
+    }
+
+    private static Connection awaitPostgresConnection(String username, String password, int port) throws Exception {
+        return TestFixtures.awaitJdbcConnection(postgresUrl(port), postgresProperties(username, password));
+    }
+
+    private static Connection openPostgresConnection(String username, String password) throws SQLException {
+        return openPostgresConnection(username, password, proxyPort);
+    }
+
+    private static Connection openPostgresConnection(String username, String password, int port) throws SQLException {
+        return DriverManager.getConnection(postgresUrl(port), postgresProperties(username, password));
+    }
+
+    private static String postgresUrl(int port) {
+        return "jdbc:postgresql://" + TestFixtures.proxyHost() + ":" + port + "/" + DATABASE;
+    }
+
+    private static Properties postgresProperties(String username, String password) {
+        Properties properties = new Properties();
+        properties.setProperty("user", username);
+        properties.setProperty("password", password);
+        properties.setProperty("sslmode", "disable");
+        properties.setProperty("connectTimeout", "5");
+        return properties;
+    }
+
+    private static int selectOne(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement();
+             ResultSet resultSet = statement.executeQuery("select 1")) {
+            assertThat(resultSet.next()).isTrue();
+            return resultSet.getInt(1);
+        }
+    }
+}

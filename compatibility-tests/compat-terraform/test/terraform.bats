@@ -1,0 +1,648 @@
+#!/usr/bin/env bats
+# Terraform Compatibility Tests for floci
+
+setup_file() {
+    load 'test_helper/common-setup'
+
+    cd "$TF_DIR"
+
+    echo "# === Terraform Compatibility Test ===" >&3
+    echo "# Endpoint: $FLOCI_ENDPOINT" >&3
+
+    # Clean any previous state
+    rm -rf .terraform .terraform.lock.hcl terraform.tfstate* 2>/dev/null || true
+
+    echo "# --- Setup: state bucket & lock table ---" >&3
+    create_state_backend
+    generate_backend_config
+
+    # 12 MiB source for aws_s3_object.large: above the provider's 5 MiB part size, so it goes multipart
+    head -c $((12 * 1024 * 1024)) /dev/urandom > "$TF_DIR/large-object.bin"
+
+    echo "# --- terraform init ---" >&3
+    run terraform init -backend-config=/tmp/floci-backend.hcl \
+        -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color
+    if [ "$status" -ne 0 ]; then
+        echo "# terraform init failed: $output" >&3
+        return 1
+    fi
+
+    echo "# --- terraform validate ---" >&3
+    run terraform validate -no-color
+    if [ "$status" -ne 0 ]; then
+        echo "# terraform validate failed: $output" >&3
+        return 1
+    fi
+
+    echo "# --- terraform plan ---" >&3
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color
+    if [ "$status" -ne 0 ]; then
+        echo "# terraform plan failed: $output" >&3
+        return 1
+    fi
+
+    echo "# --- terraform apply ---" >&3
+    run terraform apply -var="endpoint=${FLOCI_ENDPOINT}" -input=false -auto-approve -no-color
+    if [ "$status" -ne 0 ]; then
+        echo "# terraform apply failed: $output" >&3
+        return 1
+    fi
+}
+
+teardown_file() {
+    load 'test_helper/common-setup'
+
+    cd "$TF_DIR"
+
+    echo "# --- terraform destroy ---" >&3
+    terraform destroy -var="endpoint=${FLOCI_ENDPOINT}" -input=false -auto-approve -no-color || true
+    rm -f "$TF_DIR/large-object.bin"
+}
+
+setup() {
+    load 'test_helper/common-setup'
+}
+
+# --- Spot Checks ---
+
+@test "Terraform: S3 bucket created" {
+    run aws_cmd s3api head-bucket --bucket floci-compat-app
+    assert_success
+}
+
+# Base64 of a hex SHA256 digest, the way S3 encodes checksums.
+hex_to_b64() {
+    printf "$(echo "$1" | sed 's/../\\x&/g')" | base64 | tr -d '\n'
+}
+
+# The composite SHA256 S3 stores for a multipart object: cut the local file at the part sizes S3
+# reports, hash each part, hash the concatenated binary digests and append the part count.
+sha256_composite_by_sizes() {
+    local file="$1"
+    shift
+    local joined offset=0 count=0 size hex
+    joined=$(mktemp)
+    for size in "$@"; do
+        hex=$(tail -c +$((offset + 1)) "$file" | head -c "$size" | sha256sum | cut -c1-64)
+        printf "$(echo "$hex" | sed 's/../\\x&/g')" >> "$joined"
+        offset=$((offset + size))
+        count=$((count + 1))
+    done
+    echo "$(hex_to_b64 "$(sha256sum "$joined" | cut -c1-64)")-$count"
+    rm -f "$joined"
+}
+
+@test "Terraform: large aws_s3_object is multipart-uploaded with the composite SHA256 checksum" {
+    run aws_cmd s3api head-object --bucket floci-compat-app --key large/multipart.bin \
+        --checksum-mode ENABLED --output json
+    assert_success
+    local checksum type etag
+    checksum=$(echo "$output" | jq -r '.ChecksumSHA256')
+    type=$(echo "$output" | jq -r '.ChecksumType')
+    etag=$(echo "$output" | jq -r '.ETag')
+    [ "$type" = "COMPOSITE" ]
+    [[ "$etag" =~ -[0-9]+\"$ ]]
+
+    run aws_cmd s3api get-object-attributes --bucket floci-compat-app --key large/multipart.bin \
+        --object-attributes Checksum ObjectParts --output json
+    assert_success
+    [ "$(echo "$output" | jq -r '.ObjectParts.TotalPartsCount')" -gt 1 ]
+    local sizes expected
+    sizes=$(echo "$output" | jq -r '.ObjectParts.Parts[].Size')
+    expected=$(sha256_composite_by_sizes "$TF_DIR/large-object.bin" $sizes)
+    [ "$checksum" = "$expected" ]
+    # GetObjectAttributes reports the composite without the part-count suffix
+    [ "$(echo "$output" | jq -r '.Checksum.ChecksumSHA256')" = "${expected%-*}" ]
+}
+
+@test "Terraform: state holds the composite checksum S3 reports for the large object" {
+    cd "$TF_DIR"
+    run terraform output -raw large_object_checksum_sha256
+    assert_success
+    local head_checksum
+    head_checksum=$(aws_cmd s3api head-object --bucket floci-compat-app --key large/multipart.bin \
+        --checksum-mode ENABLED --output json | jq -r '.ChecksumSHA256')
+    [ "$output" = "$head_checksum" ]
+}
+
+@test "Terraform: re-planning the large object reports no changes" {
+    cd "$TF_DIR"
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_s3_object.large
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
+}
+
+@test "Terraform: SQS queue created" {
+    run aws_cmd sqs get-queue-url --queue-name floci-compat-jobs
+    assert_success
+    assert_output --partial "QueueUrl"
+}
+
+@test "Terraform: SNS topic created" {
+    run aws_cmd sns list-topics
+    assert_success
+    assert_output --partial "floci-compat-events"
+}
+
+@test "Terraform: SES receipt filter created" {
+    run aws_cmd ses list-receipt-filters
+    assert_success
+    assert_output --partial "floci-compat-filter"
+    assert_output --partial "10.10.10.0/24"
+}
+
+@test "Terraform: SES receipt rule set created and active" {
+    run aws_cmd ses describe-receipt-rule-set --rule-set-name floci-compat-rule-set
+    assert_success
+    assert_output --partial "floci-compat-rule-set"
+
+    run aws_cmd ses describe-active-receipt-rule-set
+    assert_success
+    assert_output --partial "floci-compat-rule-set"
+    assert_output --partial "X-Floci-Compat"
+}
+
+@test "Terraform: SES receipt rule round-trips its actions" {
+    run aws_cmd ses describe-receipt-rule --rule-set-name floci-compat-rule-set --rule-name floci-compat-rule
+    assert_success
+    assert_output --partial "X-Floci-Compat"
+    assert_output --partial "floci-compat-events"
+    assert_output --partial "RuleSet"
+}
+
+@test "Terraform: DynamoDB table created" {
+    run aws_cmd dynamodb describe-table --table-name floci-compat-items
+    assert_success
+    assert_output --partial "ACTIVE"
+}
+
+@test "Terraform: SSM parameter created" {
+    run aws_cmd ssm get-parameter --name /floci-compat/db-url
+    assert_success
+    assert_output --partial "jdbc:"
+}
+
+@test "Terraform: Secrets Manager secret created" {
+    run aws_cmd secretsmanager describe-secret --secret-id "floci-compat/db-creds"
+    assert_success
+    assert_output --partial "floci-compat"
+}
+
+@test "Terraform: ECR repository created" {
+    run aws_cmd ecr describe-repositories --repository-names floci-compat-app
+    assert_success
+    assert_output --partial "floci-compat-app"
+}
+
+@test "Terraform: ECS cluster created" {
+    run aws_cmd ecs describe-clusters --clusters floci-compat-cluster
+    assert_success
+    assert_output --partial "floci-compat-cluster"
+    assert_output --partial "ACTIVE"
+}
+
+@test "Terraform: KMS key created" {
+    run aws_cmd kms list-keys
+    assert_success
+    [ "$(aws_cmd kms list-keys --query 'length(Keys)' --output text)" -gt 0 ]
+}
+
+@test "Terraform: Kinesis stream created" {
+    run aws_cmd kinesis describe-stream-summary --stream-name floci-compat-events
+    assert_success
+    assert_output --partial "ACTIVE"
+}
+
+@test "Terraform: CloudWatch log group created" {
+    run aws_cmd logs describe-log-groups --log-group-name-prefix /floci/compat/app
+    assert_success
+    assert_output --partial "/floci/compat/app"
+}
+
+@test "Terraform: EventBridge event bus created" {
+    run aws_cmd events describe-event-bus --name floci-compat-bus
+    assert_success
+    assert_output --partial "floci-compat-bus"
+}
+
+@test "Terraform: Step Functions state machine created" {
+    run aws_cmd stepfunctions list-state-machines
+    assert_success
+    assert_output --partial "floci-compat-state-machine"
+}
+
+@test "Terraform: CloudFormation stack created" {
+    run aws_cmd cloudformation describe-stacks --stack-name floci-compat-stack
+    assert_success
+    assert_output --partial "floci-compat-stack"
+}
+
+@test "Terraform: EKS cluster created" {
+    run aws_cmd eks describe-cluster --name floci-compat-eks
+    assert_success
+    assert_output --partial "floci-compat-eks"
+    assert_output --partial "ACTIVE"
+}
+
+@test "Terraform: API Gateway v2 HTTP API created" {
+    run aws_cmd apigatewayv2 get-apis
+    assert_success
+    assert_output --partial "floci-compat-http-api"
+}
+
+@test "Terraform: AppConfig application created" {
+    run aws_cmd appconfig list-applications
+    assert_success
+    assert_output --partial "floci-compat-appconfig"
+}
+
+@test "Terraform: Backup vault created" {
+    run aws_cmd backup describe-backup-vault --backup-vault-name floci-compat-vault
+    assert_success
+    assert_output --partial "floci-compat-vault"
+}
+
+@test "Terraform: Cloud Map namespace created" {
+    run aws_cmd servicediscovery list-namespaces
+    assert_success
+    assert_output --partial "floci-compat.internal"
+}
+
+@test "Terraform: CodeDeploy application created" {
+    run aws_cmd deploy get-application --application-name floci-compat-codedeploy
+    assert_success
+    assert_output --partial "floci-compat-codedeploy"
+}
+
+@test "Terraform: ACM certificate created" {
+    run aws_cmd acm list-certificates
+    assert_success
+    assert_output --partial "floci-compat.internal"
+}
+
+@test "Terraform: SES identity created" {
+    run aws_cmd ses get-identity-verification-attributes \
+        --identities terraform@floci-compat.internal
+    assert_success
+    assert_output --partial "terraform@floci-compat.internal"
+}
+
+@test "Terraform: EventBridge schedule created" {
+    run aws_cmd scheduler get-schedule --name floci-compat-schedule
+    assert_success
+    assert_output --partial "floci-compat-schedule"
+}
+
+@test "Terraform: WAFv2 web ACL created" {
+    run aws_cmd wafv2 list-web-acls --scope REGIONAL
+    assert_success
+    assert_output --partial "floci-compat-waf"
+}
+
+@test "Terraform: Cost and Usage Report created" {
+    run aws_cmd cur describe-report-definitions
+    assert_success
+    assert_output --partial "floci-compat-report"
+}
+
+@test "Terraform: AppSync GraphQL API created" {
+    run aws_cmd appsync list-graphql-apis
+    assert_success
+    assert_output --partial "floci-compat-graphql"
+}
+
+@test "Terraform: ElastiCache replication group created" {
+    run aws_cmd elasticache describe-replication-groups --replication-group-id floci-compat-cache
+    assert_success
+    assert_output --partial "floci-compat-cache"
+}
+
+@test "Terraform: Firehose delivery stream created" {
+    run aws_cmd firehose list-delivery-streams
+    assert_success
+    assert_output --partial "floci-compat-firehose-basic"
+}
+
+@test "Terraform: EventBridge pipe created" {
+    run aws_cmd pipes list-pipes
+    assert_success
+    assert_output --partial "floci-compat-pipe"
+}
+
+@test "Terraform: RDS DB instance created and available" {
+    run aws_cmd rds describe-db-instances --db-instance-identifier floci-compat-db
+    assert_success
+    assert_output --partial "floci-compat-db"
+    assert_output --partial "available"
+}
+
+@test "Terraform: CloudWatch alarm created with tags" {
+    run aws_cmd cloudwatch describe-alarms --alarm-names floci-compat-cpu-alarm
+    assert_success
+    assert_output --partial "floci-compat-cpu-alarm"
+
+    ALARM_ARN=$(aws_cmd cloudwatch describe-alarms --alarm-names floci-compat-cpu-alarm \
+        --query 'MetricAlarms[0].AlarmArn' --output text)
+    run aws_cmd cloudwatch list-tags-for-resource --resource-arn "$ALARM_ARN"
+    assert_success
+    assert_output --partial "compat-test"
+}
+
+@test "Terraform: VPC created with custom DNS settings" {
+    run aws_cmd ec2 describe-vpcs \
+        --filters "Name=tag:Name,Values=floci-compat-vpc"
+    assert_success
+    assert_output --partial "floci-compat-vpc"
+    assert_output --partial "10.0.0.0/16"
+}
+
+@test "Terraform: VPC enableDnsSupport persisted as false" {
+    VPC_ID=$(aws_cmd ec2 describe-vpcs \
+        --filters "Name=tag:Name,Values=floci-compat-vpc" \
+        --query 'Vpcs[0].VpcId' --output text)
+    run aws_cmd ec2 describe-vpc-attribute \
+        --vpc-id "$VPC_ID" --attribute enableDnsSupport
+    assert_success
+    assert_output --partial '"Value": false'
+}
+
+@test "Terraform: VPC enableDnsHostnames persisted as false" {
+    VPC_ID=$(aws_cmd ec2 describe-vpcs \
+        --filters "Name=tag:Name,Values=floci-compat-vpc" \
+        --query 'Vpcs[0].VpcId' --output text)
+    run aws_cmd ec2 describe-vpc-attribute \
+        --vpc-id "$VPC_ID" --attribute enableDnsHostnames
+    assert_success
+    assert_output --partial '"Value": false'
+}
+
+@test "Terraform: Route53 hosted zone created" {
+    ZONE_ID=$(aws_cmd route53 list-hosted-zones \
+        --query "HostedZones[?Name=='floci-compat.internal.' && !(Config.PrivateZone)].Id | [0]" \
+        --output text | sed 's|/hostedzone/||')
+    [ -n "$ZONE_ID" ]
+    run aws_cmd route53 get-hosted-zone --id "$ZONE_ID"
+    assert_success
+    assert_output --partial "floci-compat.internal"
+}
+
+@test "Terraform: Route53 A record created" {
+    ZONE_ID=$(aws_cmd route53 list-hosted-zones \
+        --query "HostedZones[?Name=='floci-compat.internal.' && !(Config.PrivateZone)].Id | [0]" \
+        --output text | sed 's|/hostedzone/||')
+    run aws_cmd route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID"
+    assert_success
+    assert_output --partial "app.floci-compat.internal"
+    assert_output --partial "10.0.1.10"
+}
+
+@test "Terraform: Route53 zone has auto-created SOA and NS records" {
+    ZONE_ID=$(aws_cmd route53 list-hosted-zones \
+        --query "HostedZones[?Name=='floci-compat.internal.' && !(Config.PrivateZone)].Id | [0]" \
+        --output text | sed 's|/hostedzone/||')
+    run aws_cmd route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID"
+    assert_success
+    assert_output --partial '"SOA"'
+    assert_output --partial '"NS"'
+}
+
+@test "Terraform: Route53 health check created" {
+    HEALTH_CHECK_ID=$(aws_cmd route53 list-health-checks \
+        --query "HealthChecks[?HealthCheckConfig.FullyQualifiedDomainName=='app.floci-compat.internal'].Id | [0]" \
+        --output text)
+    [ -n "$HEALTH_CHECK_ID" ]
+    run aws_cmd route53 get-health-check --health-check-id "$HEALTH_CHECK_ID"
+    assert_success
+    assert_output --partial "app.floci-compat.internal"
+    assert_output --partial "HTTP"
+}
+
+@test "Terraform: Route53 zone tags persisted" {
+    ZONE_ID=$(aws_cmd route53 list-hosted-zones \
+        --query "HostedZones[?Name=='floci-compat.internal.' && !(Config.PrivateZone)].Id | [0]" \
+        --output text | sed 's|/hostedzone/||')
+    run aws_cmd route53 list-tags-for-resource \
+        --resource-type hostedzone --resource-id "$ZONE_ID"
+    assert_success
+    assert_output --partial "compat-test"
+}
+
+@test "Terraform: Cognito user pool client created without optional blocks" {
+    POOL_ID=$(aws_cmd cognito-idp list-user-pools --max-results 10 \
+        --query "UserPools[?Name=='floci-compat-pool'].Id | [0]" --output text)
+    [ -n "$POOL_ID" ]
+    run aws_cmd cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" \
+        --query "UserPoolClients[?ClientName=='floci-compat-pool-client'].ClientId | [0]" --output text
+    assert_success
+    [ -n "$output" ]
+    [ "$output" != "None" ]
+}
+
+@test "Terraform: Firehose extended_s3 delivery stream created with correct config" {
+    run aws_cmd firehose describe-delivery-stream --delivery-stream-name floci-compat-firehose \
+        --query "DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.CompressionFormat" --output text
+    assert_success
+    assert_output "GZIP"
+}
+
+@test "Terraform: Application Auto Scaling scalable target created with tags" {
+    run aws_cmd application-autoscaling describe-scalable-targets --service-namespace ecs \
+        --resource-ids service/floci-compat-cluster/floci-compat-service \
+        --query "ScalableTargets[0].MaxCapacity" --output text
+    assert_success
+    assert_output "20"
+
+    run aws_cmd application-autoscaling describe-scalable-targets --service-namespace ecs \
+        --resource-ids service/floci-compat-cluster/floci-compat-service \
+        --query "ScalableTargets[0].ScalableTargetARN" --output text
+    assert_success
+    [[ "$output" == arn:aws:application-autoscaling:* ]]
+
+    run aws_cmd application-autoscaling list-tags-for-resource --resource-arn "$output" \
+        --query "Tags.Environment" --output text
+    assert_success
+    assert_output "compat-test"
+}
+
+@test "Terraform: Application Auto Scaling target-tracking policy round-trips resource_label" {
+    run aws_cmd application-autoscaling describe-scaling-policies --service-namespace ecs \
+        --resource-id service/floci-compat-cluster/floci-compat-service \
+        --query "ScalingPolicies[?PolicyName=='floci-compat-alb-request-count'].TargetTrackingScalingPolicyConfiguration.PredefinedMetricSpecification.ResourceLabel | [0]" \
+        --output text
+    assert_success
+    assert_output "app/floci-compat-alb/abc123/targetgroup/floci-compat-tg/def456"
+
+    run aws_cmd application-autoscaling describe-scaling-policies --service-namespace ecs \
+        --resource-id service/floci-compat-cluster/floci-compat-service \
+        --query "ScalingPolicies[?PolicyName=='floci-compat-alb-request-count'].TargetTrackingScalingPolicyConfiguration.ScaleInCooldown | [0]" \
+        --output text
+    assert_success
+    assert_output "240"
+}
+
+# A successful apply proves very little on its own: a response that silently drops a
+# field still applies cleanly, and only shows up later as perpetual drift. Asserting an
+# empty second plan is what actually catches that class of bug.
+#
+# Whole-config: this used to be scoped to just the Application Auto Scaling resources
+# because a full re-plan reported drift on aws_cognito_user_pool (device_configuration,
+# email_configuration, user_pool_add_ons), aws_db_instance (auto_minor_version_upgrade)
+# and aws_kinesis_firehose_delivery_stream (s3_backup_mode) - see #2200. Now that those
+# are fixed, this guards every resource in the fixture instead of a hand-picked subset.
+@test "Terraform: re-planning the full configuration reports no changes" {
+    cd "$TF_DIR"
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
+}
+
+@test "Terraform: IAM role attaches managed policies outside the curated set" {
+    run aws_cmd iam list-attached-role-policies --role-name floci-compat-managed-policy-role \
+        --query "sort_by(AttachedPolicies, &PolicyArn)[].PolicyArn" --output text
+    assert_success
+    assert_output --partial "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess"
+    assert_output --partial "arn:aws:iam::aws:policy/service-role/AmazonElasticMapReduceRole"
+}
+
+# A policy AWS does not publish must still be rejected, otherwise a typo silently
+# "succeeds" and Terraform/CloudFormation never surface the mistake.
+@test "Terraform: attaching a nonexistent managed policy still fails" {
+    run aws_cmd iam attach-role-policy --role-name floci-compat-managed-policy-role \
+        --policy-arn "arn:aws:iam::aws:policy/AmazonS3FullAcess"
+    assert_failure
+    assert_output --partial "NoSuchEntity"
+}
+
+# Tags are stored and readable via ListRoleTags, but the provider reads them off the
+# GetRole response. Omitting them there made every tagged role read back untagged.
+@test "Terraform: GetRole returns the role's tags" {
+    run aws_cmd iam get-role --role-name floci-compat-tagged-role \
+        --query "Role.Tags[?Key=='Environment'].Value" --output text
+    assert_success
+    assert_output "compat"
+}
+
+@test "Terraform: GetPolicy returns the policy's tags" {
+    policy_arn=$(aws_cmd iam list-policies --scope Local \
+        --query "Policies[?PolicyName=='floci-compat-tagged-policy'].Arn" --output text)
+    run aws_cmd iam get-policy --policy-arn "$policy_arn" \
+        --query "Policy.Tags[?Key=='Environment'].Value" --output text
+    assert_success
+    assert_output "compat"
+}
+
+# The other half of the contract: IAM's listing operations deliberately return a subset
+# of attributes. ListRoles "does not return the following attributes, even though they
+# are an attribute of the returned object: PermissionsBoundary, RoleLastUsed, Tags".
+# Emitting them here would deviate from AWS in the opposite direction.
+@test "Terraform: ListRoles omits tags even for a tagged role" {
+    run aws_cmd iam list-roles \
+        --query "Roles[?RoleName=='floci-compat-tagged-role'].Tags" --output text
+    assert_success
+    refute_output --partial "compat"
+}
+
+@test "Terraform: ListPolicies omits tags and description even for a tagged policy" {
+    run aws_cmd iam list-policies --scope Local \
+        --query "Policies[?PolicyName=='floci-compat-tagged-policy'].[Tags,Description]" \
+        --output text
+    assert_success
+    refute_output --partial "compat"
+    refute_output --partial "round trip"
+}
+
+# The assertion that actually matters for the drift class: tags that do not survive the
+# round trip apply cleanly and then re-plan dirty forever.
+@test "Terraform: re-planning the tagged IAM resources reports no changes" {
+    cd "$TF_DIR"
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_iam_role.tagged \
+        -target=aws_iam_policy.tagged
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
+}
+
+@test "Terraform: GuardDuty detector is created with features" {
+    run aws_cmd guardduty list-detectors --query "DetectorIds[0]" --output text
+    assert_success
+    DETECTOR_ID="$output"
+    run aws_cmd guardduty get-detector --detector-id "$DETECTOR_ID" \
+        --query "[Status, FindingPublishingFrequency]" --output text
+    assert_success
+    assert_output --partial "ENABLED"
+    assert_output --partial "SIX_HOURS"
+}
+
+@test "Terraform: GuardDuty organization configuration round-trips" {
+    run aws_cmd guardduty list-detectors --query "DetectorIds[0]" --output text
+    assert_success
+    DETECTOR_ID="$output"
+    run aws_cmd guardduty describe-organization-configuration --detector-id "$DETECTOR_ID" \
+        --query "AutoEnableOrganizationMembers" --output text
+    assert_success
+    assert_output "ALL"
+}
+
+# additional_configuration is an ordered list block; drift here means the
+# emulator reordered the list on read-back.
+@test "Terraform: re-planning GuardDuty reports no changes" {
+    cd "$TF_DIR"
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_guardduty_detector.compat \
+        -target=aws_guardduty_detector_feature.runtime_monitoring \
+        -target=aws_guardduty_organization_configuration.compat \
+        -target=aws_guardduty_organization_configuration_feature.runtime_monitoring
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
+}
+
+@test "Terraform: Transfer Family server created and ONLINE" {
+    run aws_cmd transfer list-servers --query "Servers[0].State" --output text
+    assert_success
+    assert_output "ONLINE"
+}
+
+@test "Terraform: CloudTrail trail created, logging and tagged" {
+    run aws_cmd cloudtrail describe-trails --trail-name-list floci-compat-trail \
+        --query "trailList[0].S3BucketName" --output text
+    assert_success
+    assert_output "floci-compat-trail-logs"
+    run aws_cmd cloudtrail get-trail-status --name floci-compat-trail \
+        --query "IsLogging" --output text
+    assert_success
+    assert_output "True"
+    run aws_cmd cloudtrail describe-trails --trail-name-list floci-compat-trail \
+        --query "trailList[0].TrailARN" --output text
+    assert_success
+    TRAIL_ARN="$output"
+    run aws_cmd cloudtrail list-tags --resource-id-list "$TRAIL_ARN" \
+        --query "ResourceTagList[0].TagsList[?Key=='Environment'].Value" --output text
+    assert_success
+    assert_output "compat-test"
+}
+
+# The tag refresh path (issue #2800): a re-plan reads the trail back, including its
+# tags via ListTags, and must not report drift.
+@test "Terraform: re-planning CloudTrail reports no changes" {
+    cd "$TF_DIR"
+    run terraform plan -var="endpoint=${FLOCI_ENDPOINT}" -input=false -no-color -detailed-exitcode \
+        -target=aws_cloudtrail.compat
+    if [ "$status" -eq 2 ]; then
+        echo "# drift detected on re-plan:" >&3
+        echo "$output" >&3
+    fi
+    [ "$status" -eq 0 ]
+}

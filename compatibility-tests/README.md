@@ -1,0 +1,169 @@
+# floci-compatibility-tests
+
+Compatibility test suite for [Floci](https://github.com/hectorvent/floci) — a local AWS emulator.
+
+Verifies that standard AWS tooling (SDKs, CDK, OpenTofu/Terraform) works correctly against the emulator without modification. Tests run against a live Floci instance and use real AWS SDK clients — no mocks.
+
+## Quick Start
+
+```bash
+# Install just (task runner)
+# macOS: brew install just
+# Linux: cargo install just
+
+# Copy and configure environment
+cp env.example .env
+
+# Install dependencies
+just setup
+
+# Run all tests
+just test-all
+
+# Run specific SDK tests
+just test-python
+just test-typescript
+just test-awscli
+```
+
+## Test Runners
+
+| Module                                | Language       | Test Framework | Command                |
+| ------------------------------------- | -------------- | -------------- | ---------------------- |
+| [`sdk-test-python`](sdk-test-python/) | Python 3       | pytest         | `just test-python`     |
+| [`sdk-test-node`](sdk-test-node/)     | TypeScript     | vitest         | `just test-typescript` |
+| [`sdk-test-awscli`](sdk-test-awscli/) | Bash / AWS CLI | bats-core      | `just test-awscli`     |
+| [`sdk-test-java`](sdk-test-java/)     | Java 17        | JUnit 5        | `just test-java`       |
+| [`sdk-test-go`](sdk-test-go/)         | Go 1.24        | go test        | `just test-go`         |
+
+### IaC Compatibility
+
+| Module                                  | Tool       | Command    |
+| --------------------------------------- | ---------- | ---------- |
+| [`compat-cdk`](compat-cdk/)             | AWS CDK v2 | `./run.sh` |
+| [`compat-opentofu`](compat-opentofu/)   | OpenTofu   | `./run.sh` |
+| [`compat-terraform`](compat-terraform/) | Terraform  | `./run.sh` |
+
+The Terraform suite uses the standard `hashicorp/aws` provider against Floci's local endpoint. It validates `init`, `validate`, `plan`, `apply`, resource reads, and `destroy` without creating resources in a real AWS account. See the [Terraform with Floci guide](../docs/getting-started/terraform.md) for a copy-paste setup.
+
+## Prerequisites
+
+- **Floci running** on `http://localhost:4566` (or set `FLOCI_ENDPOINT`)
+- **Docker** — required for Lambda invocation tests
+- **just** — task runner for orchestration
+
+Per-module requirements:
+
+| Module            | Requirements                        |
+| ----------------- | ----------------------------------- |
+| `sdk-test-python` | Python 3.9+, pip                    |
+| `sdk-test-node`   | Node.js 20+, npm, vitest            |
+| `sdk-test-awscli` | AWS CLI v2, bash, jq                |
+| `sdk-test-java`   | Java 17+, Maven                     |
+| `sdk-test-go`     | Go 1.24+                            |
+| `compat-cdk`      | Node.js 20+, npm, Python 3, bats-core |
+
+## Setup
+
+```bash
+# Setup all SDKs
+just setup
+
+# Setup individual SDKs
+just setup-python      # pip install -r requirements.txt
+just setup-typescript  # npm install
+just setup-awscli      # Clone bats-core, bats-support, bats-assert
+```
+
+The boto3 and botocore versions in `sdk-test-python/requirements.txt` pin the test clients,
+not the AWS models used to generate Floci's vendored data. For model audits and data
+regeneration, use the pin in `tools/aws/requirements.txt` at the repository root and check
+the selected model source. See [Botocore pin of record](../CONTRIBUTING.md#botocore-pin-of-record)
+for the distinction and the generators' data-source precedence.
+
+## Running Tests
+
+### All SDKs
+
+```bash
+just test-all
+```
+
+### Individual SDKs
+
+```bash
+# Python (pytest)
+just test-python
+
+# TypeScript (vitest)
+just test-typescript
+
+# AWS CLI (bats-core)
+just test-awscli
+```
+
+### IaC tools
+
+The Terraform, OpenTofu, and CDK suites aren't part of `just test-all` — run them individually by name:
+
+```bash
+# Terraform
+compat-terraform/run.sh
+
+# OpenTofu
+compat-opentofu/run.sh
+
+# AWS CDK
+compat-cdk/run.sh
+```
+
+Bats-based suites keep their normal console output and also write JUnit XML reports:
+
+- `sdk-test-awscli/test-results/junit.xml`
+- `compat-cdk/test-results/junit.xml`
+- `compat-terraform/test-results/junit-<bats file>.xml`
+- `compat-opentofu/test-results/junit-<bats file>.xml`
+
+The Terraform and OpenTofu suites run each `test/*.bats` file in its own process
+concurrently, so they write one report per file rather than a single `junit.xml`.
+Every consumer globs the directory, so nothing downstream changes. Set
+`BATS_PARALLEL_FILES=0` to run the files one at a time when isolating a failure.
+Each file also runs under a `BATS_FILE_TIMEOUT` (default `12m`): a fixture that hangs
+fails under its own name with its TAP output ending at the stuck test, and the reports of
+the files that finished are still published, instead of the whole job dying at the
+workflow's 20 minute limit with nothing reported.
+
+## Configuration
+
+All modules read from environment variables (see `.env.example`):
+
+```bash
+FLOCI_ENDPOINT=http://localhost:4566
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+AWS_DEFAULT_REGION=us-east-1
+```
+
+## Running with Docker
+
+Each module includes a `Dockerfile` for isolated execution:
+
+```bash
+# Python
+docker build -t floci-sdk-python sdk-test-python/
+docker run --rm --network host floci-sdk-python pytest
+
+# TypeScript
+docker build -t floci-sdk-node sdk-test-node/
+docker run --rm --network host floci-sdk-node npm test
+```
+
+On macOS/Windows, use `host.docker.internal` instead of `localhost`:
+
+```bash
+docker run --rm -e FLOCI_ENDPOINT=http://host.docker.internal:4566 floci-sdk-python pytest
+```
+
+## Exit Codes
+
+All test runners exit `0` on full pass and non-zero if any test fails — suitable for CI pipelines.

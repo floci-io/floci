@@ -1,0 +1,154 @@
+package io.floci.aws.services.eks;
+
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.testutil.IamServiceTestHelper;
+import io.floci.aws.testutil.SigV4TokenTestHelper;
+import jakarta.ws.rs.core.Response;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class EksTokenWebhookControllerTest {
+
+    private static final String CLUSTER_NAME = "demo";
+    private static final String ACCESS_KEY_ID = "AKIDEKSTEST";
+    private static final String SECRET_ACCESS_KEY = "eks-secret-key";
+    private static final String DEFAULT_ACCOUNT = "000000000000";
+    private final IamService iamService = IamServiceTestHelper.iamServiceWithAccessKeyInAccount(
+            ACCESS_KEY_ID, SECRET_ACCESS_KEY, DEFAULT_ACCOUNT);
+    private final EmulatorConfig config = mock(EmulatorConfig.class);
+    private final EksTokenWebhookController controller = new EksTokenWebhookController(
+            new EksTokenValidator(iamService), new EksWorkerAuthentication(iamService, null, null, null, config));
+
+    @BeforeEach
+    void defaultAccount() {
+        when(config.defaultAccountId()).thenReturn(DEFAULT_ACCOUNT);
+    }
+
+    @Test
+    void scopedWebhookAcceptsAKeyOnlyOnAClusterOfItsOwnAccount() throws Exception {
+        IamService otherAccountKeys = IamServiceTestHelper.iamServiceWithAccessKeyInAccount(
+                ACCESS_KEY_ID, SECRET_ACCESS_KEY, "111122223333", DEFAULT_ACCOUNT);
+        EksTokenWebhookController scoped = new EksTokenWebhookController(new EksTokenValidator(otherAccountKeys),
+                new EksWorkerAuthentication(otherAccountKeys, null, null, null, config));
+
+        Response sameAccount = scoped.reviewScoped(CLUSTER_NAME, "111122223333", "us-east-1", "0",
+                tokenReview(validToken()));
+        Response otherAccount = scoped.reviewScoped(CLUSTER_NAME, "999988887777", "us-east-1", "0",
+                tokenReview(validToken()));
+
+        assertTrue((Boolean) status(sameAccount).get("authenticated"));
+        assertFalse((Boolean) status(otherAccount).get("authenticated"));
+    }
+
+    @Test
+    void defaultAccountKeyIsRejectedOnAnotherAccountsCluster() throws Exception {
+        Response own = controller.reviewScoped(CLUSTER_NAME, DEFAULT_ACCOUNT, "us-east-1", "0",
+                tokenReview(validToken()));
+        Response other = controller.reviewScoped(CLUSTER_NAME, "111122223333", "us-east-1", "0",
+                tokenReview(validToken()));
+
+        assertTrue((Boolean) status(own).get("authenticated"));
+        assertFalse((Boolean) status(other).get("authenticated"));
+    }
+
+    @Test
+    void webhookRejectsAnInactiveKey() throws Exception {
+        IamService inactive = IamServiceTestHelper.iamServiceWithAccessKeyInAccount(
+                ACCESS_KEY_ID, SECRET_ACCESS_KEY, DEFAULT_ACCOUNT);
+        inactive.updateAccessKey("test-user", ACCESS_KEY_ID, "Inactive");
+        EksTokenWebhookController controllerWithInactiveKey = new EksTokenWebhookController(
+                new EksTokenValidator(inactive), new EksWorkerAuthentication(inactive, null, null, null, config));
+
+        Response response = controllerWithInactiveKey.review(CLUSTER_NAME, null, null, null, tokenReview(validToken()));
+
+        assertFalse((Boolean) status(response).get("authenticated"));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> status(Response response) {
+        Map<String, Object> body = (Map<String, Object>) response.getEntity();
+        return (Map<String, Object>) body.get("status");
+    }
+
+    private Map<String, Object> tokenReview(String token) {
+        return Map.of(
+                "apiVersion", "authentication.k8s.io/v1",
+                "kind", "TokenReview",
+                "spec", Map.of("token", token));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void awsIamTokenAuthenticatesAsClusterAdmin() throws Exception {
+        Response response = controller.review(CLUSTER_NAME, null, null, null, tokenReview(validToken()));
+
+        Map<String, Object> status = status(response);
+        assertEquals(Boolean.TRUE, status.get("authenticated"));
+
+        Map<String, Object> user = (Map<String, Object>) status.get("user");
+        assertEquals(List.of("system:masters"), user.get("groups"));
+    }
+
+    @Test
+    void unrecognisedTokenIsRejected() {
+        Response response = controller.review(CLUSTER_NAME, null, null, null, tokenReview("some-random-bearer-token"));
+        assertEquals(Boolean.FALSE, status(response).get("authenticated"));
+    }
+
+    @Test
+    void emptyOrMalformedReviewIsRejected() {
+        assertFalse((Boolean) status(controller.review(CLUSTER_NAME, null, null, null, Map.of())).get("authenticated"));
+        assertFalse((Boolean) status(controller.review(CLUSTER_NAME, null, null, null,
+                Map.of("spec", Map.of()))).get("authenticated"));
+    }
+
+    @Test
+    void responseIsAlwaysAWellFormedTokenReview() throws Exception {
+        Response response = controller.review(CLUSTER_NAME, null, null, null, tokenReview(validToken()));
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertEquals("authentication.k8s.io/v1", body.get("apiVersion"));
+        assertEquals("TokenReview", body.get("kind"));
+        assertTrue(body.containsKey("status"));
+    }
+
+    @Test
+    void responseEchoesRequestApiVersion() throws Exception {
+        // The kube-apiserver defaults to the v1beta1 webhook API and cannot convert a v1
+        // response back to v1beta1, so the response apiVersion MUST match the request's.
+        Map<String, Object> v1beta1Review = Map.of(
+                "apiVersion", "authentication.k8s.io/v1beta1",
+                "kind", "TokenReview",
+                "spec", Map.of("token", validToken()));
+
+        Response response = controller.review(CLUSTER_NAME, null, null, null, v1beta1Review);
+        Map<?, ?> body = (Map<?, ?>) response.getEntity();
+        assertEquals("authentication.k8s.io/v1beta1", body.get("apiVersion"));
+        assertEquals(Boolean.TRUE, status(response).get("authenticated"));
+    }
+
+    @Test
+    void tokenBoundToAnotherClusterIsRejected() throws Exception {
+        String token = SigV4TokenTestHelper.createEksToken(
+                "other-cluster", ACCESS_KEY_ID, SECRET_ACCESS_KEY, Instant.now(), 60);
+
+        Response response = controller.review(CLUSTER_NAME, null, null, null, tokenReview(token));
+
+        assertEquals(Boolean.FALSE, status(response).get("authenticated"));
+    }
+
+    private String validToken() throws Exception {
+        return SigV4TokenTestHelper.createEksToken(
+                CLUSTER_NAME, ACCESS_KEY_ID, SECRET_ACCESS_KEY, Instant.now(), 60);
+    }
+}

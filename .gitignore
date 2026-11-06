@@ -1,0 +1,50 @@
+target/
+# make native stages the container-built binary here for docker/Dockerfile.native-package
+native/
+data/
+*.class
+*.jar
+!vendor/maven/**/*.jar
+*.war
+.idea/
+*.iml
+.settings/
+.project
+.classpath
+.vscode/
+.zed/settings.json
+.DS_Store
+.zed/settings.json
+.kiro/
+
+CLAUDE.md
+GEMINI.md
+COPILOT.md
+.claude
+
+posts
+local
+
+.terraform.lock.hcl
+go.sum
+package-lock.json
+test-results.xml
+
+*.log
+test-results
+
+
+# Python tooling caches
+__pycache__/
+*.pyc
+
+# .mission/ is per-machine operational scratch (deploy scripts, ledgers, run
+# artifacts) for driving the emulator locally. It was previously hidden by a
+# per-clone .git/info/exclude rule (#2218); ignoring it here makes the rule
+# visible on every clone. Tooling meant to be shared must be committed to the
+# repo proper, not kept in .mission/.
+.mission/
+
+# The Release Cut toolchain is pinned; its lockfile must be committed
+# (npm ci fails without it) despite the global package-lock.json ignore.
+!.github/release-tooling/package-lock.json
