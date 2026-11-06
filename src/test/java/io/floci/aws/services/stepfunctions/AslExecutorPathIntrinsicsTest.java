@@ -1,0 +1,260 @@
+package io.floci.aws.services.stepfunctions;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Unit coverage for the JSONPath/intrinsic features DPS's provisioning state machine relies on:
+ * the {@code $.X.*.Y} wildcard projection, {@code States.ArrayContains}, and {@code ResultSelector}
+ * evaluation (which reuses the Parameters resolver).
+ */
+class AslExecutorPathIntrinsicsTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private AslExecutor executor;
+
+    @BeforeEach
+    @SuppressWarnings("unchecked")
+    void setUp() {
+        executor = AslExecutorFixture.builder()
+                .objectMapper(mapper)
+                .customResourceLiveness(null)
+                .build();
+    }
+
+    @Test
+    void wildcardProjectionCollectsFieldFromEachArrayElement() throws Exception {
+        JsonNode root = mapper.readTree(
+                "{\"Regions\":[{\"RegionName\":\"us-east-1\"},{\"RegionName\":\"eu-west-1\"}]}");
+        JsonNode result = executor.resolvePath("$.Regions.*.RegionName", root);
+        assertTrue(result.isArray());
+        assertEquals(2, result.size());
+        assertEquals("us-east-1", result.get(0).asText());
+        assertEquals("eu-west-1", result.get(1).asText());
+    }
+
+    @Test
+    void wildcardProjectionOnNonArrayIsNull() throws Exception {
+        JsonNode root = mapper.readTree("{\"Regions\":\"not-an-array\"}");
+        assertTrue(executor.resolvePath("$.Regions.*.RegionName", root).isNull());
+    }
+
+    @Test
+    void bracketWildcardProjectionMatchesDotForm() throws Exception {
+        JsonNode root = mapper.readTree(
+                "{\"Regions\":[{\"RegionName\":\"us-east-1\"},{\"RegionName\":\"eu-west-1\"}]}");
+        // The AWS bracket form must behave exactly like the dot form.
+        JsonNode result = executor.resolvePath("$.Regions[*].RegionName", root);
+        assertTrue(result.isArray());
+        assertEquals(2, result.size());
+        assertEquals("us-east-1", result.get(0).asText());
+        assertEquals("eu-west-1", result.get(1).asText());
+    }
+
+    @Test
+    void rootBracketDoubleWildcardFlattensArrayOfArrays() throws Exception {
+        JsonNode root = mapper.readTree("[[1,2],[3,4]]");
+        JsonNode result = executor.resolvePath("$[*][*]", root);
+        assertTrue(result.isArray());
+        assertEquals(4, result.size());
+        assertEquals(1, result.get(0).asInt());
+        assertEquals(4, result.get(3).asInt());
+    }
+
+    @Test
+    void numericBracketSegmentIndexesIntoArray() throws Exception {
+        JsonNode root = mapper.readTree("{\"items\":[\"a\",\"b\",\"c\"]}");
+        assertEquals("b", executor.resolvePath("$.items[1]", root).asText());
+    }
+
+    @Test
+    void bracketQuotedMembersSupportNamesOutsideDotShorthand() throws Exception {
+        JsonNode root = mapper.readTree(
+                "{\"config\":{\"max-limit\":2},\"a.b\":3,\"a..b\":4,\"[?(\":5}");
+
+        assertEquals(2, executor.resolvePath("$['config']['max-limit']", root).asInt());
+        assertEquals(3, executor.resolvePath("$['a.b']", root).asInt());
+        assertEquals(4, executor.resolvePath("$['a..b']", root).asInt());
+        assertEquals(5, executor.resolvePath("$['[?(']", root).asInt());
+    }
+
+    @Test
+    void filterExpressionsSupportExistenceAndComparisonPredicates() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"list":[{"keep":true,"id":1},{"keep":false,"id":2},{"id":3}]}
+                """);
+
+        assertEquals(mapper.readTree("[{\"keep\":true,\"id\":1},{\"keep\":false,\"id\":2}]"),
+                executor.resolvePath("$.list[?(@.keep)]", root));
+        assertEquals(mapper.readTree("[{\"keep\":true,\"id\":1}]"),
+                executor.resolvePath("$.list[?(@.keep == true)]", root));
+    }
+
+    @Test
+    void filterNegationTreatsExplicitNullAndMissingPropertiesAsFalsy() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"session":null},
+                  {"id":2,"session":{"token":"active"}},
+                  {"id":3}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("[{\"id\":1,\"session\":null},{\"id\":3}]"),
+                executor.resolvePath("$.items[?(!@.session)]", root));
+    }
+
+    @Test
+    void filterNegationWorksInsideCompoundPredicates() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"student_programme":"A","archived_at":null},
+                  {"id":2,"student_programme":"B"},
+                  {"id":3,"student_programme":"C","archived_at":"2026-09-01"},
+                  {"id":4,"archived_at":null}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("""
+                        [{"id":1,"student_programme":"A","archived_at":null},
+                          {"id":2,"student_programme":"B"}]
+                        """),
+                executor.resolvePath("$.items[?(@.student_programme && !@.archived_at)]", root));
+    }
+
+    @Test
+    void filterNegationSupportsBracketQuotedMembers() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"archived-at":null},
+                  {"id":2,"archived-at":"2026-09-01"},
+                  {"id":3}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("[{\"id\":1,\"archived-at\":null},{\"id\":3}]"),
+                executor.resolvePath("$.items[?(!@['archived-at'])]", root));
+    }
+
+    @Test
+    void filterNegationCompatibilityDoesNotRewriteComparisonsOrStringLiterals() throws Exception {
+        JsonNode root = mapper.readTree("""
+                {"items":[
+                  {"id":1,"session":null,"label":"!@.session"},
+                  {"id":2,"session":"active","label":"other"},
+                  {"id":3,"label":"!@.session"}
+                ]}
+                """);
+
+        assertEquals(mapper.readTree("""
+                        [{"id":2,"session":"active","label":"other"},
+                          {"id":3,"label":"!@.session"}]
+                        """),
+                executor.resolvePath("$.items[?(@.session != null)]", root));
+        assertEquals(mapper.readTree("""
+                        [{"id":1,"session":null,"label":"!@.session"},
+                          {"id":3,"label":"!@.session"}]
+                        """),
+                executor.resolvePath("$.items[?(@.label == '!@.session')]", root));
+    }
+
+    @Test
+    void recursiveDescentPreservesAndFlattensNestedArrayMatches() throws Exception {
+        JsonNode root = mapper.readTree("{\"d\":{\"x\":{\"a\":[1,2]}}}");
+
+        assertEquals(mapper.readTree("[[1,2]]"), executor.resolvePath("$.d..a", root));
+        assertEquals(mapper.readTree("[1,2]"), executor.resolvePath("$.d..a[*]", root));
+    }
+
+    @Test
+    void advancedPathsWorkInPayloadTemplatesAndIntrinsics() throws Exception {
+        JsonNode root = mapper.readTree("{\"list\":[1,null,2]}");
+        JsonNode parameters = mapper.readTree("""
+                {
+                  "filtered.$": "$.list[?(@ != null)]",
+                  "count.$": "States.ArrayLength($.list[?(@ != null)])"
+                }
+                """);
+
+        JsonNode resolved = executor.resolveParameters(parameters, root, mapper.createObjectNode());
+
+        assertEquals(mapper.readTree("[1,2]"), resolved.path("filtered"));
+        assertEquals(2, resolved.path("count").asInt());
+    }
+
+    @Test
+    void resolvePathNodeDistinguishesExplicitNullFromMissing() throws Exception {
+        JsonNode root = mapper.readTree("{\"x\":null}");
+        // An explicit null exists, so it is present (not a MissingNode)...
+        assertFalse(executor.resolvePathNode("$.x", root).isMissingNode());
+        assertTrue(executor.resolvePathNode("$.x", root).isNull());
+        // ...while an absent field resolves to a MissingNode.
+        assertTrue(executor.resolvePathNode("$.y", root).isMissingNode());
+    }
+
+    @Test
+    void arrayContainsTrueAndFalse() throws Exception {
+        JsonNode root = mapper.readTree("{\"list\":[\"a\",\"b\",\"c\"],\"hit\":\"b\",\"miss\":\"z\"}");
+        assertTrue(executor.resolvePath("States.ArrayContains($.list, $.hit)", root).asBoolean());
+        assertFalse(executor.resolvePath("States.ArrayContains($.list, $.miss)", root).asBoolean());
+    }
+
+    @Test
+    void arrayContainsThrowsWhenFirstArgIsNotAnArray() throws Exception {
+        JsonNode root = mapper.readTree("{\"notList\":\"oops\",\"hit\":\"b\"}");
+        // AWS raises States.Runtime instead of silently returning false on a non-array argument.
+        assertThrows(AslExecutor.FailStateException.class,
+                () -> executor.resolvePath("States.ArrayContains($.notList, $.hit)", root));
+    }
+
+    @Test
+    void wildcardProjectionKeepsExplicitNullsButOmitsMissing() throws Exception {
+        JsonNode root = mapper.readTree("[{\"field\":null},{\"field\":\"x\"},{\"other\":1}]");
+        JsonNode result = executor.resolvePath("$[*].field", root);
+        assertTrue(result.isArray());
+        // The explicit null is kept; the element missing "field" is omitted.
+        assertEquals(2, result.size());
+        assertTrue(result.get(0).isNull());
+        assertEquals("x", result.get(1).asText());
+    }
+
+    @Test
+    void resultSelectorAppliesProjectionAndIntrinsics() throws Exception {
+        JsonNode result = mapper.readTree(
+                "{\"Regions\":[{\"RegionName\":\"us-east-1\"},{\"RegionName\":\"us-west-2\"}]}");
+        JsonNode selector = mapper.readTree("{\"list.$\":\"$.Regions.*.RegionName\"}");
+        JsonNode out = executor.resolveParameters(selector, result, mapper.createObjectNode());
+        assertTrue(out.path("list").isArray());
+        assertEquals(2, out.path("list").size());
+        assertEquals("us-east-1", out.path("list").get(0).asText());
+    }
+
+    @Test
+    void rootArrayIndexDotBracketIsResolved() throws Exception {
+        // EventBridge Pipes delivers a batch as a JSON array; an SFN unwraps it via InputPath "$.[0]".
+        JsonNode root = mapper.readTree("[{\"systemId\":\"DFSLOCAL\",\"solutions\":[1,2]}]");
+        JsonNode out = executor.resolvePath("$.[0]", root);
+        assertTrue(out.isObject());
+        assertEquals("DFSLOCAL", out.path("systemId").asText());
+        assertEquals(2, out.path("solutions").size());
+    }
+
+    @Test
+    void rootArrayIndexNoDotIsResolved() throws Exception {
+        JsonNode root = mapper.readTree("[{\"k\":\"v0\"},{\"k\":\"v1\"}]");
+        assertEquals("v1", executor.resolvePath("$[1]", root).path("k").asText());
+    }
+
+    @Test
+    void rootArrayIndexThenFieldIsResolved() throws Exception {
+        JsonNode root = mapper.readTree("[{\"systemId\":\"S1\"}]");
+        assertEquals("S1", executor.resolvePath("$.[0].systemId", root).asText());
+    }
+}

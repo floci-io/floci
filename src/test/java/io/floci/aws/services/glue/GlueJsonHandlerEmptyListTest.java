@@ -1,0 +1,92 @@
+package io.floci.aws.services.glue;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.glue.schemaregistry.GlueSchemaRegistryService;
+import io.floci.aws.services.kms.KmsService;
+import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import jakarta.ws.rs.core.Response;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.time.Clock;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Verifies the wire-accurate empty-list responses for empty Glue resource collections.
+ * Each must return HTTP 200, an empty list under its result key, and omit NextToken.
+ */
+class GlueJsonHandlerEmptyListTest {
+
+    private static final String REGION = "us-east-1";
+    private static final String ACCOUNT_ID = "000000000000";
+
+    private GlueJsonHandler handler;
+    private ObjectMapper mapper;
+
+    @BeforeEach
+    void setUp() {
+        mapper = new ObjectMapper();
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
+        StorageFactory storageFactory = new InMemoryStorageFactory();
+        GlueSchemaRegistryService schemaRegistryService =
+                new GlueSchemaRegistryService(storageFactory, regionResolver);
+        GlueService glueService = new GlueService(
+            storageFactory, schemaRegistryService, regionResolver,
+            new ResourceGroupsTaggingService(storageFactory), new KmsService(storageFactory, regionResolver));
+        GlueJobRunService jobRunService =
+                new GlueJobRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
+        GlueCrawlerRunService crawlerRunService =
+                new GlueCrawlerRunService(new InMemoryStorage<>(), new InMemoryStorage<>(), glueService, 0, Clock.systemUTC());
+        handler = new GlueJsonHandler(glueService, jobRunService, crawlerRunService,
+                new GlueTriggerService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), glueService,
+                        jobRunService, crawlerRunService),
+                schemaRegistryService, mapper);
+    }
+
+    @Test
+    void listDataQualityRulesetsReturnsEmptyRulesetsList() throws Exception {
+        assertEmptyList("ListDataQualityRulesets", "Rulesets");
+    }
+
+    @Test
+    void getSecurityConfigurationsReturnsEmptyList() throws Exception {
+        assertEmptyList("GetSecurityConfigurations", "SecurityConfigurations");
+    }
+
+    private void assertEmptyList(String action, String listKey) throws Exception {
+        Response response = handler.handle(action, mapper.createObjectNode(), REGION);
+
+        assertEquals(200, response.getStatus());
+
+        JsonNode body = mapper.valueToTree(response.getEntity());
+        assertTrue(body.has(listKey), action + " response must contain " + listKey);
+        assertTrue(body.get(listKey).isArray(), listKey + " must be a JSON array");
+        assertEquals(0, body.get(listKey).size(), listKey + " must be empty");
+        assertFalse(body.has("NextToken"), action + " response must omit NextToken");
+        assertEquals(1, body.size(), action + " response must contain only " + listKey);
+    }
+
+    private static final class InMemoryStorageFactory extends StorageFactory {
+        private InMemoryStorageFactory() {
+            super(null, null);
+        }
+
+        @Override
+        public <V> AccountAwareStorageBackend<V> create(String serviceName,
+                                                     String fileName,
+                                                     TypeReference<Map<String, V>> typeReference) {
+            return AccountAwareStorageBackend.inMemory("000000000000");
+        }
+    }
+}

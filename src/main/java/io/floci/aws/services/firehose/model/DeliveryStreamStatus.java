@@ -1,0 +1,14 @@
+package io.floci.aws.services.firehose.model;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
+public enum DeliveryStreamStatus {
+    @JsonProperty("CREATING")
+    CREATING,
+    @JsonProperty("DELETING")
+    DELETING,
+    @JsonProperty("ACTIVE")
+    ACTIVE
+}

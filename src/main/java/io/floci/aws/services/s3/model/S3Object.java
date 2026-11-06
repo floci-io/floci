@@ -1,0 +1,218 @@
+package io.floci.aws.services.s3.model;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.floci.aws.core.common.Digests;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+@RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class S3Object {
+
+    private String bucketName;
+    private String key;
+    @JsonIgnore
+    private byte[] data;
+    private Map<String, String> metadata;
+    private String contentType;
+    private String contentEncoding;
+    private String contentDisposition;
+    private String cacheControl;
+    private String serverSideEncryption;
+    private String sseKmsKeyId;
+    private String sseCustomerAlgorithm;
+    private String sseCustomerKeyMd5;
+    private long size;
+    private Instant lastModified;
+    private String eTag;
+    private String storageClass;
+    private S3Checksum checksum;
+    private List<Part> parts;
+    private String versionId;
+    private boolean deleteMarker;
+    private boolean isLatest = true;
+
+    private Map<String, String> tags;
+    private String objectLockMode;       // "GOVERNANCE" | "COMPLIANCE" | null
+    private Instant retainUntilDate;     // null if no retention
+    private String legalHoldStatus;      // "ON" | "OFF" | null
+    private String acl;
+    private String ownerAccountId;
+
+    // Internal-only per-write stamp (not an S3 versionId, and set even when bucket versioning is
+    // off - see S3Service#getLatestObject). A fresh value is assigned every time this key is
+    // overwritten; comparing two reads of it is how a GET detects whether a concurrent overwrite
+    // landed in the middle of reading this object's metadata and body, without holding a lock
+    // for that read's full duration.
+    @JsonIgnore
+    private String dataGeneration;
+
+    // Internal-only s3.object.sequencer of the write that stored this instance, assigned under the
+    // bucket lock so concurrent writes to one key get values in the order they were stored. Unlike
+    // dataGeneration, this is persisted because version promotion needs the order after restart.
+    private String eventSequencer;
+
+    public S3Object() {
+        this.metadata = new HashMap<>();
+        this.storageClass = "STANDARD";
+        this.checksum = new S3Checksum();
+        this.parts = new ArrayList<>();
+        this.tags = new HashMap<>();
+    }
+
+    public S3Object(String bucketName, String key, byte[] data, String contentType) {
+        this(bucketName, key, data, contentType, computeETag(data));
+    }
+
+    public S3Object(String bucketName, String key, byte[] data, String contentType, String eTag) {
+        this(bucketName, key, data.length, contentType, eTag);
+        this.data = data;
+    }
+
+    /** An object whose {@code size}-byte body is stored on disk rather than held in memory. */
+    public S3Object(String bucketName, String key, long size, String contentType, String eTag) {
+        this.bucketName = bucketName;
+        this.key = key;
+        this.contentType = contentType != null ? contentType : "application/octet-stream";
+        this.size = size;
+        this.lastModified = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        this.eTag = eTag;
+        this.metadata = new HashMap<>();
+        this.storageClass = "STANDARD";
+        this.checksum = new S3Checksum();
+        this.checksum.setChecksumType(ChecksumType.FULL_OBJECT);
+        this.parts = new ArrayList<>();
+        this.tags = new HashMap<>();
+    }
+
+    public S3Object(S3Object source) {
+        this.bucketName = source.bucketName;
+        this.key = source.key;
+        this.data = source.data != null ? Arrays.copyOf(source.data, source.data.length) : null;
+        this.metadata = new HashMap<>(source.metadata);
+        this.contentType = source.contentType;
+        this.contentEncoding = source.contentEncoding;
+        this.contentDisposition = source.contentDisposition;
+        this.cacheControl = source.cacheControl;
+        this.serverSideEncryption = source.serverSideEncryption;
+        this.sseKmsKeyId = source.sseKmsKeyId;
+        this.sseCustomerAlgorithm = source.sseCustomerAlgorithm;
+        this.sseCustomerKeyMd5 = source.sseCustomerKeyMd5;
+        this.size = source.size;
+        this.lastModified = source.lastModified;
+        this.eTag = source.eTag;
+        this.storageClass = source.storageClass;
+        this.checksum = source.checksum == null ? null : source.checksum.copy();
+        this.parts = Part.copyAll(source.parts);
+        this.versionId = source.versionId;
+        this.deleteMarker = source.deleteMarker;
+        this.isLatest = source.isLatest;
+        this.tags = new HashMap<>(source.tags);
+        this.objectLockMode = source.objectLockMode;
+        this.retainUntilDate = source.retainUntilDate;
+        this.legalHoldStatus = source.legalHoldStatus;
+        this.acl = source.acl;
+        this.ownerAccountId = source.ownerAccountId;
+        this.dataGeneration = source.dataGeneration;
+        this.eventSequencer = source.eventSequencer;
+    }
+
+    public String getBucketName() { return bucketName; }
+    public void setBucketName(String bucketName) { this.bucketName = bucketName; }
+
+    public String getKey() { return key; }
+    public void setKey(String key) { this.key = key; }
+
+    public byte[] getData() { return data; }
+    public void setData(byte[] data) { this.data = data; }
+
+    public Map<String, String> getMetadata() { return metadata; }
+    public void setMetadata(Map<String, String> metadata) { this.metadata = metadata; }
+
+    public String getContentType() { return contentType; }
+    public void setContentType(String contentType) { this.contentType = contentType; }
+
+    public String getContentEncoding() { return contentEncoding; }
+    public void setContentEncoding(String contentEncoding) { this.contentEncoding = contentEncoding; }
+
+    public String getContentDisposition() { return contentDisposition; }
+    public void setContentDisposition(String contentDisposition) { this.contentDisposition = contentDisposition; }
+
+    public String getCacheControl() { return cacheControl; }
+    public void setCacheControl(String cacheControl) { this.cacheControl = cacheControl; }
+
+    public String getServerSideEncryption() { return serverSideEncryption; }
+    public void setServerSideEncryption(String serverSideEncryption) { this.serverSideEncryption = serverSideEncryption; }
+
+    public String getSseKmsKeyId() { return sseKmsKeyId; }
+    public void setSseKmsKeyId(String sseKmsKeyId) { this.sseKmsKeyId = sseKmsKeyId; }
+
+    public String getSseCustomerAlgorithm() { return sseCustomerAlgorithm; }
+    public void setSseCustomerAlgorithm(String sseCustomerAlgorithm) { this.sseCustomerAlgorithm = sseCustomerAlgorithm; }
+
+    public String getSseCustomerKeyMd5() { return sseCustomerKeyMd5; }
+    public void setSseCustomerKeyMd5(String sseCustomerKeyMd5) { this.sseCustomerKeyMd5 = sseCustomerKeyMd5; }
+
+    public long getSize() { return size; }
+    public void setSize(long size) { this.size = size; }
+
+    public Instant getLastModified() { return lastModified; }
+    public void setLastModified(Instant lastModified) { this.lastModified = lastModified; }
+
+    public String getETag() { return eTag; }
+    public void setETag(String eTag) { this.eTag = eTag; }
+
+    public String getStorageClass() { return storageClass; }
+    public void setStorageClass(String storageClass) { this.storageClass = storageClass; }
+
+    public S3Checksum getChecksum() { return checksum; }
+    public void setChecksum(S3Checksum checksum) { this.checksum = checksum; }
+
+    public List<Part> getParts() { return parts; }
+    public void setParts(List<Part> parts) { this.parts = parts; }
+
+    public String getVersionId() { return versionId; }
+    public void setVersionId(String versionId) { this.versionId = versionId; }
+
+    public boolean isDeleteMarker() { return deleteMarker; }
+    public void setDeleteMarker(boolean deleteMarker) { this.deleteMarker = deleteMarker; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    public boolean isLatest() { return isLatest; }
+    public void setLatest(boolean latest) { this.isLatest = latest; }
+
+    public String getObjectLockMode() { return objectLockMode; }
+    public void setObjectLockMode(String objectLockMode) { this.objectLockMode = objectLockMode; }
+
+    public Instant getRetainUntilDate() { return retainUntilDate; }
+    public void setRetainUntilDate(Instant retainUntilDate) { this.retainUntilDate = retainUntilDate; }
+
+    public String getLegalHoldStatus() { return legalHoldStatus; }
+    public void setLegalHoldStatus(String legalHoldStatus) { this.legalHoldStatus = legalHoldStatus; }
+
+    public String getAcl() { return acl; }
+    public void setAcl(String acl) { this.acl = acl; }
+
+    public String getOwnerAccountId() { return ownerAccountId; }
+    public void setOwnerAccountId(String ownerAccountId) { this.ownerAccountId = ownerAccountId; }
+
+    public String getDataGeneration() { return dataGeneration; }
+    public void setDataGeneration(String dataGeneration) { this.dataGeneration = dataGeneration; }
+
+    public String getEventSequencer() { return eventSequencer; }
+    public void setEventSequencer(String eventSequencer) { this.eventSequencer = eventSequencer; }
+
+    public static String computeETag(byte[] data) {
+        return "\"" + Digests.md5Hex(data) + "\"";
+    }
+}

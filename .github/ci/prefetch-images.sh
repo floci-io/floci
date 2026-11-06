@@ -165,7 +165,7 @@ starts CodeArtifactPypiDockerIntegrationTest && codeartifact_image pypi-image
 # RDS's engine fixture starts MySQL at the default and explicitly requested versions.
 # Read both sources rather than duplicating their version pins here.
 if starts RdsParameterGroupEngineIntegrationTest; then
-    MYSQL_DEFAULT="$(grep -oE 'DEFAULT_MYSQL_IMAGE *= *"[^"]+"' src/main/java/io/github/hectorvent/floci/config/EmulatorConfig.java | grep -oE '"[^"]+"' | tr -d '"')"
+    MYSQL_DEFAULT="$(grep -oE 'DEFAULT_MYSQL_IMAGE *= *"[^"]+"' src/main/java/io/floci/aws/config/EmulatorConfig.java | grep -oE '"[^"]+"' | tr -d '"')"
     [ -n "$MYSQL_DEFAULT" ] && pull "$MYSQL_DEFAULT"
     MYSQL_TEST="$(find src/test/java -name RdsParameterGroupEngineIntegrationTest.java -print -quit)"
     MYSQL_VERSIONS="$(awk -F'"' '$2 == "EngineVersion" { print $4 }' "${MYSQL_TEST:-/dev/null}" | sort -u)"

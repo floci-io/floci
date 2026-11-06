@@ -1,0 +1,458 @@
+package io.floci.aws.services.iot;
+
+import io.floci.aws.testing.IotMqttTlsProfile;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
+import org.eclipse.paho.client.mqttv3.MqttCallback;
+import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
+import org.eclipse.paho.client.mqttv3.MqttException;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+import org.junit.jupiter.api.Test;
+
+import javax.net.ssl.SSLContext;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.net.http.WebSocket;
+import java.net.http.WebSocketHandshakeException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+
+import static io.floci.aws.services.iot.IotMqttEnabledIntegrationTest.AWS_MAX_PAYLOAD;
+import static io.floci.aws.services.iot.IotMqttEnabledIntegrationTest.randomPayload;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Clients reach the broker as MQTT over WebSocket at {@code /mqtt} on the HTTP and HTTPS ports,
+ * the way AWS IoT serves {@code wss://<endpoint>:443/mqtt}: the {@code mqtt} subprotocol is
+ * echoed, the HTTPS certificate is the one every other Floci API serves, and the session behaves
+ * like one on the plaintext TCP listener because that is where the frames end up.
+ */
+@QuarkusTest
+@TestProfile(IotMqttTlsProfile.class)
+public class IotMqttWebSocketIntegrationTest {
+
+    private static final int PLAIN_PORT = IotMqttTlsProfile.PLAIN_PORT;
+    private static final short CLOSE_UNSUPPORTED_DATA = 1003;
+    private static final int CHURN_THREADS = 10;
+
+    @ConfigProperty(name = "quarkus.http.test-ssl-port", defaultValue = "0")
+    int testSslPort;
+
+    @ConfigProperty(name = "quarkus.http.test-port", defaultValue = "0")
+    int testHttpPort;
+
+    @Inject
+    IotMqttBrokerService broker;
+
+    @Test
+    void connectSubscribePublishOverWssTrustingOnlyTheFlociCa() throws Exception {
+        String topic = "ws/roundtrip/" + System.nanoTime();
+        byte[] payload = "over websocket".getBytes(StandardCharsets.UTF_8);
+
+        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-sub-" + System.nanoTime(), null, null)) {
+            subscriber.subscribe(topic);
+            try (WsClient publisher = WsClient.connect(wss("/mqtt"), "ws-pub-" + System.nanoTime(), null, null)) {
+                publisher.publish(topic, payload, 1);
+            }
+            assertArrayEquals(payload, subscriber.takePayload());
+        }
+    }
+
+    @Test
+    void plainWebSocketWorksOnTheHttpPort() throws Exception {
+        String topic = "ws/plain/" + System.nanoTime();
+        byte[] payload = "plain websocket".getBytes(StandardCharsets.UTF_8);
+
+        try (WsClient client = WsClient.connect(ws("/mqtt"), "ws-plain-" + System.nanoTime(), null, null)) {
+            assertTrue(client.isConnected());
+            client.subscribe(topic);
+            client.publish(topic, payload, 0);
+            assertArrayEquals(payload, client.takePayload());
+        }
+    }
+
+    @Test
+    void webSocketAndTcpClientsShareTheBroker() throws Exception {
+        String topic = "ws/shared/" + System.nanoTime();
+        byte[] payload = "from tcp".getBytes(StandardCharsets.UTF_8);
+
+        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-shared-" + System.nanoTime(), null, null)) {
+            subscriber.subscribe(topic);
+            MqttClient tcp = new MqttClient("tcp://127.0.0.1:" + PLAIN_PORT, "tcp-pub-" + System.nanoTime(), new MemoryPersistence());
+            tcp.connect();
+            tcp.publish(topic, payload, 1, false);
+            tcp.disconnect();
+            tcp.close();
+            assertArrayEquals(payload, subscriber.takePayload());
+        }
+    }
+
+    @Test
+    void connectNamingAnUnknownCustomAuthorizerIsRefused() {
+        String clientId = "tunnel-" + System.nanoTime();
+        String username = clientId + "?x-amz-customauthorizer-name=my-authorizer";
+        MqttException refused = assertThrows(MqttException.class,
+                () -> WsClient.connect(wss("/mqtt"), clientId, username, "token-" + System.nanoTime()));
+        assertEquals(MqttException.REASON_CODE_CONNECTION_LOST, refused.getReasonCode());
+    }
+
+    @Test
+    void sigV4QueryStringOnTheMqttPathIsAccepted() throws Exception {
+        String query = "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
+                + "&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20260906%2Fus-east-1%2Fiotdevicegateway%2Faws4_request"
+                + "&X-Amz-Date=20260906T120000Z&X-Amz-SignedHeaders=host"
+                + "&X-Amz-Signature=0000000000000000000000000000000000000000000000000000000000000000";
+        try (WsClient client = WsClient.connect(wss("/mqtt" + query), "ws-sigv4-" + System.nanoTime(), null, null)) {
+            assertTrue(client.isConnected());
+        }
+    }
+
+    @Test
+    void wrongPathIsNotAnMqttEndpoint() {
+        assertEquals(404, handshakeStatus("/not-mqtt"));
+        assertEquals(404, handshakeStatus("/mqtt/extra"));
+    }
+
+    @Test
+    void plainGetOnTheMqttPathIsNotAnUpgrade() throws Exception {
+        HttpResponse<String> response = HttpClient.newHttpClient().send(
+                HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + testHttpPort + "/mqtt")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, response.statusCode());
+    }
+
+    @Test
+    void textFrameClosesTheSessionAsUnsupportedData() throws Exception {
+        CompletableFuture<Integer> closeCode = new CompletableFuture<>();
+        WebSocket socket = HttpClient.newHttpClient().newWebSocketBuilder()
+                .subprotocols("mqtt")
+                .buildAsync(URI.create(ws("/mqtt")), new WebSocket.Listener() {
+                    @Override
+                    public CompletionStage<?> onClose(WebSocket webSocket, int statusCode, String reason) {
+                        closeCode.complete(statusCode);
+                        return null;
+                    }
+
+                    @Override
+                    public void onError(WebSocket webSocket, Throwable error) {
+                        closeCode.completeExceptionally(error);
+                    }
+                })
+                .get(10, TimeUnit.SECONDS);
+        assertEquals("mqtt", socket.getSubprotocol());
+
+        socket.sendText("not an mqtt packet", true).get(10, TimeUnit.SECONDS);
+
+        assertEquals(CLOSE_UNSUPPORTED_DATA, closeCode.get(10, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void brokerSideDisconnectDropsTheWebSocket() throws Exception {
+        String clientId = "ws-dropped-" + System.nanoTime();
+        try (WsClient client = WsClient.connect(ws("/mqtt"), clientId, null, null)) {
+            assertTrue(broker.getConnection(clientId).isPresent(), "the bridged session is a broker session");
+
+            assertTrue(broker.disconnectClient(clientId, true));
+
+            assertTrue(client.awaitConnectionLost(10, TimeUnit.SECONDS), "closing the broker side closes the WebSocket");
+        }
+    }
+
+    @Test
+    void clientDisconnectFreesTheBrokerSession() throws Exception {
+        String clientId = "ws-leaving-" + System.nanoTime();
+        WsClient client = WsClient.connect(ws("/mqtt"), clientId, null, null);
+        assertTrue(broker.getConnection(clientId).isPresent());
+
+        client.close();
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (broker.getConnection(clientId).isPresent() && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertTrue(broker.getConnection(clientId).isEmpty(), "the broker session is gone once the WebSocket closes");
+    }
+
+    @Test
+    void burstOfPublishesArrivesCompleteAndInOrder() throws Exception {
+        String topic = "ws/burst/" + System.nanoTime();
+        int count = 1000;
+        byte[] filler = new byte[4096];
+
+        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-burst-sub-" + System.nanoTime(), null, null)) {
+            subscriber.subscribe(topic);
+            try (WsClient publisher = WsClient.connect(wss("/mqtt"), "ws-burst-pub-" + System.nanoTime(), null, null)) {
+                for (int i = 0; i < count; i++) {
+                    byte[] payload = ByteBuffer.allocate(4 + filler.length).putInt(i).put(filler).array();
+                    publisher.publish(topic, payload, 0);
+                }
+                for (int i = 0; i < count; i++) {
+                    byte[] payload = subscriber.takePayload();
+                    assertEquals(4 + filler.length, payload.length);
+                    assertEquals(i, ByteBuffer.wrap(payload).getInt(), "publishes keep their order across the bridge");
+                }
+            }
+        }
+    }
+
+    @Test
+    void publishOfTheAwsMaximumPayloadIsDeliveredOverWss() throws Exception {
+        String topic = "ws/limit/" + System.nanoTime();
+        byte[] payload = randomPayload(AWS_MAX_PAYLOAD);
+
+        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-limit-sub-" + System.nanoTime(), null, null)) {
+            subscriber.subscribe(topic);
+            try (WsClient publisher = WsClient.connect(wss("/mqtt"), "ws-limit-pub-" + System.nanoTime(), null, null)) {
+                publisher.publish(topic, payload, 1);
+            }
+            assertArrayEquals(payload, subscriber.takePayload());
+        }
+    }
+
+    @Test
+    void publishAboveTheAwsMaximumPayloadDisconnectsOverWss() throws Exception {
+        String topic = "ws/over-limit/" + System.nanoTime();
+        byte[] after = "after".getBytes(StandardCharsets.UTF_8);
+
+        try (WsClient subscriber = WsClient.connect(wss("/mqtt"), "ws-over-sub-" + System.nanoTime(), null, null)) {
+            subscriber.subscribe(topic);
+            try (WsClient publisher = WsClient.connect(wss("/mqtt"), "ws-over-pub-" + System.nanoTime(), null, null)) {
+                assertThrows(MqttException.class, () -> publisher.publish(topic, randomPayload(AWS_MAX_PAYLOAD + 1), 1));
+                assertTrue(publisher.awaitConnectionLost(10, TimeUnit.SECONDS));
+            }
+            try (WsClient next = WsClient.connect(wss("/mqtt"), "ws-over-next-" + System.nanoTime(), null, null)) {
+                next.publish(topic, after, 0);
+            }
+            assertArrayEquals(after, subscriber.takePayload(), "the oversized publish is never delivered");
+        }
+    }
+
+    @Test
+    void manyConcurrentWebSocketClientsEachReceiveThePublish() throws Exception {
+        String topic = "ws/fanout/" + System.nanoTime();
+        byte[] payload = "to everyone".getBytes(StandardCharsets.UTF_8);
+        int clients = 16;
+        List<WsClient> subscribers = new CopyOnWriteArrayList<>();
+        List<Thread> threads = new ArrayList<>();
+        try {
+            CountDownLatch connected = new CountDownLatch(clients);
+            List<Throwable> failures = new CopyOnWriteArrayList<>();
+            for (int i = 0; i < clients; i++) {
+                String clientId = "ws-fanout-" + i + "-" + System.nanoTime();
+                Thread thread = new Thread(() -> {
+                    WsClient subscriber = null;
+                    try {
+                        subscriber = WsClient.connect(ws("/mqtt"), clientId, null, null);
+                        subscribers.add(subscriber);
+                        subscriber.subscribe(topic);
+                    } catch (Exception e) {
+                        failures.add(e);
+                    } finally {
+                        connected.countDown();
+                    }
+                });
+                threads.add(thread);
+                thread.start();
+            }
+            assertTrue(connected.await(30, TimeUnit.SECONDS));
+            assertTrue(failures.isEmpty(), "every concurrent handshake succeeds: " + failures);
+            assertEquals(clients, subscribers.size());
+
+            try (WsClient publisher = WsClient.connect(ws("/mqtt"), "ws-fanout-pub-" + System.nanoTime(), null, null)) {
+                publisher.publish(topic, payload, 1);
+            }
+            for (WsClient subscriber : subscribers) {
+                assertArrayEquals(payload, subscriber.takePayload());
+            }
+        } finally {
+            for (Thread thread : threads) {
+                thread.interrupt();
+            }
+            for (Thread thread : threads) {
+                try {
+                    thread.join(1000);
+                } catch (InterruptedException ignored) {
+                    // Safe to ignore during teardown; restore interrupt status for the calling thread.
+                    Thread.currentThread().interrupt();
+                }
+            }
+            for (WsClient subscriber : subscribers) {
+                try {
+                    subscriber.close();
+                } catch (Exception ignored) {
+                    // Safe to ignore teardown close errors on partially-connected or already closed clients.
+                }
+            }
+        }
+    }
+
+    @Test
+    void connectDisconnectChurnLeavesNoBrokerSessionBehind() throws Exception {
+        // Each connect costs a fixed ~300ms inside the Paho client (its sender, receiver and callback
+        // threads each sleep 100ms while starting), so the cycles run concurrently to keep the
+        // churn from being 30 of those in a row.
+        List<String> clientIds = new ArrayList<>();
+        ExecutorService pool = Executors.newFixedThreadPool(CHURN_THREADS);
+        try {
+            List<Future<?>> cycles = new ArrayList<>();
+            for (int i = 0; i < 30; i++) {
+                String clientId = "churn-" + i + "-" + System.nanoTime();
+                clientIds.add(clientId);
+                String url = i % 2 == 0 ? ws("/mqtt") : wss("/mqtt");
+                cycles.add(pool.submit(() -> {
+                    try (WsClient client = WsClient.connect(url, clientId, null, null)) {
+                        assertTrue(client.isConnected());
+                    }
+                    return null;
+                }));
+            }
+            for (Future<?> cycle : cycles) {
+                cycle.get(30, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        for (String clientId : clientIds) {
+            while (broker.getConnection(clientId).isPresent() && System.nanoTime() < deadline) {
+                Thread.sleep(20);
+            }
+            assertTrue(broker.getConnection(clientId).isEmpty(), clientId + " still has a broker session");
+        }
+    }
+
+    @Test
+    void plaintextTcpListenerStillWorks() throws Exception {
+        MqttClient client = new MqttClient("tcp://127.0.0.1:" + PLAIN_PORT, "tcp-" + System.nanoTime(), new MemoryPersistence());
+        client.connect();
+        assertTrue(client.isConnected());
+        client.disconnect();
+        client.close();
+    }
+
+    private String ws(String pathAndQuery) {
+        return "ws://127.0.0.1:" + testHttpPort + pathAndQuery;
+    }
+
+    private String wss(String pathAndQuery) {
+        return "wss://127.0.0.1:" + testSslPort + pathAndQuery;
+    }
+
+    /**
+     * The status of a failed handshake, sent the way Paho sends it (with the mqtt subprotocol), so
+     * a 404 proves the server routes on the path and not on the subprotocol.
+     */
+    private int handshakeStatus(String path) {
+        ExecutionException failure = assertThrows(ExecutionException.class, () -> HttpClient.newHttpClient()
+                .newWebSocketBuilder()
+                .subprotocols("mqtt")
+                .buildAsync(URI.create(ws(path)), new WebSocket.Listener() { })
+                .get(10, TimeUnit.SECONDS));
+        WebSocketHandshakeException handshake = assertInstanceOf(WebSocketHandshakeException.class, failure.getCause());
+        return handshake.getResponse().statusCode();
+    }
+
+    public static SSLContext trustOnlyFlociCa() throws Exception {
+        return IotDeviceIdentity.trustOnlySslContext(Path.of(IotMqttTlsProfile.TLS_DIR));
+    }
+
+    private static final class WsClient implements AutoCloseable {
+        private final MqttClient client;
+        private final BlockingQueue<byte[]> payloads = new LinkedBlockingQueue<>();
+        private final CountDownLatch connectionLost = new CountDownLatch(1);
+
+        private WsClient(MqttClient client) {
+            this.client = client;
+        }
+
+        static WsClient connect(String url, String clientId, String username, String password) throws Exception {
+            MqttClient client = new MqttClient(url, clientId, new MemoryPersistence());
+            client.setTimeToWait(10_000);
+            WsClient wsClient = new WsClient(client);
+            client.setCallback(new MqttCallback() {
+                @Override
+                public void connectionLost(Throwable cause) {
+                    wsClient.connectionLost.countDown();
+                }
+
+                @Override
+                public void messageArrived(String topic, MqttMessage message) {
+                    wsClient.payloads.add(message.getPayload());
+                }
+
+                @Override
+                public void deliveryComplete(IMqttDeliveryToken token) {
+                }
+            });
+            MqttConnectOptions options = new MqttConnectOptions();
+            options.setCleanSession(true);
+            options.setConnectionTimeout(10);
+            options.setMqttVersion(MqttConnectOptions.MQTT_VERSION_3_1_1);
+            if (url.startsWith("wss://")) {
+                options.setSocketFactory(trustOnlyFlociCa().getSocketFactory());
+            }
+            if (username != null) {
+                options.setUserName(username);
+                options.setPassword(password.toCharArray());
+            }
+            PahoWebSocketConnect.connect(client, options);
+            return wsClient;
+        }
+
+        boolean isConnected() {
+            return client.isConnected();
+        }
+
+        void subscribe(String topic) throws MqttException {
+            client.subscribe(topic, 1);
+        }
+
+        void publish(String topic, byte[] payload, int qos) throws MqttException {
+            client.publish(topic, payload, qos, false);
+        }
+
+        byte[] takePayload() throws InterruptedException {
+            byte[] payload = payloads.poll(10, TimeUnit.SECONDS);
+            assertNotNull(payload, "no publish received over WebSocket within 10s");
+            return payload;
+        }
+
+        boolean awaitConnectionLost(long timeout, TimeUnit unit) throws InterruptedException {
+            return connectionLost.await(timeout, unit);
+        }
+
+        @Override
+        public void close() throws MqttException {
+            if (client.isConnected()) {
+                client.disconnect();
+            }
+            client.close();
+        }
+    }
+}

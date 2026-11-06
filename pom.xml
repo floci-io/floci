@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.github.hectorvent</groupId>
+    <groupId>io.floci</groupId>
     <artifactId>floci</artifactId>
     <version>2.4.0</version>
     <packaging>jar</packaging>
@@ -763,7 +763,7 @@
                         <junit.jupiter.execution.parallel.config.fixed.parallelism>4</junit.jupiter.execution.parallel.config.fixed.parallelism>
                         <junit.jupiter.execution.parallel.config.fixed.max-pool-size>4</junit.jupiter.execution.parallel.config.fixed.max-pool-size>
                         <!-- An ARN minted with a blank region fails the test that reached it (BlankRegionGuard). -->
-                        <io.github.hectorvent.floci.arn.fail-on-blank-region>true</io.github.hectorvent.floci.arn.fail-on-blank-region>
+                        <io.floci.aws.arn.fail-on-blank-region>true</io.floci.aws.arn.fail-on-blank-region>
                     </systemPropertyVariables>
                     <!-- Abort a hung test with a thread dump instead of letting CI's job timeout kill
                          the shard silently. Set here rather than in junit-platform.properties, which
