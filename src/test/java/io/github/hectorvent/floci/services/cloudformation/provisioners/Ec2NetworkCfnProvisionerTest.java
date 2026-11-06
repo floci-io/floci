@@ -755,6 +755,25 @@ class Ec2NetworkCfnProvisionerTest {
         verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
+    /** A JSON null counts as not declared, as {@code AWS::NoValue} does, so the set is not the stack's. */
+    @Test
+    void aNullSecondaryPropertyCountsAsNotDeclaredAndKeepsTheSecondariesAddedOutsideTheStack() {
+        ObjectNode props = publicNatProps();
+        props.putNull("SecondaryAllocationIds");
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of()))
+                .thenReturn(List.of(natGatewayHoldingAnOutsideSecondary("public")));
+        // Only reached by an implementation that clears the set: it reports a gateway with none left.
+        when(ec2.updateNatGatewaySecondaryAddresses(any(), any(), any(), any(), any()))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+        StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+
+        provisioner.provision(r, props, ctx(NAT_ID, publicNatProps()));
+
+        assertEquals(NAT_ID, r.getPhysicalId());
+        assertEquals(OUTSIDE_PUBLIC_IP, r.getAttributes().get(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
+        verify(ec2, never()).updateNatGatewaySecondaryAddresses(any(), any(), any(), any(), any());
+    }
+
     /** Each of the three properties makes the set the stack's once the previous template declared it. */
     @Test
     void droppingAnyOneOfTheSecondaryPropertiesThePreviousTemplateDeclaredClearsTheSet() {
