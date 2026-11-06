@@ -37,6 +37,7 @@ public class CognitoUser {
     private boolean webAuthnMfaEnabled;
     private String federatedProviderName;
     private String federatedSubject;
+    private boolean federatedAutoProvisioned;
 
     public CognitoUser() {
         long now = System.currentTimeMillis() / 1000L;
@@ -151,5 +152,10 @@ public class CognitoUser {
 
     public void setFederatedSubject(String federatedSubject) {
         this.federatedSubject = federatedSubject;
+    }
+
+    public boolean isFederatedAutoProvisioned() { return federatedAutoProvisioned; }
+    public void setFederatedAutoProvisioned(boolean federatedAutoProvisioned) {
+        this.federatedAutoProvisioned = federatedAutoProvisioned;
     }
 }

@@ -333,7 +333,7 @@ class CognitoFederationServiceTest {
         CognitoUser user = cognitoService.adminGetUser(pool.getId(), storedCode.userId());
 
         assertEquals(pool.getId(), user.getUserPoolId());
-        assertEquals("CONFIRMED", user.getUserStatus());
+        assertEquals("EXTERNAL_PROVIDER", user.getUserStatus());
         assertTrue(user.isEnabled());
         assertFalse(user.getUsername().isBlank());
         assertNotNull(user.getAttributes().get("sub"));
@@ -541,6 +541,44 @@ class CognitoFederationServiceTest {
         // Verify no duplicate user was created.
         assertTrue(cognitoService.listUsers(pool.getId(), null).stream()
                 .noneMatch(u -> "Google_google-subject".equals(u.getUsername())));
+    }
+
+    @Test
+    void googleProvisioningPreservesLinkedUserProfileStatusOnResignIn() throws Exception {
+        IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        cognitoService.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.test"), "Password123!");
+        cognitoService.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-subject");
+
+        // First federated sign-in.
+        CognitoUser first = cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                Map.of("email", "updated@example.test"));
+        String statusAfterFirst = first.getUserStatus();
+
+        // Second federated sign-in.
+        CognitoUser second = cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                Map.of("email", "updated2@example.test"));
+
+        assertEquals("alice", second.getUsername());
+        assertEquals(statusAfterFirst, second.getUserStatus(),
+                "Linked profile status must be preserved across repeated federated sign-ins");
+    }
+
+    @Test
+    void googleProvisioningPreservesPermanentPasswordStatusOnResignIn() throws Exception {
+        IdentityProvider provider = createProvider("Google", "Google", Map.of("client_id", "google-client"), Map.of());
+        CognitoUser first = cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                Map.of("email", "user@example.test"));
+        cognitoService.adminSetUserPassword(pool.getId(), first.getUsername(), "PermanentPass1!", true);
+
+        CognitoUser afterPassword = cognitoService.adminGetUser(pool.getId(), first.getUsername());
+        assertEquals("CONFIRMED", afterPassword.getUserStatus());
+
+        // Re-sign-in via federation must not revert to EXTERNAL_PROVIDER.
+        CognitoUser second = cognitoService.provisionFederatedUser(pool.getId(), provider, "google-subject", null,
+                Map.of("email", "user2@example.test"));
+
+        assertEquals("CONFIRMED", second.getUserStatus(),
+                "Permanent-password profile must keep CONFIRMED across federated re-sign-in");
     }
 
     @Test
