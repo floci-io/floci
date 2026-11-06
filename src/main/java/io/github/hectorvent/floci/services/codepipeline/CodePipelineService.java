@@ -660,12 +660,14 @@ public class CodePipelineService {
             execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopping");
         }
         if (execution.isAbandon()) {
-            execution.getActionExecutions().stream()
-                    .filter(a -> "InProgress".equals(a.getStatus()))
-                    .forEach(a -> {
-                        a.setStatus("Abandoned");
-                        a.setLastUpdateTime(now());
-                    });
+            synchronized (execution) {
+                execution.getActionExecutions().stream()
+                        .filter(a -> "InProgress".equals(a.getStatus()))
+                        .forEach(a -> {
+                            a.setStatus("Abandoned");
+                            a.setLastUpdateTime(now());
+                        });
+            }
         }
         putExecution(execution);
         eventPublisher.pipelineStateChange(execution, "STOPPING");
