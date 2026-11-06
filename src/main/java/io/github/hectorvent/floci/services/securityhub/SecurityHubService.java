@@ -140,6 +140,16 @@ public class SecurityHubService implements Resettable {
             new Standard("standards/aws-resource-tagging-standard/v/1.0.0",
                     "AWS Resource Tagging Standard v1.0.0", false, false));
 
+    public PaginatedResult<Standard> describeStandards(String region, Integer maxResults, String nextToken) {
+        int limit = maxResults == null ? 100 : maxResults;
+        if (limit < 1 || limit > 100) {
+            throw invalid("MaxResults must be between 1 and 100.");
+        }
+        return Pagination.paginate(STANDARDS, Standard::path, limit, nextToken,
+                "securityhub-standards:" + region,
+                token -> invalid("Invalid NextToken."));
+    }
+
     public String standardsArn(String region, Standard standard) {
         return standard.global()
                 ? AwsArnUtils.Arn.global(regionResolver.partitionForRegion(region), "securityhub", "", standard.path()).toString()

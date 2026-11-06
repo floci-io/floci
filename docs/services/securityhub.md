@@ -41,6 +41,9 @@ Floci implements the AWS Security Hub CSPM organization and central-configuratio
 
 ## Supported behavior
 
+`DescribeStandards` supports `MaxResults` from 1 to 100 and opaque `NextToken`
+continuations. The final page omits `NextToken`; standard metadata is unchanged.
+
 The supported surface includes Security Hub CSPM enablement and configuration, delegated administrator management, finding aggregators, organization configuration, configuration policies, policy associations, and resource tags.
 
 `EnableOrganizationAdminAccount` supports the AWS `SecurityHub` and `SecurityHubV2` feature values. Legacy `SecurityHub` delegation enables Security Hub CSPM for the delegated administrator in the current Region, matching AWS organization behavior.
