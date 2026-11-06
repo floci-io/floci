@@ -418,7 +418,7 @@ class LambdaTaskAuthorizerTest {
         roleWithPolicies(STATES_DESCRIBE_ANYTHING);
         executionRole(STATES_TRUST);
 
-        authorizer.authorize(machine(), null, "Ec2.", List.of(new Permission("states:DescribeRegions", "*")));
+        authorizer.authorize(machine(), null, "Ec2.AccessDeniedException", List.of(new Permission("states:DescribeRegions", "*")));
     }
 
     @Test
@@ -429,7 +429,7 @@ class LambdaTaskAuthorizerTest {
         executionRole(STATES_TRUST);
 
         AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
-                () -> authorizer.authorize(machine(), null, "Ec2.",
+                () -> authorizer.authorize(machine(), null, "Ec2.AccessDeniedException",
                         List.of(new Permission("states:DescribeRegions", "*"))));
 
         assertEquals("Ec2.AccessDeniedException", refused.error);
@@ -487,10 +487,10 @@ class LambdaTaskAuthorizerTest {
                   "Resource":"*","Condition":{"StringEquals":{"states:HTTPEndpoint":"https://example.test"}}}]}""");
         executionRole(STATES_TRUST);
 
-        authorizer.authorize(machine(), null, "States.", List.of(new Permission("states:InvokeHTTPEndpoint", "*",
+        authorizer.authorize(machine(), null, "States.AccessDeniedException", List.of(new Permission("states:InvokeHTTPEndpoint", "*",
                 Map.of("states:HTTPEndpoint", List.of("https://example.test")))));
         AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
-                () -> authorizer.authorize(machine(), null, "States.", List.of(new Permission(
+                () -> authorizer.authorize(machine(), null, "States.AccessDeniedException", List.of(new Permission(
                         "states:InvokeHTTPEndpoint", "*", Map.of("states:HTTPEndpoint", List.of("https://other.test"))))));
         assertEquals("States.AccessDeniedException", refused.error);
     }
@@ -503,13 +503,13 @@ class LambdaTaskAuthorizerTest {
                   "Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-1"}}}]}""");
         executionRole(STATES_TRUST);
 
-        authorizer.authorize(machine(), null, "S3.", List.of(new Permission("s3:PutObject", BUCKET)));
+        authorizer.authorize(machine(), null, "S3.AccessDeniedException", List.of(new Permission("s3:PutObject", BUCKET)));
     }
 
     @Test
     void anExecutionRoleThatDoesNotExistRefusesTheTask() {
         AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
-                () -> authorizer.authorize(machine(), null, "SQS.", List.of()));
+                () -> authorizer.authorize(machine(), null, "SQS.AccessDeniedException", List.of()));
 
         assertEquals("States.Permissions", refused.error);
         assertTrue(refused.cause.contains(ROLE), refused.cause);
@@ -521,7 +521,7 @@ class LambdaTaskAuthorizerTest {
         executionRole(trust("{\"Service\":\"lambda.amazonaws.com\"}"));
 
         AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
-                () -> authorizer.authorize(machine(), null, "S3.", List.of(new Permission("s3:PutObject", BUCKET))));
+                () -> authorizer.authorize(machine(), null, "S3.AccessDeniedException", List.of(new Permission("s3:PutObject", BUCKET))));
 
         assertEquals("States.Permissions", refused.error);
         assertTrue(refused.cause.contains(ROLE), refused.cause);
@@ -535,9 +535,9 @@ class LambdaTaskAuthorizerTest {
         when(iamService.resolvePrincipalContext(ROLE)).thenReturn(CallerContext.of(List.of(ASSUME_ANY_ROLE)));
         when(iamService.resolvePrincipalContext(OWN_TASK_ROLE)).thenReturn(CallerContext.of(List.of(PUT_OBJECTS)));
 
-        authorizer.authorize(machine(), OWN_TASK_ROLE, "S3.", List.of(new Permission("s3:PutObject", BUCKET)));
+        authorizer.authorize(machine(), OWN_TASK_ROLE, "S3.AccessDeniedException", List.of(new Permission("s3:PutObject", BUCKET)));
         AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
-                () -> authorizer.authorize(machine(), OWN_TASK_ROLE, "S3.", List.of(
+                () -> authorizer.authorize(machine(), OWN_TASK_ROLE, "S3.AccessDeniedException", List.of(
                         new Permission("s3:PutObject", BUCKET), new Permission("s3:GetObject", BUCKET))));
 
         assertEquals("S3.AccessDeniedException", refused.error);
@@ -552,7 +552,7 @@ class LambdaTaskAuthorizerTest {
         taskRole(OWN_TASK_ROLE, trust("{\"Service\":\"lambda.amazonaws.com\"}"));
 
         AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
-                () -> authorizer.authorize(machine(), OWN_TASK_ROLE, "S3.", List.of()));
+                () -> authorizer.authorize(machine(), OWN_TASK_ROLE, "S3.AccessDeniedException", List.of()));
 
         assertEquals("States.TaskFailed", refused.error);
         assertEquals("The role " + ROLE + " is not authorized to assume the task state's role, " + OWN_TASK_ROLE + ".",

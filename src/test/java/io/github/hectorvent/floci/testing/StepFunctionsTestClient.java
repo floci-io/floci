@@ -17,6 +17,17 @@ import static org.junit.jupiter.api.Assertions.fail;
 /** Step Functions calls a test makes as one account, and the state machines it leaves to {@code cleanup}. */
 public final class StepFunctionsTestClient {
 
+    /** A trust policy letting Step Functions assume the role: what an execution role needs. */
+    public static final String STATES_TRUST = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
+             "Principal":{"Service":"states.amazonaws.com"}}]}
+            """;
+    /** A trust policy naming another service, so Step Functions may not assume the role. */
+    public static final String LAMBDA_TRUST = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
+             "Principal":{"Service":"lambda.amazonaws.com"}}]}
+            """;
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final long POLL_MILLIS = 25;
 
@@ -66,6 +77,18 @@ public final class StepFunctionsTestClient {
         return null;
     }
 
+    /** Polls until the execution's history holds an event of {@code eventType}. */
+    public void await(String account, String execution, String eventType, int seconds) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(seconds);
+        do {
+            if (!eventsOfType(account, execution, eventType).isEmpty()) {
+                return;
+            }
+            Thread.sleep(POLL_MILLIS);
+        } while (System.nanoTime() < deadline);
+        fail("No " + eventType + " event in " + execution);
+    }
+
     public List<JsonNode> eventsOfType(String account, String execution, String type) throws Exception {
         Response history = request(account, "GetExecutionHistory", Map.of("executionArn", execution));
         history.then().statusCode(200);
@@ -76,6 +99,14 @@ public final class StepFunctionsTestClient {
             }
         }
         return events;
+    }
+
+    /** A trust policy letting {@code roleArn} assume the role, as a task's {@code Credentials} role needs. */
+    public static String trusting(String roleArn) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
+                 "Principal":{"AWS":"%s"}}]}
+                """.formatted(roleArn);
     }
 
     private void removeMachine(String account, String arn) {

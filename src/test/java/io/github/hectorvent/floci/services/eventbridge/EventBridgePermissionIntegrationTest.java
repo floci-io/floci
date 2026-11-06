@@ -60,6 +60,7 @@ class EventBridgePermissionIntegrationTest {
             .statusCode(200)
             .body("Policy", notNullValue())
             .body("Policy", containsString("test-stmt"))
+            .body("Policy", containsString("\"Principal\":\"*\""))
             .body("Policy", containsString("events:PutEvents"));
     }
 
@@ -90,7 +91,7 @@ class EventBridgePermissionIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Policy", containsString("123456789012"))
+            .body("Policy", containsString("\"Principal\":{\"AWS\":\"arn:aws:iam::123456789012:root\"}"))
             .body("Policy", not(containsString("\"*\"")));
     }
 

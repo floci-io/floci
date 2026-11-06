@@ -821,7 +821,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 ObjectNode statement = objectMapper.createObjectNode();
                 statement.put("Sid", statementId);
                 statement.put("Effect", "Allow");
-                statement.put("Principal", principal != null ? principal : "*");
+                statement.set("Principal", permissionPrincipal(principal, bus.getArn()));
                 statement.put("Action", action != null ? action : "events:PutEvents");
                 statement.put("Resource", bus.getArn());
                 if (conditionJson != null && !conditionJson.isBlank()) {
@@ -838,6 +838,20 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
         busStore.put(key, bus);
         LOG.infov("Put permission on bus {0}, statement {1}", effectiveBus, statementId);
+    }
+
+    /**
+     * The principal a {@code PutPermission} statement grants: every account for {@code *}, and otherwise the
+     * account the request names, as its root in the bus's partition.
+     */
+    private static JsonNode permissionPrincipal(String principal, String busArn) {
+        if (principal == null || "*".equals(principal)) {
+            return TextNode.valueOf("*");
+        }
+        ObjectNode aws = JsonNodeFactory.instance.objectNode();
+        aws.put("AWS", AwsArnUtils.Arn.global(AwsArnUtils.parse(busArn).partition(), "iam", principal, "root")
+                .toString());
+        return aws;
     }
 
     /**
@@ -1422,6 +1436,34 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private static boolean isBlank(Object value) {
         return !(value instanceof String s) || s.isBlank();
+    }
+
+    /**
+     * The ARN of the event bus a {@code PutEvents} entry's {@code EventBusName} reaches: the bus of that
+     * name, or of the name its ARN gives, in the {@code account} and {@code region} the call runs in, as
+     * {@link #putEventsFromRequest} looks it up whatever account and Region the ARN names. Empty for an
+     * ARN that request refuses as malformed.
+     */
+    public static Optional<String> eventBusArn(String eventBusName, String partition, String region, String account) {
+        try {
+            return Optional.of(new AwsArnUtils.Arn(partition, "events", region, account,
+                    "event-bus/" + resolvedBusName(eventBusName)).toString());
+        } catch (AwsException e) {
+            LOG.debugv("EventBusName {0} is malformed, so it names no bus: {1}", eventBusName, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The resource policy of the event bus {@code busArn} names, in the account and Region of that ARN.
+     * Empty when the bus does not exist or has no policy; the default bus has none until one is put on it.
+     */
+    public Optional<String> findBusPolicy(String busArn) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(busArn);
+        String name = arn.resource().substring("event-bus/".length());
+        return accountGet(busStore, arn.accountId(), busKey(arn.region(), name))
+                .map(EventBus::getPolicy)
+                .filter(policy -> !policy.isBlank());
     }
 
     private static String resolvedBusName(String busName) {
