@@ -26,10 +26,14 @@ import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.MatchResult;
 import java.util.regex.Pattern;
 
 /**
@@ -71,18 +75,22 @@ public class CodeArtifactPypiController {
 
     private final CodeArtifactService service;
     private final PypiserverSidecarClient pypiserver;
+    private final CodeArtifactPypiExternalConnectionImporter externalConnectionImporter;
     private final HttpClient httpClient;
     private final ConcurrentHashMap<String, Object> uploadLocks = new ConcurrentHashMap<>();
 
     @Inject
-    public CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarClient pypiserver) {
-        this(service, pypiserver, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+    public CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarClient pypiserver,
+            CodeArtifactPypiExternalConnectionImporter externalConnectionImporter) {
+        this(service, pypiserver, externalConnectionImporter,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
     }
 
     CodeArtifactPypiController(CodeArtifactService service, PypiserverSidecarClient pypiserver,
-                                HttpClient httpClient) {
+            CodeArtifactPypiExternalConnectionImporter externalConnectionImporter, HttpClient httpClient) {
         this.service = service;
         this.pypiserver = pypiserver;
+        this.externalConnectionImporter = externalConnectionImporter;
         this.httpClient = httpClient;
     }
 
@@ -101,6 +109,15 @@ public class CodeArtifactPypiController {
      * {@code /codeartifact/pypi/<domain>/<repository>/} prefix where {@link #downloadFile} is
      * actually routed, so pip would 404 trying to install anything the index lists. Verified
      * against a real pypiserver response before writing this, not assumed.
+     *
+     * <p>Merges in whichever files {@code repository}'s own pypi external connection names that
+     * are not already listed above, the same promise-now/fetch-later split {@code
+     * CodeArtifactNpmExternalConnectionImporter#mergedPackument} already documents for npm:
+     * without this, a real {@code pip} client could never even learn that an unretained file
+     * exists, let alone request it through {@link #downloadFile}, the one place its real bytes
+     * are actually fetched and stored. Run even when pypiserver itself has never heard of this
+     * package at all ({@code response.getStatus() == 404}): a package that only exists on the
+     * real public registry so far must still be listable, the same as real CodeArtifact.
      */
     @GET
     @Path("simple/{package}/")
@@ -112,16 +129,83 @@ public class CodeArtifactPypiController {
         try {
             Response response = proxyGet(handle.baseUrl(), SIMPLE_PATH + SidecarUriUtils.encodeSegment(packageName)
                     + "/");
-            if (response.getStatus() != 200) {
+            String rewrittenOrNull;
+            Set<String> knownFilenames;
+            if (response.getStatus() == 200) {
+                String html = new String((byte[]) response.getEntity(), StandardCharsets.UTF_8);
+                rewrittenOrNull = html.replace("href=\"/packages/", "href=\"" + handle.pathPrefix() + "/packages/");
+                knownFilenames = hrefFilenames(html);
+            } else if (response.getStatus() == 404) {
+                rewrittenOrNull = null;
+                knownFilenames = Set.of();
+            } else {
                 return response;
             }
-            String html = new String((byte[]) response.getEntity(), StandardCharsets.UTF_8);
-            String rewritten = html.replace("href=\"/packages/", "href=\"" + handle.pathPrefix() + "/packages/");
-            return Response.status(200).entity(rewritten.getBytes(StandardCharsets.UTF_8)).type(MediaType.TEXT_HTML)
+            List<CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile> additional =
+                    externalConnectionImporter.additionalExternalFilenames(handle.region(), domain, handle.owner(),
+                            repository, handle.repoId(), packageName, knownFilenames);
+            if (rewrittenOrNull == null && additional.isEmpty()) {
+                return response;
+            }
+            String merged = withAdditionalFilenames(rewrittenOrNull, handle.pathPrefix(), additional);
+            return Response.status(200).entity(merged.getBytes(StandardCharsets.UTF_8)).type(MediaType.TEXT_HTML)
                     .build();
         } finally {
             pypiserver.endUse(handle.repoId());
         }
+    }
+
+    /**
+     * Appends an {@code <a href="...">} entry for each of {@code additional}'s filenames to
+     * {@code bodyHtmlOrNull}, right before its closing {@code </body>} tag, or builds a minimal
+     * document from scratch when {@code bodyHtmlOrNull} is {@code null} (pypiserver itself has no
+     * local listing for this package at all yet). {@code additional} ultimately comes from the
+     * real public registry's own response, and nothing here depends on it being free of
+     * characters that would otherwise be read as markup: the link text is HTML-escaped, and the
+     * {@code href} itself is percent-encoded via {@link SidecarUriUtils#encodeSegment} rather than
+     * merely HTML-escaped, the same way every other place in this controller that places a
+     * caller- or response-supplied filename into a URI path segment already does (see {@link
+     * #downloadFile}); HTML-escaping alone would leave a literal {@code #} or {@code ?} free to
+     * be read as a URI fragment or query string by whatever real client resolves this href,
+     * silently truncating the path it actually requests.
+     *
+     * <p>Each entry also carries the real registry's own {@code data-yanked}/{@code
+     * data-requires-python} attributes (PEP 592/PEP 700) when it has them: a real {@code pip}
+     * client uses exactly these to filter out a yanked release or one its own interpreter cannot
+     * satisfy, and without them here, a file this repository has not retained yet would look
+     * unconditionally eligible on the very first install, even though the registry's own response
+     * already said otherwise (raised in review).
+     */
+    private static String withAdditionalFilenames(String bodyHtmlOrNull, String pathPrefix,
+            List<CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile> additional) {
+        if (additional.isEmpty()) {
+            return bodyHtmlOrNull;
+        }
+        StringBuilder extra = new StringBuilder();
+        for (CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile file : additional) {
+            extra.append("<a href=\"").append(pathPrefix).append("/packages/")
+                    .append(SidecarUriUtils.encodeSegment(file.filename())).append("\"");
+            if (file.requiresPythonOrNull() != null) {
+                extra.append(" data-requires-python=\"").append(escapeHtml(file.requiresPythonOrNull()))
+                        .append("\"");
+            }
+            if (file.yanked()) {
+                extra.append(" data-yanked=\"\"");
+            }
+            extra.append(">").append(escapeHtml(file.filename())).append("</a><br>\n");
+        }
+        if (bodyHtmlOrNull == null) {
+            return "<!DOCTYPE html><html><body>\n" + extra + "</body></html>";
+        }
+        int bodyClose = bodyHtmlOrNull.toLowerCase(Locale.ROOT).lastIndexOf("</body>");
+        if (bodyClose < 0) {
+            return bodyHtmlOrNull + extra;
+        }
+        return bodyHtmlOrNull.substring(0, bodyClose) + extra + bodyHtmlOrNull.substring(bodyClose);
+    }
+
+    private static String escapeHtml(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 
     /**
@@ -137,6 +221,13 @@ public class CodeArtifactPypiController {
      * the override records instead needs no write-time bookkeeping at all: whichever path put the
      * real file there, an override written later by {@code UpdatePackageVersionsStatus}/{@code
      * DisposePackageVersions} is found the same way regardless.
+     *
+     * <p>A local miss, with no matching Archived/Disposed override, is exactly AWS's own
+     * documented trigger for an external connection: a real client requesting a file this
+     * emulator's own pypiserver sidecar does not have yet. Never attempted when {@code match} is
+     * non-null: that means a status override already exists for the version this filename
+     * belongs to, Archived or Disposed, and retention must never resurrect it, the same guard
+     * {@link #upload} already enforces on the publish side.
      */
     @GET
     @Path("packages/{filename}")
@@ -155,7 +246,13 @@ public class CodeArtifactPypiController {
                     return Response.status(404).build();
                 }
             }
-            return proxyGet(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename));
+            Response response = proxyGet(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename));
+            if (match == null && response.getStatus() == 404
+                    && externalConnectionImporter.tryImportAsset(handle.region(), domain, handle.owner(), repository,
+                            handle.repoId(), filename)) {
+                return proxyGet(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename));
+            }
+            return response;
         } finally {
             pypiserver.endUse(handle.repoId());
         }
@@ -330,7 +427,7 @@ public class CodeArtifactPypiController {
      * silently fetching a different path than the one actually requested.
      */
     private Optional<byte[]> existingFileContent(String baseUrl, String packageName, String filename) {
-        String normalized = normalizePackageName(packageName);
+        String normalized = PypiserverSidecarClient.normalizePackageName(packageName);
         URI indexUri = SidecarUriUtils.combine(URI.create(baseUrl),
                 SIMPLE_PATH + SidecarUriUtils.encodeSegment(normalized) + "/");
         HttpRequest indexRequest = HttpRequest.newBuilder(indexUri).timeout(Duration.ofSeconds(5)).GET().build();
@@ -370,10 +467,6 @@ public class CodeArtifactPypiController {
                             + "upstream returned " + fileResponse.statusCode());
         }
         return Optional.of(fileResponse.body());
-    }
-
-    private static String normalizePackageName(String name) {
-        return name.toLowerCase(Locale.ROOT).replaceAll("[-_.]+", "-");
     }
 
     private record ArchivedOrDisposedMatch(String packageName, String version) {
@@ -416,14 +509,24 @@ public class CodeArtifactPypiController {
      * this check.
      */
     private static boolean indexListsFilename(String indexBody, String filename) {
-        return SIMPLE_INDEX_HREF.matcher(indexBody).results()
-                .map(match -> {
-                    String href = match.group(1);
-                    String name = href.substring(href.lastIndexOf('/') + 1);
-                    int fragment = name.indexOf('#');
-                    return fragment < 0 ? name : name.substring(0, fragment);
-                })
-                .anyMatch(filename::equals);
+        return hrefFilenames(indexBody).contains(filename);
+    }
+
+    /**
+     * Every real filename {@code html}'s own {@code href="..."} attributes name, with any
+     * trailing {@code #...} hash fragment stripped: shared by {@link #indexListsFilename}'s own
+     * single-filename check and {@link #packageIndex}'s own external-connection merge, which
+     * needs the whole set to know what pypiserver's local listing already has.
+     */
+    private static Set<String> hrefFilenames(String html) {
+        Set<String> filenames = new LinkedHashSet<>();
+        for (MatchResult match : SIMPLE_INDEX_HREF.matcher(html).results().toList()) {
+            String href = match.group(1);
+            String name = href.substring(href.lastIndexOf('/') + 1);
+            int fragment = name.indexOf('#');
+            filenames.add(fragment < 0 ? name : name.substring(0, fragment));
+        }
+        return filenames;
     }
 
     private Response forwardUpload(String baseUrl, String contentType, byte[] content) {
