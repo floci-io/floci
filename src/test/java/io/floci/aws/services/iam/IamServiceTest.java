@@ -515,6 +515,73 @@ class IamServiceTest {
     }
 
     @Test
+    void userPrincipalTagsAreSnapshottedAndRefreshedForEachRequest() {
+        IamUser user = iamService.createUser("tagged", "/team/");
+        user.setTags(new LinkedHashMap<>(Map.of("Team", "platform", "Empty", "")));
+        String key = iamService.createAccessKey("tagged").getAccessKeyId();
+        IamService.CallerArns caller = iamService.resolveCallerArns(key).orElseThrow();
+        user.getTags().put("Team", "other");
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        caller.putPrincipalKeys(context);
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
+        assertEquals(List.of(""), context.get("aws:PrincipalTag/Empty"));
+        context.clear();
+        iamService.resolveCallerArns(key).orElseThrow().putPrincipalKeys(context);
+        assertEquals(List.of("other"), context.get("aws:PrincipalTag/Team"));
+        user.getTags().clear();
+        context.clear();
+        iamService.resolveCallerArns(key).orElseThrow().putPrincipalKeys(context);
+        assertTrue(context.keySet().stream().noneMatch(k -> k.startsWith("aws:PrincipalTag/")));
+    }
+
+    @Test
+    void userSessionTokensCarryUserTagsButFederatedAndRootSessionsDoNot() {
+        IamUser user = iamService.createUser("tagged", "/");
+        user.setTags(Map.of("Team", "platform"));
+        String key = iamService.createAccessKey("tagged").getAccessKeyId();
+        Instant expiration = Instant.now().plusSeconds(3600);
+        iamService.registerIssuedSession("ASIAUSER", "secret", "token", null, expiration,
+                null, "000000000000", key);
+        iamService.registerIssuedSession("ASIAFEDERATED", "secret", "token",
+                "arn:aws:sts::000000000000:federated-user/tagged", expiration, null, "000000000000", key);
+        iamService.registerIssuedSession("ASIAROOT", "secret", "token", null, expiration,
+                null, "000000000000", "test");
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIAUSER").orElseThrow().putPrincipalKeys(context);
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
+        for (String session : List.of("ASIAFEDERATED", "ASIAROOT")) {
+            context.clear();
+            iamService.resolveCallerArns(session).orElseThrow().putPrincipalKeys(context);
+            assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+        }
+    }
+
+    @Test
+    void roleSessionPrincipalTagsComeFromTheStoredRoleWithItsPath() {
+        IamRole role = iamService.createRole("Worker", "/teams/platform/", "{}", null, 3600, null);
+        role.setTags(Map.of("Team", "platform"));
+        iamService.registerSession("ASIATAGGEDROLE", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "worker", "AROAWORKER:worker");
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIATAGGEDROLE").orElseThrow().putPrincipalKeys(context);
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
+        role.setTags(Map.of());
+        context.clear();
+        iamService.resolveCallerArns("ASIATAGGEDROLE").orElseThrow().putPrincipalKeys(context);
+        assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+    }
+
+    @Test
+    void simulationStillRequiresCallerSuppliedPrincipalTags() {
+        IamUser user = iamService.createUser("tagged", "/");
+        user.setTags(Map.of("Team", "platform"));
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.simulationPrincipalKeys(user.getArn()).orElseThrow().putPrincipalKeys(context);
+        assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+        assertEquals(List.of("tagged"), context.get("aws:username"));
+    }
+
+    @Test
     void callerArnsSayWhetherAPermissionsBoundaryIsAttached() {
         IamService service = iamService(false);
         String boundaryArn = service.createPolicy("bound", "/", null, ALL_S3, null).getArn();
