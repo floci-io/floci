@@ -320,15 +320,21 @@ public class BedrockAgentCoreControlService {
     }
 
     public void tagByArn(String region, String arn, Map<String, String> tags) {
-        AgentRuntime runtime = getAgentRuntimeByArn(region, arn);
-        runtime.getTags().putAll(tags);
-        storage.put(key(region, runtime.getAgentRuntimeId()), runtime);
+        String runtimeId = getAgentRuntimeByArn(region, arn).getAgentRuntimeId();
+        synchronized (runtimeLock(region, runtimeId)) {
+            AgentRuntime runtime = getAgentRuntime(runtimeId, region);
+            runtime.getTags().putAll(tags);
+            storage.put(key(region, runtimeId), runtime);
+        }
     }
 
     public void untagByArn(String region, String arn, List<String> keys) {
-        AgentRuntime runtime = getAgentRuntimeByArn(region, arn);
-        keys.forEach(runtime.getTags()::remove);
-        storage.put(key(region, runtime.getAgentRuntimeId()), runtime);
+        String runtimeId = getAgentRuntimeByArn(region, arn).getAgentRuntimeId();
+        synchronized (runtimeLock(region, runtimeId)) {
+            AgentRuntime runtime = getAgentRuntime(runtimeId, region);
+            keys.forEach(runtime.getTags()::remove);
+            storage.put(key(region, runtimeId), runtime);
+        }
     }
 
     /** The runtime a runtime ARN names, at any version; ResourceNotFoundException when none does. */
