@@ -157,8 +157,15 @@ public sealed interface DnsRecord {
         }
     }
 
-    record Srv(int port, String target) implements DnsRecord {
+    record Srv(int priority, int weight, int port, String target) implements DnsRecord {
+        public Srv(int port, String target) {
+            this(1, 1, port, target);
+        }
+
         public Srv {
+            if (priority < 0 || priority > 65535 || weight < 0 || weight > 65535) {
+                throw new IllegalArgumentException("SRV priority and weight must fit unsigned 16-bit fields");
+            }
             if (port < 0 || port > 65535) {
                 throw new IllegalArgumentException("Invalid SRV port: " + port);
             }
@@ -171,8 +178,8 @@ public sealed interface DnsRecord {
 
         @Override
         public byte[] data() {
-            byte[] name = encodeName(target);
-            return ByteBuffer.allocate(6 + name.length).putShort((short) 1).putShort((short) 1)
+            byte[] name = ".".equals(target) ? new byte[]{0} : encodeName(target);
+            return ByteBuffer.allocate(6 + name.length).putShort((short) priority).putShort((short) weight)
                     .putShort((short) port).put(name).array();
         }
     }

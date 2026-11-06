@@ -42,6 +42,43 @@ class Route53DnsPacketIntegrationTest {
 
     private final List<String> zoneIds = new ArrayList<>();
 
+    @Test
+    void privateSrvPreservesEveryFieldAndTtlAcrossTheWire() throws Exception {
+        String zone = uniqueName() + ".example";
+        String id = route53.createHostedZone(zone, UUID.randomUUID().toString(), null,
+                new VpcAssociation("vpc-srv", "us-east-1")).zone().getId();
+        zoneIds.add(id);
+        String name = "_api._tcp." + zone;
+        change(id, "CREATE", record(name, "SRV", 17,
+                "20 0 8080 first." + zone + ".", "10 100 65535 second." + zone));
+
+        byte[] request = request(name, 33);
+        byte[] response = query(request);
+        assertPrivateHeader(response, 0, 2);
+        ByteBuffer packet = ByteBuffer.wrap(response);
+        packet.position(request.length);
+        List<String> values = new ArrayList<>();
+        for (int i = 0; i < 2; i++) {
+            assertEquals(name, EmbeddedDnsServer.readName(packet, response));
+            assertEquals(33, packet.getShort());
+            assertEquals(1, packet.getShort());
+            assertEquals(17, packet.getInt());
+            int length = Short.toUnsignedInt(packet.getShort());
+            int start = packet.position();
+            values.add(Short.toUnsignedInt(packet.getShort()) + " "
+                    + Short.toUnsignedInt(packet.getShort()) + " "
+                    + Short.toUnsignedInt(packet.getShort()) + " "
+                    + EmbeddedDnsServer.readName(packet, response));
+            assertEquals(start + length, packet.position());
+        }
+        assertEquals(List.of("10 100 65535 second." + zone, "20 0 8080 first." + zone),
+                values.stream().sorted().toList());
+
+        assertPrivateHeader(query(request(name, 1)), 0, 0);
+        assertPrivateHeader(query(request("_tcp." + zone, 33)), 0, 0);
+        assertPrivateHeader(query(request("absent." + zone, 33)), 3, 0);
+    }
+
     @ParameterizedTest
     @CsvSource({"1,1", "2,1", "1,28", "2,28"})
     void privateCnamePreservesMissingTargetResponseAcrossTheWire(int depth, int type) throws Exception {
@@ -231,7 +268,7 @@ class Route53DnsPacketIntegrationTest {
         String id = createZone(name);
         for (String type : List.of("TXT", "NS", "SOA")) {
             String owner = "bad-" + type.toLowerCase() + "." + name;
-            change(id, "UPSERT", record(owner, type, 60, null));
+            change(id, "UPSERT", record(owner, type, 60, (String) null));
             int queryType = switch (type) {
                 case "NS" -> 2;
                 case "SOA" -> 6;
@@ -243,7 +280,7 @@ class Route53DnsPacketIntegrationTest {
             change(id, "UPSERT", record("ttl." + name, "TXT", ttl, "\"value\""));
             assertHeader(query(request("ttl." + name, 16)), 5, false, 0, 0);
         }
-        change(id, "UPSERT", record(name, "SOA", 60, null));
+        change(id, "UPSERT", record(name, "SOA", 60, (String) null));
         assertHeader(query(request("missing." + name, 16)), 5, false, 0, 0);
     }
 
@@ -279,12 +316,12 @@ class Route53DnsPacketIntegrationTest {
         route53.changeResourceRecordSets(id, List.of(Map.of("action", action, "rrs", record)), null);
     }
 
-    private static ResourceRecordSet record(String name, String type, long ttl, String value) {
+    private static ResourceRecordSet record(String name, String type, long ttl, String... values) {
         ResourceRecordSet record = new ResourceRecordSet();
         record.setName(name);
         record.setType(type);
         record.setTtl(ttl);
-        record.setRecords(List.of(new ResourceRecord(value)));
+        record.setRecords(Arrays.stream(values).map(ResourceRecord::new).toList());
         return record;
     }
 
@@ -297,6 +334,13 @@ class Route53DnsPacketIntegrationTest {
         return ByteBuffer.allocate(16 + encoded.length).putShort((short) 0x1234).putShort((short) 0x0100)
                 .putShort((short) 1).putShort((short) 0).putShort((short) 0).putShort((short) 0)
                 .put(encoded).putShort((short) type).putShort((short) 1).array();
+    }
+
+    private static void assertPrivateHeader(byte[] response, int rcode, int answers) {
+        ByteBuffer packet = ByteBuffer.wrap(response);
+        assertEquals(rcode, packet.getShort(2) & 15);
+        assertEquals(answers, packet.getShort(6));
+        assertEquals(0, packet.getShort(8));
     }
 
     private static void assertHeader(byte[] response, int rcode, boolean authoritative, int answers, int authorities) {

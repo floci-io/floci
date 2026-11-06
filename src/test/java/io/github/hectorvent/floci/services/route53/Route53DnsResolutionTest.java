@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.route53;
 
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsLookupHelper;
+import io.github.hectorvent.floci.core.common.dns.DnsRecord;
 import io.github.hectorvent.floci.services.route53.model.AliasTarget;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
@@ -11,6 +12,10 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.net.InetAddress;
@@ -406,6 +411,97 @@ class Route53DnsResolutionTest {
         Optional<DnsAnswer> result = dnsRecordSource.resolveIpv4("ec2-alias." + zone);
         assertTrue(result.isPresent());
         assertEquals(List.of("10.0.0.5"), result.get().addresses());
+    }
+
+    @Test
+    void privateSrvParsesWhitespaceAndUnsignedLimits() {
+        String zone = uniqueZone();
+        String id = createPrivateZone(zone);
+        String name = "_api._tcp." + zone;
+        addRecord(id, name, "SRV", " \t65535\t 65535  65535\tTarget." + zone + ". \t", 0L);
+        DnsAnswer answer = dnsRecordSource.resolve(name.toUpperCase() + ".", 33).orElseThrow();
+        assertEquals(0, answer.ttlSeconds());
+        assertEquals(List.of(new DnsRecord.Srv(65535, 65535, 65535, "Target." + zone + ".")), answer.records());
+        addRecord(id, "_unavailable._tcp." + zone, "SRV", "0 0 0 .");
+        assertEquals(List.of(new DnsRecord.Srv(0, 0, 0, ".")),
+                dnsRecordSource.resolve("_unavailable._tcp." + zone, 33).orElseThrow().records());
+    }
+
+    @ParameterizedTest
+    @CsvSource({", 60", "-1, 60", "0, 0", "42, 42", "2147483647, 2147483647", "2147483648, 2147483647"})
+    void privateSrvPreservesDefaultAndClampedTtls(Long ttl, int expectedTtl) {
+        String zone = uniqueZone();
+        String id = createPrivateZone(zone);
+        String name = "_api._tcp." + zone;
+        ResourceRecordSet set = new ResourceRecordSet();
+        set.setName(name);
+        set.setType("SRV");
+        set.setTtl(ttl);
+        set.setRecords(List.of(new ResourceRecord("0 0 8080 target." + zone)));
+        route53Service.changeResourceRecordSets(id, List.of(Map.of("action", "CREATE", "rrs", set)), null);
+
+        DnsAnswer answer = dnsRecordSource.resolve(name, 33).orElseThrow();
+        assertEquals(0, answer.responseCode());
+        assertEquals(expectedTtl, answer.ttlSeconds());
+        assertEquals(List.of(new DnsRecord.Srv(0, 0, 8080, "target." + zone)), answer.records());
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"", "0 1 80", "0 1 80 target.example extra", "bad 1 80 target.example",
+            "-1 1 80 target.example", "65536 1 80 target.example", "0 -1 80 target.example",
+            "0 65536 80 target.example", "0 1 -1 target.example", "0 1 65536 target.example",
+            "999999999999 1 80 target.example", "0 1 80 invalid..example"})
+    void privateSrvRefusesMalformedValuesWithoutReturningPartialAnswers(String value) {
+        String zone = uniqueZone();
+        String id = createPrivateZone(zone);
+        String name = "_api._tcp." + zone;
+        List<String> values = new ArrayList<>();
+        values.add("0 100 8080 valid." + zone);
+        values.add(value);
+        addRecords(id, name, "SRV", values);
+        DnsAnswer answer = dnsRecordSource.resolve(name, 33).orElseThrow();
+        assertEquals(5, answer.responseCode());
+        assertTrue(answer.isEmpty());
+        Mockito.verifyNoInteractions(dnsLookupHelper);
+    }
+
+    @Test
+    void privateSrvPreservesOwnershipAndPublicFallthrough() {
+        String zone = uniqueZone();
+        String id = createPrivateZone(zone);
+        addRecord(id, "address." + zone, "A", "192.0.2.1");
+        assertEquals(DnsAnswer.noData(), dnsRecordSource.resolve("address." + zone, 33).orElseThrow());
+        assertEquals(DnsAnswer.noData(), dnsRecordSource.resolve(zone, 33).orElseThrow());
+        assertEquals(DnsAnswer.nxDomain(), dnsRecordSource.resolve("absent." + zone, 33).orElseThrow());
+        assertEquals(List.of("192.0.2.1"), dnsRecordSource.resolve("address." + zone, 1).orElseThrow().addresses());
+
+        String publicZone = uniqueZone();
+        String publicId = route53Service.createHostedZone(publicZone, UUID.randomUUID().toString(),
+                null, null).zone().getId();
+        createdZoneIds.add(publicId);
+        String publicName = "_api._tcp." + publicZone;
+        addRecord(publicId, publicName, "SRV", "0 100 8080 target." + publicZone);
+        assertTrue(dnsRecordSource.resolve(publicName, 33).isEmpty());
+        assertTrue(dnsRecordSource.resolveAuthoritative(publicName, 33).isEmpty());
+        assertTrue(dnsRecordSource.resolve(null, 33).isEmpty());
+        assertTrue(dnsRecordSource.resolve(" ", 33).isEmpty());
+        Mockito.verifyNoInteractions(dnsLookupHelper);
+    }
+
+    @Test
+    void privateSrvRefusesUnsupportedRoutingPolicies() {
+        String zone = uniqueZone();
+        String id = createPrivateZone(zone);
+        ResourceRecordSet set = new ResourceRecordSet();
+        set.setName("_api._tcp." + zone);
+        set.setType("SRV");
+        set.setTtl(60L);
+        set.setSetIdentifier("weighted");
+        set.setWeight(100L);
+        set.setRecords(List.of(new ResourceRecord("0 100 8080 target." + zone)));
+        route53Service.changeResourceRecordSets(id, List.of(Map.of("action", "CREATE", "rrs", set)), null);
+        assertEquals(5, dnsRecordSource.resolve(set.getName(), 33).orElseThrow().responseCode());
     }
 
     private String createPrivateZone(String name) {
