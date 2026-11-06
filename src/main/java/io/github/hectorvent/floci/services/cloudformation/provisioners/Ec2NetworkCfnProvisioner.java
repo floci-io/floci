@@ -671,7 +671,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         // SubnetId, AllocationId, ConnectivityType and PrivateIpAddress are createOnly: the same
         // values keep the gateway, a change replaces it. With no PrivateIpAddress the gateway keeps
         // the address it was given. The Secondary* properties are not createOnly: the gateway is
-        // kept and its secondary addresses are changed in place.
+        // kept and its secondary addresses are changed in place, when the stack manages them.
         NatGateway existing = ctx.isUpdate() ? findNatGateway(ctx.priorPhysicalId(), ctx.region()) : null;
         boolean reuse = existing != null && Objects.equals(subnetId, existing.getSubnetId())
                 && Objects.equals(allocationId, existing.getAllocationId())
@@ -687,9 +687,14 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         }
         NatGateway[] current = {nat};
         int secondaryCountValue = Ec2Service.secondaryPrivateIpCount(secondaryCount, "private".equals(connectivityType));
+        // The three properties are one address set: declaring any of them, now or before,
+        // puts all three under the stack.
+        boolean managesSecondaries = Stream.of("SecondaryAllocationIds", "SecondaryPrivateIpAddresses",
+                        "SecondaryPrivateIpAddressCount")
+                .anyMatch(name -> (props != null && props.has(name)) || ctx.previouslyDeclared(name));
         if (reuse) {
             CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
-                if (!holdsSecondaries(existing, secondaryAllocationIds, secondaryPrivateIps, secondaryCountValue)) {
+                if (managesSecondaries && !holdsSecondaries(existing, secondaryAllocationIds, secondaryPrivateIps, secondaryCountValue)) {
                     ObjectNode prior = inPlacePrior(r, existing.getNatGatewayId(), ctx);
                     if (!prior.has("natSecondaries")) {
                         prior.set("natSecondaries", natSecondaries(existing));
