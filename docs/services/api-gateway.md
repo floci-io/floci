@@ -1,5 +1,8 @@
 # API Gateway
 
+`GetRestApis` supports `limit` and `position`, with a default page size of 25
+and a maximum of 500. The terminal page omits `position`.
+
 Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
 HTTP integrations preserve path encoding through custom domains and `execute-api` hosts as well

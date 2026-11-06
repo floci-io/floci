@@ -10,6 +10,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService.StoredMapping;
@@ -417,12 +419,18 @@ public class ApiGatewayController {
 
     @GET
     @Path("/restapis")
-    public Response getRestApis(@Context HttpHeaders headers) {
+    public Response getRestApis(@Context HttpHeaders headers,
+                                @QueryParam("limit") String limit,
+                                @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<RestApi> apis = service.getRestApis(region);
+        PaginatedResult<RestApi> page = service.getRestApis(region,
+                Pagination.parseMaxResults(limit, "BadRequestException"), position);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
-        apis.forEach(a -> items.add(toApiNode(region, a)));
+        page.items().forEach(a -> items.add(toApiNode(region, a)));
+        if (page.nextToken() != null) {
+            root.put("position", page.nextToken());
+        }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayRestApiPages;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -107,8 +108,7 @@ class ApiGatewayRestApiCfnUpdateIntegrationTest {
             String apiId = created.get("ApiId");
             assertEquals(apiId, updated.get("ApiId"));
             assertEquals(created.get("ResourceId"), updated.get("ResourceId"));
-            given().when().get("/restapis").then().statusCode(200)
-                    .body("item.findAll { it.name == '" + API_NAME + "' }.size()", equalTo(1));
+            assertEquals(1L, ApiGatewayRestApiPages.restApiNames().stream().filter(API_NAME::equals).count());
             given().when().get("/restapis/" + apiId).then().statusCode(200)
                     .body("description", equalTo("second"))
                     .body("endpointConfiguration.types", contains("EDGE"));

@@ -5,12 +5,12 @@ import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.Optional;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,12 +56,8 @@ class ApiGatewayListRestApisConcurrentDeleteTest {
 
         assertTrue(service.findRootResourceId(REGION, apiId).isPresent());
 
-        given()
-        .when()
-            .get("/restapis")
-        .then()
-            .statusCode(200)
-            .body("item.findAll { it.id == '" + apiId + "' }[0].rootResourceId", notNullValue())
-            .body("item.findAll { it.id == '" + apiId + "' }[0].name", equalTo("listing-survivor"));
+        Map<String, Object> api = ApiGatewayRestApiPages.restApi(apiId);
+        assertNotNull(api.get("rootResourceId"));
+        assertEquals("listing-survivor", api.get("name"));
     }
 }

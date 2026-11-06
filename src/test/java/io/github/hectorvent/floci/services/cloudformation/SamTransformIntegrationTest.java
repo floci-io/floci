@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayRestApiPages;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -17,6 +18,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -1091,14 +1093,8 @@ class SamTransformIntegrationTest {
 
         waitForStackStatus(stackName, "CREATE_COMPLETE");
 
-        String apiId = given()
-        .when()
-            .get("/restapis")
-        .then()
-            .statusCode(200)
-            .body("item.find { it.name == '" + apiName + "' }.name", equalTo(apiName))
-            .extract()
-            .path("item.find { it.name == '" + apiName + "' }.id");
+        String apiId = (String) ApiGatewayRestApiPages.restApis().stream()
+                .filter(api -> apiName.equals(api.get("name"))).findFirst().orElseThrow().get("id");
 
         String authorizerId = given()
         .when()
@@ -1173,14 +1169,8 @@ class SamTransformIntegrationTest {
 
         waitForStackStatus(stackName, "CREATE_COMPLETE");
 
-        String apiId = given()
-        .when()
-            .get("/restapis")
-        .then()
-            .statusCode(200)
-            .body("item.find { it.name == '" + apiName + "' }.name", equalTo(apiName))
-            .extract()
-            .path("item.find { it.name == '" + apiName + "' }.id");
+        String apiId = (String) ApiGatewayRestApiPages.restApis().stream()
+                .filter(api -> apiName.equals(api.get("name"))).findFirst().orElseThrow().get("id");
 
         String helloResourceId = given()
         .when()
@@ -1245,17 +1235,15 @@ class SamTransformIntegrationTest {
         // AWS's runtime prefers. The /hello method assertion below proves the reapply runs on
         // the same path that also turns the DefinitionBody into resources and methods, so a
         // provisioner that never reads DefinitionBody at all cannot pass this test.
-        String apiId = given()
-        .when()
-            .get("/restapis")
-        .then()
-            .statusCode(200)
-            .body("item.name", hasItem(apiName))
-            .body("item.name", not(hasItem("title-from-document")))
-            .body("item.find { it.name == '" + apiName + "' }.description", equalTo(apiDescription))
-            .body("item.description", not(hasItem("description-from-document")))
-            .extract()
-            .path("item.find { it.name == '" + apiName + "' }.id");
+        List<Map<String, Object>> apis = ApiGatewayRestApiPages.restApis();
+        Map<String, Object> api = apis.stream().filter(candidate -> apiName.equals(candidate.get("name")))
+                .findFirst().orElseThrow();
+        assertEquals(apiDescription, api.get("description"));
+        assertThat(apis.stream().map(candidate -> candidate.get("name")).toList(),
+                not(hasItem("title-from-document")));
+        assertThat(apis.stream().map(candidate -> candidate.get("description")).toList(),
+                not(hasItem("description-from-document")));
+        String apiId = (String) api.get("id");
 
         String helloResourceId = given()
         .when()

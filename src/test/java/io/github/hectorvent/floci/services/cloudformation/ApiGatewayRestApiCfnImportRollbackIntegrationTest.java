@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.apigateway.ApiGatewayRestApiPages;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -84,8 +85,9 @@ class ApiGatewayRestApiCfnImportRollbackIntegrationTest {
 
     /** Of the REST APIs named {@link #API_NAME}, only the one created outside the stack is left, unchanged. */
     private static void assertOnlyTheOutsideApiIsLeft(String outsideId) {
-        given().when().get("/restapis").then().statusCode(200)
-                .body("item.findAll { it.name == '" + API_NAME + "' }.id", contains(outsideId));
+        assertThat(ApiGatewayRestApiPages.restApis().stream()
+                .filter(api -> API_NAME.equals(api.get("name"))).map(api -> api.get("id")).toList(),
+                contains(outsideId));
         given().when().get("/restapis/" + outsideId).then().statusCode(200)
                 .body("description", equalTo("outside the stack"));
     }
