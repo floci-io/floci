@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
@@ -218,17 +219,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
         assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
         assertEquals(name, output(describeStack(stackName), "GroupRef"));
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStackResource")
-            .formParam("StackName", stackName)
-            .formParam("LogicalResourceId", "Group")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<PhysicalResourceId>" + name + "</PhysicalResourceId>"));
+        assertEquals(name, CfnRequests.physicalId(stackName, "Group", CFN_AUTH));
         cognito("GetGroup", "{\"UserPoolId\": \"" + firstPool + "\", \"GroupName\": \"" + name + "\"}")
             .statusCode(200)
             .body("Group.Description", equalTo("d1"))
@@ -277,17 +268,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         assertThat(failures, contains(containsString("CloudFormation cannot update a stack when a custom-named"
                 + " resource requires replacing. Rename " + generated + " and update the stack again.")));
         assertEquals(generated, output(describeStack(stackName), "GroupRef"));
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStackResource")
-            .formParam("StackName", stackName)
-            .formParam("LogicalResourceId", "Group")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<PhysicalResourceId>" + generated + "</PhysicalResourceId>"));
+        assertEquals(generated, CfnRequests.physicalId(stackName, "Group", CFN_AUTH));
         cognito("GetGroup", "{\"UserPoolId\": \"" + poolId + "\", \"GroupName\": \"" + generated + "\"}")
             .statusCode(200)
             .body("Group.Description", equalTo("d1"))
