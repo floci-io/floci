@@ -455,6 +455,11 @@ public class PipesTargetInvoker {
 
     private static boolean isBase64SourceField(String field, JsonNode container, JsonNode outer) {
         if ("data".equals(field)) {
+            // Flat Pipes shape: container is the record itself.
+            if (container != null && "aws:kinesis".equals(container.path("eventSource").asText())) {
+                return true;
+            }
+            // Legacy nested shape: container is the "kinesis" child.
             return outer != null && "aws:kinesis".equals(outer.path("eventSource").asText())
                     && outer.path("kinesis") == container;
         }
