@@ -639,6 +639,16 @@ public class DynamoDbService {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
             table.getProvisionedThroughput().setWriteCapacityUnits(writeCapacity);
         }
+        // Track warm throughput: on-demand uses fixed values, provisioned uses the capacity.
+        if ("PAY_PER_REQUEST".equals(billingMode)) {
+            table.setWarmReadUnitsPerSecond(12000);
+            table.setWarmWriteUnitsPerSecond(4000);
+        } else {
+            long rcu = readCapacity != null ? readCapacity : 5L;
+            long wcu = writeCapacity != null ? writeCapacity : 5L;
+            table.setWarmReadUnitsPerSecond(rcu);
+            table.setWarmWriteUnitsPerSecond(wcu);
+        }
 
         if (gsis != null && !gsis.isEmpty()) {
             for (GlobalSecondaryIndex gsi : gsis) {
@@ -2574,9 +2584,15 @@ public class DynamoDbService {
 
         if (readCapacity != null) {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
+            if (readCapacity > table.getWarmReadUnitsPerSecond()) {
+                table.setWarmReadUnitsPerSecond(readCapacity);
+            }
         }
         if (writeCapacity != null) {
             table.getProvisionedThroughput().setWriteCapacityUnits(writeCapacity);
+            if (writeCapacity > table.getWarmWriteUnitsPerSecond()) {
+                table.setWarmWriteUnitsPerSecond(writeCapacity);
+            }
         }
 
         for (String indexName : gsiDeletes) {
@@ -4077,7 +4093,7 @@ public class DynamoDbService {
             arr.add(value);
         }
     }
-    
+
     private void setValueAtPath(ObjectNode item, String path, JsonNode value, JsonNode exprAttrNames) {
         List<Object> tokens = parsePath(path, exprAttrNames);
         if (tokens.isEmpty()) return;

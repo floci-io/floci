@@ -28,6 +28,8 @@ public class TableDefinition {
     private long itemCount;
     private long tableSizeBytes;
     private ProvisionedThroughput provisionedThroughput;
+    private long warmReadUnitsPerSecond;
+    private long warmWriteUnitsPerSecond;
     private String tableArn;
     private Map<String, String> tags;
     private List<GlobalSecondaryIndex> globalSecondaryIndexes;
@@ -95,6 +97,8 @@ public class TableDefinition {
         this.tableArn = AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
         this.tableId = UUID.randomUUID().toString();
         this.provisionedThroughput = new ProvisionedThroughput(5, 5);
+        this.warmReadUnitsPerSecond = 5;
+        this.warmWriteUnitsPerSecond = 5;
         this.tags = new HashMap<>();
         this.globalSecondaryIndexes = new ArrayList<>();
         this.localSecondaryIndexes = new ArrayList<>();
@@ -127,6 +131,12 @@ public class TableDefinition {
 
     public ProvisionedThroughput getProvisionedThroughput() { return provisionedThroughput; }
     public void setProvisionedThroughput(ProvisionedThroughput provisionedThroughput) { this.provisionedThroughput = provisionedThroughput; }
+
+    public long getWarmReadUnitsPerSecond() { return warmReadUnitsPerSecond; }
+    public void setWarmReadUnitsPerSecond(long v) { this.warmReadUnitsPerSecond = v; }
+
+    public long getWarmWriteUnitsPerSecond() { return warmWriteUnitsPerSecond; }
+    public void setWarmWriteUnitsPerSecond(long v) { this.warmWriteUnitsPerSecond = v; }
 
     public String getTableArn() { return tableArn; }
     public void setTableArn(String tableArn) { this.tableArn = tableArn; }
