@@ -54,6 +54,12 @@ class PaymentCryptographyDataPlaneIamEnforcementTest {
     /** The key the MAC operations use, which is a MAC key and not a data-encryption one. */
     private String macKeyArn;
 
+    /** The key the PIN operations use to protect the block. */
+    private String pinEncryptionKeyArn;
+
+    /** The key the PIN operations compute the verification value under. */
+    private String visaVerificationKeyArn;
+
     @TestHTTPResource("/")
     static URI baseUri;
 
@@ -77,6 +83,24 @@ class PaymentCryptographyDataPlaneIamEnforcementTest {
                 .header("Authorization", auth(ADMIN, "payment-cryptography"))
                 .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
                         + "\"KeyUsage\":\"TR31_M6_ISO_9797_5_CMAC_KEY\","
+                        + "\"KeyModesOfUse\":{\"Generate\":true,\"Verify\":true}},\"Exportable\":true}")
+                .when().post("/")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        pinEncryptionKeyArn = given().contentType("application/x-amz-json-1.0")
+                .header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
+                .header("Authorization", auth(ADMIN, "payment-cryptography"))
+                .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                        + "\"KeyUsage\":\"TR31_P0_PIN_ENCRYPTION_KEY\","
+                        + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}")
+                .when().post("/")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        visaVerificationKeyArn = given().contentType("application/x-amz-json-1.0")
+                .header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
+                .header("Authorization", auth(ADMIN, "payment-cryptography"))
+                .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                        + "\"KeyUsage\":\"TR31_V2_VISA_PIN_VERIFICATION_KEY\","
                         + "\"KeyModesOfUse\":{\"Generate\":true,\"Verify\":true}},\"Exportable\":true}")
                 .when().post("/")
                 .then().statusCode(200)
@@ -233,6 +257,47 @@ class PaymentCryptographyDataPlaneIamEnforcementTest {
                 .body("{\"KeyIdentifier\":\"" + macKeyArn + "\",\"MessageData\":\"" + "00".repeat(16) + "\","
                         + "\"GenerationAttributes\":{\"Algorithm\":\"CMAC\"}}")
                 .when().post("/mac/generate")
+                .then();
+    }
+
+    @Test
+    void aDenialOnOneKeyIsEnforcedWhenThePinNamesIt() {
+        // The PIN data names its keys in the body, and the action is checked on them, so a
+        // denial limited to the PIN encryption key holds.
+        EnforcementFixtures.putUserPolicy(port(), auth(ADMIN, "iam"), callerName, "p",
+                "{\"Version\":\"2012-10-17\",\"Statement\":["
+                        + "{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"},"
+                        + "{\"Effect\":\"Deny\",\"Action\":\"payment-cryptography:GeneratePinData\","
+                        + "\"Resource\":\"" + pinEncryptionKeyArn + "\"}]}");
+
+        assertEquals(403, generatePinData().extract().statusCode());
+    }
+
+    @Test
+    void anAllowOnTheKeysThePinNamesIsEnough() {
+        // The PIN data names two keys, and the action is checked on both, so the policy has to
+        // allow the two of them and nothing else.
+        EnforcementFixtures.putUserPolicy(port(), auth(ADMIN, "iam"), callerName, "p",
+                "{\"Version\":\"2012-10-17\",\"Statement\":["
+                        + "{\"Effect\":\"Allow\",\"Action\":\"payment-cryptography:*\","
+                        + "\"Resource\":[" + "\"" + pinEncryptionKeyArn + "\","
+                        + "\"" + visaVerificationKeyArn + "\"]}]}");
+
+        ValidatableResponse response = generatePinData();
+        assertEquals(200, response.extract().statusCode());
+        response.body("EncryptedPinBlock", notNullValue());
+    }
+
+    /** The request is made as the caller, whose policy is what is under test. */
+    private ValidatableResponse generatePinData() {
+        return given().contentType("application/json")
+                .header("Authorization", auth(caller.accessKeyId(), "payment-cryptography"))
+                .body("{\"EncryptionKeyIdentifier\":\"" + pinEncryptionKeyArn + "\","
+                        + "\"GenerationKeyIdentifier\":\"" + visaVerificationKeyArn + "\","
+                        + "\"PinBlockFormat\":\"ISO_FORMAT_0\","
+                        + "\"PrimaryAccountNumber\":\"5081470082639564\","
+                        + "\"GenerationAttributes\":{\"VisaPin\":{\"PinVerificationKeyIndex\":1}}}")
+                .when().post("/pindata/generate")
                 .then();
     }
 

@@ -37,6 +37,7 @@ services:
     doc: docs/services/payment-cryptography-data.md
     sources:
       - { path: services/paymentcryptography/PaymentCryptographyCryptoController.java, mode: rest }
+      - { path: services/paymentcryptography/PaymentCryptographyPinController.java, mode: rest }
   - service: applicationautoscaling
     doc: docs/services/applicationautoscaling.md
     sources:

@@ -73,6 +73,18 @@ class PaymentCryptographyDataPlaneIamRouteTest {
     }
 
     @Test
+    void thePinOperationsResolveToTheirActions() {
+        assertEquals("payment-cryptography:GeneratePinData",
+                resolve("/_paymentcryptography/pindata/generate"));
+        assertEquals("payment-cryptography:VerifyPinData",
+                resolve("/_paymentcryptography/pindata/verify"));
+        assertEquals("payment-cryptography:TranslatePinData",
+                resolve("/_paymentcryptography/pindata/translate"));
+        assertEquals("payment-cryptography:GenerateMacEmvPinChange",
+                resolve("/_paymentcryptography/macemvpinchange/generate"));
+    }
+
+    @Test
     void theRoutesAreReadUnderTheServicesScope() {
         // A client of the data plane signs for the service, which is one scope for both of
         // its planes, and a client that signs for the data plane's own scope is served under
