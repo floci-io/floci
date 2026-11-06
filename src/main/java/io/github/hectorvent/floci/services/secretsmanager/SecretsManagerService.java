@@ -1700,7 +1700,7 @@ public class SecretsManagerService implements ResourceProvider {
                 invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "testSecret", region);
             } finally {
                 if (staged) {
-                    removeVersion(secretArn, clientRequestToken, region);
+                    removeUntouchedPlaceholder(secretArn, clientRequestToken, region);
                 }
             }
 
@@ -1762,12 +1762,17 @@ public class SecretsManagerService implements ResourceProvider {
         }
     }
 
-    private void removeVersion(String secretArn, String versionId, String region) {
+    /** Removes the version {@link #stagePendingVersion} added, unless something has written to it since. */
+    private void removeUntouchedPlaceholder(String secretArn, String versionId, String region) {
         synchronized (lockFor(secretArn)) {
             Secret secret = resolveSecret(secretArn, region);
-            if (secret.getVersions() != null && secret.getVersions().remove(versionId) != null) {
-                persist(secret, region);
+            SecretVersion version = secret.getVersions() == null ? null : secret.getVersions().get(versionId);
+            if (version == null || version.getSecretString() != null || version.getSecretBinary() != null
+                    || !List.of("AWSPENDING").equals(version.getVersionStages())) {
+                return;
             }
+            secret.getVersions().remove(versionId);
+            persist(secret, region);
         }
     }
 

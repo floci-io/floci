@@ -90,6 +90,24 @@ class SecretsManagerRotateLaterTest {
         awaitOnlyVersion(created.getCurrentVersionId());
     }
 
+    @Test
+    void aValueWrittenUnderTheTokenDuringTheTestStepIsKept() {
+        when(lambda.invoke(anyString(), anyString(), any(byte[].class), any())).thenAnswer(invocation -> {
+            service.putSecretValue(NAME, "written", null, TOKEN, REGION, List.of("AWSPENDING"));
+            return succeeded();
+        });
+        service.createSecret(NAME, "v1", null, null, null, null, REGION);
+
+        service.rotateSecret(NAME, TOKEN, LAMBDA_ARN, null, false, REGION);
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            verify(lambda).invoke(anyString(), anyString(), any(byte[].class), any());
+            SecretVersion version = service.describeSecret(NAME, REGION).getVersions().get(TOKEN);
+            assertTrue(version == null || !version.getVersionStages().contains("AWSPENDING"));
+        });
+        assertEquals("written", service.getSecretValue(NAME, TOKEN, null, REGION).getSecretString());
+    }
+
     /** Waits until the rotation has run its test step and the secret holds only the given version. */
     private void awaitOnlyVersion(String versionId) {
         await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
