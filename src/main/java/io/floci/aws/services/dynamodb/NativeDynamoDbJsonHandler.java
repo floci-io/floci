@@ -162,8 +162,10 @@ public class NativeDynamoDbJsonHandler {
     private Response handleCreateTable(JsonNode request, String region) {
         TableDefinition table = createTableFromSpec(request, "", region, "ACTIVE");
 
+        ObjectNode tableNode = tableToNode(table);
+        tableNode.remove("WarmThroughput");
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("TableDescription", tableToNode(table));
+        response.set("TableDescription", tableNode);
         return Response.ok(response).build();
     }
 
@@ -3732,8 +3734,8 @@ public class NativeDynamoDbJsonHandler {
 
         ObjectNode warmThroughput = objectMapper.createObjectNode();
         warmThroughput.put("Status", "ACTIVE");
-        warmThroughput.put("ReadUnitsPerSecond", 0);
-        warmThroughput.put("WriteUnitsPerSecond", 0);
+        warmThroughput.put("ReadUnitsPerSecond", table.getWarmReadUnitsPerSecond());
+        warmThroughput.put("WriteUnitsPerSecond", table.getWarmWriteUnitsPerSecond());
         node.set("WarmThroughput", warmThroughput);
 
         // Global-table replicas. In a single-process emulator every region is served by this same

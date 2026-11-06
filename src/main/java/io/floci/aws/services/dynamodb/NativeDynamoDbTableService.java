@@ -35,6 +35,8 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class NativeDynamoDbTableService {
+    private static final long ON_DEMAND_WARM_READ_UNITS = 12000;
+    private static final long ON_DEMAND_WARM_WRITE_UNITS = 4000;
 
     private static final String DEFAULT_ACCOUNT_ID = "000000000000";
     private static final String SSE_TYPE_KMS = "KMS";
@@ -465,6 +467,24 @@ public class NativeDynamoDbTableService {
             if ("PAY_PER_REQUEST".equals(billingMode)) {
                 table.getProvisionedThroughput().setReadCapacityUnits(0L);
                 table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+                // Don't drop a peak above the on-demand baseline.
+                if (ON_DEMAND_WARM_READ_UNITS > table.getWarmReadUnitsPerSecond()) {
+                    table.setWarmReadUnitsPerSecond(ON_DEMAND_WARM_READ_UNITS);
+                }
+                if (ON_DEMAND_WARM_WRITE_UNITS > table.getWarmWriteUnitsPerSecond()) {
+                    table.setWarmWriteUnitsPerSecond(ON_DEMAND_WARM_WRITE_UNITS);
+                }
+            } else {
+                // Switching to provisioned: warm throughput becomes the provisioned capacity
+                // if it exceeds the current warm value (preserve history).
+                long rcu = table.getProvisionedThroughput().getReadCapacityUnits();
+                long wcu = table.getProvisionedThroughput().getWriteCapacityUnits();
+                if (rcu > table.getWarmReadUnitsPerSecond()) {
+                    table.setWarmReadUnitsPerSecond(rcu);
+                }
+                if (wcu > table.getWarmWriteUnitsPerSecond()) {
+                    table.setWarmWriteUnitsPerSecond(wcu);
+                }
             }
         }
 
