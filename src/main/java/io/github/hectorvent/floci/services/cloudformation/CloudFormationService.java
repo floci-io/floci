@@ -128,7 +128,10 @@ public class CloudFormationService implements ResourceProvider {
     // The execution running on a stack, by stack id, completed once it and any delete it deferred end.
     private final ConcurrentHashMap<String, CompletableFuture<Void>> runningExecutions = new ConcurrentHashMap<>();
     // A delete requested while its stack's execution runs, by stack id, with the resources it retains.
-    private final ConcurrentHashMap<String, List<String>> deferredDeletes = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, DeferredDelete> deferredDeletes = new ConcurrentHashMap<>();
+
+    /** A DeleteStack accepted while an execution runs: what it retains, and the token its statuses carry. */
+    private record DeferredDelete(List<String> retain, String clientRequestToken) {}
     private final ExecutorService executor = newOperationExecutor();
 
     static ThreadPoolExecutor newOperationExecutor() {
@@ -1516,10 +1519,12 @@ public class CloudFormationService implements ResourceProvider {
                 if (!runningExecutions.remove(stackId, done)) {
                     return existing;
                 }
-                List<String> retain = deferredDeletes.remove(stackId);
-                if (retain != null && existing != null && stackId.equals(existing.getStackId())) {
-                    startDelete(existing, retain);
-                    deferred.add(retain);
+                DeferredDelete delete = deferredDeletes.remove(stackId);
+                if (delete != null && existing != null && stackId.equals(existing.getStackId())) {
+                    // The delete's own token, not the execution's, from its first status on.
+                    existing.setClientRequestToken(delete.clientRequestToken());
+                    startDelete(existing, delete.retain());
+                    deferred.add(delete.retain());
                 }
                 return existing;
             });
@@ -1656,7 +1661,7 @@ public class CloudFormationService implements ResourceProvider {
             if (running != null) {
                 // The execution deletes the stack once it ends: a create stops before its next
                 // resource, an update finishes, and the delete then removes all that was built.
-                deferredDeletes.putIfAbsent(existing.getStackId(), retain);
+                deferredDeletes.putIfAbsent(existing.getStackId(), new DeferredDelete(retain, clientRequestToken));
                 submitted[0] = running;
                 return existing;
             }
