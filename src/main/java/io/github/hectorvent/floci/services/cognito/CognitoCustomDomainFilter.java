@@ -26,8 +26,9 @@ import java.util.Set;
 /**
  * Routes Cognito custom-domain requests by Host. On AWS a custom domain serves
  * {@code https://<domain>/oauth2/token}, {@code /oauth2/revoke}, {@code /oauth2/userInfo},
- * {@code /oauth2/authorize}, {@code /oauth2/idpresponse}, and managed login's {@code /login} and
- * {@code /logout}; Floci maps those onto the {@code /cognito-idp/...} handlers and pins the pool and
+ * {@code /oauth2/authorize}, {@code /oauth2/idpresponse}, managed login's {@code /login} and
+ * {@code /logout}, and the sign-up confirmation page {@code /confirmUser}; Floci maps those onto
+ * the {@code /cognito-idp/...} handlers and pins the pool and
  * the account that own the domain, since the request itself carries no AWS credential. Any other
  * path under {@code /oauth2/} is answered here with AWS's JSON 404, and a served path called with a
  * method it does not serve with an empty 405, so neither reaches S3 as a key of a bucket named
@@ -49,6 +50,7 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
     private static final Logger LOG = Logger.getLogger(CognitoCustomDomainFilter.class);
     private static final String OAUTH_PREFIX = "/oauth2/";
     private static final Set<String> MANAGED_LOGIN_PATHS = Set.of("/login", "/logout");
+    private static final String CONFIRM_USER_PATH = "/confirmUser";
     private static final String TARGET_PREFIX = "/cognito-idp";
     /** The paths the Cognito handlers serve on a custom domain, and their methods. */
     private static final Map<String, List<String>> SERVED_ROUTES = Map.of(
@@ -59,7 +61,8 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
             "/oauth2/userInfo", List.of(HttpMethod.GET, HttpMethod.HEAD, HttpMethod.POST),
             "/login", List.of(HttpMethod.GET, HttpMethod.HEAD, HttpMethod.POST),
             // AWS refuses a HEAD here rather than sign the browser out.
-            "/logout", List.of(HttpMethod.GET));
+            "/logout", List.of(HttpMethod.GET),
+            "/confirmUser", List.of(HttpMethod.GET, HttpMethod.HEAD));
     /** AWS's answer to a path under /oauth2/ that its authorization server does not serve. */
     private static final String NOT_FOUND_BODY = "{\"error\":\"This URL doesn't exist on the authorization server.\"}";
 
@@ -74,7 +77,8 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
     public void filter(ContainerRequestContext requestContext) {
         URI originalUri = requestContext.getUriInfo().getRequestUri();
         String path = originalUri.getRawPath();
-        if (path == null || !(path.startsWith(OAUTH_PREFIX) || MANAGED_LOGIN_PATHS.contains(path))) {
+        if (path == null || !(path.startsWith(OAUTH_PREFIX) || MANAGED_LOGIN_PATHS.contains(path)
+                || isConfirmUser(path))) {
             return;
         }
         String host = RequestHost.of(requestContext);
@@ -85,7 +89,9 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
         if (domain.isEmpty()) {
             return;
         }
-        List<String> methods = SERVED_ROUTES.get(path);
+        // AWS documents the link with and without a trailing slash. Both hit the same handler.
+        String routePath = CONFIRM_USER_PATH.equals(stripTrailingSlash(path)) ? CONFIRM_USER_PATH : path;
+        List<String> methods = SERVED_ROUTES.get(routePath);
         if (methods == null) {
             requestContext.abortWith(Response.status(Response.Status.NOT_FOUND)
                     .type(MediaType.APPLICATION_JSON_TYPE.withCharset("UTF-8"))
@@ -108,12 +114,23 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
         }
 
         URI newUri = UriBuilder.fromUri(originalUri)
-                .replacePath(TARGET_PREFIX + path)
+                .replacePath(TARGET_PREFIX + routePath)
                 .build();
         LOG.debugv("Cognito custom domain routing: {0}{1} -> {2}", host, path, newUri.getPath());
         requestContext.setProperty(POOL_PROPERTY, domain.get().getUserPoolId());
         requestContext.setProperty(AccountContextFilter.PINNED_ACCOUNT_PROPERTY, domain.get().getAwsAccountId());
         RequestUriRewrite.apply(requestContext, newUri);
+    }
+
+    private static boolean isConfirmUser(String path) {
+        return CONFIRM_USER_PATH.equals(stripTrailingSlash(path));
+    }
+
+    private static String stripTrailingSlash(String path) {
+        if (path.length() > 1 && path.endsWith("/")) {
+            return path.substring(0, path.length() - 1);
+        }
+        return path;
     }
 
     private static String stripPort(String host) {

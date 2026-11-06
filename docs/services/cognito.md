@@ -193,6 +193,7 @@ POST https://auth.example.localhost.floci.io/oauth2/userInfo
 GET  https://auth.example.localhost.floci.io/login
 POST https://auth.example.localhost.floci.io/login
 GET  https://auth.example.localhost.floci.io/logout
+GET  https://auth.example.localhost.floci.io/confirmUser
 ```
 
 Requests are matched on the `Host` header, so the name must resolve to Floci (any
@@ -201,8 +202,9 @@ the account that created it, since these requests carry no AWS credential: a `cl
 another pool is refused with `invalid_client`, and an access token issued by another pool with
 `invalid_token`. Domain names are unique across all accounts, as on AWS. The pool's `openid-configuration` advertises the custom-domain
 URLs when one exists. Prefix domains (`<prefix>.auth.<region>.amazoncognito.com`) are stored but not
-routed, since that hostname never reaches Floci. `/login` and `/logout` are served at the root only
-on a custom-domain host; on Floci's own host they are `/cognito-idp/login` and `/cognito-idp/logout`.
+routed, since that hostname never reaches Floci. `/login`, `/logout` and `/confirmUser` are served at
+the root only on a custom-domain host; on Floci's own host they are `/cognito-idp/login`,
+`/cognito-idp/logout` and `/cognito-idp/confirmUser`.
 On a custom-domain host, any other path under `/oauth2/` is answered with AWS's JSON 404, and a
 served path called with a method it does not serve with an empty 405 whose `Allow` header lists
 the methods it does serve. HEAD is answered as GET, as on AWS, except on `/logout`, which AWS
@@ -311,9 +313,9 @@ passwordless pool generates a password. `TemporaryPasswordValidityDays` is not e
 
 | Action | Description |
 |--------|-------------|
-| SignUp | Creates a self-service user for an app client. |
+| SignUp | Creates a self-service user for an app client. With `VerificationMessageTemplate.DefaultEmailOption` of `CONFIRM_WITH_LINK`, the confirmation email carries a link instead of a code. |
 | ConfirmSignUp | Confirms a pending self-service signup. |
-| ResendConfirmationCode | Issues a new sign-up confirmation code to an unconfirmed user, replacing the previous one, and returns where it was sent. |
+| ResendConfirmationCode | Issues a new sign-up confirmation to an unconfirmed user, replacing the previous one, and returns where it was sent. A `CONFIRM_WITH_LINK` pool sends another confirmation link. |
 | GetUser | Returns attributes for the authenticated access-token user, and the MFA settings (`UserMFASettingList`, `PreferredMfaSetting`) once any is turned on. |
 | GetUserAuthFactors | Returns the authenticated access-token user's sign-in factors: `PASSWORD` when the user has a password, `EMAIL_OTP` and `SMS_OTP` when the email or phone number is verified, whatever the pool's `AllowedFirstAuthFactors` allows, as on AWS, `WEB_AUTHN` once the user has registered a passkey, and `SOFTWARE_TOKEN` once `VerifySoftwareToken` has confirmed an authenticator. The access token must carry the `aws.cognito.signin.user.admin` scope. `UserMFASettingList` and `PreferredMfaSetting` report the SMS, email and software-token MFA preferences set with `SetUserMFAPreference`. |
 | GetUserAttributeVerificationCode | Issues a verification code for the authenticated user's email or phone_number attribute. The CustomMessage trigger shapes its message, with triggerSource `CustomMessage_VerifyUserAttribute` and the request's `ClientMetadata`. |
@@ -328,8 +330,19 @@ passwordless pool generates a password. `TemporaryPasswordValidityDays` is not e
 | CompleteWebAuthnRegistration | Verifies the `RegistrationResponseJSON` in `Credential` and registers the passkey. |
 | ListWebAuthnCredentials | Lists the authenticated access-token user's passkeys, oldest first, up to 20 per page. `NextToken` is a cursor on the last passkey listed, so deleting a passkey between two pages skips none. |
 | DeleteWebAuthnCredential | Deletes one of the authenticated access-token user's passkeys. |
-| ForgotPassword | Starts the local forgot-password flow for a user. |
+| ForgotPassword | Starts the local forgot-password flow for a user. The message stays a code even when the pool's verification type is `CONFIRM_WITH_LINK`. |
 | ConfirmForgotPassword | Completes the forgot-password flow by setting a replacement password. |
+
+When `VerificationMessageTemplate.DefaultEmailOption` is `CONFIRM_WITH_LINK`, `SignUp` and
+`ResendConfirmationCode` email `EmailSubjectByLink` and `EmailMessageByLink` (or Cognito's default
+link message when those are unset). The `{##link text##}` placeholder becomes a link to
+`/cognito-idp/confirmUser?client_id&user_name&confirmation_code`, or to `/confirmUser` on a custom
+domain. Opening it confirms the user. A shared-host link carries no AWS credential, so the client
+id is resolved across accounts and the user is confirmed in the account that owns the client. A
+custom domain still confirms in the account that owns the domain. A prefix domain is not used in
+the link, because Floci does not serve that hostname. `CONFIRM_WITH_CODE`, and a pool with no verification type, keep the
+`{####}` code template. Password reset, attribute verification and sign-in codes stay on that code
+template either way. SMS stays a code.
 
 As on AWS, every operation authorized by the user's access token (`GetUser`,
 `GetUserAuthFactors`, `UpdateUserAttributes`, `DeleteUserAttributes`, `DeleteUser`,
@@ -687,6 +700,7 @@ plain, so branding is stored and returned rather than rendered. Two divergences 
 | `GET /cognito-idp/oauth2/idpresponse`                | OIDC provider callback endpoint                                  |
 | `GET`, `POST /cognito-idp/login`                     | Managed login sign-in form                                       |
 | `GET /cognito-idp/logout`                            | Managed login sign-out                                           |
+| `GET /cognito-idp/confirmUser`                       | Confirms a sign-up from a `CONFIRM_WITH_LINK` email              |
 | `POST /cognito-idp/oauth2/token`                     | OAuth code, refresh-token and client-credentials token endpoint  |
 | `POST /cognito-idp/oauth2/revoke`                    | OAuth refresh token revocation endpoint                          |
 | `GET`, `POST /cognito-idp/oauth2/userInfo`           | OIDC userInfo endpoint, for a user's access token                |
