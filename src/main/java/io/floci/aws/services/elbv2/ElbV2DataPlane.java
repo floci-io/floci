@@ -1585,15 +1585,19 @@ public class ElbV2DataPlane {
                                 copyTargetResponseHeaders(resp.headers(), req.response());
                                 cookies.forEach(cookie -> req.response().headers().add("Set-Cookie", cookie));
                                 if (resp.statusCode() != 101) {
-                                    clientReq.exceptionHandler(err ->
-                                            LOG.debugv("WebSocket refusal connection closed: {0}", err.getMessage()));
                                     req.resume();
                                     if (resp.getHeader("Content-Length") == null) {
                                         req.response().setChunked(true);
                                     }
-                                    // A refused connect() request stays unfinished and holds its pool slot.
                                     resp.pipeTo(req.response())
-                                            .onComplete(ignored -> clientReq.connection().close());
+                                            .onComplete(result -> {
+                                                if (result.failed()) {
+                                                    LOG.warnv(result.cause(),
+                                                            "Failed relaying refused WebSocket upgrade from {0}:{1}",
+                                                            host, port);
+                                                }
+                                                WebSocketUpgrades.closeRefusedRequest(clientReq);
+                                            });
                                     return;
                                 }
                                 req.response().putHeader("Connection", "Upgrade");

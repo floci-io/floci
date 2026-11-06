@@ -3,6 +3,7 @@ package io.floci.aws.services.elbv2;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.testing.RealElbV2DataPlaneProfile;
+import io.floci.aws.testutil.LogCapture;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.junit.mockito.InjectSpy;
@@ -22,6 +23,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
 
 import static io.floci.aws.testing.AlbFixtures.createListener;
 import static io.floci.aws.testing.AlbFixtures.createLoadBalancer;
@@ -70,6 +72,9 @@ class ElbV2WebSocketIntegrationTest {
                 .requestHandler(request -> {
                     if (!"websocket".equalsIgnoreCase(request.getHeader("Upgrade"))) {
                         request.response().setStatusCode(400).end("not an upgrade");
+                    } else if (request.path().startsWith("/broken/")) {
+                        request.response().setChunked(true).setStatusCode(503).write("partial")
+                                .onSuccess(ignored -> request.response().close());
                     } else if (!request.path().startsWith("/socket.io/")) {
                         request.response().headers()
                                 .add("Set-Cookie", "a=1; Path=/")
@@ -172,6 +177,22 @@ class ElbV2WebSocketIntegrationTest {
             assertEquals(404, rejected.getStatus());
             assertEquals("upgrade refused", rejected.getBody().toString());
         }
+
+        WebSocket socket = connect("/socket.io/?transport=websocket");
+        try {
+            assertEquals("transport=websocket:hello", exchange(socket, "hello"));
+        } finally {
+            socket.close();
+        }
+    }
+
+    @Test
+    void failedRefusalRelayLogsItsCauseAndAllowsAnotherUpgrade() throws Exception {
+        LogCapture.awaitRecord(ElbV2DataPlane.class, Duration.ofSeconds(3),
+                record -> record.getLevel().intValue() >= Level.WARNING.intValue()
+                        && record.getThrown() != null
+                        && record.getMessage().contains("Failed relaying refused WebSocket upgrade"),
+                () -> assertThrows(ExecutionException.class, () -> connect("/broken/?transport=websocket")));
 
         WebSocket socket = connect("/socket.io/?transport=websocket");
         try {

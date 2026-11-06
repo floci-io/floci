@@ -197,8 +197,6 @@ public class CloudFrontWebSocketProxy {
      */
     private static void relayRefusal(HttpClientResponse response, HttpServerResponse viewerResponse,
                                      HttpClientRequest originRequest, OriginClock clock) {
-        originRequest.exceptionHandler(err ->
-                LOG.debugv("CloudFront WebSocket refusal connection closed: {0}", err.getMessage()));
         if (response.getHeader("Content-Length") == null) {
             viewerResponse.setChunked(true);
         }
@@ -227,15 +225,13 @@ public class CloudFrontWebSocketProxy {
         });
         response.endHandler(ignored -> {
             clock.stop();
-            // connect() leaves the request unfinished on refusal, so reading the body does not
-            // release its pool slot. Close only after the entire refusal has been relayed.
-            originRequest.connection().close();
+            WebSocketUpgrades.closeRefusedRequest(originRequest);
             viewerResponse.end();
         });
         response.exceptionHandler(err -> {
             clock.stop();
             originRequest.reset();
-            LOG.debugv("CloudFront origin failed while refusing a WebSocket upgrade: {0}", err.getMessage());
+            LOG.warnv(err, "CloudFront origin failed while refusing a WebSocket upgrade");
             viewerResponse.reset();
         });
     }
