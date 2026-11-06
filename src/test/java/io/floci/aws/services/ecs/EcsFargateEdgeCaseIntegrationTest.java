@@ -65,6 +65,16 @@ class EcsFargateEdgeCaseIntegrationTest {
         return family;
     }
 
+    /** A task's current status, for waiting on a launch the RunTask answer no longer blocks on. */
+    private static String taskStatus(String taskArn) {
+        return call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\"" + taskArn + "\"]}", 200)
+                .jsonPath().getString("tasks[0].lastStatus");
+    }
+
+    private static void awaitStatus(String taskArn, String status) {
+        await().atMost(Duration.ofSeconds(10)).until(() -> status.equals(taskStatus(taskArn)));
+    }
+
     // ── Task size ─────────────────────────────────────────────────────────────
 
     @Test
@@ -557,6 +567,9 @@ class EcsFargateEdgeCaseIntegrationTest {
                 + family + "\",\"launchType\":\"FARGATE\"," + NETWORK + "}", 200)
                 .jsonPath().getString("tasks[0].taskArn");
 
+        // The stop goes through STOPPING only once the launch has landed the task RUNNING;
+        // a stop that arrives while it is still launching answers before that.
+        awaitStatus(taskArn, "RUNNING");
         Response stopped = call("StopTask", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\""
                 + taskArn + "\",\"reason\":\"edge\"}", 200);
 
@@ -665,6 +678,11 @@ class EcsFargateEdgeCaseIntegrationTest {
                 .jsonPath().getString("tasks[0].taskArn");
         call("StopTask", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\"" + stopped + "\"}", 200);
 
+        // The listing is RUNNING by default, so both tasks must have landed where the
+        // assertions expect them before it is read.
+        awaitStatus(running, "RUNNING");
+        awaitStatus(stopped, "STOPPED");
+
         // Without a desiredStatus the listing is RUNNING only, which is AWS's default filter.
         List<String> byDefault = call("ListTasks", "{\"cluster\":\"" + CLUSTER + "\",\"family\":\""
                 + family + "\"}", 200).jsonPath().getList("taskArns");
@@ -690,6 +708,9 @@ class EcsFargateEdgeCaseIntegrationTest {
                 + ",\"startedBy\":\"edge-batch-7\"}", 200)
                 .jsonPath().getString("tasks[0].taskArn");
 
+        // The listings below are RUNNING by default, so wait for the launch to land first.
+        awaitStatus(tagged, "RUNNING");
+
         assertTrue(call("ListTasks", "{\"cluster\":\"" + CLUSTER + "\",\"family\":\"" + family
                 + "\",\"launchType\":\"FARGATE\"}", 200)
                 .jsonPath().getList("taskArns").contains(tagged));
@@ -713,6 +734,12 @@ class EcsFargateEdgeCaseIntegrationTest {
         String family = seed("edge-list-paging");
         call("RunTask", "{\"cluster\":\"" + CLUSTER + "\",\"taskDefinition\":\"" + family
                 + "\",\"count\":3,\"launchType\":\"FARGATE\"," + NETWORK + "}", 200);
+
+        // The listing is RUNNING by default, so wait until all three launches have landed
+        // before paging through it.
+        await().atMost(Duration.ofSeconds(10)).until(() -> call("ListTasks",
+                "{\"cluster\":\"" + CLUSTER + "\",\"family\":\"" + family + "\"}", 200)
+                .jsonPath().getList("taskArns").size() == 3);
 
         Response first = call("ListTasks", "{\"cluster\":\"" + CLUSTER + "\",\"family\":\"" + family
                 + "\",\"maxResults\":2}", 200);

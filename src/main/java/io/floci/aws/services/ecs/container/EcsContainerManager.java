@@ -648,10 +648,9 @@ public class EcsContainerManager {
             containersInDefinitionOrder.forEach(container -> container.setManagedAgents(agents));
         }
         task.setContainers(containersInDefinitionOrder);
-        task.setLastStatus(TaskStatus.RUNNING.name());
-        task.setDesiredStatus(TaskStatus.RUNNING.name());
-        task.setStartedAt(Instant.now());
-
+        // The task's own status is owned by EcsService: writing RUNNING here would overwrite
+        // a StopTask that arrived while the pull was running, so the service marks the task
+        // running once this call returns, after checking the stop had not arrived first.
         return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                 firelensVolumeName,
                 protectedNetwork == null ? null : protectedNetwork.eni().getNetworkInterfaceId(), region,

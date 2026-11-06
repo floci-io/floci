@@ -88,6 +88,8 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "volume-retry", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        await().atMost(Duration.ofSeconds(5)).until(() -> "RUNNING".equals(
+                service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus()));
 
         if (exitsNaturally) {
             service.reconcile();
@@ -128,8 +130,13 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         EcsTask task = service.runTask(null, "failed-volume-launch", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst();
-        assertEquals("STOPPED", task.getLastStatus());
-        assertEquals("Failed to start: launch failed", task.getStoppedReason());
+        // The answer is the task as it stood at launch time; the failed launch lands it STOPPED
+        // on the task launcher, so the stopped state is read back through DescribeTasks.
+        assertEquals("PENDING", task.getLastStatus());
+        await().atMost(Duration.ofSeconds(5)).until(() -> "STOPPED".equals(
+                service.describeTasks(null, List.of(task.getTaskArn()), REGION).getFirst().getLastStatus()));
+        EcsTask stopped = service.describeTasks(null, List.of(task.getTaskArn()), REGION).getFirst();
+        assertEquals("Failed to start: launch failed", stopped.getStoppedReason());
         assertTrue(partial.hasTaskVolumes());
         service.reconcile();
         assertFalse(partial.hasTaskVolumes());
@@ -176,7 +183,7 @@ class EcsServiceTeardownTest {
     }
 
     @Test
-    void startupTransitionWaitsForTheTaskLock() throws Exception {
+    void runTaskAnswersPendingWhileContainerStartupIsStillRunning() throws Exception {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -202,35 +209,28 @@ class EcsServiceTeardownTest {
         definition.setImage("nginx:alpine");
         service.registerTaskDefinition("locked-start", List.of(definition), null, null, null,
                 null, null, List.of(), REGION);
-        AtomicReference<Throwable> launchFailure = new AtomicReference<>();
-        Thread launch = new Thread(() -> {
-            try {
+        // RunTask used to block here until the containers started. It now answers with the
+        // task PENDING while the launch runs on the task launcher, so the caller is never
+        // held behind a slow pull.
+        CompletableFuture<List<EcsTask>> launch = CompletableFuture.supplyAsync(() ->
                 service.runTask(null, "locked-start", 1, LaunchType.FARGATE, null, null,
-                        List.of(), null, REGION);
-            } catch (Throwable failure) {
-                launchFailure.set(failure);
-            }
-        });
-        launch.start();
+                        List.of(), null, REGION));
         try {
             assertTrue(startEntered.await(5, TimeUnit.SECONDS));
-            synchronized (startingTask.get()) {
-                finishStart.countDown();
-                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                while (launch.getState() != Thread.State.BLOCKED) {
-                    assertTrue(launch.isAlive(), "startup finished without acquiring the task lock");
-                    assertTrue(System.nanoTime() < deadline, "startup did not wait for the task lock");
-                    Thread.onSpinWait();
-                }
-            }
-            launch.join(5000);
-            assertFalse(launch.isAlive());
-            assertNull(launchFailure.get());
-            assertEquals("RUNNING", startingTask.get().getLastStatus());
+            List<EcsTask> tasks = launch.get(5, TimeUnit.SECONDS);
+            assertEquals(1, tasks.size());
+            assertEquals("PENDING", tasks.getFirst().getLastStatus());
+            // The live task is PENDING too: nothing marks it running until its containers
+            // are actually up.
+            assertEquals("PENDING", service.describeTasks(null,
+                    List.of(tasks.getFirst().getTaskArn()), REGION).getFirst().getLastStatus());
         } finally {
             finishStart.countDown();
-            service.stopManagedContainers();
         }
+        await().atMost(Duration.ofSeconds(5)).until(() -> "RUNNING".equals(
+                service.describeTasks(null, List.of(startingTask.get().getTaskArn()), REGION)
+                        .getFirst().getLastStatus()));
+        service.stopManagedContainers();
     }
 
     @Test
@@ -276,13 +276,19 @@ class EcsServiceTeardownTest {
                         List.of(), null, REGION));
         try {
             assertTrue(startEntered.await(5, TimeUnit.SECONDS));
-            assertEquals("STOPPING", service.stopTask(null, taskArn.get(), null, REGION).getLastStatus());
+            // The stop is recorded against the still-launching task: desiredStatus STOPPED
+            // with lastStatus unchanged, for the launch to land once the handle arrives.
+            EcsTask stopped = service.stopTask(null, taskArn.get(), null, REGION);
+            assertEquals("PENDING", stopped.getLastStatus());
+            assertEquals("STOPPED", stopped.getDesiredStatus());
+            assertEquals("UserInitiated", stopped.getStopCode());
         } finally {
             finishStart.countDown();
         }
 
         launch.get(5, TimeUnit.SECONDS);
-        assertEquals("STOPPED", service.describeTasks(null, List.of(taskArn.get()), REGION).getFirst().getLastStatus());
+        await().atMost(Duration.ofSeconds(5)).until(() -> "STOPPED".equals(
+                service.describeTasks(null, List.of(taskArn.get()), REGION).getFirst().getLastStatus()));
         verify(containerManager).stopTaskAndCollectExitCodes(handle);
         service.stopManagedContainers();
     }
@@ -367,6 +373,8 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "retry-removal", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        await().atMost(Duration.ofSeconds(5)).until(() -> "RUNNING".equals(
+                service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus()));
 
         service.stopTask(null, taskArn, null, REGION);
         assertEquals("STOPPING", service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus());
@@ -410,6 +418,8 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "unknown-exit", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        await().atMost(Duration.ofSeconds(5)).until(() -> "RUNNING".equals(
+                service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus()));
 
         EcsTask stopped = service.stopTask(null, taskArn, null, REGION);
         assertEquals("STOPPED", stopped.getLastStatus());
@@ -449,6 +459,8 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "concurrent-stop", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        await().atMost(Duration.ofSeconds(5)).until(() -> "RUNNING".equals(
+                service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus()));
 
         CompletableFuture<EcsTask> first = CompletableFuture.supplyAsync(() ->
                 service.stopTask(null, taskArn, null, REGION));
@@ -516,6 +528,9 @@ class EcsServiceTeardownTest {
         // The reconciler must be stopped before handles are drained, or a tick could
         // restart the drained tasks between teardown and the final storage flush.
         assertTrue(service.isReconcilerShutdown());
+        // The launcher is drained by the same teardown, so no launch can land a handle
+        // after the handle loop ran.
+        assertTrue(service.isTaskLauncherShutdown());
 
         // Handles are claimed on the first pass; a second invocation must be a no-op.
         service.stopManagedContainers();
@@ -523,7 +538,7 @@ class EcsServiceTeardownTest {
     }
 
     @Test
-    void afterResetRestartsTheReconcilerThatAResetTeardownStopped() {
+    void afterResetRestartsTheReconcilerAndTaskLauncherThatAResetTeardownStopped() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(false); // docker mode
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -538,17 +553,21 @@ class EcsServiceTeardownTest {
 
         // A reset runs the teardown, then clear(), and afterReset() last, even when the wipe or
         // a clear() threw; shutdown runs only the teardown. afterReset() alone must bring the
-        // reconciler back.
+        // reconciler and the task launcher back.
         service.stopManagedContainers();
         assertTrue(service.isReconcilerShutdown());
+        assertTrue(service.isTaskLauncherShutdown());
 
         service.afterReset();
         assertFalse(service.isReconcilerShutdown());
+        assertFalse(service.isTaskLauncherShutdown());
         service.afterReset();
         assertFalse(service.isReconcilerShutdown());
+        assertFalse(service.isTaskLauncherShutdown());
 
         service.stopManagedContainers();
         assertTrue(service.isReconcilerShutdown());
+        assertTrue(service.isTaskLauncherShutdown());
     }
 
     @Test
@@ -586,6 +605,8 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "retry-fam", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        await().atMost(Duration.ofSeconds(5)).until(() -> "RUNNING".equals(
+                service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus()));
 
         service.stopTask(null, taskArn, null, REGION);
         verify(containerManager, times(1)).stopTaskAndCollectExitCodes(handle);
