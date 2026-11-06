@@ -735,7 +735,7 @@ public class CodePipelineService {
         String executionId = request.path("filter").path("pipelineExecutionId").asText(null);
         List<ActionExecution> actions = executions(account, region, pipelineName).stream()
                 .filter(e -> executionId == null || executionId.equals(e.getPipelineExecutionId()))
-                .flatMap(e -> e.getActionExecutions().stream())
+                .flatMap(e -> actionExecutionsSnapshot(e).stream())
                 .sorted(Comparator.comparing(ActionExecution::getStartTime,
                         Comparator.nullsLast(Comparator.reverseOrder())))
                 .toList();
@@ -840,14 +840,14 @@ public class CodePipelineService {
         CodePipelinePipeline pipeline = requirePipeline(account, region, pipelineName);
 
         CodePipelineExecution execution = executions(account, region, pipelineName).stream()
-                .filter(e -> e.getActionExecutions().stream()
+                .filter(e -> actionExecutionsSnapshot(e).stream()
                         .anyMatch(a -> stageName.equals(a.getStageName())
                                 && actionName.equals(a.getActionName())
                                 && token.equals(a.getToken())))
                 .findFirst()
                 .orElse(null);
 
-        ActionExecution approval = execution == null ? null : execution.getActionExecutions().stream()
+        ActionExecution approval = execution == null ? null : actionExecutionsSnapshot(execution).stream()
                 .filter(a -> stageName.equals(a.getStageName()) && actionName.equals(a.getActionName()))
                 .filter(a -> token.equals(a.getToken()))
                 .findFirst()
@@ -2588,7 +2588,7 @@ public class CodePipelineService {
         if (!execution.isStopRequested()) {
             return false;
         }
-        boolean anyRunning = execution.getActionExecutions().stream()
+        boolean anyRunning = actionExecutionsSnapshot(execution).stream()
                 .anyMatch(a -> "InProgress".equals(a.getStatus()));
         if (!execution.isAbandon() && anyRunning) {
             return false;
@@ -2770,6 +2770,12 @@ public class CodePipelineService {
         throw new AwsException("StageNotFoundException", "Stage not found: " + stageName, 400);
     }
 
+    private List<ActionExecution> actionExecutionsSnapshot(CodePipelineExecution execution) {
+        synchronized (execution) {
+            return List.copyOf(execution.getActionExecutions());
+        }
+    }
+
     private Map<String, String> latestActionStatuses(CodePipelineExecution execution, String stageName) {
         Map<String, String> statuses = new LinkedHashMap<>();
         synchronized (execution) {
@@ -2896,14 +2902,14 @@ public class CodePipelineService {
 
     private String pipelineExecutionId(ActionExecution action) {
         return executionStore.scanAllAccounts().stream()
-                .filter(e -> e.getActionExecutions().stream()
+                .filter(e -> actionExecutionsSnapshot(e).stream()
                         .anyMatch(a -> action.getActionExecutionId().equals(a.getActionExecutionId())))
                 .map(CodePipelineExecution::getPipelineExecutionId)
                 .findFirst().orElse("");
     }
 
     private List<ActionExecution> actionExecutionsForStage(CodePipelineExecution execution, String stage) {
-        return execution.getActionExecutions().stream()
+        return actionExecutionsSnapshot(execution).stream()
                 .filter(a -> stage.equals(a.getStageName()))
                 .toList();
     }
