@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsQueryServiceResolver;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SigV4CredentialScope;
@@ -206,6 +207,7 @@ public class ResourceArnBuilder {
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
+            case "ec2"            -> buildEc2InstanceTagArns(operation, ctx, region, accountId, partition);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
             case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
@@ -219,6 +221,28 @@ public class ResourceArnBuilder {
             case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
+    }
+
+    /** Keeps every tagging target in handler order, including resources not yet modelled as ARNs. */
+    private List<String> buildEc2InstanceTagArns(String operation, ContainerRequestContext ctx,
+                                                String region, String accountId, String partition) {
+        if (!"ec2:CreateTags".equals(operation) && !"ec2:DeleteTags".equals(operation)) {
+            return namedResources("ec2", operation, ctx, region, accountId, partition);
+        }
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        List<String> resources = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String id = form.get("ResourceId." + i);
+            if (id == null) {
+                break;
+            }
+            // Match the handler's contiguous list and first duplicate value. Other resource
+            // types keep their wildcard check, rather than disappearing behind an instance.
+            resources.add(id.startsWith("i-")
+                    ? new AwsArnUtils.Arn(partition, "ec2", region, accountId, "instance/" + id).toString()
+                    : "*");
+        }
+        return resources.isEmpty() ? List.of("*") : resources;
     }
 
     /**
@@ -555,6 +579,12 @@ public class ResourceArnBuilder {
         // resource has and leave a deny on the real one unmatched.
         Optional<StoredEntity> stored = storedIamEntity(resourceType, name, accountId);
         if (stored.isEmpty()) {
+            // GetRole probes a name before creation. It has no Path parameter, so only the
+            // root-path ARN can be named when no stored role supplies the authoritative path.
+            if ("GetRole".equals(action)) {
+                return List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                        "role/" + name).toString());
+            }
             return List.of("*");
         }
         String storedArn = stored.get().arn();
