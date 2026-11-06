@@ -547,6 +547,39 @@ class SnsCfnProvisionerTest {
     }
 
     @Test
+    void firehoseSubscriptionForwardsTheResolvedRoleArn() {
+        String roleArn = "arn:aws:iam::000000000000:role/sns-firehose";
+        JsonNode properties = props("""
+                {"TopicArn":"t","Protocol":"firehose","Endpoint":"e",
+                 "SubscriptionRoleArn":{"Fn::GetAtt":["Role","Arn"]}}
+                """);
+        when(engine.resolve(properties.path("SubscriptionRoleArn"))).thenReturn(roleArn);
+        when(sns.subscribe(eq("t"), eq("firehose"), eq("e"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub"));
+        StackResource resource = new StackResource();
+        resource.setResourceType("AWS::SNS::Subscription");
+        resource.setAttributes(new HashMap<>());
+
+        provisioner.provision(resource, properties, ctx);
+
+        verify(sns).subscribe("t", "firehose", "e", REGION, Map.of("SubscriptionRoleArn", roleArn));
+        assertEquals("arn:sub", resource.getPhysicalId());
+        assertEquals("arn:sub", resource.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void nullSubscriptionRoleArnIsNotForwarded() {
+        when(sns.subscribe(eq("t"), eq("sqs"), eq("e"), eq(REGION), anyMap()))
+                .thenReturn(subscription("arn:sub"));
+
+        provision("AWS::SNS::Subscription", """
+                {"TopicArn":"t","Protocol":"sqs","Endpoint":"e","SubscriptionRoleArn":null}
+                """);
+
+        verify(sns).subscribe("t", "sqs", "e", REGION, Map.of());
+    }
+
+    @Test
     void subscriptionRefIsTheSubscriptionArn() {
         when(sns.subscribe(eq(TOPIC_ARN), eq("sqs"), eq("arn:queue"), eq(REGION), anyMap()))
                 .thenReturn(subscription("arn:sub"));

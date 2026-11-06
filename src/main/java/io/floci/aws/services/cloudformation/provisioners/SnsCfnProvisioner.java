@@ -198,11 +198,18 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         if (props.has("RawMessageDelivery")) {
             attributes.put("RawMessageDelivery", ctx.engine().resolve(props.path("RawMessageDelivery")));
         }
+        if (props.hasNonNull("SubscriptionRoleArn")) {
+            attributes.put("SubscriptionRoleArn", ctx.engine().resolve(props.path("SubscriptionRoleArn")));
+        }
         if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
             attributes.put("RedrivePolicy", ctx.engine().resolveJsonAttribute(props.path("RedrivePolicy")));
         }
 
         Subscription sub = snsService.subscribe(topicArn, protocol, endpoint, ctx.region(), attributes);
+        if (ctx.isUpdate() && attributes.containsKey("SubscriptionRoleArn")) {
+            snsService.setSubscriptionAttribute(sub.getSubscriptionArn(), "SubscriptionRoleArn",
+                    attributes.get("SubscriptionRoleArn"), ctx.region());
+        }
         r.setPhysicalId(sub.getSubscriptionArn());
         r.getAttributes().put("Arn", sub.getSubscriptionArn());
     }
