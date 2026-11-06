@@ -24,6 +24,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -68,7 +69,7 @@ public class CloudFrontKeyValueStoreController {
             body.put("Created", epochSeconds(kvs.getCreated()));
             body.put("LastModified", epochSeconds(kvs.getLastModifiedTime()));
             body.put("Status", kvs.getStatus());
-            return Response.ok(body).header(ETAG, kvs.getEtag()).build();
+            return Response.ok(body).header(ETAG, kvs.getDataEtag()).build();
         });
     }
 
@@ -97,10 +98,20 @@ public class CloudFrontKeyValueStoreController {
                                @HeaderParam("If-Match") String ifMatch,
                                String requestBody) {
         return handle(() -> {
+            if (requestBody != null && requestBody.getBytes(StandardCharsets.UTF_8).length
+                    > CloudFrontKeyValueStoreService.MAX_UPDATE_PAYLOAD_BYTES) {
+                throw new AwsException("ValidationException", "The request payload is too large.", 400);
+            }
             JsonNode request = readBody(requestBody);
+            if (request.path("Puts").size() + request.path("Deletes").size()
+                    > CloudFrontKeyValueStoreService.MAX_KEY_UPDATES) {
+                throw new AwsException("ValidationException",
+                        "At most " + CloudFrontKeyValueStoreService.MAX_KEY_UPDATES
+                                + " keys can be updated in one request.", 400);
+            }
             Map<String, String> puts = new LinkedHashMap<>();
             for (JsonNode put : request.path("Puts")) {
-                puts.put(requiredText(put, KEY), put.path(VALUE).asText(""));
+                puts.put(requiredText(put, KEY), requiredText(put, VALUE));
             }
             List<String> deletes = new ArrayList<>();
             for (JsonNode delete : request.path("Deletes")) {
@@ -114,11 +125,11 @@ public class CloudFrontKeyValueStoreController {
     @Path("/{kvsArn}/keys/{key}")
     public Response getKey(@PathParam("kvsArn") String kvsArn, @PathParam("key") String key) {
         return handle(() -> {
-            Map.Entry<String, String> entry = service.getKey(kvsArn, key);
-            KeyValueStore kvs = service.describeByArn(kvsArn);
+            CloudFrontKeyValueStoreService.KeyLookup lookup = service.getKey(kvsArn, key);
+            KeyValueStore kvs = lookup.store();
             ObjectNode body = objectMapper.createObjectNode();
-            body.put(KEY, entry.getKey());
-            body.put(VALUE, entry.getValue());
+            body.put(KEY, lookup.key());
+            body.put(VALUE, lookup.value());
             body.put(ITEM_COUNT, CloudFrontKeyValueStoreService.itemCount(kvs));
             body.put(TOTAL_SIZE_IN_BYTES, CloudFrontKeyValueStoreService.totalSizeInBytes(kvs));
             return Response.ok(body).build();
@@ -152,7 +163,7 @@ public class CloudFrontKeyValueStoreController {
         ObjectNode body = objectMapper.createObjectNode();
         body.put(ITEM_COUNT, CloudFrontKeyValueStoreService.itemCount(kvs));
         body.put(TOTAL_SIZE_IN_BYTES, CloudFrontKeyValueStoreService.totalSizeInBytes(kvs));
-        return Response.ok(body).header(ETAG, kvs.getEtag()).build();
+        return Response.ok(body).header(ETAG, kvs.getDataEtag()).build();
     }
 
     private JsonNode readBody(String requestBody) {
