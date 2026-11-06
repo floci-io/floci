@@ -2358,7 +2358,8 @@ class CognitoServiceTest {
         when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
                 .thenReturn("123456");
         doThrow(new RuntimeException("SES unavailable")).when(messageDispatcher)
-                .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any(), any());
+                .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any(), any(),
+                        any());
 
         CognitoService serviceWithVerification = new CognitoService(
                 new InMemoryStorage<>(),

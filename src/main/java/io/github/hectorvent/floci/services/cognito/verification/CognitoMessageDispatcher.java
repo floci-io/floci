@@ -27,6 +27,11 @@ import java.util.regex.Pattern;
  * mediums. Renders the {@code {####}} placeholder; appends a failsafe line if
  * the template lacks the placeholder.
  *
+ * Sign-up and resend emails use {@code EmailMessageByLink} and {@code EmailSubjectByLink}
+ * when the pool's {@code DefaultEmailOption} is {@code CONFIRM_WITH_LINK}, and the
+ * {@code {##link text##}} placeholder becomes a confirmation link. Password reset,
+ * attribute verification and sign-in codes stay on the code template.
+ *
  * The caller may supply the response of a CustomMessage Lambda trigger invocation,
  * whose {@code emailSubject}/{@code emailMessage}/{@code smsMessage} take precedence
  * over the pool's own template.
@@ -44,6 +49,9 @@ public final class CognitoMessageDispatcher {
     // user pool configures no VerificationMessageTemplate).
     private static final String DEFAULT_EMAIL_SUBJECT = "Your verification code";
     private static final String DEFAULT_EMAIL_BODY = "Your verification code is {####}.";
+    private static final String DEFAULT_LINK_EMAIL_SUBJECT = "Your verification link";
+    private static final String DEFAULT_LINK_EMAIL_BODY =
+            "Please click the link below to verify your email address. {##Verify Email##}";
     private static final String DEFAULT_SMS_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_FROM = "no-reply@verificationemail.com";
     private static final Sender DEFAULT_SENDER = new Sender(DEFAULT_FROM, DEFAULT_FROM);
@@ -52,6 +60,11 @@ public final class CognitoMessageDispatcher {
     private static final String CODE_PLACEHOLDER = "{####}";
     private static final String USERNAME_PLACEHOLDER = "{username}";
     private static final Pattern INVITE_PLACEHOLDERS = Pattern.compile("\\{username}|\\{####}");
+    /**
+     * {@code {##link text##}}, the placeholder Cognito replaces with a confirmation link.
+     * The text is non-empty, so the code placeholder {@code {####}} is not a link.
+     */
+    private static final Pattern LINK_PLACEHOLDER = Pattern.compile("\\{##([^#]+)##}");
     // AdminCreateUser invitation defaults, used when neither a CustomMessage trigger nor the pool's
     // AdminCreateUserConfig.InviteMessageTemplate supplies the text.
     private static final String DEFAULT_INVITE_SUBJECT = "Your temporary password";
@@ -84,6 +97,19 @@ public final class CognitoMessageDispatcher {
     public void dispatch(UserPool pool, CognitoUser user, VerificationCode.Purpose purpose,
                          String code, List<String> deliveryMediums,
                          Map<String, Object> customMessageResponse) {
+        dispatch(pool, user, purpose, code, deliveryMediums, customMessageResponse, null);
+    }
+
+    /**
+     * Same as {@link #dispatch(UserPool, CognitoUser, VerificationCode.Purpose, String, List, Map)},
+     * with the sign-up confirmation link {@code SignUp} and {@code ResendConfirmationCode} build.
+     * The link is used only for an email whose pool {@code DefaultEmailOption} is
+     * {@code CONFIRM_WITH_LINK}. Every other message, including password reset and attribute
+     * verification on that same pool, keeps the code template.
+     */
+    public void dispatch(UserPool pool, CognitoUser user, VerificationCode.Purpose purpose,
+                         String code, List<String> deliveryMediums,
+                         Map<String, Object> customMessageResponse, String confirmationLink) {
 
         Map<String, Object> template = pool.getVerificationMessageTemplate();
         if (template == null) template = Map.of();
@@ -100,11 +126,19 @@ public final class CognitoMessageDispatcher {
                 Map<String, Object> emailTemplate = purpose == VerificationCode.Purpose.EMAIL_MFA
                         || (purpose == VerificationCode.Purpose.EMAIL_OTP && pool.getEmailMfaConfiguration() != null)
                         ? emailMfaTemplate(pool) : template;
+                boolean linkEmail = confirmWithLink(emailTemplate, purpose, confirmationLink);
                 String subject = stringOrNull(customMessageResponse, "emailSubject");
-                if (subject == null) subject = stringOr(emailTemplate.get("EmailSubject"), DEFAULT_EMAIL_SUBJECT);
+                if (subject == null) {
+                    subject = stringOr(emailTemplate.get(linkEmail ? "EmailSubjectByLink" : "EmailSubject"),
+                            linkEmail ? DEFAULT_LINK_EMAIL_SUBJECT : DEFAULT_EMAIL_SUBJECT);
+                }
                 String rawBody = stringOrNull(customMessageResponse, "emailMessage");
-                if (rawBody == null) rawBody = stringOr(emailTemplate.get(emailTemplateKey()), DEFAULT_EMAIL_BODY);
-                sendEmail(pool, region, email, subject, renderTemplate(rawBody, code));
+                if (rawBody == null) {
+                    rawBody = stringOr(emailTemplate.get(linkEmail ? "EmailMessageByLink" : "EmailMessage"),
+                            linkEmail ? DEFAULT_LINK_EMAIL_BODY : DEFAULT_EMAIL_BODY);
+                }
+                RenderedEmail rendered = renderEmail(rawBody, code, linkEmail, confirmationLink);
+                sendEmail(pool, region, email, subject, rendered.text(), rendered.html());
             } else if ("SMS".equalsIgnoreCase(medium) && phone != null) {
                 String rawBody = stringOrNull(customMessageResponse, "smsMessage");
                 if (rawBody == null) rawBody = stringOr(resolveSmsTemplate(pool, template, purpose), DEFAULT_SMS_BODY);
@@ -190,6 +224,11 @@ public final class CognitoMessageDispatcher {
     }
 
     private void sendEmail(UserPool pool, String region, String email, String subject, String body) {
+        sendEmail(pool, region, email, subject, body, null);
+    }
+
+    private void sendEmail(UserPool pool, String region, String email, String subject, String body,
+                           String bodyHtml) {
         Sender sender = sender(pool, region);
         ses.sendServiceEmail(SendEmailRequest.builder()
             .source(sender.from())
@@ -198,7 +237,7 @@ public final class CognitoMessageDispatcher {
             .returnPath(sender.from().equals(sender.address()) ? null : sender.address())
             .toAddresses(List.of(email))
             .region(region)
-            .content(new EmailContent.Simple(subject, body, null, List.of()))
+            .content(new EmailContent.Simple(subject, body, bodyHtml, List.of()))
             .build());
     }
 
@@ -365,13 +404,80 @@ public final class CognitoMessageDispatcher {
     }
 
     /**
-     * Email template key. Returns the code-based {@code EmailMessage} ({@code {####}}).
-     * TODO: honor the pool's {@code DefaultEmailOption}: when set to {@code CONFIRM_WITH_LINK},
-     * AWS uses {@code EmailMessageByLink}/{@code EmailSubjectByLink} ({@code {##Verify Email##}})
-     * instead of the code template. Code-only is sufficient for the current foundation scope.
+     * Sign-up and resend confirmation emails use the link template only when the pool asks for
+     * one and the caller supplied the link. SMS, and every other email purpose, stay on the code.
      */
-    private String emailTemplateKey() {
-        return "EmailMessage";
+    private static boolean confirmWithLink(Map<String, Object> template, VerificationCode.Purpose purpose,
+                                           String confirmationLink) {
+        if (confirmationLink == null || purpose != VerificationCode.Purpose.SIGNUP_CONFIRMATION) {
+            return false;
+        }
+        Object option = template.get("DefaultEmailOption");
+        return option != null && "CONFIRM_WITH_LINK".equals(option.toString());
+    }
+
+    /**
+     * A code email is text, with {@code {####}} filled in. A link email is text plus HTML: the
+     * {@code {##link text##}} placeholder becomes the confirmation URL in the text part and an
+     * anchor in the HTML part. A link template with neither placeholder gets the URL appended,
+     * the same failsafe the code template applies to a missing {@code {####}}. A custom message
+     * that supplies {@code {####}} and no link placeholder is delivered as a code, which is the
+     * message the trigger wrote.
+     */
+    private static RenderedEmail renderEmail(String template, String code, boolean link, String confirmationLink) {
+        if (!link) {
+            return new RenderedEmail(renderTemplate(template, code), null);
+        }
+        if (LINK_PLACEHOLDER.matcher(template).find()) {
+            String text = replaceCode(replaceLink(template, confirmationLink, false), code);
+            String html = replaceCode(replaceLink(template, confirmationLink, true), code);
+            return new RenderedEmail(text, html);
+        }
+        if (template.contains(CODE_PLACEHOLDER)) {
+            return new RenderedEmail(template.replace(CODE_PLACEHOLDER, code), null);
+        }
+        return new RenderedEmail(template + "\n" + confirmationLink,
+                template + "<br><a href=\"" + htmlEscape(confirmationLink) + "\">Verify Email</a>");
+    }
+
+    private static String replaceLink(String template, String url, boolean html) {
+        Matcher matcher = LINK_PLACEHOLDER.matcher(template);
+        StringBuilder rendered = new StringBuilder();
+        while (matcher.find()) {
+            String replacement = html
+                    ? "<a href=\"" + htmlEscape(url) + "\">" + htmlEscape(matcher.group(1)) + "</a>"
+                    : url;
+            matcher.appendReplacement(rendered, Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(rendered);
+        return rendered.toString();
+    }
+
+    private static String replaceCode(String template, String code) {
+        if (!template.contains(CODE_PLACEHOLDER)) {
+            return template;
+        }
+        return template.replace(CODE_PLACEHOLDER, code);
+    }
+
+    private static String htmlEscape(String value) {
+        StringBuilder escaped = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '&' -> escaped.append("&amp;");
+                case '<' -> escaped.append("&lt;");
+                case '>' -> escaped.append("&gt;");
+                case '"' -> escaped.append("&quot;");
+                case '\'' -> escaped.append("&#39;");
+                default -> escaped.append(c);
+            }
+        }
+        return escaped.toString();
+    }
+
+    /** The text part of an email, and the HTML part when the message is a confirmation link. */
+    private record RenderedEmail(String text, String html) {
     }
 
     /**
@@ -417,7 +523,7 @@ public final class CognitoMessageDispatcher {
         return s.isEmpty() ? null : s;
     }
 
-    private String renderTemplate(String template, String code) {
+    private static String renderTemplate(String template, String code) {
         if (template.contains(CODE_PLACEHOLDER)) {
             return template.replace(CODE_PLACEHOLDER, code);
         }
