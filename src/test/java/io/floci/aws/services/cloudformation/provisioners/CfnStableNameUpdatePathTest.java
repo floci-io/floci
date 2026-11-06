@@ -262,9 +262,9 @@ class CfnStableNameUpdatePathTest {
     @Test
     void microvmImageUpdateGoesThroughUpdateImageInsteadOfRecreatingIt() {
         LambdaMicrovmsService microvms = mock(LambdaMicrovmsService.class);
-        when(microvms.createImage(anyString(), anyString(), anyString(), any(), any(), any(), any()))
+        when(microvms.createImage(anyString(), anyString(), anyString(), any(), any(), any(), any(), any()))
                 .thenAnswer(inv -> microvmImage(inv.getArgument(2)));
-        when(microvms.updateImage(anyString(), anyString(), any(), any(), any(), any()))
+        when(microvms.updateImage(anyString(), anyString(), any(), any(), any(), any(), any()))
                 .thenAnswer(inv -> microvmImage(inv.getArgument(1)));
         LambdaMicrovmsCfnProvisioner provisioner = new LambdaMicrovmsCfnProvisioner(microvms);
         JsonNode props = mapper.createObjectNode()
@@ -286,8 +286,8 @@ class CfnStableNameUpdatePathTest {
         assertEquals(generatedName, updated.getAttributes().get("Name"), "the generated name must stay stable");
         // createImage on an existing image silently mints a new version rather than rejecting, so
         // here the assertion is that the update went to the schema's update handler instead.
-        verify(microvms, times(1)).createImage(anyString(), anyString(), eq(generatedName), any(), any(), any(), any());
-        verify(microvms).updateImage(eq("us-east-1"), eq(generatedName), any(), any(), any(), any());
+        verify(microvms, times(1)).createImage(anyString(), anyString(), eq(generatedName), any(), any(), any(), any(), any());
+        verify(microvms).updateImage(eq("us-east-1"), eq(generatedName), any(), any(), any(), any(), any());
     }
 
     private static LambdaMicrovmsService.MicrovmImage microvmImage(String name) {

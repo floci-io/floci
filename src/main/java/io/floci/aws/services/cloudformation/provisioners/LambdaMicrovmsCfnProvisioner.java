@@ -158,9 +158,9 @@ public class LambdaMicrovmsCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         LambdaMicrovmsService.MicrovmImage image = reused
                 ? microvmsService.updateImage(ctx.region(), name, baseImageArn, buildRoleArn,
-                        codeArtifactUri, description)
+                        codeArtifactUri, description, null)
                 : microvmsService.createImage(ctx.region(), ctx.accountId(), name, baseImageArn,
-                        buildRoleArn, codeArtifactUri, description);
+                        buildRoleArn, codeArtifactUri, description, null);
         settle(r, ctx, attributesBefore, reused, image.imageArn);
         r.getAttributes().put("ImageArn", image.imageArn);
         r.getAttributes().put("Arn", image.imageArn);

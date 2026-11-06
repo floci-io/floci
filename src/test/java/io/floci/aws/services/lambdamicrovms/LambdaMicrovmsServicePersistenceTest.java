@@ -55,7 +55,7 @@ class LambdaMicrovmsServicePersistenceTest {
     private LambdaMicrovmsService.MicrovmImage createImage(LambdaMicrovmsService service, String name) {
         return service.createImage(REGION, ACCOUNT_ID, name,
                 "arn:aws:lambda:us-east-1::microvm-image/al2023-1", "arn:aws:iam::000000000000:role/build",
-                "s3://bucket/artifact.zip", "an image");
+                "s3://bucket/artifact.zip", "an image", null);
     }
 
     @Test
@@ -79,7 +79,7 @@ class LambdaMicrovmsServicePersistenceTest {
         LambdaMicrovmsService first = process();
         createImage(first, "probe-image");
         first.updateImage(REGION, "probe-image", "arn:aws:lambda:us-east-1::microvm-image/al2023-1",
-                "arn:aws:iam::000000000000:role/other", "s3://bucket/next.zip", "updated");
+                "arn:aws:iam::000000000000:role/other", "s3://bucket/next.zip", "updated", null);
 
         LambdaMicrovmsService.MicrovmImage image = process().getImage(REGION, "probe-image");
         assertEquals("UPDATED", image.state);
@@ -143,7 +143,7 @@ class LambdaMicrovmsServicePersistenceTest {
         createImage(service, "probe-image");
         service.createImage("eu-west-1", ACCOUNT_ID, "other-image",
                 "arn:aws:lambda:eu-west-1::microvm-image/al2023-1",
-                "arn:aws:iam::000000000000:role/build", "s3://bucket/artifact.zip", null);
+                "arn:aws:iam::000000000000:role/build", "s3://bucket/artifact.zip", null, null);
 
         LambdaMicrovmsService reloaded = process();
         assertEquals(List.of("probe-image"),

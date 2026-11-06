@@ -144,7 +144,8 @@ public class LambdaMicrovmsService implements ResourceProvider {
 
     public MicrovmImage createImage(String region, String accountId, String name,
                                     String baseImageArn, String buildRoleArn,
-                                    String codeArtifactUri, String description) {
+                                    String codeArtifactUri, String description,
+                                    String baseImageVersion) {
         if (name == null || !NAME_PATTERN.matcher(name).matches()) {
             throw new AwsException("ValidationException",
                     "name must match [a-zA-Z0-9-_]{1,64}", 400);
@@ -167,7 +168,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
         image.state = "CREATING";
         image.description = description;
         image.baseImageArn = baseImageArn;
-        image.baseImageVersion = "1.0";
+        image.baseImageVersion = baseImageVersion != null ? baseImageVersion : "1.0";
         image.buildRoleArn = buildRoleArn;
         image.codeArtifactUri = codeArtifactUri;
         image.createdAt = Instant.now();
@@ -234,7 +235,8 @@ public class LambdaMicrovmsService implements ResourceProvider {
     }
 
     public MicrovmImage updateImage(String region, String name, String baseImageArn,
-                                    String buildRoleArn, String codeArtifactUri, String description) {
+                                    String buildRoleArn, String codeArtifactUri, String description,
+                                    String baseImageVersion) {
         MicrovmImage image = getImage(region, name);
         if (baseImageArn == null || buildRoleArn == null || codeArtifactUri == null) {
             // Recorded live: the PUT is a full replace, not a patch.
@@ -242,6 +244,7 @@ public class LambdaMicrovmsService implements ResourceProvider {
                     "validation errors detected: baseImageArn, buildRoleArn and codeArtifact must not be null", 400);
         }
         image.baseImageArn = baseImageArn;
+        image.baseImageVersion = baseImageVersion != null ? baseImageVersion : "1.0";
         image.buildRoleArn = buildRoleArn;
         image.codeArtifactUri = codeArtifactUri;
         image.description = description;

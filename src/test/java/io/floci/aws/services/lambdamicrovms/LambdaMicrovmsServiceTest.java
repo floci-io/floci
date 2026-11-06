@@ -92,6 +92,44 @@ class LambdaMicrovmsServiceTest {
     }
 
     @Test
+    void createImageStoresTheRequestedBaseImageVersionAndDefaultsToOnePointZero() {
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
+        LambdaMicrovmsService service = new LambdaMicrovmsService(regionResolver, mock(StorageFactory.class));
+
+        LambdaMicrovmsService.MicrovmImage pinned = service.createImage(REGION, ACCOUNT_ID, "pinned",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                "arn:aws:iam::000000000000:role/build", "s3://bucket/artifact.zip", "an image", "1");
+        assertEquals("1", pinned.baseImageVersion);
+
+        LambdaMicrovmsService.MicrovmImage unpinned = service.createImage(REGION, ACCOUNT_ID, "unpinned",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                "arn:aws:iam::000000000000:role/build", "s3://bucket/artifact.zip", "an image", null);
+        assertEquals("1.0", unpinned.baseImageVersion);
+    }
+
+    @Test
+    void updateImageStoresTheRequestedBaseImageVersionAndResetsWhenOmitted() {
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
+        LambdaMicrovmsService service = new LambdaMicrovmsService(regionResolver, mock(StorageFactory.class));
+        service.createImage(REGION, ACCOUNT_ID, "img",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                "arn:aws:iam::000000000000:role/build", "s3://bucket/artifact.zip", "an image", null);
+        assertEquals("1.0", service.getImage(REGION, "img").baseImageVersion);
+
+        LambdaMicrovmsService.MicrovmImage updated = service.updateImage(REGION, "img",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                "arn:aws:iam::000000000000:role/build", "s3://bucket/artifact.zip", "an image", "9");
+        assertEquals("9", updated.baseImageVersion);
+
+        LambdaMicrovmsService.MicrovmImage reset = service.updateImage(REGION, "img",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                "arn:aws:iam::000000000000:role/build", "s3://bucket/artifact.zip", "an image", null);
+        assertEquals("1.0", reset.baseImageVersion);
+    }
+
+    @Test
     void aVersionQualifiedConnectorIsNotATagTarget() {
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);

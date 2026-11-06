@@ -122,16 +122,16 @@ class LambdaMicrovmsCfnProvisionerTest {
     }
 
     private void stubImageCreateAndUpdate() {
-        when(service.createImage(anyString(), anyString(), anyString(), any(), any(), any(), any()))
+        when(service.createImage(anyString(), anyString(), anyString(), any(), any(), any(), any(), any()))
                 .thenAnswer(inv -> image(inv.getArgument(2), "1.0"));
-        when(service.updateImage(anyString(), anyString(), any(), any(), any(), any()))
+        when(service.updateImage(anyString(), anyString(), any(), any(), any(), any(), any()))
                 .thenAnswer(inv -> image(inv.getArgument(1), "2.0"));
     }
 
     @Test
     void imageRefIsTheImageArnAndTheGetAttAttributesAreSet() {
         when(service.createImage(eq(REGION), eq("000000000000"), eq("img"), eq(BASE_IMAGE),
-                eq(BUILD_ROLE), eq(CODE_URI), eq("an image"))).thenReturn(image("img", "1.0"));
+                eq(BUILD_ROLE), eq(CODE_URI), eq("an image"), any())).thenReturn(image("img", "1.0"));
         StackResource r = resource(IMAGE_TYPE);
 
         provisioner.provision(r, imageProps("img"), ctx(null));
@@ -157,8 +157,8 @@ class LambdaMicrovmsCfnProvisionerTest {
         assertEquals(imageArn(generatedName), updated.getPhysicalId());
         assertEquals("2.0", updated.getAttributes().get("LatestActiveImageVersion"));
         assertFalse(provisioner.hasReplacementUpdate(updated));
-        verify(service, times(1)).createImage(anyString(), anyString(), anyString(), any(), any(), any(), any());
-        verify(service).updateImage(REGION, generatedName, BASE_IMAGE, BUILD_ROLE, CODE_URI, "an image");
+        verify(service, times(1)).createImage(anyString(), anyString(), anyString(), any(), any(), any(), any(), any());
+        verify(service).updateImage(REGION, generatedName, BASE_IMAGE, BUILD_ROLE, CODE_URI, "an image", null);
     }
 
     @Test
@@ -171,7 +171,7 @@ class LambdaMicrovmsCfnProvisionerTest {
         provisioner.provision(updated, imageProps("renamed"), ctx(created.getPhysicalId()));
 
         assertEquals(imageArn("renamed"), updated.getPhysicalId());
-        verify(service, never()).updateImage(anyString(), anyString(), any(), any(), any(), any());
+        verify(service, never()).updateImage(anyString(), anyString(), any(), any(), any(), any(), any());
         assertTrue(provisioner.hasReplacementUpdate(updated));
         assertEquals(imageArn("old-name"), provisioner.updateCleanupPhysicalId(updated));
 
@@ -192,8 +192,8 @@ class LambdaMicrovmsCfnProvisionerTest {
 
         assertEquals(imageArn("img"), updated.getPhysicalId());
         assertFalse(provisioner.hasReplacementUpdate(updated), "the reused image must not be marked displaced");
-        verify(service).updateImage(REGION, "img", BASE_IMAGE, BUILD_ROLE, CODE_URI, "an image");
-        verify(service, never()).createImage(anyString(), anyString(), anyString(), any(), any(), any(), any());
+        verify(service).updateImage(REGION, "img", BASE_IMAGE, BUILD_ROLE, CODE_URI, "an image", null);
+        verify(service, never()).createImage(anyString(), anyString(), anyString(), any(), any(), any(), any(), any());
     }
 
     @Test

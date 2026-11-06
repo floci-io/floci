@@ -97,7 +97,8 @@ public class LambdaMicrovmsController {
                 text(request, "baseImageArn"),
                 text(request, "buildRoleArn"),
                 codeArtifact.isMissingNode() ? null : text(codeArtifact, "uri"),
-                text(request, "description"));
+                text(request, "description"),
+                text(request, "baseImageVersion"));
         return Response.status(201).entity(imageNode(image, ImageShape.CREATE)).build();
     }
 
@@ -135,7 +136,7 @@ public class LambdaMicrovmsController {
         MicrovmImage image = service.updateImage(region, imageIdentifier,
                 text(request, "baseImageArn"), text(request, "buildRoleArn"),
                 updArtifact.isMissingNode() ? null : text(updArtifact, "uri"),
-                text(request, "description"));
+                text(request, "description"), text(request, "baseImageVersion"));
         return Response.ok(imageNode(image, ImageShape.UPDATE, activeBefore)).build();
     }
 
