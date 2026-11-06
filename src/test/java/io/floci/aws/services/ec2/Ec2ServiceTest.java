@@ -271,6 +271,23 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void runInstancesWithoutGroupsGetsItsSubnetVpcsDefaultGroup() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        Subnet subnet = service.createSubnet(region, vpcId, "10.94.1.0/24", region + "a");
+
+        Instance instance = service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
+                List.of(), subnet.getSubnetId(), null, List.of(), null, null).getInstances().getFirst();
+
+        List<String> expected = List.of(service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
+        assertEquals(vpcId, instance.getVpcId());
+        assertEquals(expected, instance.getSecurityGroups().stream().map(GroupIdentifier::getGroupId).toList());
+        assertEquals(expected, instance.getNetworkInterfaces().getFirst().getGroups().stream()
+                .map(GroupIdentifier::getGroupId).toList());
+    }
+
+    @Test
     void defaultSecurityGroupOfIsEmptyOnceTheDefaultGroupIsGone() {
         Ec2Service service = mockModeService();
         String region = "us-east-1";
