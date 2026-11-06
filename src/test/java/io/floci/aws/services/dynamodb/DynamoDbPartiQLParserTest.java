@@ -373,6 +373,37 @@ class DynamoDbPartiQLParserTest {
         assertEquals("Statement wasn't well formed, can't be processed: " + message, e.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SELECT m.inner FROM "t"
+            SELECT pk, l[0].VALUE FROM "t"
+            SELECT pk FROM "t" WHERE m.a.size.b = 1
+            SELECT pk FROM "t" WHERE attribute_exists(m.key)
+            SELECT pk FROM "t" WHERE m.'a' = 1
+            SELECT pk FROM "t" WHERE m.? = 1
+            SELECT pk FROM "t" WHERE m.true = 1
+            SELECT pk FROM "t" WHERE m.
+            SELECT pk FROM "t" WHERE m.inner = <<>>
+            SELECT pk FROM "t" WHERE m.inner = 1 AND n =
+            SELECT pk FROM "t".inner
+            UPDATE "t" SET m.select = 1 WHERE pk = 1
+            UPDATE "t" SET a = m.null WHERE pk = 1
+            UPDATE "t" REMOVE m.from WHERE pk = 1
+            DELETE FROM "t".inner WHERE pk = 1
+            INSERT INTO "t".inner VALUE {'pk': 1}
+            """)
+    void refusesAKeywordOrATermAfterAPathDot(String statement) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals("Statement wasn't well formed, can't be processed: Invalid path dot component", e.getMessage());
+    }
+
+    @Test
+    void readsAQuotedKeywordAfterAPathDot() {
+        assertDoesNotThrow(() -> DynamoDbPartiQLParser.parse(
+                "SELECT m.\"inner\", m.foo FROM \"t\" WHERE m.attribute_exists = 1", List.of()));
+    }
+
     @Test
     void namesWhatFollowsALongRunOfSigns() {
         AwsException e = assertThrows(AwsException.class,

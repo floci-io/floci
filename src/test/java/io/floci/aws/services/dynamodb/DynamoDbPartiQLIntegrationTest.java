@@ -734,6 +734,14 @@ class DynamoDbPartiQLIntegrationTest {
             .body("Item.v.containsKey('N')", equalTo(false));
     }
 
+    @Test
+    @Order(34)
+    void aPathRefusesAKeywordAfterADot() {
+        statement("SELECT * FROM \"" + TABLE + "\" WHERE pk = 'x' AND m.inner = 1")
+            .statusCode(400)
+            .body("message", equalTo("Statement wasn't well formed, can't be processed: Invalid path dot component"));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}
