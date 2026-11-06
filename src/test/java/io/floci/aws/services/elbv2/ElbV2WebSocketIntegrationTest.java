@@ -162,6 +162,26 @@ class ElbV2WebSocketIntegrationTest {
     }
 
     @Test
+    void repeatedRefusalsDoNotExhaustTargetConnections() throws Exception {
+        // Exceed the data plane's 100-connection pool before opening a working tunnel.
+        for (int attempt = 0; attempt < 110; attempt++) {
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> connect("/elsewhere/?transport=websocket"),
+                    "Refusal " + attempt + " must complete without waiting for a pool connection");
+            UpgradeRejectedException rejected = assertInstanceOf(UpgradeRejectedException.class, failure.getCause());
+            assertEquals(404, rejected.getStatus());
+            assertEquals("upgrade refused", rejected.getBody().toString());
+        }
+
+        WebSocket socket = connect("/socket.io/?transport=websocket");
+        try {
+            assertEquals("transport=websocket:hello", exchange(socket, "hello"));
+        } finally {
+            socket.close();
+        }
+    }
+
+    @Test
     void plainRequestStillReachesTargetWithoutUpgrade() {
         given()
                 .baseUri("http://127.0.0.1")
