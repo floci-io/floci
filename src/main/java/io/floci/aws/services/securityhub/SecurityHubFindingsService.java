@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -15,8 +16,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
@@ -59,10 +58,10 @@ public class SecurityHubFindingsService implements Resettable {
 
     public synchronized ImportResult batchImportFindings(String region, JsonNode request) {
         JsonNode requestedFindings = request == null ? null : request.get("Findings");
-        if (requestedFindings == null || !requestedFindings.isArray()
-                || requestedFindings.isEmpty() || requestedFindings.size() > 100) {
+        if (requestedFindings == null || !requestedFindings.isArray()) {
             throw invalid("Findings must contain between 1 and 100 findings.");
         }
+        SecurityHubRequestShapes.checkFindingsSize(requestedFindings.size());
         String accountId = regionResolver.getAccountId();
         Map<String, ObjectNode> stored = new LinkedHashMap<>(
                 findings.getForAccount(accountId, region).orElseGet(LinkedHashMap::new));
@@ -83,12 +82,14 @@ public class SecurityHubFindingsService implements Resettable {
             if (!seen.contains(key)) {
                 ObjectNode previous = stored.get(key);
                 JsonNode verificationState = candidate.get("VerificationState");
-                if (previous == null && verificationState != null && (!verificationState.isTextual()
-                        || !List.of("UNKNOWN", "TRUE_POSITIVE", "FALSE_POSITIVE", "BENIGN_POSITIVE")
-                                .contains(verificationState.textValue()))) {
-                    failures.add(new ImportFailure(id, "InvalidInput",
-                            "VerificationState must be a valid verification state."));
-                    continue;
+                if (previous == null && verificationState != null) {
+                    try {
+                        SecurityHubRequestShapes.checkInitialVerificationState(verificationState);
+                    } catch (AwsException e) {
+                        failures.add(new ImportFailure(id, "InvalidInput",
+                                "VerificationState must be a valid verification state."));
+                        continue;
+                    }
                 }
                 ObjectNode imported = ((ObjectNode) candidate).deepCopy();
                 Instant updatedAt = Instant.parse(imported.path("UpdatedAt").textValue());
@@ -120,11 +121,9 @@ public class SecurityHubFindingsService implements Resettable {
         if (request.has("SortCriteria")) {
             throw invalid("SortCriteria is not supported.");
         }
+        SecurityHubRequestShapes.checkGetFindings(request);
         Map<String, List<StringPredicate>> filters = parseFilters(request.get("Filters"));
         Integer maxResults = Pagination.parseMaxResults(request, "MaxResults", "InvalidInputException");
-        if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
-            throw invalid("MaxResults must be between 1 and 100.");
-        }
         String nextToken = Pagination.parseNextToken(request, "NextToken", "InvalidInputException");
         if (nextToken != null && nextToken.isEmpty()) {
             throw invalid("NextToken is invalid.");
@@ -204,19 +203,12 @@ public class SecurityHubFindingsService implements Resettable {
             if (!compliance.isObject()) {
                 return invalidFinding("Compliance must be a JSON object.");
             }
-            if (compliance.has("Status")) {
-                String status = text(compliance, "Status");
-                if (status == null || !List.of("PASSED", "WARNING", "FAILED", "NOT_AVAILABLE")
-                        .contains(status)) {
-                    return invalidFinding("Compliance.Status must be a valid compliance status.");
-                }
+            if (compliance.has("Status") && text(compliance, "Status") == null) {
+                return invalidFinding("Compliance.Status must be a valid compliance status.");
             }
         }
-        if (finding.has("RecordState")) {
-            String recordState = text(finding, "RecordState");
-            if (recordState == null || !List.of("ACTIVE", "ARCHIVED").contains(recordState)) {
-                return invalidFinding("RecordState must be ACTIVE or ARCHIVED.");
-            }
+        if (finding.has("RecordState") && text(finding, "RecordState") == null) {
+            return invalidFinding("RecordState must be a valid record state.");
         }
         JsonNode providerFields = finding.path("FindingProviderFields");
         if (!providerFields.isMissingNode() && !providerFields.isObject()) {
@@ -232,8 +224,7 @@ public class SecurityHubFindingsService implements Resettable {
                 }
                 if (severity.has("Label")) {
                     String label = text(severity, "Label");
-                    if (label == null || !List.of("INFORMATIONAL", "LOW", "MEDIUM", "HIGH", "CRITICAL")
-                            .contains(label)) {
+                    if (label == null) {
                         return invalidFinding("Severity.Label must be a valid severity label.");
                     }
                 }
@@ -256,6 +247,11 @@ public class SecurityHubFindingsService implements Resettable {
                     }
                 }
             }
+        }
+        try {
+            SecurityHubRequestShapes.checkFinding(finding);
+        } catch (AwsException e) {
+            return invalidFinding(e.getMessage());
         }
         return null;
     }
@@ -430,12 +426,7 @@ public class SecurityHubFindingsService implements Resettable {
                         .append(predicate.value().length()).append(':').append(predicate.value());
             }
         });
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return Base64Url.encode(digest.digest(scope.toString().getBytes(StandardCharsets.UTF_8)));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalStateException("SHA-256 is unavailable", e);
-        }
+        return Base64Url.encode(Digests.sha256(scope.toString().getBytes(StandardCharsets.UTF_8)));
     }
 
     private static String findingKey(String productArn, String id) {

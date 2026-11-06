@@ -26,6 +26,7 @@ import regen_iam_shapes
 import regen_payment_cryptography_shapes
 import regen_logs_delivery_shapes
 import regen_resource_groups_shapes
+import regen_securityhub_shapes
 import regen_sesv2_shapes
 import regen_sts_shapes
 import request_shapes as r
@@ -333,6 +334,8 @@ def test_build_constraints_output_is_stable():
     (regen_iam_shapes, "iam/2010-05-08", "iam-request-shapes.json",
      {"prepare": regen_iam_shapes.prepare}),
     (regen_sts_shapes, "sts/2011-06-15", "sts-request-shapes.json", {}),
+    (regen_securityhub_shapes, "securityhub/2018-10-26", "securityhub-request-shapes.json",
+     {"prepare": regen_securityhub_shapes.prepare}),
 ])
 def test_each_constraints_script_runs_the_shared_main_with_its_operations(script, model, output, extra,
                                                                          monkeypatch):
@@ -358,6 +361,7 @@ def vendored(script) -> tuple[str, ...]:
 @pytest.mark.parametrize("script", [
     regen_ecr_shapes, regen_iam_shapes, regen_logs_delivery_shapes, regen_payment_cryptography_shapes,
     regen_resource_groups_shapes, regen_sts_shapes,
+    regen_securityhub_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
@@ -370,6 +374,26 @@ def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_
         named.extend(shape[side] for side in ("member", "key", "value") if side in shape)
         for child in named:
             assert child in doc["shapes"], f"{name} names {child}"
+
+
+def test_securityhub_shapes_keep_modelled_findings_and_filter_constraints():
+    doc = json.loads(regen_securityhub_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+
+    assert shapes["BatchImportFindingsRequestFindingList"]["min"] == 1
+    assert shapes["BatchImportFindingsRequestFindingList"]["max"] == 100
+    assert shapes["MaxResults"]["min"] == 1
+    assert shapes["MaxResults"]["max"] == 100
+    assert shapes["RatioScale"]["min"] == 0
+    assert shapes["RatioScale"]["max"] == 100
+    assert shapes["VerificationState"]["enum"] == ["UNKNOWN", "TRUE_POSITIVE", "FALSE_POSITIVE",
+                                                     "BENIGN_POSITIVE"]
+    assert shapes["RecordState"]["enum"] == ["ACTIVE", "ARCHIVED"]
+    assert "CONTAINS" in shapes["StringFilterComparison"]["enum"]
+    assert shapes["AwsSecurityFinding"]["members"]["ProductFields"] == "FieldMap"
+    assert shapes["FindingProviderFields"]["members"]["RelatedFindings"] == "RelatedFindingList"
+    assert shapes["RelatedFinding"]["required"] == ["ProductArn", "Id"]
+    assert "Double" not in shapes
 
 
 def test_ecr_shapes_name_the_ecr_model_and_its_registry_setting_actions():

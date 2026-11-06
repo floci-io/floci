@@ -446,6 +446,41 @@ class SecurityHubFindingsServiceTest {
     }
 
     @Test
+    void providerConfidenceAndCriticalityUseModeledBoundsPerFinding() {
+        ObjectNode highConfidence = finding("high-confidence", ACCOUNT, REGION);
+        highConfidence.putObject("FindingProviderFields").put("Confidence", 101);
+        ObjectNode negativeCriticality = finding("negative-criticality", ACCOUNT, REGION);
+        negativeCriticality.putObject("FindingProviderFields").put("Criticality", -1);
+
+        SecurityHubFindingsService.ImportResult result = service.batchImportFindings(REGION,
+                batch(finding("valid", ACCOUNT, REGION), highConfidence, negativeCriticality));
+
+        assertEquals(1, result.successCount());
+        assertEquals(2, result.failedFindings().size());
+        assertTrue(result.failedFindings().stream().allMatch(error -> "InvalidInput".equals(error.errorCode())));
+        assertEquals("valid", onlyFinding(service, REGION).path("Id").asText());
+    }
+
+    @Test
+    void malformedProductAndRelatedFieldsFailOnlyTheirFinding() {
+        ObjectNode badProduct = finding("bad-product-fields", ACCOUNT, REGION);
+        badProduct.put("ProductFields", "bad");
+        ObjectNode badRelated = finding("bad-related-findings", ACCOUNT, REGION);
+        badRelated.put("RelatedFindings", "bad");
+        ObjectNode badProviderRelated = finding("bad-provider-related", ACCOUNT, REGION);
+        badProviderRelated.putObject("FindingProviderFields").put("RelatedFindings", "bad");
+
+        SecurityHubFindingsService.ImportResult result = service.batchImportFindings(REGION,
+                batch(finding("valid", ACCOUNT, REGION), badProduct, badRelated, badProviderRelated));
+
+        assertEquals(1, result.successCount());
+        assertEquals(List.of("bad-product-fields", "bad-related-findings", "bad-provider-related"),
+                result.failedFindings().stream().map(SecurityHubFindingsService.ImportFailure::id).toList());
+        assertTrue(result.failedFindings().stream().allMatch(error -> "InvalidInput".equals(error.errorCode())));
+        assertEquals("valid", onlyFinding(service, REGION).path("Id").asText());
+    }
+
+    @Test
     void optionalSeverityAndTypesCanBeOmittedWithoutLosingOtherFindingFields() {
         ObjectNode sparse = finding("sparse", ACCOUNT, REGION);
         sparse.remove("Severity");

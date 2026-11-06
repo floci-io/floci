@@ -106,6 +106,16 @@ class RequestConstraintCheckTest {
     }
 
     @Test
+    void individualShapeAndListSizeKeepTheModeledConstraints() {
+        assertEquals("enum Kind [A, B]", assertThrows(AwsException.class,
+                () -> CHECK.checkShape("Kind", json("\"C\""))).getMessage());
+        assertDoesNotThrow(() -> CHECK.checkShape("Kind", json("\"A\"")));
+        assertEquals("bounds Put.items list null..2 3", assertThrows(AwsException.class,
+                () -> CHECK.checkListSize("Put", "items", 3)).getMessage());
+        assertDoesNotThrow(() -> CHECK.checkListSize("Put", "items", 2));
+    }
+
+    @Test
     void aStringIsMeasuredInCodePoints() {
         // One emoji is two UTF-16 units but one code point, so it is under the minimum of 2.
         assertEquals("bounds Put.name string 2..5 1", violation("{\"name\":\"\\uD83D\\uDE00\"}"));
