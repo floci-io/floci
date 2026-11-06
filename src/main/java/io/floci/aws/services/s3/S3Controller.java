@@ -4118,6 +4118,14 @@ public class S3Controller {
         for (Map.Entry<String, String> e : fields.entrySet()) {
             lcFields.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
         }
+        String encryption = S3Service.normalizeServerSideEncryption(
+            lcFields.get("x-amz-server-side-encryption"));
+        String kmsKeyId = lcFields.get("x-amz-server-side-encryption-aws-kms-key-id");
+        if (kmsKeyId != null && !"aws:kms".equals(encryption) && !"aws:kms:dsse".equals(encryption)) {
+            throw new AwsException("InvalidArgument",
+                "KMS key ID requires aws:kms or aws:kms:dsse server-side encryption.", 400);
+        }
+        Map<String, List<String>> requestConditions = S3ObjectActions.encryptionConditions(encryption, kmsKeyId);
 
         /*
          * IamEnforcementFilter's own filter() method only ever sees the Authorization header or,
@@ -4134,11 +4142,11 @@ public class S3Controller {
         if (credential != null && !credential.isEmpty()) {
             iamEnforcementFilter.authorizePostObject(AccountResolver.SIGV4_SCHEME + " Credential=" + credential,
                     S3PublicAccessEvaluator.objectArn(s3Service.bucketPartition(bucket), bucket, key),
-                    regionResolver.resolveRegionFromPresignedCredential(credential));
+                    regionResolver.resolveRegionFromPresignedCredential(credential), requestConditions);
         }
 
         if (s3Service.isAuthEnforced() || (config.auth().validateSignatures() && isSignedPost(lcFields))) {
-            validatePresignedPostAuth(lcFields, bucket, key, fileData.length);
+            validatePresignedPostAuth(lcFields, bucket, key, fileData.length, requestConditions);
         } else {
             // Validate policy conditions if present
             String policy = lcFields.get("policy");
@@ -4168,7 +4176,9 @@ public class S3Controller {
         }
 
         S3Object obj = s3Service.postObject(bucket, key, fileData, objectContentType,
-                metadata.isEmpty() ? null : metadata);
+            metadata.isEmpty() ? null : metadata, new PutObjectOptions()
+                .withServerSideEncryption(encryption)
+                .withSseKmsKeyId(kmsKeyId));
         LOG.infov("Presigned POST upload: {0}/{1} ({2} bytes)", bucket, key, fileData.length);
 
         String xml = new XmlBuilder()
@@ -4183,6 +4193,12 @@ public class S3Controller {
         var response = Response.status(204)
                 .header("ETag", obj.getETag())
                 .header("Location", bucket + "/" + key);
+        if (obj.getServerSideEncryption() != null) {
+            response.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
+        }
+        if (obj.getSseKmsKeyId() != null) {
+            response.header("x-amz-server-side-encryption-aws-kms-key-id", obj.getSseKmsKeyId());
+        }
         if (obj.getVersionId() != null) {
             response.header("x-amz-version-id", obj.getVersionId());
         }
@@ -4225,7 +4241,8 @@ public class S3Controller {
      * SigV4-signed by a known secret key referenced through {@code x-amz-credential}, matching
      * real S3's behavior of rejecting fabricated or absent credentials with 403 AccessDenied.
      */
-    private void validatePresignedPostAuth(Map<String, String> fields, String bucket, String key, int contentLength) {
+    private void validatePresignedPostAuth(Map<String, String> fields, String bucket, String key, int contentLength,
+                                          Map<String, List<String>> requestConditions) {
         String policy = fields.get("policy");
         String credential = fields.get("x-amz-credential");
         String signature = fields.get("x-amz-signature");
@@ -4263,8 +4280,8 @@ public class S3Controller {
 
         // Route through the same bucket-policy/ACL check every other S3 write path uses, so this
         // path automatically inherits any future strengthening there too.
-        s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject",
-                new S3Service.RequestAuthorization(true, accessKeyId, sessionToken));
+        s3Service.authorizeObjectWrite(bucket, key, null, "s3:PutObject",
+            new S3Service.RequestAuthorization(true, accessKeyId, sessionToken), requestConditions);
 
         validatePolicyExpiration(policy);
         validatePolicyConditions(policy, bucket, fields, contentLength);
