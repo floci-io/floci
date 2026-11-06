@@ -977,11 +977,8 @@ public class ApiGatewayController {
      *
      * <p>Each pair is {@code [used, remaining]}, not {@code [used, quota]}: measured against real
      * API Gateway, the second element is the quota limit minus the cumulative use so far in the
-     * period. Both elements are {@code 0} here because the emulator does not meter requests per API
-     * key, so there is no use to report or to subtract from a plan's quota. Once the execute path
-     * counts per key, this method is where the count feeds in; until then a caller that sums the
-     * used counts gets the same zero it already gets from an unsupported action, without having to
-     * special-case a missing endpoint.
+     * period. The execute path counts each admitted call per key and UTC day, and a plan without a
+     * quota reports {@code [0, 0]}, as AWS does.
      */
     @GET
     @Path("/usageplans/{usagePlanId}/usage")
