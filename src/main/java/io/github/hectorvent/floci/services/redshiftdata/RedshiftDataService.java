@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
 import io.github.hectorvent.floci.services.redshift.proxy.CopyJobSql;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftSqlInterceptor;
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumReadException;
@@ -683,7 +684,8 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                 throw new SQLException("External query preparation failed: " + exception.getMessage(), "58030", exception);
             }
         }
-        ParsedSql parsed = RedshiftDataSqlParameters.parse(CopyJobSql.rewrite(sql, !autoCommit || !connection.getAutoCommit()));
+        String rewritten = CopyJobSql.rewrite(sql, !autoCommit || !connection.getAutoCommit());
+        ParsedSql parsed = RedshiftDataSqlParameters.parse(RedshiftSqlInterceptor.rewrite(rewritten));
         execution.checkCancellation();
         if (!autoCommit) {
             connection.setAutoCommit(false);

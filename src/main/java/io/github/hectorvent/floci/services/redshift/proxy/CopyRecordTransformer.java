@@ -13,7 +13,7 @@ import java.util.function.IntConsumer;
  */
 final class CopyRecordTransformer {
 
-    private static final String SQLSTATE_INTERNAL = "XX000";
+    private static final String SQLSTATE_INVALID_COPY = "22P04";
     private static final byte NEWLINE = '\n';
     private static final byte CARRIAGE_RETURN = '\r';
     private static final byte BACKSLASH = '\\';
@@ -291,8 +291,7 @@ final class CopyRecordTransformer {
     /**
      * Rewrites a DATE or TIMESTAMP field from the DATEFORMAT or TIMEFORMAT to the ISO text PostgreSQL reads.
      * Returns the field as it is when no format applies to its column, and null when ACCEPTANYDATE turns a
-     * value that does not match into NULL; without it such a value fails the COPY, whatever MAXERROR says,
-     * because it never reaches the backend that skips records under MAXERROR.
+     * value that does not match into NULL; otherwise it is a record error counted by MAXERROR.
      */
     private byte[] convertTemporal(byte[] value, int column) {
         if (!transforms.temporal() || columnKinds == null || column >= columnKinds.size()) {
@@ -315,8 +314,9 @@ final class CopyRecordTransformer {
             if (transforms.acceptAnyDate()) {
                 return null;
             }
-            throw malformed("invalid " + (kind == ColumnKind.DATE ? "date" : "timestamp") + " in column "
-                    + (column + 1) + ": " + e.getMessage());
+            throw new S3CopySimulator.S3TransferException("22007",
+                    "COPY invalid " + (kind == ColumnKind.DATE ? "date" : "timestamp") + " in column "
+                            + (column + 1) + ": " + e.getMessage(), e);
         }
     }
 
@@ -463,6 +463,6 @@ final class CopyRecordTransformer {
     }
 
     private static S3CopySimulator.S3TransferException malformed(String detail) {
-        return new S3CopySimulator.S3TransferException(SQLSTATE_INTERNAL, "COPY failed: " + detail, null);
+        return new S3CopySimulator.S3TransferException(SQLSTATE_INVALID_COPY, "COPY failed: " + detail, null);
     }
 }

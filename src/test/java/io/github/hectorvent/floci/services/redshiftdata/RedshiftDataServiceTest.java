@@ -94,6 +94,17 @@ class RedshiftDataServiceTest {
     }
 
     @Test
+    void redshiftTableDdlIsRewrittenThroughTheDataApi() {
+        String id = service.executeStatement(req("CREATE TABLE events (id int) DISTSTYLE ALL"), REGION)
+                .path("Id").asText();
+        assertEquals("FINISHED", service.describeStatement(idOf(id)).path("Status").asText());
+        String queryId = service.executeStatement(req("SELECT count(*) FROM events"), REGION).path("Id").asText();
+        assertEquals("FINISHED", service.describeStatement(idOf(queryId)).path("Status").asText());
+        assertEquals(0, service.getStatementResult(idOf(queryId)).path("Records").get(0).get(0)
+                .path("longValue").asLong());
+    }
+
+    @Test
     void copyJobListAndShowReadTheCatalogThroughTheDataApi() throws SQLException {
         try (Connection connection = DriverManager.getConnection(jdbcUrl, "sa", "");
                 Statement statement = connection.createStatement()) {

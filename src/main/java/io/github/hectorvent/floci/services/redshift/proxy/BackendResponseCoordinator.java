@@ -109,6 +109,26 @@ final class BackendResponseCoordinator {
         }
     }
 
+    boolean awaitSyncTurn(Ticket ticket, long timeout, TimeUnit unit) throws InterruptedException {
+        long remaining = unit.toNanos(timeout);
+        lock.lockInterruptibly();
+        try {
+            while (!closed) {
+                PendingOperation head = pending.peekFirst();
+                if (head != null && head.ticket().equals(ticket)) {
+                    return true;
+                }
+                if (remaining <= 0) {
+                    return false;
+                }
+                remaining = changed.awaitNanos(remaining);
+            }
+            return false;
+        } finally {
+            lock.unlock();
+        }
+    }
+
     void onBackendFrame(char type, byte[] body) {
         lock.lock();
         try {
@@ -182,6 +202,17 @@ final class BackendResponseCoordinator {
         }
     }
 
+    void discardUntilSync() {
+        lock.lock();
+        try {
+            discardingUntilSync = true;
+            discardQueuedOperationsBeforeSync();
+            changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     boolean isDiscardingUntilSync() {
         lock.lock();
         try {
@@ -195,6 +226,17 @@ final class BackendResponseCoordinator {
         lock.lock();
         try {
             return lastReadyStatus;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    void transactionEnded() {
+        lock.lock();
+        try {
+            lastReadyStatus = 'I';
+            session.transactionEnded();
+            changed.signalAll();
         } finally {
             lock.unlock();
         }
