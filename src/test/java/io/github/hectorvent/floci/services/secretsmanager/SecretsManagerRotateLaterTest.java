@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -35,6 +36,7 @@ class SecretsManagerRotateLaterTest {
     private static final String REGION = "us-east-1";
     private static final String NAME = "rotate-later";
     private static final String TOKEN = "11111111-2222-3333-4444-555555555555";
+    private static final String OTHER_TOKEN = "66666666-7777-8888-9999-000000000000";
     private static final String LAMBDA_ARN = "arn:aws:lambda:us-east-1:000000000000:function:rotate";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -88,6 +90,42 @@ class SecretsManagerRotateLaterTest {
         service.rotateSecret(NAME, TOKEN, LAMBDA_ARN, null, false, REGION);
 
         awaitOnlyVersion(created.getCurrentVersionId());
+    }
+
+    @Test
+    void aValueWrittenUnderTheTokenDuringTheTestStepIsKept() {
+        when(lambda.invoke(anyString(), anyString(), any(byte[].class), any())).thenAnswer(invocation -> {
+            service.putSecretValue(NAME, "written", null, TOKEN, REGION, List.of("AWSPENDING"));
+            return succeeded();
+        });
+        service.createSecret(NAME, "v1", null, null, null, null, REGION);
+
+        service.rotateSecret(NAME, TOKEN, LAMBDA_ARN, null, false, REGION);
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            verify(lambda).invoke(anyString(), anyString(), any(byte[].class), any());
+            SecretVersion version = service.describeSecret(NAME, REGION).getVersions().get(TOKEN);
+            assertTrue(version == null || !version.getVersionStages().contains("AWSPENDING"));
+        });
+        assertEquals("written", service.getSecretValue(NAME, TOKEN, null, REGION).getSecretString());
+    }
+
+    @Test
+    void aVersionAnotherClientStagesDuringTheTestStepKeepsItsStage() {
+        when(lambda.invoke(anyString(), anyString(), any(byte[].class), any())).thenAnswer(invocation -> {
+            service.putSecretValue(NAME, "staged-elsewhere", null, OTHER_TOKEN, REGION, List.of("AWSPENDING"));
+            return succeeded();
+        });
+        service.createSecret(NAME, "v1", null, null, null, null, REGION);
+
+        service.rotateSecret(NAME, TOKEN, LAMBDA_ARN, null, false, REGION);
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            verify(lambda).invoke(anyString(), anyString(), any(byte[].class), any());
+            assertFalse(service.describeSecret(NAME, REGION).getVersions().containsKey(TOKEN),
+                    "the test step's own version must be removed");
+        });
+        assertEquals(OTHER_TOKEN, service.getSecretValue(NAME, null, "AWSPENDING", REGION).getVersionId());
     }
 
     /** Waits until the rotation has run its test step and the secret holds only the given version. */
