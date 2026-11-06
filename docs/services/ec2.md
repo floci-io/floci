@@ -143,23 +143,23 @@ lifecycle. The cloud-image-derived entry is a separate AMI ID and alias, so
 old behavior unless they choose `ami-ubuntu2404-cloud-arm64` or the
 `ami-ubuntu2404-cloud` alias.
 
-The Java metadata-driven builder lives at `io.github.hectorvent.floci.tools.ami.AmiImageTool`. Its recipe is checked in at `docker/ec2/ami-images/image-build-metadata.yaml`, and generated context/provenance defaults to `target/ami-images/<image-id>/`.
+The Java metadata-driven builder lives at `io.floci.aws.tools.ami.AmiImageTool`. Its recipe is checked in at `docker/ec2/ami-images/image-build-metadata.yaml`, and generated context/provenance defaults to `target/ami-images/<image-id>/`.
 
 ```bash
 ./mvnw -q -DskipTests compile exec:java \
-  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.mainClass=io.floci.aws.tools.ami.AmiImageTool \
   -Dexec.args="plan --image-id ubuntu-24.04-arm64"
 
 ./mvnw -q -DskipTests compile exec:java \
-  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.mainClass=io.floci.aws.tools.ami.AmiImageTool \
   -Dexec.args="generate --image-id ubuntu-24.04-arm64"
 
 ./mvnw -q -DskipTests compile exec:java \
-  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.mainClass=io.floci.aws.tools.ami.AmiImageTool \
   -Dexec.args="build --image-id ubuntu-24.04-arm64"
 
 ./mvnw -q -DskipTests compile exec:java \
-  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.mainClass=io.floci.aws.tools.ami.AmiImageTool \
   -Dexec.args="smoke --image-id ubuntu-24.04-arm64"
 ```
 

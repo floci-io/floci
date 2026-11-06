@@ -1,0 +1,734 @@
+package io.floci.aws.services.route53;
+
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+
+import java.util.List;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.*;
+
+@QuarkusTest
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+class Route53IntegrationTest {
+
+    private static final String XML = "application/xml";
+
+    private static String zoneId;
+    private static List<String> zoneNameServers;
+    private static String changeId;
+    private static String healthCheckId;
+
+    // ── Hosted Zones ──────────────────────────────────────────────────────────
+
+    @Test
+    @Order(1)
+    void createHostedZone_returns201WithLocation() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>example.com</Name>
+                  <CallerReference>ref-001</CallerReference>
+                  <HostedZoneConfig>
+                    <Comment>test zone</Comment>
+                    <PrivateZone>true</PrivateZone>
+                  </HostedZoneConfig>
+                </CreateHostedZoneRequest>
+                """;
+
+        String locationHeader = given()
+                .contentType(XML)
+                .body(body)
+                .when().post("/2013-04-01/hostedzone")
+                .then()
+                .statusCode(201)
+                .contentType(XML)
+                .header("Location", containsString("/2013-04-01/hostedzone/Z"))
+                .body("CreateHostedZoneResponse.HostedZone.Name", equalTo("example.com."))
+                .body("CreateHostedZoneResponse.HostedZone.Id", startsWith("/hostedzone/Z"))
+                .body("CreateHostedZoneResponse.HostedZone.ResourceRecordSetCount", equalTo("2"))
+                .body("CreateHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("false"))
+                .body("CreateHostedZoneResponse.ChangeInfo.Status", equalTo("INSYNC"))
+                .body("CreateHostedZoneResponse.ChangeInfo.Id", startsWith("/change/C"))
+                .body(not(containsString("<VPC>")))
+                .body(containsString("<NameServer>ns-"))
+                .extract().header("Location");
+
+        // Location is an absolute URL: http://localhost:PORT/2013-04-01/hostedzone/ZXXX
+        zoneId = locationHeader.substring(locationHeader.lastIndexOf('/') + 1);
+        zoneNameServers = given().when().get("/2013-04-01/hostedzone/" + zoneId).then().extract()
+                .xmlPath().getList("GetHostedZoneResponse.DelegationSet.NameServers.NameServer");
+    }
+
+    @Test
+    @Order(2)
+    void getHostedZone_returnsCreatedZone() {
+        given()
+                .when().get("/2013-04-01/hostedzone/" + zoneId)
+                .then()
+                .statusCode(200)
+                .contentType(XML)
+                .body("GetHostedZoneResponse.HostedZone.Id", equalTo("/hostedzone/" + zoneId))
+                .body("GetHostedZoneResponse.HostedZone.Name", equalTo("example.com."))
+                .body("GetHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("false"))
+                .body(not(containsString("<VPCs>")))
+                .body(containsString(zoneNameServers.getFirst()));
+    }
+
+    @Test
+    @Order(3)
+    void createHostedZone_withVpcReturnsPrivateZoneAndAssociation() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>private.example.com</Name>
+                  <CallerReference>ref-private-001</CallerReference>
+                  <VPC>
+                    <VPCId>vpc-12345678</VPCId>
+                    <VPCRegion>us-west-2</VPCRegion>
+                  </VPC>
+                  <HostedZoneConfig>
+                    <Comment>private test zone</Comment>
+                  </HostedZoneConfig>
+                </CreateHostedZoneRequest>
+                """;
+
+        String locationHeader = given()
+                .contentType(XML)
+                .body(body)
+                .when().post("/2013-04-01/hostedzone")
+                .then()
+                .statusCode(201)
+                .contentType(XML)
+                .body("CreateHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("true"))
+                .body("CreateHostedZoneResponse.VPC.VPCId", equalTo("vpc-12345678"))
+                .body("CreateHostedZoneResponse.VPC.VPCRegion", equalTo("us-west-2"))
+                .extract().header("Location");
+
+        String privateZoneId = locationHeader.substring(locationHeader.lastIndexOf('/') + 1);
+
+        try {
+            given()
+                    .when().get("/2013-04-01/hostedzone/" + privateZoneId)
+                    .then()
+                    .statusCode(200)
+                    .contentType(XML)
+                    .body("GetHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("true"))
+                    .body("GetHostedZoneResponse.VPCs.VPC.size()", equalTo(1))
+                    .body("GetHostedZoneResponse.VPCs.VPC.VPCId", equalTo("vpc-12345678"))
+                    .body("GetHostedZoneResponse.VPCs.VPC.VPCRegion", equalTo("us-west-2"));
+        } finally {
+            given()
+                    .when().delete("/2013-04-01/hostedzone/" + privateZoneId)
+                    .then()
+                    .statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(4)
+    void listHostedZones_includesCreatedZone() {
+        given()
+                .when().get("/2013-04-01/hostedzone")
+                .then()
+                .statusCode(200)
+                .contentType(XML)
+                .body("ListHostedZonesResponse.IsTruncated", equalTo("false"))
+                .body(containsString("/hostedzone/" + zoneId));
+    }
+
+    @Test
+    @Order(5)
+    void listHostedZonesByName_returnsZone() {
+        given()
+                .queryParam("dnsname", "example.com.")
+                .when().get("/2013-04-01/hostedzonesbyname")
+                .then()
+                .statusCode(200)
+                .contentType(XML)
+                .body(containsString("example.com."));
+    }
+
+    @Test
+    @Order(6)
+    void getHostedZoneCount_includesZone() {
+        given()
+                .when().get("/2013-04-01/hostedzonecount")
+                .then()
+                .statusCode(200)
+                .body("GetHostedZoneCountResponse.HostedZoneCount", not(equalTo("0")));
+    }
+
+    // ── Resource Record Sets ──────────────────────────────────────────────────
+
+    @Test
+    @Order(7)
+    void listResourceRecordSets_autoCreatedSOAandNS() {
+        String firstNameserver = zoneNameServers.getFirst() + ".";
+        String fourthNameserver = zoneNameServers.get(3) + ".";
+        String body = given()
+                .when().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                .then()
+                .statusCode(200)
+                .contentType(XML)
+                .body("ListResourceRecordSetsResponse.IsTruncated", equalTo("false"))
+                .extract().body().asString();
+
+        assertThat(body, containsString("<Type>SOA</Type>"));
+        assertThat(body, containsString("<Type>NS</Type>"));
+        assertThat(body, containsString(
+                "<Value>" + firstNameserver + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value>"));
+        assertThat(body, containsString("<Value>" + fourthNameserver + "</Value>"));
+    }
+
+    @Test
+    @Order(8)
+    void changeResourceRecordSets_createARecord() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch>
+                    <Changes>
+                      <Change>
+                        <Action>CREATE</Action>
+                        <ResourceRecordSet>
+                          <Name>www.example.com.</Name>
+                          <Type>A</Type>
+                          <TTL>300</TTL>
+                          <ResourceRecords>
+                            <ResourceRecord><Value>1.2.3.4</Value></ResourceRecord>
+                          </ResourceRecords>
+                        </ResourceRecordSet>
+                      </Change>
+                    </Changes>
+                  </ChangeBatch>
+                </ChangeResourceRecordSetsRequest>
+                """;
+
+        String responseBody = given()
+                .contentType(XML)
+                .body(body)
+                .when().post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                .then()
+                .statusCode(200)
+                .contentType(XML)
+                .body("ChangeResourceRecordSetsResponse.ChangeInfo.Status", equalTo("INSYNC"))
+                .body("ChangeResourceRecordSetsResponse.ChangeInfo.Id", startsWith("/change/C"))
+                .extract().body().asString();
+
+        // Extract change ID for getChange test
+        int start = responseBody.indexOf("/change/") + 8;
+        int end = responseBody.indexOf("</Id>", start);
+        if (start > 8 && end > start) {
+            changeId = responseBody.substring(start, end);
+        }
+    }
+
+    @Test
+    @Order(9)
+    void listResourceRecordSets_includesARecord() {
+        String body = given()
+                .when().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                .then()
+                .statusCode(200)
+                .extract().body().asString();
+
+        assertThat(body, containsString("<Type>A</Type>"));
+        assertThat(body, containsString("<Value>1.2.3.4</Value>"));
+    }
+
+    @Test
+    @Order(10)
+    void changeResourceRecordSets_deleteSOA_fails() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch>
+                    <Changes>
+                      <Change>
+                        <Action>DELETE</Action>
+                        <ResourceRecordSet>
+                          <Name>example.com.</Name>
+                          <Type>SOA</Type>
+                          <TTL>900</TTL>
+                          <ResourceRecords>
+                            <ResourceRecord><Value>%s awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value></ResourceRecord>
+                          </ResourceRecords>
+                        </ResourceRecordSet>
+                      </Change>
+                    </Changes>
+                  </ChangeBatch>
+                </ChangeResourceRecordSetsRequest>
+                """.formatted(zoneNameServers.getFirst() + ".");
+
+        given()
+                .contentType(XML)
+                .body(body)
+                .when().post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidChangeBatch"));
+    }
+
+    @Test
+    @Order(11)
+    void getChange_returnsInsync() {
+        if (changeId == null) return;
+        given()
+                .when().get("/2013-04-01/change/" + changeId)
+                .then()
+                .statusCode(200)
+                .body("GetChangeResponse.ChangeInfo.Status", equalTo("INSYNC"))
+                .body("GetChangeResponse.ChangeInfo.Id", equalTo("/change/" + changeId));
+    }
+
+    @Test
+    @Order(12)
+    void changeResourceRecordSets_deleteARecord() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch>
+                    <Changes>
+                      <Change>
+                        <Action>DELETE</Action>
+                        <ResourceRecordSet>
+                          <Name>www.example.com.</Name>
+                          <Type>A</Type>
+                          <TTL>300</TTL>
+                          <ResourceRecords>
+                            <ResourceRecord><Value>1.2.3.4</Value></ResourceRecord>
+                          </ResourceRecords>
+                        </ResourceRecordSet>
+                      </Change>
+                    </Changes>
+                  </ChangeBatch>
+                </ChangeResourceRecordSetsRequest>
+                """;
+
+        given()
+                .contentType(XML)
+                .body(body)
+                .when().post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                .then()
+                .statusCode(200)
+                .body("ChangeResourceRecordSetsResponse.ChangeInfo.Status", equalTo("INSYNC"));
+    }
+
+    @Test
+    @Order(13)
+    void deleteHostedZone_failsWhenNonDefaultRecordsExist() {
+        String createBody = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>nonempty.example.com</Name>
+                  <CallerReference>ref-nonempty</CallerReference>
+                </CreateHostedZoneRequest>
+                """;
+
+        String loc = given()
+                .contentType(XML).body(createBody)
+                .when().post("/2013-04-01/hostedzone")
+                .then().statusCode(201)
+                .extract().header("Location");
+        String tmpId = loc.substring(loc.lastIndexOf('/') + 1);
+
+        String addRecord = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch>
+                    <Changes>
+                      <Change>
+                        <Action>CREATE</Action>
+                        <ResourceRecordSet>
+                          <Name>sub.nonempty.example.com.</Name>
+                          <Type>A</Type>
+                          <TTL>60</TTL>
+                          <ResourceRecords>
+                            <ResourceRecord><Value>10.0.0.1</Value></ResourceRecord>
+                          </ResourceRecords>
+                        </ResourceRecordSet>
+                      </Change>
+                    </Changes>
+                  </ChangeBatch>
+                </ChangeResourceRecordSetsRequest>
+                """;
+        given().contentType(XML).body(addRecord)
+               .post("/2013-04-01/hostedzone/" + tmpId + "/rrset")
+               .then().statusCode(200);
+
+        given()
+                .when().delete("/2013-04-01/hostedzone/" + tmpId)
+                .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("HostedZoneNotEmpty"));
+
+        // Cleanup
+        String deleteRecord = addRecord.replace("<Action>CREATE</Action>", "<Action>DELETE</Action>");
+        given().contentType(XML).body(deleteRecord)
+               .post("/2013-04-01/hostedzone/" + tmpId + "/rrset")
+               .then().statusCode(200);
+        given().delete("/2013-04-01/hostedzone/" + tmpId).then().statusCode(200);
+    }
+
+    @Test
+    @Order(14)
+    void deleteHostedZone_succeedsAfterRecordsRemoved() {
+        given()
+                .when().delete("/2013-04-01/hostedzone/" + zoneId)
+                .then()
+                .statusCode(200)
+                .body("DeleteHostedZoneResponse.ChangeInfo.Status", equalTo("INSYNC"));
+    }
+
+    @Test
+    @Order(15)
+    void getHostedZone_returns404AfterDelete() {
+        given()
+                .when().get("/2013-04-01/hostedzone/" + zoneId)
+                .then()
+                .statusCode(404)
+                .body("ErrorResponse.Error.Code", equalTo("NoSuchHostedZone"));
+    }
+
+    // ── Health Checks ─────────────────────────────────────────────────────────
+
+    private static String healthCheckRequest(String callerReference, String resourcePath) {
+        return """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHealthCheckRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <CallerReference>%s</CallerReference>
+                  <HealthCheckConfig>
+                    <Type>HTTPS</Type>
+                    <FullyQualifiedDomainName>example.com</FullyQualifiedDomainName>
+                    <Port>443</Port>
+                    <ResourcePath>%s</ResourcePath>
+                    <RequestInterval>30</RequestInterval>
+                    <FailureThreshold>3</FailureThreshold>
+                  </HealthCheckConfig>
+                </CreateHealthCheckRequest>
+                """.formatted(callerReference, resourcePath);
+    }
+
+    @Test
+    @Order(26)
+    void createHealthCheck_nonNumericFailureThreshold_isInvalidInput() {
+        given()
+                .contentType(XML)
+                .body(healthCheckRequest("hc-bad-" + System.nanoTime(), "/health")
+                        .replace("<FailureThreshold>3</FailureThreshold>", "<FailureThreshold>three</FailureThreshold>"))
+                .when().post("/2013-04-01/healthcheck")
+                .then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+    }
+
+    // Catches: an SDK retry of CreateHealthCheck (same caller reference and settings) answered with
+    // HealthCheckAlreadyExists instead of the health check it already created.
+    @Test
+    @Order(25)
+    void createHealthCheck_retryWithSameReferenceAndSettings_returnsTheSameHealthCheck() {
+        String reference = "hc-retry-" + System.nanoTime();
+        String firstId = given()
+                .contentType(XML).body(healthCheckRequest(reference, "/health"))
+                .when().post("/2013-04-01/healthcheck")
+                .then().statusCode(201)
+                .extract().path("CreateHealthCheckResponse.HealthCheck.Id");
+        try {
+            given()
+                    .contentType(XML).body(healthCheckRequest(reference, "/health"))
+                    .when().post("/2013-04-01/healthcheck")
+                    .then().statusCode(201)
+                    .body("CreateHealthCheckResponse.HealthCheck.Id", equalTo(firstId));
+
+            given()
+                    .contentType(XML).body(healthCheckRequest(reference, "/other"))
+                    .when().post("/2013-04-01/healthcheck")
+                    .then().statusCode(409)
+                    .body("ErrorResponse.Error.Code", equalTo("HealthCheckAlreadyExists"));
+
+            given()
+                    .contentType(XML)
+                    .body(healthCheckRequest(reference, "/health")
+                            .replace("<FailureThreshold>3</FailureThreshold>",
+                                    "<FailureThreshold>3</FailureThreshold><EnableSNI>false</EnableSNI>"))
+                    .when().post("/2013-04-01/healthcheck")
+                    .then().statusCode(409)
+                    .body("ErrorResponse.Error.Code", equalTo("HealthCheckAlreadyExists"));
+
+            given()
+                    .contentType(XML)
+                    .body(healthCheckRequest(reference, "/health")
+                            .replace("<RequestInterval>30</RequestInterval>", "")
+                            .replace("<FailureThreshold>3</FailureThreshold>", ""))
+                    .when().post("/2013-04-01/healthcheck")
+                    .then().statusCode(201)
+                    .body("CreateHealthCheckResponse.HealthCheck.Id", equalTo(firstId));
+        } finally {
+            given().when().delete("/2013-04-01/healthcheck/" + firstId).then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(16)
+    void createHealthCheck_returns201() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHealthCheckRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <CallerReference>hc-ref-001</CallerReference>
+                  <HealthCheckConfig>
+                    <Type>HTTPS</Type>
+                    <FullyQualifiedDomainName>example.com</FullyQualifiedDomainName>
+                    <Port>443</Port>
+                    <ResourcePath>/health</ResourcePath>
+                    <RequestInterval>30</RequestInterval>
+                    <FailureThreshold>3</FailureThreshold>
+                  </HealthCheckConfig>
+                </CreateHealthCheckRequest>
+                """;
+
+        String loc = given()
+                .contentType(XML).body(body)
+                .when().post("/2013-04-01/healthcheck")
+                .then()
+                .statusCode(201)
+                .header("Location", containsString("/2013-04-01/healthcheck/"))
+                .body("CreateHealthCheckResponse.HealthCheck.CallerReference", equalTo("hc-ref-001"))
+                .body("CreateHealthCheckResponse.HealthCheck.HealthCheckConfig.Type", equalTo("HTTPS"))
+                .body("CreateHealthCheckResponse.HealthCheck.HealthCheckVersion", equalTo("1"))
+                .extract().header("Location");
+
+        healthCheckId = loc.substring(loc.lastIndexOf('/') + 1);
+    }
+
+    @Test
+    @Order(17)
+    void getHealthCheck_returnsCreated() {
+        given()
+                .when().get("/2013-04-01/healthcheck/" + healthCheckId)
+                .then()
+                .statusCode(200)
+                .body("GetHealthCheckResponse.HealthCheck.Id", equalTo(healthCheckId))
+                .body("GetHealthCheckResponse.HealthCheck.HealthCheckConfig.Port", equalTo("443"));
+    }
+
+    @Test
+    @Order(18)
+    void listHealthChecks_includesCreated() {
+        String body = given()
+                .when().get("/2013-04-01/healthcheck")
+                .then()
+                .statusCode(200)
+                .extract().body().asString();
+
+        assertThat(body, containsString(healthCheckId));
+    }
+
+    @Test
+    @Order(19)
+    void deleteHealthCheck_returns200() {
+        given()
+                .when().delete("/2013-04-01/healthcheck/" + healthCheckId)
+                .then()
+                .statusCode(200);
+
+        given()
+                .when().get("/2013-04-01/healthcheck/" + healthCheckId)
+                .then()
+                .statusCode(404)
+                .body("ErrorResponse.Error.Code", equalTo("NoSuchHealthCheck"));
+    }
+
+    // ── Tags ──────────────────────────────────────────────────────────────────
+
+    @Test
+    @Order(20)
+    void tagging_addListRemove() {
+        String createBody = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <Name>tagged.example.com</Name>
+                  <CallerReference>ref-tagged</CallerReference>
+                </CreateHostedZoneRequest>
+                """;
+        String loc = given()
+                .contentType(XML).body(createBody)
+                .when().post("/2013-04-01/hostedzone")
+                .then().statusCode(201).extract().header("Location");
+        String tagZoneId = loc.substring(loc.lastIndexOf('/') + 1);
+
+        String addTagBody = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ChangeTagsForResourceRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <AddTags>
+                    <Tag><Key>env</Key><Value>test</Value></Tag>
+                    <Tag><Key>owner</Key><Value>floci</Value></Tag>
+                  </AddTags>
+                </ChangeTagsForResourceRequest>
+                """;
+        given()
+                .contentType(XML).body(addTagBody)
+                .when().post("/2013-04-01/tags/hostedzone/" + tagZoneId)
+                .then().statusCode(200);
+
+        String listBody = given()
+                .when().get("/2013-04-01/tags/hostedzone/" + tagZoneId)
+                .then()
+                .statusCode(200)
+                .body("ListTagsForResourceResponse.ResourceTagSet.ResourceType", equalTo("hostedzone"))
+                .body("ListTagsForResourceResponse.ResourceTagSet.ResourceId", equalTo(tagZoneId))
+                .extract().body().asString();
+
+        assertThat(listBody, containsString("<Key>env</Key>"));
+        assertThat(listBody, containsString("<Key>owner</Key>"));
+
+        String removeTagBody = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <ChangeTagsForResourceRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <RemoveTagKeys>
+                    <Key>owner</Key>
+                  </RemoveTagKeys>
+                </ChangeTagsForResourceRequest>
+                """;
+        given()
+                .contentType(XML).body(removeTagBody)
+                .when().post("/2013-04-01/tags/hostedzone/" + tagZoneId)
+                .then().statusCode(200);
+
+        String afterRemove = given()
+                .when().get("/2013-04-01/tags/hostedzone/" + tagZoneId)
+                .then().statusCode(200)
+                .extract().body().asString();
+
+        assertThat(afterRemove, containsString("<Key>env</Key>"));
+        assertThat(afterRemove, not(containsString("<Key>owner</Key>")));
+
+        // Cleanup
+        given().delete("/2013-04-01/hostedzone/" + tagZoneId).then().statusCode(200);
+    }
+
+    // ── Limits ────────────────────────────────────────────────────────────────
+
+    @Test
+    @Order(21)
+    void getAccountLimit_returnsValue() {
+        given()
+                .when().get("/2013-04-01/accountlimit/MAX_HOSTED_ZONES_BY_OWNER")
+                .then()
+                .statusCode(200)
+                .body("GetAccountLimitResponse.Limit.Type", equalTo("MAX_HOSTED_ZONES_BY_OWNER"))
+                .body("GetAccountLimitResponse.Limit.Value", equalTo("500"));
+    }
+
+    @Test
+    @Order(22)
+    void updateHostedZoneComment_replacesTheCommentAndClearsItWhenOmitted() {
+        String ownZoneId = createZoneForCommentTest("comment-zone-1", "before the import");
+
+        given()
+                .contentType(XML)
+                .body("""
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <UpdateHostedZoneCommentRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                          <Comment>after the import</Comment>
+                        </UpdateHostedZoneCommentRequest>
+                        """)
+                .when().post("/2013-04-01/hostedzone/" + ownZoneId)
+                .then()
+                .statusCode(200)
+                .contentType(XML)
+                .body("UpdateHostedZoneCommentResponse.HostedZone.Id", equalTo("/hostedzone/" + ownZoneId))
+                .body("UpdateHostedZoneCommentResponse.HostedZone.Config.Comment", equalTo("after the import"));
+
+        given()
+                .when().get("/2013-04-01/hostedzone/" + ownZoneId)
+                .then()
+                .statusCode(200)
+                .body("GetHostedZoneResponse.HostedZone.Config.Comment", equalTo("after the import"));
+
+        // AWS deletes the existing comment when the request carries none.
+        given()
+                .contentType(XML)
+                .body("""
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <UpdateHostedZoneCommentRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/"/>
+                        """)
+                .when().post("/2013-04-01/hostedzone/" + ownZoneId)
+                .then()
+                .statusCode(200)
+                .body(not(containsString("<Comment>")));
+
+        // Cleanup
+        given().when().delete("/2013-04-01/hostedzone/" + ownZoneId).then().statusCode(200);
+    }
+
+    @Test
+    @Order(23)
+    void updateHostedZoneComment_unknownZoneIsNoSuchHostedZone() {
+        given()
+                .contentType(XML)
+                .body("""
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <UpdateHostedZoneCommentRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                          <Comment>nope</Comment>
+                        </UpdateHostedZoneCommentRequest>
+                        """)
+                .when().post("/2013-04-01/hostedzone/ZNOPE000000000")
+                .then()
+                .statusCode(404)
+                .body(containsString("NoSuchHostedZone"));
+    }
+
+    @Test
+    @Order(24)
+    void updateHostedZoneComment_rejectsABodyThatIsNotAnUpdateRequest() {
+        String zoneId = createZoneForCommentTest("comment-zone-2", "keep me");
+
+        // A truncated document parses to no root, so it must not read as "no Comment given".
+        given()
+                .contentType(XML)
+                .body("<UpdateHostedZoneCommentRequest><Comment>gone</Comment>")
+                .when().post("/2013-04-01/hostedzone/" + zoneId)
+                .then()
+                .statusCode(400)
+                .body(containsString("InvalidInput"));
+
+        given()
+                .contentType(XML)
+                .body("<DeleteHostedZoneRequest/>")
+                .when().post("/2013-04-01/hostedzone/" + zoneId)
+                .then()
+                .statusCode(400)
+                .body(containsString("InvalidInput"));
+
+        given()
+                .when().get("/2013-04-01/hostedzone/" + zoneId)
+                .then()
+                .statusCode(200)
+                .body("GetHostedZoneResponse.HostedZone.Config.Comment", equalTo("keep me"));
+
+        // Cleanup
+        given().when().delete("/2013-04-01/hostedzone/" + zoneId).then().statusCode(200);
+    }
+
+    private String createZoneForCommentTest(String callerReference, String comment) {
+        String location = given()
+                .contentType(XML)
+                .body("""
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                          <Name>comments.example.com</Name>
+                          <CallerReference>%s</CallerReference>
+                          <HostedZoneConfig>
+                            <Comment>%s</Comment>
+                          </HostedZoneConfig>
+                        </CreateHostedZoneRequest>
+                        """.formatted(callerReference, comment))
+                .when().post("/2013-04-01/hostedzone")
+                .then().statusCode(201).extract().header("Location");
+        return location.substring(location.lastIndexOf('/') + 1);
+    }
+}

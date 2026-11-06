@@ -1,0 +1,227 @@
+package io.floci.aws.services.redshift.proxy;
+
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.rds.proxy.PasswordValidator;
+import io.floci.aws.services.rds.proxy.RdsProxyTlsCertificates;
+import io.floci.aws.services.rds.proxy.RdsSigV4Validator;
+import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
+import io.floci.aws.services.redshift.spectrum.SpectrumInterceptor;
+import io.floci.aws.services.s3.S3Service;
+import io.quarkus.runtime.ShutdownEvent;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.OptionalInt;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Registry of all active Redshift auth proxies. One proxy per cluster, keyed by
+ * the relay key "{accountId}:{clusterId}". Mirrors RdsProxyManager; Redshift is
+ * always PostgreSQL and never IAM-enabled, so those parameters are dropped.
+ */
+@ApplicationScoped
+public class RedshiftProxyManager {
+
+    private static final Logger LOG = Logger.getLogger(RedshiftProxyManager.class);
+
+    private final RdsSigV4Validator sigV4Validator;
+    private final RdsProxyTlsCertificates tlsCertificates;
+    private final S3Service s3Service;
+    private final IamService iamService;
+    private final SpectrumInterceptor spectrumInterceptor;
+    private final EmulatorConfig config;
+    private final RedshiftParquetWriter parquetWriter;
+    private final RedshiftAuditLogPublisher auditLogPublisher;
+    private final ConcurrentHashMap<String, RedshiftAuthProxy> proxies = new ConcurrentHashMap<>();
+    /**
+     * Proxies whose listener could not be closed during a failed start or replace. The
+     * reference is kept (not discarded) so a later {@link #stopProxy}/{@link #stopAll}
+     * can retry the close; until one succeeds, {@code stopProxy} keeps throwing so the
+     * caller leaves the port reserved rather than handing it out to another cluster.
+     */
+    private final ConcurrentHashMap<String, RedshiftAuthProxy> unclosableProxies = new ConcurrentHashMap<>();
+
+    public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
+                                S3Service s3Service, IamService iamService, EmulatorConfig config) {
+        this(sigV4Validator, tlsCertificates, s3Service, iamService, config, null);
+    }
+
+    public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
+                                S3Service s3Service, IamService iamService, EmulatorConfig config,
+                                SpectrumInterceptor spectrumInterceptor) {
+        this(sigV4Validator, tlsCertificates, s3Service, iamService, config, spectrumInterceptor, null, null);
+    }
+
+    @Inject
+    public RedshiftProxyManager(RdsSigV4Validator sigV4Validator, RdsProxyTlsCertificates tlsCertificates,
+                                S3Service s3Service, IamService iamService, EmulatorConfig config,
+                                SpectrumInterceptor spectrumInterceptor,
+                                RedshiftAuditLogPublisher auditLogPublisher, RedshiftParquetWriter parquetWriter) {
+        this.sigV4Validator = sigV4Validator;
+        this.tlsCertificates = tlsCertificates;
+        this.s3Service = s3Service;
+        this.iamService = iamService;
+        this.spectrumInterceptor = spectrumInterceptor;
+        this.config = config;
+        this.parquetWriter = parquetWriter;
+        this.auditLogPublisher = auditLogPublisher;
+    }
+
+    public synchronized void startProxy(String relayKey, int proxyPort,
+                                        String backendHost, int backendPort, String advertisedHost,
+                                        String masterUsername, String masterPassword, String dbName,
+                                        PasswordValidator passwordValidator) {
+        startProxy(relayKey, proxyPort, backendHost, backendPort, advertisedHost, masterUsername,
+                masterPassword, dbName, passwordValidator, List.of());
+    }
+
+    public synchronized void startProxy(String relayKey, int proxyPort,
+                                        String backendHost, int backendPort, String advertisedHost,
+                                        String masterUsername, String masterPassword, String dbName,
+                                        PasswordValidator passwordValidator, List<String> iamRoleArns) {
+        startProxy(relayKey, proxyPort, backendHost, backendPort, advertisedHost, masterUsername,
+                masterPassword, dbName, passwordValidator, iamRoleArns, null);
+    }
+
+    public synchronized void startProxy(String relayKey, int proxyPort,
+                                        String backendHost, int backendPort, String advertisedHost,
+                                        String masterUsername, String masterPassword, String dbName,
+                                        PasswordValidator passwordValidator, List<String> iamRoleArns,
+                                        String defaultIamRoleArn) {
+        // A prior unclosable entry for this key is left in place: its listener may still
+        // be bound, and only a successful stop (never a fresh start) may drop it.
+        // Make sure the self-signed proxy certificate covers the host clients will connect to,
+        // so sslmode=prefer/require handshakes succeed.
+        tlsCertificates.ensureHost(advertisedHost);
+        invalidateSpectrumRuntime(relayKey);
+        EmulatorConfig.RedshiftServiceConfig redshiftConfig = config.services().redshift();
+        String clusterAccountId = relayKey.substring(0, relayKey.indexOf(':'));
+        RedshiftAuthProxy proxy = new RedshiftAuthProxy(
+                relayKey, backendHost, backendPort, masterUsername, masterPassword, dbName,
+                sigV4Validator, tlsCertificates, passwordValidator, s3Service, iamService,
+                clusterAccountId,
+                iamRoleArns,
+                redshiftConfig.proxyHandshakeTimeoutMillis(), redshiftConfig.proxyBackendConnectTimeoutMillis(),
+                redshiftConfig.proxyMaxConnections(), spectrumInterceptor, auditLogPublisher, parquetWriter);
+        proxy.updateIamRoles(iamRoleArns, defaultIamRoleArn);
+        try {
+            proxy.start(proxyPort);
+        } catch (IOException | RuntimeException e) {
+            RuntimeException failure = new RuntimeException(
+                    "Failed to start Redshift proxy for cluster " + relayKey + " on port " + proxyPort, e);
+            cleanupFailedStart(relayKey, proxy, failure);
+            throw failure;
+        }
+        RedshiftAuthProxy previous = proxies.put(relayKey, proxy);
+        if (previous != null) {
+            try {
+                previous.stop();
+            } catch (RuntimeException e) {
+                proxies.put(relayKey, previous);
+                RuntimeException failure = new RuntimeException(
+                        "Failed to replace Redshift proxy for cluster " + relayKey, e);
+                cleanupFailedStart(relayKey, proxy, failure);
+                throw failure;
+            }
+        }
+    }
+
+    public synchronized void updateMasterPassword(String relayKey, String newPassword) {
+        RedshiftAuthProxy proxy = proxies.get(relayKey);
+        if (proxy != null) {
+            proxy.updateMasterPassword(newPassword);
+            LOG.infov("Updated Redshift proxy master password for cluster {0}", relayKey);
+        }
+    }
+
+    public synchronized void updateIamRoles(String relayKey, List<String> iamRoleArns) {
+        RedshiftAuthProxy proxy = proxies.get(relayKey);
+        if (proxy != null) {
+            proxy.updateIamRoles(iamRoleArns);
+            LOG.infov("Updated Redshift proxy IAM roles for cluster {0}", relayKey);
+        }
+    }
+
+    public synchronized void updateIamRoles(String relayKey, List<String> iamRoleArns, String defaultIamRoleArn) {
+        RedshiftAuthProxy proxy = proxies.get(relayKey);
+        if (proxy != null) {
+            proxy.updateIamRoles(iamRoleArns, defaultIamRoleArn);
+        }
+    }
+
+    /** Open client connections of the proxy registered under {@code relayKey}; empty when none runs. */
+    public OptionalInt activeConnections(String relayKey) {
+        RedshiftAuthProxy proxy = proxies.get(relayKey);
+        return proxy == null ? OptionalInt.empty() : OptionalInt.of(proxy.activeConnections());
+    }
+
+    public synchronized void stopProxy(String relayKey) {
+        // Retry any listener a previous failed start/replace could not close. If it still
+        // cannot be closed this throws, and the entry stays for the next retry.
+        RedshiftAuthProxy unclosable = unclosableProxies.get(relayKey);
+        if (unclosable != null) {
+            unclosable.stop();
+            unclosableProxies.remove(relayKey);
+            LOG.infov("Recovered previously unclosable Redshift proxy for cluster {0}", relayKey);
+        }
+        RedshiftAuthProxy proxy = proxies.get(relayKey);
+        if (proxy != null) {
+            proxy.stop();
+            proxies.remove(relayKey);
+            LOG.infov("Stopped Redshift proxy for cluster {0}", relayKey);
+        }
+        invalidateSpectrumRuntime(relayKey);
+    }
+
+    public void forgetSpectrumRuntime(String relayKey) {
+        if (spectrumInterceptor != null && spectrumInterceptor.preparation() != null) {
+            String accountId = relayKey.substring(0, relayKey.indexOf(':'));
+            spectrumInterceptor.preparation().forgetRuntime(accountId, relayKey);
+        }
+    }
+
+    private void invalidateSpectrumRuntime(String relayKey) {
+        if (spectrumInterceptor != null && spectrumInterceptor.preparation() != null) {
+            spectrumInterceptor.preparation().invalidateRuntime(relayKey);
+        }
+    }
+
+    public synchronized void stopAll() {
+        proxies.forEach((relayKey, proxy) -> {
+            try {
+                proxy.stop();
+                proxies.remove(relayKey, proxy);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Failed to stop Redshift proxy for cluster {0} during shutdown", relayKey);
+            }
+        });
+        unclosableProxies.forEach((relayKey, proxy) -> {
+            try {
+                proxy.stop();
+                unclosableProxies.remove(relayKey, proxy);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Failed to close leaked Redshift proxy for cluster {0} during shutdown", relayKey);
+            }
+        });
+        LOG.info("Stopped all Redshift proxies");
+    }
+
+    void onShutdown(@Observes ShutdownEvent event) {
+        stopAll();
+    }
+
+    private void cleanupFailedStart(String relayKey, RedshiftAuthProxy proxy, RuntimeException failure) {
+        try {
+            proxy.stop();
+        } catch (RuntimeException cleanupFailure) {
+            // Keep the listener reachable so stopProxy/stopAll can retry closing it later.
+            unclosableProxies.put(relayKey, proxy);
+            failure.addSuppressed(cleanupFailure);
+        }
+    }
+}
