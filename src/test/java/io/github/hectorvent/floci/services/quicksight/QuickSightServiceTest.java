@@ -118,6 +118,48 @@ class QuickSightServiceTest {
                 () -> service.redeem(token, token, "one", "https://localhost:3443", null)).getHttpStatus());
     }
 
+    @Test
+    void cleanupRemovesExpiredSessionsAcrossAccountsAndPreservesLiveSessions() throws Exception {
+        String abandoned = token(service.generateEmbedUrl(ACCOUNT, embedRequest()).path("EmbedUrl").asText());
+        String foreignAccount = "111122223333";
+        String foreignUser = service.registerUser(foreignAccount, "default", mapper.readTree("""
+                {"UserName":"reader","Email":"reader@example.com","UserRole":"READER","IdentityType":"QUICKSIGHT"}
+                """)).path("User").path("Arn").asText();
+        ObjectNode foreignDashboard = mapper.createObjectNode().put("Name", "Foreign");
+        foreignDashboard.putObject("Definition");
+        foreignDashboard.putArray("Permissions").addObject().put("Principal", foreignUser)
+                .putArray("Actions").add("quicksight:DescribeDashboard");
+        service.create(foreignAccount, "dashboard", "one", foreignDashboard);
+        String foreign = token(service.generateEmbedUrl(foreignAccount, embedRequest().put("UserArn", foreignUser))
+                .path("EmbedUrl").asText());
+        String foreignCookie = service.redeem(foreign, foreign, "one", "https://localhost:3443", null)
+                .path("_SessionCookie").asText();
+
+        when(clock.instant()).thenReturn(START.plusSeconds(299));
+        assertEquals(0, service.cleanupExpiredSessions(clock.instant()));
+        String fresh = token(service.generateEmbedUrl(ACCOUNT, embedRequest()).path("EmbedUrl").asText());
+        when(clock.instant()).thenReturn(START.plusSeconds(300));
+        assertEquals(1, service.cleanupExpiredSessions(clock.instant()));
+        assertEquals(0, service.cleanupExpiredSessions(clock.instant()));
+        assertThrows(AwsException.class, () -> service.redeem(abandoned, abandoned, "one", "https://localhost:3443", null));
+        String freshCookie = service.redeem(fresh, fresh, "one", "https://localhost:3443", null)
+                .path("_SessionCookie").asText();
+
+        when(clock.instant()).thenReturn(START.plusSeconds(600));
+        assertEquals(0, service.cleanupExpiredSessions(clock.instant()));
+        assertEquals("Foreign", service.redeem(foreign, null, "one", "https://localhost:3443", foreignCookie).path("Name").asText());
+        when(clock.instant()).thenReturn(START.plusSeconds(900));
+        assertEquals(1, service.cleanupExpiredSessions(clock.instant()));
+        assertEquals(0, service.cleanupExpiredSessions(clock.instant()));
+        assertThrows(AwsException.class, () -> service.redeem(foreign, null, "one", "https://localhost:3443", foreignCookie));
+        assertEquals("One", service.redeem(fresh, null, "one", "https://localhost:3443", freshCookie).path("Name").asText());
+        when(clock.instant()).thenReturn(START.plusSeconds(1200));
+        assertEquals(1, service.cleanupExpiredSessions(clock.instant()));
+        assertEquals(0, service.cleanupExpiredSessions(clock.instant()));
+        assertThrows(AwsException.class, () -> service.redeem(fresh, null, "one", "https://localhost:3443", freshCookie));
+        assertEquals("One", service.describe(ACCOUNT, "dashboard", "one").path("Dashboard").path("Name").asText());
+    }
+
     private ObjectNode embedRequest() {
         ObjectNode request = mapper.createObjectNode().put("UserArn", principal).put("SessionLifetimeInMinutes", 15);
         request.putObject("ExperienceConfiguration").putObject("Dashboard").put("InitialDashboardId", "one");

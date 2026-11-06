@@ -124,20 +124,21 @@ class QuickSightIntegrationTest {
                     .permissions(ResourcePermission.builder().principal(user).actions("quicksight:DescribeDashboard").build()));
             try {
                 URI generated = URI.create(client.generateEmbedUrlForRegisteredUser(request -> request.awsAccountId(ACCOUNT).userArn(user)
-                        .allowedDomains("https://app.example.com")
+                        .allowedDomains("https://APP.example.com:443", "https://PORTAL.example.com:443")
                         .experienceConfiguration(experience -> experience.dashboard(dashboard -> dashboard.initialDashboardId(id)))).embedUrl());
                 URI local = endpoint.resolve(generated.getRawPath() + "?" + generated.getRawQuery());
                 assertEquals(403, http.send(HttpRequest.newBuilder(local).header("Referer", "https://other.example/").build(), HttpResponse.BodyHandlers.ofString()).statusCode());
+                assertEquals(403, http.send(HttpRequest.newBuilder(local).header("Referer", "https://app.example.com:8443/").build(), HttpResponse.BodyHandlers.ofString()).statusCode());
                 HttpResponse<String> page = http.send(HttpRequest.newBuilder(local).header("Referer", "https://app.example.com/reports").build(), HttpResponse.BodyHandlers.ofString());
                 assertEquals(200, page.statusCode());
                 assertTrue(page.body().contains("&lt;script&gt;bad()&lt;/script&gt; &amp; metadata"));
                 assertFalse(page.body().contains("<script>"));
                 assertEquals("no-store", page.headers().firstValue("cache-control").orElseThrow());
-                assertEquals("frame-ancestors https://app.example.com", page.headers().firstValue("content-security-policy").orElseThrow());
+                assertEquals("frame-ancestors https://app.example.com https://portal.example.com", page.headers().firstValue("content-security-policy").orElseThrow());
                 String cookie = page.headers().firstValue("set-cookie").orElseThrow();
                 assertTrue(cookie.contains("HttpOnly; Secure; SameSite=None"));
                 HttpRequest reload = HttpRequest.newBuilder(endpoint.resolve(generated.getRawPath()))
-                        .header("Referer", "https://app.example.com/reports").header("Cookie", cookie.split(";")[0]).build();
+                        .header("Referer", "https://APP.EXAMPLE.com:443/reports").header("Cookie", cookie.split(";")[0]).build();
                 assertEquals(200, http.send(reload, HttpResponse.BodyHandlers.ofString()).statusCode());
             } finally {
                 client.deleteDashboard(request -> request.awsAccountId(ACCOUNT).dashboardId(id));

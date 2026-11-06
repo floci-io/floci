@@ -20,6 +20,7 @@ import jakarta.inject.Inject;
 
 import java.net.URI;
 import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import java.util.function.Function;
@@ -248,13 +249,14 @@ public class QuickSightService implements Resettable {
             } catch (IllegalArgumentException exception) {
                 throw invalid("Invalid allowed domain.");
             }
-            if (origin.getHost() == null || !("https".equals(origin.getScheme())
-                    || "http".equals(origin.getScheme()) && "localhost".equals(origin.getHost()))
+            String normalized = QuickSightOrigins.normalize(origin);
+            if (normalized.isEmpty() || !("https".equalsIgnoreCase(origin.getScheme())
+                    || "http".equalsIgnoreCase(origin.getScheme()) && "localhost".equalsIgnoreCase(origin.getHost()))
                     || origin.getRawQuery() != null || origin.getRawFragment() != null
                     || origin.getPath() != null && !origin.getPath().isEmpty() && !origin.getPath().equals("/")) {
                 throw invalid("AllowedDomains must contain HTTPS origins or HTTP localhost.");
             }
-            domains.add(origin.getScheme() + "://" + origin.getRawAuthority());
+            domains.add(normalized);
         }
         String token = account + "-" + UUID.randomUUID();
         ObjectNode session = mapper.createObjectNode().put("account", account).put("region", regions.getRegion())
@@ -294,7 +296,23 @@ public class QuickSightService implements Resettable {
                     .put("expires", now + session.path("lifetime").asInt() * 60L);
             sessions.putForAccount(account, token, new QuickSightResource(session));
         }
-        return dashboard.put("_SessionCookie", session.path("cookie").asText());
+        ArrayNode allowedOrigins = mapper.createArrayNode();
+        for (JsonNode domain : session.path("domains")) {
+            String normalized = QuickSightOrigins.fromUrl(domain.asText());
+            if (!normalized.isEmpty()) {
+                allowedOrigins.add(normalized);
+            }
+        }
+        return dashboard.put("_SessionCookie", session.path("cookie").asText()).set("_AllowedOrigins", allowedOrigins);
+    }
+
+    public synchronized int cleanupExpiredSessions(Instant now) {
+        long deadline = now.getEpochSecond();
+        return sessions.deleteAllAccountsMatching(resource -> {
+            ObjectNode session = resource.document();
+            String expiryField = session.path("redeemed").asBoolean() ? "expires" : "redeemUntil";
+            return session.path(expiryField).asLong() <= deadline;
+        });
     }
 
     private void requireRegisteredUser(String account, String principal) {
@@ -306,8 +324,9 @@ public class QuickSightService implements Resettable {
     }
 
     private boolean originAllowed(JsonNode domains, String origin) {
+        String normalized = QuickSightOrigins.fromUrl(origin);
         for (JsonNode domain : domains) {
-            if (domain.asText().equals(origin)) {
+            if (!normalized.isEmpty() && QuickSightOrigins.fromUrl(domain.asText()).equals(normalized)) {
                 return true;
             }
         }
@@ -419,7 +438,7 @@ public class QuickSightService implements Resettable {
     }
 
     @Override
-    public void clear() {
+    public synchronized void clear() {
         resources.clear();
         sessions.clear();
     }

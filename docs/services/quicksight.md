@@ -41,10 +41,16 @@ Dashboard URLs use `/embed/{session}/dashboards/{id}?code={bearer}` and resolve 
 persisted dashboard after checking the registered user's direct sharing permissions.
 The bearer expires after five minutes and can be redeemed once. Subsequent loads
 require the secure session cookie; session lifetime is 15 to 600 minutes. Requested
-allowed origins are checked against the embedding page's referrer and included in
-`frame-ancestors`. Allowed domains are exact HTTPS origins or HTTP localhost,
-with one to three entries; wildcard domains and a configured domain allowlist
-are not implemented.
+allowed origins are checked against the embedding page's referrer. Host names and
+schemes are lowercased and default ports are omitted when origins are stored or
+compared. `frame-ancestors` includes every session allowed origin so nested frames
+on those origins can embed the dashboard. Allowed domains are exact HTTPS origins
+or HTTP localhost, with one to three entries; wildcard domains and a configured
+domain allowlist are not implemented.
+
+When QuickSight is enabled, a background sweep removes expired unredeemed URLs and
+redeemed sessions at startup and every sixty seconds, including when idle. The
+worker pauses for emulator reset and stops before storage is flushed at shutdown.
 Treat embed URLs as credentials and do not put them in logs or shared reports.
 
 ## Scope
