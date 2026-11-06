@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-11-03",
+    "retrieved": "2026-11-04",
     "note": "make iam-authorized-actions-verify checks every entry against AWS. QuickSight actions without resource types added from its AWS Service Reference on 2026-11-05; other entries retain their vendored snapshot."
   },
   "authorizedActions": {
@@ -421,6 +421,17 @@
       "ListNetworkConnectors",
       "ListWebFunctions",
       "PassNetworkConnector"
+    ],
+    "payment-cryptography": [
+      "CreateKey",
+      "DisableDefaultKeyReplicationRegions",
+      "EnableDefaultKeyReplicationRegions",
+      "GetDefaultKeyReplicationRegions",
+      "GetParametersForExport",
+      "GetParametersForImport",
+      "ImportKey",
+      "ListAliases",
+      "ListKeys"
     ],
     "pipes": [
       "ListPipes"

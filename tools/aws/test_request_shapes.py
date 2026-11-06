@@ -389,19 +389,19 @@ def test_payment_cryptography_shapes_widen_the_partition_the_model_writes():
     doc = json.loads(regen_payment_cryptography_shapes.OUTPUT.read_text(encoding="utf-8"))
 
     # The model writes the commercial partition; the service writes every partition it serves.
-    assert regen_payment_cryptography_shapes.COMMERCIAL not in doc["shapes"]["KeyArn"]["pattern"]
-    assert regen_payment_cryptography_shapes.EVERY_PARTITION in doc["shapes"]["KeyArn"]["pattern"]
-    assert regen_payment_cryptography_shapes.EVERY_PARTITION in doc["shapes"]["ResourceArn"]["pattern"]
+    assert r.COMMERCIAL not in doc["shapes"]["KeyArn"]["pattern"]
+    assert r.EVERY_PARTITION in doc["shapes"]["KeyArn"]["pattern"]
+    assert r.EVERY_PARTITION in doc["shapes"]["ResourceArn"]["pattern"]
 
 
 def test_payment_cryptography_shapes_widen_the_region_on_every_pattern_the_model_writes_it():
     doc = json.loads(regen_payment_cryptography_shapes.OUTPUT.read_text(encoding="utf-8"))
 
     patterns = [shape["pattern"] for shape in doc["shapes"].values() if "pattern" in shape]
-    assert not [p for p in patterns if regen_payment_cryptography_shapes.COMMERCIAL_REGION in p]
-    assert doc["shapes"]["Region"]["pattern"] == regen_payment_cryptography_shapes.EVERY_REGION
+    assert not [p for p in patterns if r.COMMERCIAL_REGION in p]
+    assert doc["shapes"]["Region"]["pattern"] == r.EVERY_REGION
     for name in ("KeyArn", "KeyArnOrKeyAliasType", "ResourceArn"):
-        assert regen_payment_cryptography_shapes.EVERY_REGION in doc["shapes"][name]["pattern"]
+        assert r.EVERY_REGION in doc["shapes"][name]["pattern"]
 
 
 def test_payment_cryptography_shapes_take_every_published_region_of_its_partition():
