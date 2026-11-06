@@ -1,0 +1,371 @@
+package io.floci.aws.core.common.docker;
+
+import com.github.dockerjava.api.model.Bind;
+import com.github.dockerjava.api.model.DeviceRequest;
+import com.github.dockerjava.api.model.LogConfig;
+import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.VolumesFrom;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Immutable specification for a Docker container to be created.
+ * Use {@link ContainerBuilder} to construct instances of this record.
+ *
+ * @param image Docker image name (required)
+ * @param name Container name (optional, Docker generates one if null)
+ * @param env Environment variables as "KEY=value" strings
+ * @param cmd Command to run (overrides image CMD)
+ * @param entrypoint Entrypoint to use (overrides image ENTRYPOINT)
+ * @param memoryBytes Memory limit in bytes (null = no limit)
+ * @param portBindings Map of container port to host port (0 = dynamic allocation)
+ * @param loopbackPortBindings Container ports whose host bindings accept loopback traffic only
+ * @param exposedPorts Ports to expose (required for port bindings)
+ * @param networkMode Docker network name or mode (null = default bridge)
+ * @param mounts Volume mounts (named volumes, bind mounts, tmpfs)
+ * @param binds Legacy bind mounts (prefer mounts for new code)
+ * @param volumesFrom Volumes inherited from other containers
+ * @param extraHosts Extra /etc/hosts entries as "hostname:ip" strings
+ * @param labels Container labels merged over the default floci-aws labels
+ * @param logConfig Docker log driver configuration (null = daemon default)
+ * @param privileged Whether to run the container in privileged mode (required for k3s)
+ * @param cgroupnsMode Docker cgroup namespace mode (for example, "host")
+ * @param dnsServers DNS server IPs to inject into the container (e.g. Floci's embedded DNS)
+ * @param workingDir Working directory inside the container (overrides image WORKDIR)
+ * @param user User the container process runs as, formatted "uid[:gid]" (null = image USER)
+ * @param groupAdd Supplementary group IDs added to the container process
+ * @param deviceRequests Device requests for accelerators such as GPUs (empty = none)
+ * @param nanoCpus Hard CPU quota in billionths of a CPU (null = no quota)
+ * @param cpuShares Relative CPU weight against other containers (null = daemon default)
+ * @param readonlyRootfs Whether the container's own filesystem is mounted read only
+ * @param linkLocalIps Link-local IPv4 addresses assigned to the container's endpoint on the configured network
+ * @param portBindingHostIps Host interface each published port binds to, keyed by container port.
+ *        A port with no entry here, and not in {@code loopbackPortBindings}, binds every interface
+ * @param init Whether Docker runs its init process as PID 1, forwarding signals to the command, for
+ *        images whose command does not handle SIGTERM itself
+ * @param linuxOptions Capabilities, devices, shared memory, tmpfs and swap
+ *        ({@link LinuxOptions#NONE} = daemon defaults)
+ * @param javaTrustStore Whether, with TLS on, the container's JVMs trust Floci's CA: the CA bundle's Java trust
+ *        store goes in beside the bundle, and {@code JAVA_TOOL_OPTIONS} points at it
+ */
+public record ContainerSpec(
+        String image,
+        String name,
+        List<String> env,
+        List<String> cmd,
+        List<String> entrypoint,
+        Long memoryBytes,
+        Map<Integer, Integer> portBindings,
+        List<Integer> loopbackPortBindings,
+        List<Integer> exposedPorts,
+        String networkMode,
+        List<Mount> mounts,
+        List<Bind> binds,
+        List<VolumesFrom> volumesFrom,
+        List<String> extraHosts,
+        Map<String, String> labels,
+        LogConfig logConfig,
+        boolean privileged,
+        String cgroupnsMode,
+        List<String> dnsServers,
+        String workingDir,
+        String user,
+        List<String> groupAdd,
+        List<DeviceRequest> deviceRequests,
+        Long nanoCpus,
+        Integer cpuShares,
+        boolean readonlyRootfs,
+        List<String> linkLocalIps,
+        Map<Integer, String> portBindingHostIps,
+        boolean init,
+        LinuxOptions linuxOptions,
+        boolean javaTrustStore
+) {
+    private static final Pattern LINK_LOCAL_IPV4 = Pattern.compile("^169\\.254\\.(\\d{1,3})\\.(\\d{1,3})$");
+    private static final Set<String> NETWORKS_WITHOUT_ENDPOINT_IPAM = Set.of("bridge", "default", "host", "none");
+    private static final Set<String> NAMESPACE_NETWORK_MODES = Set.of("host", "none");
+
+    public ContainerSpec {
+        if (linuxOptions == null) {
+            linuxOptions = LinuxOptions.NONE;
+        }
+        if (linkLocalIps != null && !linkLocalIps.isEmpty()) {
+            requireUserDefinedNetwork(networkMode);
+            linkLocalIps.forEach(ContainerSpec::requireLinkLocalIpv4);
+        }
+    }
+
+    /**
+     * Creates a minimal spec with just the image name.
+     * All other fields will be null or empty lists.
+     */
+    public ContainerSpec(String image) {
+        this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
+                List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(),
+                null, null, List.of(), List.of(), null, null, false, List.of(), Map.of(), false, LinuxOptions.NONE,
+                false);
+    }
+
+    /**
+     * Backward-compatible constructor that leaves the container's JVMs on the image's trust store, so callers
+     * that predate the Java trust store keep their existing behaviour.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> loopbackPortBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<VolumesFrom> volumesFrom,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd,
+            List<DeviceRequest> deviceRequests,
+            Long nanoCpus,
+            Integer cpuShares,
+            boolean readonlyRootfs,
+            List<String> linkLocalIps,
+            Map<Integer, String> portBindingHostIps,
+            boolean init,
+            LinuxOptions linuxOptions
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
+                exposedPorts, networkMode, mounts, binds, volumesFrom, extraHosts, labels, logConfig,
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
+                nanoCpus, cpuShares, readonlyRootfs, linkLocalIps, portBindingHostIps, init, linuxOptions, false);
+    }
+
+    /**
+     * Backward-compatible constructor that leaves {@code linuxOptions} to the daemon, so callers
+     * that predate the Linux process options keep their existing behaviour.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> loopbackPortBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<VolumesFrom> volumesFrom,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd,
+            List<DeviceRequest> deviceRequests,
+            Long nanoCpus,
+            Integer cpuShares,
+            boolean readonlyRootfs,
+            List<String> linkLocalIps,
+            Map<Integer, String> portBindingHostIps,
+            boolean init
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
+                exposedPorts, networkMode, mounts, binds, volumesFrom, extraHosts, labels, logConfig,
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
+                nanoCpus, cpuShares, readonlyRootfs, linkLocalIps, portBindingHostIps, init, LinuxOptions.NONE);
+    }
+
+    /**
+     * Backward-compatible constructor that defaults {@code loopbackPortBindings},
+     * {@code volumesFrom}, and {@code deviceRequests} to empty.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, List.of(), exposedPorts,
+                networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig, privileged,
+                cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(), null, null, false,
+                List.of(), Map.of(), false, LinuxOptions.NONE);
+    }
+
+    /**
+     * Backward-compatible constructor that defaults {@code volumesFrom} and
+     * {@code deviceRequests} to empty, so callers that predate volume inheritance and
+     * accelerator support keep their existing behaviour.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> loopbackPortBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
+                exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, List.of(),
+                null, null, false, List.of(), Map.of(), false, LinuxOptions.NONE);
+    }
+
+    /**
+     * Backward-compatible constructor that defaults {@code volumesFrom} to empty while
+     * preserving explicitly requested devices.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> loopbackPortBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd,
+            List<DeviceRequest> deviceRequests
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
+                exposedPorts, networkMode, mounts, binds, List.of(), extraHosts, labels, logConfig,
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
+                null, null, false, List.of(), Map.of(), false, LinuxOptions.NONE);
+    }
+
+    /**
+     * Returns true if this spec has any port bindings configured.
+     */
+    public boolean hasPortBindings() {
+        return portBindings != null && !portBindings.isEmpty();
+    }
+
+    /**
+     * Returns true when the network mode hands the container an existing network namespace
+     * ({@code host}, {@code none} or {@code container:<id>}) instead of an endpoint on a Docker
+     * network. Docker applies these modes at creation only and publishes no ports through them.
+     */
+    public boolean sharesNetworkNamespace() {
+        return networkMode != null
+                && (NAMESPACE_NETWORK_MODES.contains(networkMode) || networkMode.startsWith("container:"));
+    }
+
+    /**
+     * Returns true when Docker can publish the requested port bindings on the host.
+     */
+    public boolean publishesPorts() {
+        return hasPortBindings() && !sharesNetworkNamespace();
+    }
+
+    /**
+     * Returns true if this spec has a memory limit configured.
+     */
+    public boolean hasMemoryLimit() {
+        return memoryBytes != null && memoryBytes > 0;
+    }
+
+    /**
+     * Returns true if log rotation is configured.
+     */
+    public boolean hasLogConfig() {
+        return logConfig != null;
+    }
+
+    /**
+     * Returns true if this spec asks the daemon for any device, such as a GPU.
+     */
+    public boolean hasDeviceRequests() {
+        return deviceRequests != null && !deviceRequests.isEmpty();
+    }
+
+    private static void requireUserDefinedNetwork(String networkMode) {
+        if (networkMode == null || networkMode.isBlank()
+                || NETWORKS_WITHOUT_ENDPOINT_IPAM.contains(networkMode) || networkMode.startsWith("container:")) {
+            throw new IllegalArgumentException(
+                    "Link-local addresses need a user-defined Docker network, but the network is '"
+                            + networkMode + "'");
+        }
+    }
+
+    private static void requireLinkLocalIpv4(String ip) {
+        Matcher matcher = ip == null ? null : LINK_LOCAL_IPV4.matcher(ip);
+        if (matcher == null || !matcher.matches()
+                || Integer.parseInt(matcher.group(1)) > 255 || Integer.parseInt(matcher.group(2)) > 255) {
+            throw new IllegalArgumentException("'" + ip + "' is not an IPv4 address in 169.254.0.0/16");
+        }
+    }
+
+    /**
+     * Returns true when the container asks for link-local addresses on its network endpoint.
+     */
+    public boolean hasLinkLocalIps() {
+        return linkLocalIps != null && !linkLocalIps.isEmpty();
+    }
+
+    /**
+     * Returns true when the configured network must be attached with endpoint settings before start.
+     */
+    public boolean hasNetworkConfiguration() {
+        return networkMode != null && !networkMode.isBlank() && hasLinkLocalIps();
+    }
+}

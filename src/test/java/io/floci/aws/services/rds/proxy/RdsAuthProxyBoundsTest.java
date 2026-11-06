@@ -1,0 +1,187 @@
+package io.floci.aws.services.rds.proxy;
+
+import io.floci.aws.config.FlociCertificateAuthority;
+import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.services.rds.container.RdsBackendGate;
+import io.floci.aws.services.rds.model.DatabaseEngine;
+import io.floci.aws.testutil.FreePorts;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
+import java.nio.file.Path;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+
+/**
+ * Covers the connection bounds (handshake timeout, backend-connect deferral, permit pool,
+ * accept backlog) added to {@link RdsAuthProxy} for the POSTGRES engine, mirroring the
+ * equivalent coverage in {@code RedshiftAuthProxyTest}.
+ */
+class RdsAuthProxyBoundsTest {
+
+    @TempDir
+    Path tempDir;
+
+    private RdsAuthProxy proxy;
+    private ServerSocket fakeBackend;
+
+    @AfterEach
+    void tearDown() throws IOException {
+        if (proxy != null) {
+            proxy.stop();
+        }
+        if (fakeBackend != null && !fakeBackend.isClosed()) {
+            fakeBackend.close();
+        }
+    }
+
+    @Test
+    void neverConnectsToTheBackendWhenTheClientDropsBeforeSendingAStartupPacket() throws Exception {
+        // Postgres startup is client-first: the backend connection is opened only after the
+        // client's startup message has been validated, so a client that vanishes beforehand
+        // must never cause a backend connection.
+        fakeBackend = new ServerSocket(0);
+        fakeBackend.setSoTimeout(500);
+
+        int proxyPort = FreePorts.anyInterfacePort();
+        proxy = newProxy(5000, 5000, 100);
+        proxy.start(proxyPort);
+
+        new Socket("localhost", proxyPort).close();
+
+        assertThrows(SocketTimeoutException.class, fakeBackend::accept,
+                "proxy connected to the backend before validating the client's startup message");
+    }
+
+    @Test
+    void idleClientIsDroppedAfterTheConfiguredHandshakeTimeout() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        int proxyPort = FreePorts.anyInterfacePort();
+        proxy = newProxy(200, 5000, 100);
+        proxy.start(proxyPort);
+
+        try (Socket client = new Socket("localhost", proxyPort)) {
+            client.setSoTimeout(5000);
+            // Send nothing; the proxy must drop the connection once the handshake timeout
+            // elapses. The client observes this as EOF once the proxy closes its end.
+            int result = client.getInputStream().read();
+            assertEquals(-1, result, "proxy did not drop an idle client after the handshake timeout");
+        }
+    }
+
+    @Test
+    void refusesAConnectionBeyondTheConfiguredLimit() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        int proxyPort = FreePorts.anyInterfacePort();
+        proxy = newProxy(5000, 5000, 1);
+        proxy.start(proxyPort);
+
+        // Hold the proxy's single connection permit from the test thread itself, so the
+        // refusal below is deterministic rather than a race against a real first connection.
+        Field permitsField = RdsAuthProxy.class.getDeclaredField("connectionPermits");
+        permitsField.setAccessible(true);
+        Semaphore permits = (Semaphore) permitsField.get(proxy);
+        assertTrue(permits.tryAcquire(), "expected the single configured permit to be available");
+
+        try (Socket client = new Socket("localhost", proxyPort)) {
+            int result = client.getInputStream().read();
+            assertEquals(-1, result, "connection was not refused once the connection limit was reached");
+        } finally {
+            permits.release();
+        }
+    }
+
+    @Test
+    void rejectsMissingBackendRuntimeIdentity() {
+        for (String runtimeId : new String[] {null, "", " "}) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> newProxy(runtimeId, 5000, 5000, 100));
+        }
+    }
+
+    @Test
+    void holdsTheClientUntilTheBackendGateAdmitsItAndReleasesTheLeaseWhenItLeaves() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        fakeBackend.setSoTimeout(300);
+        CountDownLatch admit = new CountDownLatch(1);
+        CountDownLatch released = new CountDownLatch(1);
+        AtomicReference<String> enteredRuntime = new AtomicReference<>();
+        RdsBackendGate gate = runtimeId -> {
+            enteredRuntime.set(runtimeId);
+            admit.await();
+            return released::countDown;
+        };
+        int proxyPort = FreePorts.anyInterfacePort();
+        proxy = new RdsAuthProxy("db-1", "localhost", fakeBackend.getLocalPort(), "runtime:db-1",
+                DatabaseEngine.SQLSERVER, false, "sa", "Secret123", null,
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
+                5000, 5000, 100, null, gate);
+        proxy.start(proxyPort);
+
+        try (Socket client = new Socket("localhost", proxyPort)) {
+            client.setSoTimeout(5000);
+            assertThrows(SocketTimeoutException.class, fakeBackend::accept,
+                    "the proxy reached the backend before the gate admitted the client");
+            admit.countDown();
+            fakeBackend.setSoTimeout(5000);
+            try (Socket backendSide = fakeBackend.accept()) {
+                backendSide.getOutputStream().write('x');
+                assertEquals('x', client.getInputStream().read(), "the held client is served once admitted");
+            }
+        }
+        assertEquals("runtime:db-1", enteredRuntime.get());
+        assertTrue(released.await(5, TimeUnit.SECONDS), "the lease is released when the connection ends");
+    }
+
+    @Test
+    void bindsWithABurstTolerantAcceptBacklog() throws Exception {
+        AtomicInteger acceptBacklog = new AtomicInteger();
+        proxy = new RdsAuthProxy("db-1", "localhost", 1, "runtime:db-1",
+                DatabaseEngine.POSTGRES, false, "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
+                5000, 5000, 100) {
+            @Override
+            ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
+                acceptBacklog.set(backlog);
+                return super.listenSocket(proxyPort, backlog);
+            }
+        };
+        proxy.start(0);
+        assertEquals(4096, acceptBacklog.get(),
+                "a connection burst must not overflow the proxy's accept queue");
+    }
+
+    private RdsAuthProxy newProxy(int handshakeTimeoutMillis, int backendConnectTimeoutMillis,
+                                  int maxConnections) {
+        return newProxy("runtime:db-1", handshakeTimeoutMillis, backendConnectTimeoutMillis, maxConnections);
+    }
+
+    private RdsAuthProxy newProxy(String runtimeId, int handshakeTimeoutMillis,
+                                  int backendConnectTimeoutMillis, int maxConnections) {
+        int backendPort = fakeBackend != null ? fakeBackend.getLocalPort() : 1;
+        return new RdsAuthProxy("db-1", "localhost", backendPort, runtimeId,
+                DatabaseEngine.POSTGRES, false,
+                "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
+                handshakeTimeoutMillis, backendConnectTimeoutMillis, maxConnections);
+    }
+
+    private RdsProxyTlsCertificates realTls() {
+        return new RdsProxyTlsCertificates(FlociCertificateAuthority.loadOrCreate(tempDir.resolve("tls")),
+                new CertificateGenerator());
+    }
+}

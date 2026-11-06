@@ -3,7 +3,7 @@
 Every entry is meant to excuse one file until that file is cleaned up. An entry that matches no
 file is dead weight, and one that matches several hides violations nobody chose to excuse. The
 paths start below the package root, so they keep matching when the package moves
-(io.github.hectorvent.floci to io.floci.aws).
+(io.floci.aws to io.floci.aws).
 """
 
 from pathlib import Path
@@ -21,7 +21,7 @@ SOURCE_ROOTS = (
     "compatibility-tests/sdk-test-java/src/main/java/",
     "compatibility-tests/sdk-test-java/src/test/java/",
 )
-PACKAGE_PATH = "io/github/hectorvent/floci/"
+PACKAGE_PATH = "io/floci/aws/"
 RENAMED_PATH = "io/floci/aws/"
 
 

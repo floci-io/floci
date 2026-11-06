@@ -1,0 +1,140 @@
+package io.floci.aws.services.redshiftdata;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.SqlParameterParser;
+import io.floci.aws.core.common.SqlParameterParser.ParsedSql;
+
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.sql.Types;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+/**
+ * Translates Redshift Data API {@code SqlParameter} bindings into JDBC
+ * {@link PreparedStatement} bindings.
+ *
+ * <p>The Data API uses named placeholders ({@code :name}); JDBC uses positional
+ * {@code ?}. {@link #parse(String)} rewrites the SQL to positional form while
+ * recording the placeholder order. Redshift Data API parameter values are always
+ * strings on the wire, so {@link #bind} binds every placeholder with
+ * {@link PreparedStatement#setString}; PostgreSQL coerces to the column type.
+ */
+final class RedshiftDataSqlParameters {
+
+    private static final Pattern PARAMETER_NAME = Pattern.compile("[0-9a-zA-Z_]+");
+
+    private RedshiftDataSqlParameters() {
+    }
+
+    /**
+     * Rewrites {@code :name} placeholders to positional {@code ?}, skipping over
+     * string literals, quoted identifiers, line and block comments, PostgreSQL
+     * {@code ::} casts, and dollar-quoted strings so a colon inside any of those
+     * is left untouched. Backslash is not treated as a string-literal escape
+     * (the PostgreSQL default with {@code standard_conforming_strings} on).
+     */
+    static ParsedSql parse(String sql) {
+        return SqlParameterParser.parse(sql, SqlParameterParser.Options.REDSHIFT);
+    }
+
+    /**
+     * Binds each positional placeholder from {@code order} with the matching
+     * value in {@code valuesByName}.
+     *
+     * @throws AwsException if a placeholder has no supplied value
+     */
+    static void bind(PreparedStatement statement, List<String> order, Map<String, String> valuesByName)
+            throws SQLException {
+        for (int position = 0; position < order.size(); position++) {
+            String name = order.get(position);
+            if (!valuesByName.containsKey(name)) {
+                throw new AwsException("ValidationException",
+                        "SQL references parameter :" + name + " but no matching value was supplied.", 400);
+            }
+            String value = valuesByName.get(name);
+            if (value == null) {
+                statement.setNull(position + 1, Types.NULL);
+            } else {
+                statement.setString(position + 1, value);
+            }
+        }
+    }
+
+    /**
+     * Reads a Data API {@code {name, value}} array into an insertion-ordered map.
+     */
+    static Map<String, String> parseParameters(JsonNode request, String field) {
+        JsonNode array = request.get(field);
+        if (array == null || array.isNull()) {
+            return Map.of();
+        }
+        if (!array.isArray()) {
+            throw new AwsException("ValidationException", field + " must be an array of {name, value} objects.", 400);
+        }
+        Map<String, String> byName = new LinkedHashMap<>();
+        for (JsonNode parameter : array) {
+            if (parameter == null || !parameter.isObject() || !parameter.hasNonNull("name")) {
+                throw new AwsException("ValidationException", "Each parameter must be an object with a name.", 400);
+            }
+            String name = parameter.get("name").asText();
+            JsonNode value = parameter.get("value");
+            String text = value == null || value.isNull() ? null : value.asText();
+            if (byName.putIfAbsent(name, text) != null) {
+                throw new AwsException("ValidationException", "Duplicate parameter name :" + name + ".", 400);
+            }
+        }
+        return byName;
+    }
+
+    static Map<String, String> parseBatchParameters(JsonNode request, List<String> sqls) {
+        JsonNode supplied = request.get("Parameters");
+        if (supplied != null && !supplied.isNull()) {
+            if (!supplied.isArray() || supplied.isEmpty()) {
+                throw new AwsException("ValidationException", "Parameters must be a non-empty array of {name, value} objects.", 400);
+            }
+            for (JsonNode parameter : supplied) {
+                JsonNode name = parameter.path("name");
+                JsonNode value = parameter.path("value");
+                if (!name.isTextual() || !PARAMETER_NAME.matcher(name.textValue()).matches()
+                        || !value.isTextual() || value.textValue().isEmpty()) {
+                    throw new AwsException("ValidationException",
+                            "Each parameter must have a name matching [0-9a-zA-Z_]+ and a non-empty string value.", 400);
+                }
+            }
+        }
+        Map<String, String> parameters = parseParameters(request, "Parameters");
+        Set<String> referenced = new LinkedHashSet<>();
+        for (String sql : sqls) {
+            referenced.addAll(parse(sql).parameterOrder());
+        }
+        for (String name : referenced) {
+            if (!parameters.containsKey(name)) {
+                throw new AwsException("ValidationException",
+                        "SQL references parameter :" + name + " but no matching value was supplied.", 400);
+            }
+        }
+        for (String name : parameters.keySet()) {
+            if (!referenced.contains(name)) {
+                throw new AwsException("ValidationException",
+                        "Parameter :" + name + " is not referenced by any SQL statement in the batch.", 400);
+            }
+        }
+        return parameters;
+    }
+
+    /**
+     * Whether {@code sql} holds more than one statement, applying the same
+     * literal / identifier / comment / dollar-quote skipping as {@link #parse}
+     * so a {@code ;} inside any of those is not counted. Trailing {@code ;}
+     * characters (with only whitespace after) are permitted.
+     */
+    static boolean isMultiStatement(String sql) {
+        return SqlParameterParser.isMultiStatement(sql, SqlParameterParser.Options.REDSHIFT);
+    }
+}

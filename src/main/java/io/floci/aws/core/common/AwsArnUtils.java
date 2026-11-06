@@ -1,0 +1,255 @@
+package io.floci.aws.core.common;
+
+import java.util.Optional;
+
+public final class AwsArnUtils {
+
+    private AwsArnUtils() {}
+
+    /**
+     * Parsed representation of an AWS ARN.
+     *
+     * Fields map directly to the six colon-delimited segments:
+     * {@code arn:<partition>:<service>:<region>:<accountId>:<resource>}
+     *
+     * {@code region} and {@code accountId} are empty strings (not null) when the ARN
+     * omits them (e.g. {@code arn:aws:s3:::my-bucket}).
+     *
+     * The {@code resource} field is left unparsed — its internal structure is
+     * service-specific and callers are responsible for splitting it as needed.
+     */
+    public record Arn(String partition, String service, String region, String accountId, String resource) {
+
+        /**
+         * Factory for AWS ARNs, deriving the partition from the region.
+         * Produces: {@code arn:<partition>:<service>:<region>:<accountId>:<resource>}
+         *
+         * <p>A resource in {@code cn-north-1} gets {@code aws-cn}, one in {@code us-gov-west-1}
+         * gets {@code aws-us-gov}, and everything else gets {@code aws}. See
+         * {@link AwsRegions#partitionFor}.
+         *
+         * <p>A blank region says nothing about the partition, so it falls back to {@code aws}.
+         * A regionless ARN is minted through {@link #global} or
+         * {@link RegionResolver#buildGlobalArn} instead; {@code make partition-check} fails a call
+         * that passes a literal blank region here, and {@link BlankRegionGuard} one whose blank
+         * region arrives at run time.
+         */
+        public static Arn of(String service, String region, String accountId, String resource) {
+            BlankRegionGuard.check(region, service, resource);
+            return new Arn(AwsRegions.partitionFor(region), service, region, accountId, resource);
+        }
+
+        /**
+         * Factory for the ARN of a global service, which carries no region and whose partition
+         * is the caller's: {@code arn:<partition>:<service>::<accountId>:<resource>}. The
+         * partition is taken as given and never derived; a static utility must not reach into
+         * the request scope, or the same call would mint different ARNs depending on the thread.
+         */
+        public static Arn global(String partition, String service, String accountId, String resource) {
+            return new Arn(partition, service, "", accountId, resource);
+        }
+
+        @Override
+        public String toString() {
+            return "arn:" + partition + ":" + service + ":" + region + ":" + accountId + ":" + resource; // partition-literal: the one ARN formatter
+        }
+    }
+
+    /**
+     * Parses an ARN string into an {@link Arn} record.
+     *
+     * @throws IllegalArgumentException if the string is null, blank, does not start with {@code arn:},
+     *                                  or has fewer than six colon-delimited segments
+     */
+    public static Arn parse(String arn) {
+        if (arn == null || arn.isBlank()) {
+            throw new IllegalArgumentException("ARN must not be null or blank");
+        }
+        String[] parts = arn.split(":", 6); // partition-literal: the one ARN parser
+        if (parts.length < 6 || !"arn".equals(parts[0])) {
+            throw new IllegalArgumentException("Invalid ARN: " + arn);
+        }
+        return new Arn(parts[1], parts[2], parts[3], parts[4], parts[5]);
+    }
+
+    /**
+     * Returns the region from an ARN, or {@code defaultRegion} when the ARN is null,
+     * unparseable, or has an empty region field.
+     */
+    public static String regionOrDefault(String arn, String defaultRegion) {
+        if (arn == null) {
+            return defaultRegion;
+        }
+        try {
+            String region = parse(arn).region();
+            return region.isEmpty() ? defaultRegion : region;
+        } catch (IllegalArgumentException e) {
+            return defaultRegion;
+        }
+    }
+
+    /**
+     * Returns the account ID from an ARN, or {@code defaultAccount} when the ARN is null,
+     * unparseable, or has an empty account field.
+     */
+    public static String accountOrDefault(String arn, String defaultAccount) {
+        if (arn == null) {
+            return defaultAccount;
+        }
+        try {
+            String account = parse(arn).accountId();
+            return account.isEmpty() ? defaultAccount : account;
+        } catch (IllegalArgumentException e) {
+            return defaultAccount;
+        }
+    }
+
+    /**
+     * Returns the partition an ARN names, or {@code defaultPartition} when the value is null or
+     * not an ARN. Anything derived from a stored IAM resource (a role's sessions, its account's
+     * OIDC provider) takes the partition that resource was created in, not the request's.
+     */
+    public static String partitionOrDefault(String arn, String defaultPartition) {
+        return isArn(arn) ? parse(arn).partition() : defaultPartition;
+    }
+
+    /**
+     * Regex fragment matching any AWS partition id: {@code aws}, {@code aws-cn},
+     * {@code aws-us-gov}, and the classified {@code aws-iso*} and {@code aws-eusc} partitions.
+     *
+     * <p>Transcribed from the shape AWS publishes in its own service models, where every
+     * partition-carrying ARN member is patterned {@code arn:aws(-[a-z]{1,5}){0,3}:...}. The group
+     * is non-capturing so it can be dropped into an existing pattern without shifting the
+     * numbering of the groups around it.
+     *
+     * <p>Exists because a literal {@code ^arn:aws:} anchors a pattern to the commercial partition
+     * and silently rejects every legal ARN outside it.
+     */
+    public static final String PARTITION_REGEX = "aws(?:-[a-z]{1,5}){0,3}";
+
+    /**
+     * True when {@code value} is syntactically an ARN: six colon-delimited segments, the first
+     * of which is {@code arn}. Says nothing about whether the resource part is well formed for
+     * its service, which only that service can decide.
+     *
+     * <p>The partition-tolerant replacement for a {@code startsWith("arn:aws:")} probe.
+     */
+    public static boolean isArn(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String[] parts = value.split(":", 6);
+        return parts.length == 6 && "arn".equals(parts[0]);
+    }
+
+    /**
+     * True when {@code value} is meant as an ARN: it starts with {@code arn:}, whether or not the
+     * rest is well formed. For a parameter that takes a name or an ARN, where AWS answers a
+     * malformed ARN with its own error (an {@code InvalidParameterValue}, a {@code ValidationError},
+     * a not-found) instead of looking it up as a name. {@link #isArn} needs all six segments, so it
+     * would send {@code arn:aws:rds} down the name path and change the error the caller sees.
+     */
+    public static boolean looksLikeArn(String value) {
+        return value != null && value.startsWith("arn:"); // partition-literal: the one attempted-ARN check
+    }
+
+    /**
+     * True when {@code value} is an ARN naming {@code service}, in any partition. The common use
+     * is telling an identifier that may be either a bare name or a full ARN apart, e.g. a
+     * DynamoDB {@code TableName} that clients are allowed to give either way.
+     */
+    public static boolean isArnFor(String value, String service) {
+        return isArn(value) && value.split(":", 6)[2].equals(service);
+    }
+
+    /**
+     * The resource segment of {@code value} when it is an ARN naming {@code service} in any
+     * partition, e.g. {@code bucket/key} for {@code arn:aws-cn:s3:::bucket/key}; empty otherwise.
+     * The partition-tolerant replacement for {@code startsWith("arn:aws:s3:::")} followed by a
+     * {@code substring} of that literal's length.
+     */
+    public static Optional<String> resourceIfArnFor(String value, String service) {
+        if (!isArnFor(value, service)) {
+            return Optional.empty();
+        }
+        return Optional.of(value.split(":", 6)[5]);
+    }
+
+    /**
+     * The parsed ARN when {@code value} is an ARN naming {@code service} in {@code region} and that
+     * region's partition, e.g. a stored key belonging to the region a list call was made in; empty
+     * otherwise.
+     */
+    public static Optional<Arn> parseIfArnIn(String value, String service, String region) {
+        if (!isArnFor(value, service)) {
+            return Optional.empty();
+        }
+        Arn arn = parse(value);
+        return arn.region().equals(region) && arn.partition().equals(AwsRegions.partitionFor(region))
+                ? Optional.of(arn) : Optional.empty();
+    }
+
+    /**
+     * True when the ARN names a partition other than {@code localPartition}, the one the current
+     * request belongs to ({@link RegionResolver#getPartition()}). An empty partition field is
+     * not foreign: callers that omit it are naming a local resource. Mirrors
+     * {@link #isForeignAccount}: foreign is relative to the caller, never to a fixed {@code aws}.
+     */
+    public static boolean isForeignPartition(Arn arn, String localPartition) {
+        if (arn == null) {
+            return false;
+        }
+        String partition = arn.partition();
+        return partition != null && !partition.isEmpty() && !partition.equals(localPartition);
+    }
+
+    /**
+     * True when the ARN names an account other than {@code localAccountId}. An empty account
+     * field is not foreign: several AWS ARN forms omit it for a resource the caller owns.
+     */
+    public static boolean isForeignAccount(Arn arn, String localAccountId) {
+        if (arn == null) {
+            return false;
+        }
+        String account = arn.accountId();
+        return account != null && !account.isEmpty() && !account.equals(localAccountId);
+    }
+
+    /**
+     * The bucket and key named by an S3 object ARN ({@code arn:aws:s3:::bucket/key}, or the
+     * region/account-bearing form {@code arn:aws:s3:region:account:bucket/key}).
+     *
+     * <p>Returns {@code null} rather than throwing when the value is not one: not an ARN, not
+     * the {@code s3} service, or a resource without both a bucket and a key. Callers decide
+     * whether that is a registration error (ECS rejecting a FireLens {@code config-file-value})
+     * or a launch error.
+     */
+    public static S3ObjectRef parseS3ObjectArn(String value) {
+        if (!isArn(value)) {
+            return null;
+        }
+        Arn arn = parse(value);
+        if (!"s3".equals(arn.service())) {
+            return null;
+        }
+        String resource = arn.resource();
+        int slash = resource.indexOf('/');
+        if (slash <= 0 || slash == resource.length() - 1) {
+            return null;
+        }
+        return new S3ObjectRef(resource.substring(0, slash), resource.substring(slash + 1));
+    }
+
+    /** The bucket and key of an S3 object ARN, as returned by {@link #parseS3ObjectArn}. */
+    public record S3ObjectRef(String bucket, String key) {
+    }
+
+    /**
+     * Converts an SQS ARN to a queue URL using the given base URL.
+     * Example: arn:aws:sqs:us-east-1:000000000000:my-queue → http://localhost:4566/000000000000/my-queue
+     */
+    public static String arnToQueueUrl(String arn, String baseUrl) {
+        Arn parsed = parse(arn);
+        return baseUrl + "/" + parsed.accountId() + "/" + parsed.resource();
+    }
+}

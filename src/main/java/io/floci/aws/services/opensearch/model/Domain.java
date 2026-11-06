@@ -1,0 +1,342 @@
+package io.floci.aws.services.opensearch.model;
+
+import com.fasterxml.jackson.annotation.JsonFormat;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
+
+@RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class Domain {
+
+    @JsonProperty("DomainName")
+    private String domainName;
+
+    @JsonProperty("DomainId")
+    private String domainId;
+
+    @JsonProperty("ARN")
+    private String arn;
+
+    /**
+     * The AWS region the domain was created in. Null on records persisted before domains were
+     * keyed by region, whose region comes from their ARN; also the marker that tells the
+     * container manager those records predate region-scoped data directories.
+     */
+    @JsonProperty("Region")
+    private String region;
+
+    @JsonProperty("EngineVersion")
+    private String engineVersion;
+
+    @JsonProperty("AccessPolicies")
+    private String accessPolicies;
+
+    @JsonProperty("Processing")
+    private boolean processing = false;
+
+    @JsonProperty("Deleted")
+    private boolean deleted = false;
+
+    @JsonProperty("ClusterConfig")
+    private ClusterConfig clusterConfig = new ClusterConfig();
+
+    @JsonProperty("EBSOptions")
+    private EbsOptions ebsOptions = new EbsOptions();
+
+    @JsonProperty("VPCOptions")
+    private VpcOptions vpcOptions;
+
+    @JsonProperty("AdvancedSecurityOptions")
+    private AdvancedSecurityOptions advancedSecurityOptions;
+
+    @JsonProperty("EncryptionAtRestOptions")
+    private EncryptionAtRestOptions encryptionAtRestOptions;
+
+    @JsonProperty("NodeToNodeEncryptionOptions")
+    private NodeToNodeEncryptionOptions nodeToNodeEncryptionOptions;
+
+    @JsonProperty("DomainEndpointOptions")
+    private DomainEndpointOptions domainEndpointOptions;
+
+    @JsonProperty("AdvancedOptions")
+    private Map<String, String> advancedOptions = new HashMap<>();
+
+    /** Null on records written before this field existed; reported as {@code ipv4}. */
+    @JsonProperty("IPAddressType")
+    private String ipAddressType;
+
+    @JsonProperty("OffPeakWindowOptions")
+    private OffPeakWindowOptions offPeakWindowOptions;
+
+    @JsonProperty("SoftwareUpdateOptions")
+    private SoftwareUpdateOptions softwareUpdateOptions;
+
+    @JsonProperty("Endpoint")
+    private String endpoint = "";
+
+    @JsonProperty("Tags")
+    private Map<String, String> tags = new HashMap<>();
+
+    @JsonProperty("ContainerId")
+    private String containerId;
+
+    @JsonProperty("HostPort")
+    private Integer hostPort;
+
+    @JsonIgnore
+    private String accountId;
+
+    @JsonProperty("VolumeId")
+    private String volumeId;
+
+    /**
+     * The domain's Docker volume name. Stamped at creation with the current prefix; null on
+     * records written before this field existed, which are backfilled with the frozen legacy
+     * name so their data stays reachable.
+     */
+    @JsonProperty("DockerVolumeName")
+    private String dockerVolumeName;
+
+    /**
+     * Who owns the storage the domain's container mounts; null on records written before
+     * this field existed, whose volumes are always Floci-managed.
+     */
+    @JsonProperty("VolumeOwnership")
+    private VolumeOwnership volumeOwnership;
+
+    @JsonProperty("CreatedAt")
+    @JsonFormat(shape = JsonFormat.Shape.NUMBER)
+    private Instant createdAt;
+
+    public Domain() {}
+
+    public Map<String, String> getAdvancedOptions() {
+        return advancedOptions;
+    }
+
+    public void setAdvancedOptions(Map<String, String> advancedOptions) {
+        this.advancedOptions = advancedOptions != null ? advancedOptions : new HashMap<>();
+    }
+
+    public String getIpAddressType() {
+        return ipAddressType;
+    }
+
+    public void setIpAddressType(String ipAddressType) {
+        this.ipAddressType = ipAddressType;
+    }
+
+    public OffPeakWindowOptions getOffPeakWindowOptions() {
+        return offPeakWindowOptions;
+    }
+
+    public void setOffPeakWindowOptions(OffPeakWindowOptions offPeakWindowOptions) {
+        this.offPeakWindowOptions = offPeakWindowOptions;
+    }
+
+    public SoftwareUpdateOptions getSoftwareUpdateOptions() {
+        return softwareUpdateOptions;
+    }
+
+    public void setSoftwareUpdateOptions(SoftwareUpdateOptions softwareUpdateOptions) {
+        this.softwareUpdateOptions = softwareUpdateOptions;
+    }
+
+    public String getDomainName() {
+        return domainName;
+    }
+
+    public void setDomainName(String domainName) {
+        this.domainName = domainName;
+    }
+
+    public String getDomainId() {
+        return domainId;
+    }
+
+    public void setDomainId(String domainId) {
+        this.domainId = domainId;
+    }
+
+    public String getArn() {
+        return arn;
+    }
+
+    public void setArn(String arn) {
+        this.arn = arn;
+    }
+
+    public String getRegion() {
+        return region;
+    }
+
+    public void setRegion(String region) {
+        this.region = region;
+    }
+
+    public String getEngineVersion() {
+        return engineVersion;
+    }
+
+    public void setEngineVersion(String engineVersion) {
+        this.engineVersion = engineVersion;
+    }
+
+    public String getAccessPolicies() {
+        return accessPolicies;
+    }
+
+    public void setAccessPolicies(String accessPolicies) {
+        this.accessPolicies = accessPolicies;
+    }
+
+    public boolean isProcessing() {
+        return processing;
+    }
+
+    public void setProcessing(boolean processing) {
+        this.processing = processing;
+    }
+
+    public boolean isDeleted() {
+        return deleted;
+    }
+
+    public void setDeleted(boolean deleted) {
+        this.deleted = deleted;
+    }
+
+    public ClusterConfig getClusterConfig() {
+        return clusterConfig;
+    }
+
+    public void setClusterConfig(ClusterConfig clusterConfig) {
+        this.clusterConfig = clusterConfig;
+    }
+
+    public EbsOptions getEbsOptions() {
+        return ebsOptions;
+    }
+
+    public void setEbsOptions(EbsOptions ebsOptions) {
+        this.ebsOptions = ebsOptions;
+    }
+
+    public VpcOptions getVpcOptions() {
+        return vpcOptions;
+    }
+
+    public void setVpcOptions(VpcOptions vpcOptions) {
+        this.vpcOptions = vpcOptions;
+    }
+
+    public AdvancedSecurityOptions getAdvancedSecurityOptions() {
+        return advancedSecurityOptions;
+    }
+
+    public void setAdvancedSecurityOptions(AdvancedSecurityOptions advancedSecurityOptions) {
+        this.advancedSecurityOptions = advancedSecurityOptions;
+    }
+
+    public EncryptionAtRestOptions getEncryptionAtRestOptions() {
+        return encryptionAtRestOptions;
+    }
+
+    public void setEncryptionAtRestOptions(EncryptionAtRestOptions encryptionAtRestOptions) {
+        this.encryptionAtRestOptions = encryptionAtRestOptions;
+    }
+
+    public NodeToNodeEncryptionOptions getNodeToNodeEncryptionOptions() {
+        return nodeToNodeEncryptionOptions;
+    }
+
+    public void setNodeToNodeEncryptionOptions(NodeToNodeEncryptionOptions nodeToNodeEncryptionOptions) {
+        this.nodeToNodeEncryptionOptions = nodeToNodeEncryptionOptions;
+    }
+
+    public DomainEndpointOptions getDomainEndpointOptions() {
+        return domainEndpointOptions;
+    }
+
+    public void setDomainEndpointOptions(DomainEndpointOptions domainEndpointOptions) {
+        this.domainEndpointOptions = domainEndpointOptions;
+    }
+
+    public String getEndpoint() {
+        return endpoint;
+    }
+
+    public void setEndpoint(String endpoint) {
+        this.endpoint = endpoint;
+    }
+
+    public Map<String, String> getTags() {
+        return tags;
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags != null ? new HashMap<>(tags) : new HashMap<>();
+    }
+
+    public String getContainerId() {
+        return containerId;
+    }
+
+    public void setContainerId(String containerId) {
+        this.containerId = containerId;
+    }
+
+    public Integer getHostPort() {
+        return hostPort;
+    }
+
+    public void setHostPort(Integer hostPort) {
+        this.hostPort = hostPort;
+    }
+
+    public String getVolumeId() {
+        return volumeId;
+    }
+
+    public void setVolumeId(String volumeId) {
+        this.volumeId = volumeId;
+    }
+
+    public String getDockerVolumeName() {
+        return dockerVolumeName;
+    }
+
+    public void setDockerVolumeName(String dockerVolumeName) {
+        this.dockerVolumeName = dockerVolumeName;
+    }
+
+    public VolumeOwnership getVolumeOwnership() {
+        return volumeOwnership;
+    }
+
+    public void setVolumeOwnership(VolumeOwnership volumeOwnership) {
+        this.volumeOwnership = volumeOwnership;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public String getAccountId() {
+        return accountId;
+    }
+
+    public void setAccountId(String accountId) {
+        this.accountId = accountId;
+    }
+}
