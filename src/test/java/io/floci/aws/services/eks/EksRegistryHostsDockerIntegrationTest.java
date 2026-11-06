@@ -1,6 +1,8 @@
 package io.floci.aws.services.eks;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Frame;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.DockerHostResolver;
@@ -249,8 +251,47 @@ class EksRegistryHostsDockerIntegrationTest {
             }
             Thread.sleep(2000);
         }
+        if (!running) {
+            logPodDiagnostics(containerId);
+        }
         assertTrue(running, "registry-hosts-pod must reach Running, pulling its image through the configured host");
         execInContainerWithExitCode(containerId, new String[]{"kubectl", "delete", "pod", "registry-hosts-pod", "--now"});
+    }
+
+    /** Cleanup removes the k3s container, and kubelet's output reaches nothing else. */
+    private void logPodDiagnostics(String containerId) {
+        String[][] commands = {
+                {"kubectl", "describe", "pod", "registry-hosts-pod"},
+                {"kubectl", "describe", "nodes"},
+                {"kubectl", "get", "pods", "-A", "-o", "wide"},
+                {"crictl", "images"},
+                {"cat", "/run/flannel/subnet.env"}
+        };
+        for (String[] command : commands) {
+            try {
+                ContainerExec.Result result = ContainerExec.run(dockerClient, containerId, command, 10);
+                LOG.warnv("{0}\n{1}", String.join(" ", command), result.summary());
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not run {0}", String.join(" ", command));
+            }
+        }
+        LOG.warnv("k3s log tail\n{0}", k3sLogTail(containerId));
+    }
+
+    private String k3sLogTail(String containerId) {
+        StringBuilder out = new StringBuilder();
+        try {
+            dockerClient.logContainerCmd(containerId).withStdOut(true).withStdErr(true).withTail(2000)
+                    .exec(new ResultCallback.Adapter<Frame>() {
+                        @Override
+                        public void onNext(Frame frame) {
+                            out.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                        }
+                    }).awaitCompletion(10, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            out.append("(could not read logs: ").append(e.getMessage()).append(')');
+        }
+        return out.toString();
     }
 
     /**
