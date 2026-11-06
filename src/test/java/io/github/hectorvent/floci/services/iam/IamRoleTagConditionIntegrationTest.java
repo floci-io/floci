@@ -113,6 +113,68 @@ class IamRoleTagConditionIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"aws:ResourceTag/", "iam:ResourceTag/"})
+    void storedUserTagsGatePolicyUpdatesAndExplicitDenies(String prefix) {
+        try (IamClient admin = AwsTestClients.create(IamClient.builder(), "test", Region.US_EAST_1)) {
+            String owned = user(admin, List.of(tag("Owner", "team-a")));
+            String other = user(admin, List.of(tag("Owner", "team-b")));
+            String untagged = user(admin, List.of());
+            String blocked = user(admin, List.of(tag("Owner", "team-a"), tag("Blocked", "yes")));
+            String policy = """
+                    {"Version":"2012-10-17","Statement":[
+                    {"Effect":"Allow","Action":"iam:PutUserPolicy","Resource":"*",
+                     "Condition":{"StringEquals":{"%sOwner":"team-a"}}},
+                    {"Effect":"Deny","Action":"iam:PutUserPolicy","Resource":"*",
+                     "Condition":{"StringEquals":{"%sBlocked":"yes"}}}]}""".formatted(prefix, prefix);
+            try (IamClient caller = caller(policy)) {
+                caller.putUserPolicy(r -> r.userName(owned).policyName("inline").policyDocument(INLINE));
+                for (String name : List.of(other, untagged, blocked)) {
+                    denied(() -> caller.putUserPolicy(r -> r.userName(name).policyName("inline").policyDocument(INLINE)));
+                    assertEquals(List.of(), admin.listUserPolicies(r -> r.userName(name)).policyNames());
+                }
+                admin.untagUser(r -> r.userName(owned).tagKeys("Owner"));
+                denied(() -> caller.putUserPolicy(r -> r.userName(owned).policyName("second").policyDocument(INLINE)));
+                assertEquals(List.of("inline"), admin.listUserPolicies(r -> r.userName(owned)).policyNames());
+            }
+        }
+    }
+
+    @Test
+    void policyTaggingAndUntaggingEnforceGeneratedRequestTagConditions() {
+        try (IamClient admin = AwsTestClients.create(IamClient.builder(), "test", Region.US_EAST_1)) {
+            String arn = admin.createPolicy(r -> r.policyName("tag-policy-" + suffix())
+                    .policyDocument(INLINE)).policy().arn();
+            String policy = """
+                    {"Version":"2012-10-17","Statement":[
+                    {"Effect":"Allow","Action":"iam:TagPolicy","Resource":"*",
+                     "Condition":{"StringEquals":{"aws:RequestTag/Env":"dev"},
+                      "ForAllValues:StringEquals":{"aws:TagKeys":["Env"]}}},
+                    {"Effect":"Allow","Action":"iam:UntagPolicy","Resource":"*",
+                     "Condition":{"ForAllValues:StringEquals":{"aws:TagKeys":["Env"]},
+                      "Null":{"aws:TagKeys":"false"}}}]}""";
+            try (IamClient caller = caller(policy)) {
+                denied(() -> caller.tagPolicy(r -> r.policyArn(arn).tags(tag("Env", "prod"))));
+                denied(() -> caller.tagPolicy(r -> r.policyArn(arn).tags(tag("Env", "dev"), tag("Owner", "other"))));
+                assertEquals(List.of(), admin.listPolicyTags(r -> r.policyArn(arn)).tags());
+                caller.tagPolicy(r -> r.policyArn(arn).tags(tag("Env", "dev")));
+                denied(() -> caller.untagPolicy(r -> r.policyArn(arn).tagKeys("Env", "Owner")));
+                assertEquals(List.of(tag("Env", "dev")), admin.listPolicyTags(r -> r.policyArn(arn)).tags());
+                caller.untagPolicy(r -> r.policyArn(arn).tagKeys("Env"));
+                assertEquals(List.of(), admin.listPolicyTags(r -> r.policyArn(arn)).tags());
+            } finally {
+                admin.deletePolicy(r -> r.policyArn(arn));
+            }
+        }
+    }
+
+    private String user(IamClient admin, List<Tag> tags) {
+        String name = "tag-user-" + suffix();
+        admin.createUser(r -> r.userName(name).tags(tags));
+        cleanup.register(() -> EnforcementFixtures.removeUser(baseUri.getPort(), auth("test", "iam"), name));
+        return name;
+    }
+
     private String role(IamClient admin, List<Tag> tags) {
         String name = "tag-role-" + suffix();
         admin.createRole(r -> r.roleName(name).path("/tag-context/").assumeRolePolicyDocument(TRUST).tags(tags));

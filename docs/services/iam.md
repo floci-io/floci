@@ -2604,21 +2604,31 @@ floci populates:
   `DeleteRolePermissionsBoundary`. A role or user without a boundary, or one that does not
   exist, carries no value for the key.
 
-  The table's `roleTags` entries read `aws:ResourceTag/<key>` and `iam:ResourceTag/<key>`
-  from the stored role on existing-role APIs addressed by `RoleName`, such as `GetRole`,
-  `PutRolePolicy`, `TagRole` and `UntagRole`. The lookup uses the request account and the
-  tags before any mutation. `PassRole`, creation, and operations addressing a role by an
-  ARN or deletion-task ID do not gain these keys. A stray `RoleName` on another operation
-  does not supply role tags. Stored user tags and caller principal tags are not read here.
-  The action coverage comes from the Service Reference's role resource keys and the
-  pinned SDK model, with the documented `PassRole` exclusion.
+  Resource tags use the same `fromTarget` route: `aws:ResourceTag/<key>` and
+  `iam:ResourceTag/<key>` come from the stored role or user named by the generated target,
+  where the Service Reference lists those keys for that resource type. The lookup uses
+  the request account and the tags before any mutation. The table retains the source
+  resource types so a secondary `RoleName`, such as on `AddRoleToInstanceProfile`, cannot
+  supply the instance profile's tags. Missing targets carry no resource-tag values.
+  Creation of the target, unsupported target types, and ARN/task-ID-based lookups are
+  recorded in `notRead`. `PassRole` is a reasoned generator exception: the
+  [IAM guide](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_tags.html) warns that
+  ResourceTag conditions with this action do not have reliable results. Caller principal
+  tags are not read here.
+
+  The `requestTags` entries cover all 16 IAM tagging actions: the Tag/Untag pairs for
+  instance profiles, MFA devices, OIDC providers, policies, roles, SAML providers,
+  server certificates and users. Their action/key pairs come from `ActionConditionKeys`
+  on actions marked `IsTaggingOnly` in the Service Reference. Botocore supplies the
+  list member and, for tag structures, the key/value member names. The resolver reads
+  those generated fields; creation continues through the existing tag-on-create path.
 
   A request without the parameter carries no value for the key, and the target remains the
   authorized resource. Every other pair the reference lists is in the table's `notRead` with
   its reason. Regenerate with `make iam-condition-keys-sync`.
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
-  IAM `TagRole` and `TagUser` (the `Tags` list),
+  IAM tagging actions listed in the generated `requestTags` table (the modeled tag list),
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and
   `s3:PutBucketTagging` (the `<Tagging>` body), for S3 Control's `s3:TagResource` (its `Tags` body),
   and for every create in the tag-on-create table whose action takes it, as described under the
@@ -2706,8 +2716,8 @@ floci populates:
   session, a federated user or the account root it is absent, and a statement that matches on it
   cannot match: an absent key has no equal or like value. That absence is the enforcement rather
   than a gap in it.
-- `aws:TagKeys`: the case-sensitive requested tag keys for IAM `TagRole` and `TagUser`
-  (from `Tags`), `UntagRole` and `UntagUser` (from `TagKeys`), EC2 `RunInstances` and
+- `aws:TagKeys`: the case-sensitive requested tag keys for all 16 IAM tagging actions
+  in the generated table (tag structures or a list of keys), EC2 `RunInstances` and
   `CreateTags`, S3 `PutBucketTagging`, S3 Control `TagResource` (its `Tags` body) and
   `UntagResource` (its `tagKeys` query parameters), and every create in the tag-on-create table
   whose action takes it. S3 Control's come from `s3control-tag-condition-keys.json`, which
