@@ -10,6 +10,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -135,5 +136,102 @@ class BedrockAgentCoreEndpointIntegrationTest {
         given().contentType("application/json").body("{\"name\":\"x\"}")
                 .when().put("/runtimes/missing-abcdefghij/runtime-endpoints/")
                 .then().statusCode(404);
+    }
+
+    @Test
+    void endpointTagsFromCreateCanBeListedTaggedAndUntaggedOnTheEndpointArn() {
+        String id = given().contentType("application/json").body(CREATE_RUNTIME.replace("epAgent", "epTagAgent"))
+                .when().put("/runtimes/").then().statusCode(202).extract().path("agentRuntimeId");
+        String runtimeArn = given().contentType("application/json")
+                .when().get("/runtimes/" + id + "/")
+                .then().statusCode(200).extract().path("agentRuntimeArn");
+        String endpointArn = given().contentType("application/json")
+                .body("{\"name\":\"tagged\",\"tags\":{\"env\":\"prod\"}}")
+                .when().put("/runtimes/" + id + "/runtime-endpoints/")
+                .then().statusCode(202).extract().path("agentRuntimeEndpointArn");
+        try {
+            given().when().get("/tags/" + endpointArn)
+                    .then().statusCode(200).body("tags.env", equalTo("prod"));
+
+            given().contentType("application/json").body("{\"tags\":{\"team\":\"ml\"}}")
+                    .when().post("/tags/" + endpointArn).then().statusCode(204);
+            given().when().delete("/tags/" + endpointArn + "?tagKeys=env").then().statusCode(204);
+            given().when().get("/tags/" + endpointArn)
+                    .then().statusCode(200)
+                    .body("tags.team", equalTo("ml"))
+                    .body("tags.env", nullValue());
+
+            given().when().get("/tags/" + runtimeArn)
+                    .then().statusCode(200).body("tags.team", nullValue());
+        } finally {
+            given().when().delete("/runtimes/" + id + "/").then().statusCode(202);
+        }
+    }
+
+    @Test
+    void endpointTagsAreRemovedWithTheEndpointAndRejectForeignOrMissingArns() {
+        String id = given().contentType("application/json").body(CREATE_RUNTIME.replace("epAgent", "epTagAgent2"))
+                .when().put("/runtimes/").then().statusCode(202).extract().path("agentRuntimeId");
+        String endpointArn = given().contentType("application/json")
+                .body("{\"name\":\"gone\",\"tags\":{\"env\":\"prod\"}}")
+                .when().put("/runtimes/" + id + "/runtime-endpoints/")
+                .then().statusCode(202).extract().path("agentRuntimeEndpointArn");
+        try {
+            for (String foreign : new String[] {endpointArn.replace(":000000000000:", ":222222222222:"),
+                    endpointArn.replace(":us-east-1:", ":eu-west-1:"),
+                    endpointArn.replace("arn:aws:", "arn:aws-cn:")}) {
+                given().when().get("/tags/" + foreign)
+                        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+                given().contentType("application/json").body("{\"tags\":{\"env\":\"stolen\"}}")
+                        .when().post("/tags/" + foreign).then().statusCode(404)
+                        .body("__type", equalTo("ResourceNotFoundException"));
+                given().when().delete("/tags/" + foreign + "?tagKeys=env")
+                        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+            }
+            given().when().get("/tags/" + endpointArn).then().statusCode(200).body("tags.env", equalTo("prod"));
+
+            given().when().delete("/runtimes/" + id + "/runtime-endpoints/gone/").then().statusCode(202);
+            given().when().get("/tags/" + endpointArn)
+                    .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+            given().contentType("application/json").body("{\"tags\":{\"a\":\"b\"}}")
+                    .when().post("/tags/" + endpointArn).then().statusCode(404)
+                    .body("__type", equalTo("ResourceNotFoundException"));
+            given().when().delete("/tags/" + endpointArn + "?tagKeys=a")
+                    .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+
+            String missingRuntimeArn = endpointArn.replaceAll("agentEndpoint/.*", "agent/missing0000-AbCdEfGhIj");
+            String existingRuntimeArn = endpointArn.replaceAll("agentEndpoint/.*", "agent/" + id);
+            for (String runtimeTarget : new String[] {missingRuntimeArn,
+                    existingRuntimeArn.replace(":000000000000:", ":222222222222:"),
+                    existingRuntimeArn.replace(":us-east-1:", ":eu-west-1:"),
+                    existingRuntimeArn.replace("arn:aws:", "arn:aws-cn:")}) {
+                given().when().get("/tags/" + runtimeTarget)
+                        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+                given().contentType("application/json").body("{\"tags\":{\"a\":\"b\"}}")
+                        .when().post("/tags/" + runtimeTarget).then().statusCode(404)
+                        .body("__type", equalTo("ResourceNotFoundException"));
+                given().when().delete("/tags/" + runtimeTarget + "?tagKeys=a")
+                        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+            }
+        } finally {
+            given().when().delete("/runtimes/" + id + "/").then().statusCode(202);
+        }
+    }
+
+    @Test
+    void createEndpointRejectsInvalidTags() {
+        String id = given().contentType("application/json").body(CREATE_RUNTIME.replace("epAgent", "epTagAgent3"))
+                .when().put("/runtimes/").then().statusCode(202).extract().path("agentRuntimeId");
+        try {
+            given().contentType("application/json").body("{\"name\":\"bad\",\"tags\":{\"k\":\"v!\"}}")
+                    .when().put("/runtimes/" + id + "/runtime-endpoints/").then().statusCode(400);
+            given().contentType("application/json").body("{\"name\":\"bad\",\"tags\":{\"\":\"v\"}}")
+                    .when().put("/runtimes/" + id + "/runtime-endpoints/").then().statusCode(400);
+            given().contentType("application/json")
+                    .when().get("/runtimes/" + id + "/runtime-endpoints/bad/")
+                    .then().statusCode(404);
+        } finally {
+            given().when().delete("/runtimes/" + id + "/").then().statusCode(202);
+        }
     }
 }

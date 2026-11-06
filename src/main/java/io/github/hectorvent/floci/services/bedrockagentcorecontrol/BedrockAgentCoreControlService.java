@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -341,6 +342,44 @@ public class BedrockAgentCoreControlService {
                         "AgentCore resource not found: " + arn, 404));
     }
 
+    public Map<String, String> getEndpointTagsByArn(String region, String arn) {
+        Map<String, String> snapshot = new HashMap<>();
+        updateEndpointTags(region, arn, snapshot::putAll, false);
+        return snapshot;
+    }
+
+    public void tagEndpointByArn(String region, String arn, Map<String, String> tags) {
+        updateEndpointTags(region, arn, endpointTags -> endpointTags.putAll(tags), true);
+    }
+
+    public void untagEndpointByArn(String region, String arn, List<String> keys) {
+        updateEndpointTags(region, arn, endpointTags -> keys.forEach(endpointTags::remove), true);
+    }
+
+    private void updateEndpointTags(String region, String arn, Consumer<Map<String, String>> change,
+                                    boolean persist) {
+        EndpointLocation located = requireEndpointByArn(region, arn);
+        String runtimeId = located.runtime().getAgentRuntimeId();
+        synchronized (runtimeLock(region, runtimeId)) {
+            AgentRuntime runtime = getAgentRuntime(runtimeId, region);
+            AgentRuntimeEndpoint endpoint = runtime.getEndpoints().stream()
+                    .filter(e -> e.getUuid().equals(located.endpoint().getUuid()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "AgentCore resource not found: " + arn, 404));
+            change.accept(endpoint.getTags());
+            if (persist) {
+                storage.put(key(region, runtimeId), runtime);
+            }
+        }
+    }
+
+    private EndpointLocation requireEndpointByArn(String region, String arn) {
+        return findEndpointByArn(region, arn)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "AgentCore resource not found: " + arn, 404));
+    }
+
     private static String uuidFromArn(String arn) {
         // arn:aws:bedrock-agentcore:<region>:<account>:agent/<uuid>:<version>
         String resource = BedrockAgentCoreArns.resource(arn);
@@ -354,6 +393,12 @@ public class BedrockAgentCoreControlService {
 
     public AgentRuntimeEndpoint createEndpoint(String runtimeId, String name, String agentRuntimeVersion,
                                                String description, String clientToken, String region) {
+        return createEndpoint(runtimeId, name, agentRuntimeVersion, description, null, clientToken, region);
+    }
+
+    public AgentRuntimeEndpoint createEndpoint(String runtimeId, String name, String agentRuntimeVersion,
+                                               String description, Map<String, String> tags, String clientToken,
+                                               String region) {
         synchronized (runtimeLock(region, runtimeId)) {
             AgentRuntime runtime = getAgentRuntime(runtimeId, region);
             if (clientToken != null) {
@@ -378,6 +423,9 @@ public class BedrockAgentCoreControlService {
             requirePublishedVersion(runtime, version);
             AgentRuntimeEndpoint endpoint = newEndpoint(name, version, description, Instant.now());
             endpoint.setClientToken(clientToken);
+            if (tags != null) {
+                endpoint.getTags().putAll(tags);
+            }
             runtime.getEndpoints().add(endpoint);
             storage.put(key(region, runtimeId), runtime);
             LOG.infov("Created AgentCore endpoint {0} on runtime {1}", name, runtimeId);

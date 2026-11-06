@@ -5,6 +5,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * A named endpoint (qualifier) pointing at a specific version of an AgentCore Runtime.
@@ -24,6 +26,7 @@ public class AgentRuntimeEndpoint {
     private String clientToken;
     private Instant createdAt;
     private Instant lastUpdatedAt;
+    private Map<String, String> tags = new HashMap<>();
 
     public String getName() {
         return name;
@@ -95,5 +98,13 @@ public class AgentRuntimeEndpoint {
 
     public void setLastUpdatedAt(Instant lastUpdatedAt) {
         this.lastUpdatedAt = lastUpdatedAt;
+    }
+
+    public Map<String, String> getTags() {
+        return tags;
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags != null ? tags : new HashMap<>();
     }
 }
