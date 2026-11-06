@@ -1,0 +1,273 @@
+package io.floci.aws.services.cloudfront;
+
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.cloudfront.model.KeyValueStore;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.when;
+
+class CloudFrontKeyValueStoreServiceTest {
+
+    private static final String ACCOUNT = "000000000000";
+
+    private CloudFrontKeyValueStoreService newService() {
+        StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
+                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory(ACCOUNT));
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
+        when(config.defaultAccountId()).thenReturn(ACCOUNT);
+        return new CloudFrontKeyValueStoreService(storageFactory, config, new RegionResolver("us-east-1", ACCOUNT));
+    }
+
+    private static void assertError(String code, int status, Runnable action) {
+        AwsException e = assertThrows(AwsException.class, action::run);
+        assertEquals(code, e.getErrorCode());
+        assertEquals(status, e.getHttpStatus());
+    }
+
+    @Test
+    void createStoresAReadyStoreWithAnArnAndAnEtag() {
+        CloudFrontKeyValueStoreService service = newService();
+
+        KeyValueStore created = service.create("tenants", "tenant to version");
+
+        assertEquals("tenants", created.getName());
+        assertEquals("READY", created.getStatus());
+        assertEquals("tenant to version", created.getComment());
+        assertEquals("arn:aws:cloudfront::" + ACCOUNT + ":key-value-store/" + created.getId(), created.getArn());
+        assertTrue(created.getItems().isEmpty());
+        assertEquals(created.getArn(), service.findByArn(created.getArn()).orElseThrow().getArn());
+        assertEquals(created.getEtag(), service.describe("tenants").getEtag());
+    }
+
+    @Test
+    void createRejectsAnInvalidNameADuplicateAndAnOverlongComment() {
+        CloudFrontKeyValueStoreService service = newService();
+        service.create("tenants", null);
+
+        assertError("EntityAlreadyExists", 409, () -> service.create("tenants", null));
+        assertError("InvalidArgument", 400, () -> service.create("bad name!", null));
+        assertError("InvalidArgument", 400, () -> service.create("", null));
+        assertError("InvalidArgument", 400, () -> service.create("a".repeat(65), null));
+        assertError("InvalidArgument", 400, () -> service.create("commented", "c".repeat(129)));
+    }
+
+    @Test
+    void describeOfAnUnknownStoreIsEntityNotFound() {
+        assertError("EntityNotFound", 404, () -> newService().describe("missing"));
+    }
+
+    @Test
+    void updateNeedsTheCurrentEtagAndRotatesIt() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", "one");
+        String firstEtag = created.getEtag();
+
+        assertError("InvalidIfMatchVersion", 400, () -> service.update("tenants", "stale", "two"));
+        assertError("InvalidIfMatchVersion", 400, () -> service.update("tenants", null, "two"));
+
+        KeyValueStore updated = service.update("tenants", firstEtag, "two");
+
+        assertEquals("two", updated.getComment());
+        assertNotEquals(firstEtag, updated.getEtag());
+    }
+
+    @Test
+    void deleteNeedsTheCurrentEtag() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+
+        assertError("InvalidIfMatchVersion", 400, () -> service.delete("tenants", "stale"));
+        service.delete("tenants", created.getEtag());
+
+        assertError("EntityNotFound", 404, () -> service.describe("tenants"));
+    }
+
+    @Test
+    void listIsOrderedByNameAndPagesWithAMarker() {
+        CloudFrontKeyValueStoreService service = newService();
+        service.create("gamma", null);
+        service.create("alpha", null);
+        service.create("beta", null);
+
+        List<KeyValueStore> firstPage = service.list(null, 2);
+        List<KeyValueStore> secondPage = service.list("beta", 2);
+
+        assertEquals(List.of("alpha", "beta"), firstPage.stream().map(KeyValueStore::getName).toList());
+        assertEquals(List.of("gamma"), secondPage.stream().map(KeyValueStore::getName).toList());
+    }
+
+    @Test
+    void putKeyThenGetKeyRoundTripsAndCountsBytes() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+
+        KeyValueStore written = service.putKey(created.getArn(), created.getEtag(), "demo.example.com", "3-5-19-1234");
+
+        assertEquals("3-5-19-1234", service.getKey(created.getArn(), "demo.example.com").getValue());
+        assertEquals(1, CloudFrontKeyValueStoreService.itemCount(written));
+        assertEquals("demo.example.com".length() + "3-5-19-1234".length(),
+                CloudFrontKeyValueStoreService.totalSizeInBytes(written));
+        assertNotEquals(created.getEtag(), written.getEtag());
+    }
+
+    @Test
+    void sizeIsCountedInUtf8Bytes() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+
+        KeyValueStore written = service.putKey(created.getArn(), created.getEtag(), "k", "é");
+
+        assertEquals(1 + 2, CloudFrontKeyValueStoreService.totalSizeInBytes(written));
+    }
+
+    @Test
+    void aDataPlaneWriteWithAStaleOrMissingEtagIsRejected() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+        String arn = created.getArn();
+        service.putKey(arn, created.getEtag(), "a", "1");
+
+        assertError("ValidationException", 400, () -> service.putKey(arn, created.getEtag(), "b", "2"));
+        assertError("ValidationException", 400, () -> service.putKey(arn, null, "b", "2"));
+        assertNull(service.describeByArn(arn).getItems().get("b"));
+    }
+
+    @Test
+    void controlPlaneUpdatesRotateTheSameEtagTheDataPlaneChecks() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", "one");
+        String staleForDataPlane = created.getEtag();
+
+        service.update("tenants", created.getEtag(), "two");
+
+        assertError("ValidationException", 400,
+                () -> service.putKey(created.getArn(), staleForDataPlane, "a", "1"));
+    }
+
+    @Test
+    void anUnknownStoreArnIsResourceNotFoundOnTheDataPlane() {
+        CloudFrontKeyValueStoreService service = newService();
+        String arn = "arn:aws:cloudfront::" + ACCOUNT + ":key-value-store/00000000-0000-0000-0000-000000000000";
+
+        assertError("ResourceNotFoundException", 404, () -> service.describeByArn(arn));
+        assertError("ResourceNotFoundException", 404, () -> service.getKey(arn, "a"));
+        assertError("ResourceNotFoundException", 404, () -> service.putKey(arn, "etag", "a", "1"));
+    }
+
+    @Test
+    void aMissingKeyIsResourceNotFound() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+
+        assertError("ResourceNotFoundException", 404, () -> service.getKey(created.getArn(), "missing"));
+        assertError("ResourceNotFoundException", 404,
+                () -> service.deleteKey(created.getArn(), created.getEtag(), "missing"));
+    }
+
+    @Test
+    void keyAndValueLimitsAreEnforcedInBytes() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+        String arn = created.getArn();
+        String etag = created.getEtag();
+
+        assertError("ValidationException", 400, () -> service.putKey(arn, etag, "k".repeat(513), "v"));
+        assertError("ValidationException", 400, () -> service.putKey(arn, etag, "k", "v".repeat(1025)));
+        assertError("ValidationException", 400, () -> service.putKey(arn, etag, "", "v"));
+
+        KeyValueStore atTheLimit = service.putKey(arn, etag, "k".repeat(512), "v".repeat(1024));
+        assertEquals(1, CloudFrontKeyValueStoreService.itemCount(atTheLimit));
+    }
+
+    @Test
+    void aStoreCannotGrowPastFiveMebibytes() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+        Map<String, String> puts = new LinkedHashMap<>();
+        for (int i = 0; i < 5200; i++) {
+            puts.put("key-%05d".formatted(i), "v".repeat(1024));
+        }
+
+        assertError("ServiceQuotaExceededException", 402,
+                () -> service.updateKeys(created.getArn(), created.getEtag(), puts, List.of()));
+        assertTrue(service.describeByArn(created.getArn()).getItems().isEmpty());
+    }
+
+    @Test
+    void aBatchIsAtomicWhenOneEntryIsInvalid() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+        Map<String, String> puts = new LinkedHashMap<>();
+        puts.put("good", "1");
+        puts.put("bad", "v".repeat(1025));
+
+        assertError("ValidationException", 400,
+                () -> service.updateKeys(created.getArn(), created.getEtag(), puts, List.of()));
+
+        KeyValueStore unchanged = service.describeByArn(created.getArn());
+        assertTrue(unchanged.getItems().isEmpty());
+        assertEquals(created.getEtag(), unchanged.getEtag());
+    }
+
+    @Test
+    void aBatchAppliesPutsAndDeletesTogetherAndSkipsDeletesOfAbsentKeys() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+        KeyValueStore first = service.updateKeys(created.getArn(), created.getEtag(),
+                Map.of("a", "1", "b", "2"), List.of());
+
+        KeyValueStore second = service.updateKeys(created.getArn(), first.getEtag(),
+                Map.of("c", "3"), List.of("a", "never-existed"));
+
+        assertEquals(List.of("b", "c"), new ArrayList<>(new TreeMap<>(second.getItems()).keySet()));
+        assertNotEquals(first.getEtag(), second.getEtag());
+    }
+
+    @Test
+    void listKeysIsSortedAndPagesWithAToken() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+        Map<String, String> puts = new LinkedHashMap<>();
+        for (String key : List.of("echo", "alpha", "delta", "bravo", "charlie")) {
+            puts.put(key, key.toUpperCase());
+        }
+        service.updateKeys(created.getArn(), created.getEtag(), puts, List.of());
+
+        CloudFrontKeyValueStoreService.KeyPage first = service.listKeys(created.getArn(), null, 2);
+        CloudFrontKeyValueStoreService.KeyPage second = service.listKeys(created.getArn(), first.nextToken(), 2);
+        CloudFrontKeyValueStoreService.KeyPage third = service.listKeys(created.getArn(), second.nextToken(), 2);
+
+        assertEquals(List.of("alpha", "bravo"), first.items().stream().map(Map.Entry::getKey).toList());
+        assertEquals(List.of("charlie", "delta"), second.items().stream().map(Map.Entry::getKey).toList());
+        assertEquals(List.of("echo"), third.items().stream().map(Map.Entry::getKey).toList());
+        assertNull(third.nextToken());
+    }
+
+    @Test
+    void listKeysValidatesMaxResultsAndTheToken() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+
+        assertError("ValidationException", 400, () -> service.listKeys(created.getArn(), null, 0));
+        assertError("ValidationException", 400, () -> service.listKeys(created.getArn(), null, 51));
+        assertError("ValidationException", 400, () -> service.listKeys(created.getArn(), "!!not base64!!", 10));
+        assertEquals(10, CloudFrontKeyValueStoreService.DEFAULT_LIST_KEYS);
+    }
+}
