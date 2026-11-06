@@ -249,8 +249,9 @@ public class EcsServiceDiscoveryRegistrar {
     /**
      * Builds the instance attributes AWS records for an ECS-registered instance. On AWS the
      * address of an awsvpc task is its ENI address, because that is where the task answers. In
-     * Floci the ENI address belongs to no network the task's containers joined, so an awsvpc task
-     * registers the address its container actually holds, and falls back to the ENI address only
+     * Floci the ENI address is held at most on the VPC's Docker network, which peers outside that
+     * VPC cannot reach, so an awsvpc task registers the address its container holds on
+     * the network it was created on, and falls back to the ENI address only
      * when no running container can say what it holds. A bridge-mode task has no ENI and is
      * registered at the container's host address, as before.
      *
