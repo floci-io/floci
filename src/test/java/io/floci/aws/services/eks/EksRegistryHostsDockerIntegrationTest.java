@@ -283,26 +283,27 @@ class EksRegistryHostsDockerIntegrationTest {
     }
 
     private String k3sLogTail(String containerId) {
-        StringBuilder out = new StringBuilder();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        String problem = "";
         try {
             boolean completed = dockerClient.logContainerCmd(containerId).withStdOut(true).withStdErr(true)
                     .withTail(2000)
                     .exec(new ResultCallback.Adapter<Frame>() {
                         @Override
                         public void onNext(Frame frame) {
-                            out.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                            out.writeBytes(frame.getPayload());
                         }
                     }).awaitCompletion(10, TimeUnit.SECONDS);
             if (!completed) {
-                out.append("(timed out reading logs)");
+                problem = "(timed out reading logs)";
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            out.append("(interrupted while reading logs)");
+            problem = "(interrupted while reading logs)";
         } catch (Exception e) {
-            out.append("(could not read logs: ").append(e.getMessage()).append(')');
+            problem = "(could not read logs: " + e.getMessage() + ")";
         }
-        return out.toString();
+        return out.toString(StandardCharsets.UTF_8) + problem;
     }
 
     /**
