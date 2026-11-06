@@ -14,9 +14,11 @@ import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskStatus;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -119,7 +121,11 @@ class EcsFirelensS3ConfigTest {
         List<EcsTask> tasks = service.runTask("test-cluster", "ec2-s3", 1,
                 LaunchType.EC2, null, null, List.of(), null, "us-east-1");
 
-        EcsTask task = tasks.getFirst();
+        // RunTask answers before the launch; the failure lands on the task in the background.
+        String taskArn = tasks.getFirst().getTaskArn();
+        await().atMost(Duration.ofSeconds(5)).until(() -> TaskStatus.STOPPED.name().equals(
+                service.describeTasks("test-cluster", List.of(taskArn), "us-east-1").getFirst().getLastStatus()));
+        EcsTask task = service.describeTasks("test-cluster", List.of(taskArn), "us-east-1").getFirst();
         assertEquals(TaskStatus.STOPPED.name(), task.getLastStatus());
         assertEquals("Unable to download firelens s3 config file: unable to download s3 config "
                         + "extra.conf from bucket firelens-configs: The specified key does not exist.",

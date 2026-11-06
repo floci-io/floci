@@ -21,12 +21,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,6 +37,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -65,8 +68,8 @@ class EcsServiceRestartLeftoversTest {
         });
         EcsService restarted = service(storage, false, manager, mock(EcsLoadBalancerRegistrar.class), null);
         restarted.releasePreviousRunLeftovers();
-        EcsTask task = restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null,
-                null, null, REGION).getFirst();
+        EcsTask task = awaitLaunched(restarted, "app-cluster", restarted.runTask("app-cluster", "web", 1,
+                LaunchType.EC2, null, null, null, null, REGION).getFirst());
         assertEquals("RUNNING", task.getLastStatus());
         restarted.reconcileServices();
         verify(manager, times(2)).startTask(any(), any(), any(), anyString());
@@ -100,7 +103,8 @@ class EcsServiceRestartLeftoversTest {
         definition.setImage("busybox:stable");
         restarted.registerTaskDefinition("web", List.of(definition), NetworkMode.bridge, null, null,
                 null, null, List.of(), REGION);
-        restarted.runTask(null, "web", 1, LaunchType.EC2, null, null, null, null, REGION);
+        awaitLaunched(restarted, null,
+                restarted.runTask(null, "web", 1, LaunchType.EC2, null, null, null, null, REGION).getFirst());
         restarted.reconcile();
         restarted.reconcile();
         restarted.reconcile();
@@ -166,14 +170,15 @@ class EcsServiceRestartLeftoversTest {
                 null, null, List.of(), REGION);
 
         restarted.releasePreviousRunLeftovers();
-        EcsTask blocked = restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null,
-                null, null, REGION).getFirst();
+        EcsTask blocked = awaitLaunched(restarted, "app-cluster", restarted.runTask("app-cluster", "web", 1,
+                LaunchType.EC2, null, null, null, null, REGION).getFirst());
 
         assertEquals("STOPPED", blocked.getLastStatus());
         assertThat(blocked.getStoppedReason(), containsString("previous run"));
         verify(containerManager, never()).startTask(any(), any(), any(), anyString());
 
-        restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION);
+        awaitLaunched(restarted, "app-cluster",
+                restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION).getFirst());
 
         verify(containerManager, times(3)).removeLeftoverContainers();
         verify(containerManager).startTask(any(), any(), any(), anyString());
@@ -215,7 +220,8 @@ class EcsServiceRestartLeftoversTest {
                 null, null, List.of(), REGION);
 
         restarted.releasePreviousRunLeftovers();
-        restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION);
+        awaitLaunched(restarted, "app-cluster",
+                restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION).getFirst());
 
         verify(containerManager, never()).removeLeftoverContainers();
         verify(containerManager, never()).removeLeftoverTaskVolumes();
@@ -275,16 +281,30 @@ class EcsServiceRestartLeftoversTest {
         ecs.createService("app-cluster", "alpha", "web", 0, LaunchType.EC2, List.of(lb), null, REGION);
 
         // A task of no service at all: any container can take the address a stale entry points at.
-        EcsTask task = ecs.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION)
-                .getFirst();
+        EcsTask task = awaitLaunched(ecs, "app-cluster",
+                ecs.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION).getFirst());
 
         assertEquals("RUNNING", task.getLastStatus());
         // A target only on the ports the container serves, and never at the VPC-scoped ENI address.
-        verify(lbRegistrar).evictUnrecordedTargets(task, Set.of(TARGET_GROUP_ARN),
+        // The launch evicts them just after it marks the task RUNNING.
+        verify(lbRegistrar, timeout(5000)).evictUnrecordedTargets(task, Set.of(TARGET_GROUP_ARN),
                 Set.of(new EcsTaskAddress(host, targetPort)), REGION);
-        verify(discoveryRegistrar).evictUnrecordedInstances(task, Set.of("srv-alpha"),
+        verify(discoveryRegistrar, timeout(5000)).evictUnrecordedInstances(task, Set.of("srv-alpha"),
                 Set.of(new EcsTaskAddress("10.0.1.5", null, "vpc-app"), new EcsTaskAddress("172.19.0.4", null)),
                 REGION);
+    }
+
+    /**
+     * RunTask answers before the launch, which lands the task RUNNING or STOPPED on the task
+     * launcher's thread. Returns the live task, the one the launch hands the registrars.
+     */
+    private static EcsTask awaitLaunched(EcsService service, String cluster, EcsTask launched) {
+        await().atMost(Duration.ofSeconds(5)).until(() -> {
+            String status = service.describeTasks(cluster, List.of(launched.getTaskArn()), REGION)
+                    .getFirst().getLastStatus();
+            return !"PROVISIONING".equals(status) && !"PENDING".equals(status);
+        });
+        return service.describeTasks(cluster, List.of(launched.getTaskArn()), REGION).getFirst();
     }
 
     private static void persistServiceWithLoadBalancer(StorageFactory storage) {
