@@ -1071,7 +1071,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 if (inst.getDockerContainerId() != null
                         && containerManager.isContainerRunning(inst.getDockerContainerId())) {
-                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                    restoreVolumeDevice(vol, inst, att.getDevice());
                 }
             }
         }
@@ -1102,9 +1102,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             for (VolumeAttachment att : vol.getAttachments()) {
                 if (inst.getInstanceId().equals(att.getInstanceId())
                         && (inst.getRootDeviceName() == null || !att.getDevice().equals(inst.getRootDeviceName()))) {
-                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                    restoreVolumeDevice(vol, inst, att.getDevice());
                 }
             }
+        }
+    }
+
+    private void restoreVolumeDevice(Volume volume, Instance instance, String device) {
+        try {
+            volumeBlockDeviceManager.attachVolume(volume, instance, device);
+        } catch (AwsException e) {
+            LOG.warnv("Could not restore volume {0} on instance {1}: {2}",
+                    volume.getVolumeId(), instance.getInstanceId(), e.getMessage());
         }
     }
 
@@ -14788,6 +14797,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterValue",
                     "Value '" + device + "' for parameter device is invalid.", 400);
         }
+        return withVolumeLock(volumeId, () -> attachVolumeToInstance(region, volumeId, instanceId, device));
+    }
+
+    private VolumeAttachment attachVolumeToInstance(String region, String volumeId, String instanceId, String device) {
         Volume volume = getRequiredVolume(region, volumeId);
         Instance inst = getRequiredInstance(region, instanceId);
         if (!List.of("running", "stopped").contains(inst.getState().getName())) {
@@ -14824,6 +14837,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.attachVolume(volume, inst, device);
+        }
+
         VolumeAttachment attachment = new VolumeAttachment();
         attachment.setVolumeId(volumeId);
         attachment.setInstanceId(instanceId);
@@ -14835,10 +14852,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         volume.getAttachments().add(attachment);
         volume.setState("in-use");
         volumes.put(key(region, volumeId), volume);
-
-        if (volumeBlockDeviceManager != null) {
-            volumeBlockDeviceManager.attachVolume(volume, inst, device);
-        }
 
         return attachment;
     }

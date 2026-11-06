@@ -147,6 +147,7 @@ import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -6830,6 +6831,80 @@ class Ec2ServiceTest {
         assertEquals("/dev/sdf", attached.getAttachments().getFirst().getDevice());
         assertEquals("attached", attached.getAttachments().getFirst().getState());
         assertFalse(attached.getAttachments().getFirst().isDeleteOnTermination());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void attachmentExceptionsLeaveStoredVolumeAvailableAndRetryable(boolean awsError) {
+        Ec2VolumeBlockDeviceManager blockDevices = mock(Ec2VolumeBlockDeviceManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), null, null, blockDevices);
+        Instance instance = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        instance.setState(InstanceState.running());
+        Volume volume = service.createVolume("us-east-1", instance.getPlacement().getAvailabilityZone(), "gp3", 1,
+                false, 0, null, null, List.of());
+        RuntimeException failure = awsError ? new AwsException("InternalError", "attachment failed", 500)
+                : new IllegalStateException("unexpected backend failure");
+        when(blockDevices.attachVolume(any(), any(), anyString())).thenThrow(failure);
+
+        assertThrows(RuntimeException.class, () -> service.attachVolume("us-east-1", volume.getVolumeId(),
+                instance.getInstanceId(), "/dev/xvdf"));
+        Volume stored = service.describeVolumes("us-east-1", List.of(volume.getVolumeId()), Map.of()).getFirst();
+        assertEquals("available", stored.getState());
+        assertTrue(stored.getAttachments().isEmpty());
+
+        doReturn(Optional.of("/dev/xvdf")).when(blockDevices).attachVolume(any(), any(), anyString());
+        assertEquals("attached", service.attachVolume("us-east-1", volume.getVolumeId(),
+                instance.getInstanceId(), "/dev/xvdf").getState());
+        when(blockDevices.attachVolume(any(), any(), anyString()))
+                .thenThrow(new AwsException("InternalError", "restoration failed", 500));
+        assertDoesNotThrow(() -> service.restoreAttachedVolumesForInstance("us-east-1", instance));
+        assertEquals("in-use", stored.getState());
+        assertEquals(1, stored.getAttachments().size());
+    }
+
+    @Test
+    void concurrentAttachmentWaitsForThePhysicalOperation() throws Exception {
+        Ec2VolumeBlockDeviceManager blockDevices = mock(Ec2VolumeBlockDeviceManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), null, null, blockDevices);
+        Instance instance = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        instance.setState(InstanceState.running());
+        Volume volume = service.createVolume("us-east-1", instance.getPlacement().getAvailabilityZone(), "gp3", 1,
+                false, 0, null, null, List.of());
+        CountDownLatch attaching = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(blockDevices.attachVolume(any(), any(), anyString())).thenAnswer(invocation -> {
+            attaching.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            return Optional.of("/dev/xvdf");
+        });
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<VolumeAttachment> first = executor.submit(() -> service.attachVolume("us-east-1",
+                    volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf"));
+            try {
+                assertTrue(attaching.await(10, TimeUnit.SECONDS));
+                AtomicReference<Thread> contender = new AtomicReference<>();
+                Future<AwsException> second = executor.submit(() -> {
+                    contender.set(Thread.currentThread());
+                    return assertThrows(AwsException.class, () -> service.attachVolume("us-east-1",
+                            volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdg"));
+                });
+                awaitBlockedOrDone(contender, second);
+                assertFalse(second.isDone(), "second attachment must wait for the physical operation");
+                release.countDown();
+                assertEquals("attached", first.get(10, TimeUnit.SECONDS).getState());
+                assertEquals("VolumeInUse", second.get(10, TimeUnit.SECONDS).getErrorCode());
+                verify(blockDevices).attachVolume(volume, instance, "/dev/xvdf");
+                verify(blockDevices, never()).attachVolume(volume, instance, "/dev/xvdg");
+            } finally {
+                release.countDown();
+            }
+        }
     }
 
     @Test

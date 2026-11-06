@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.docker.ContainerBuilder;
@@ -265,7 +266,8 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
      * Attaches a volume to a target instance container as a block device.
      *
      * @return the device path inside the container if block device creation succeeded,
-     *         or empty if degraded or container was not running.
+     *         or empty for intentional metadata-only tracking.
+     * @throws AwsException if physical attachment is attempted but fails
      */
     public Optional<String> attachVolume(Volume volume, Instance instance, String requestedDevice) {
         if (!isAvailable()) {
@@ -281,6 +283,9 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
             return Optional.empty();
         }
 
+        if (instance.getState() != null && "stopped".equals(instance.getState().getName())) {
+            return Optional.empty();
+        }
         String targetContainerId = instance.getDockerContainerId();
         if (targetContainerId == null || targetContainerId.isBlank()) {
             LOG.warnv("Instance {0} has no Docker container ID; volume {1} attached as metadata only",
@@ -295,9 +300,7 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
 
         String helperId = ensureHelperContainer();
         if (helperId == null) {
-            LOG.warnv("EC2 volume helper container unavailable; volume {0} attached as metadata only",
-                    volume.getVolumeId());
-            return Optional.empty();
+            throw attachmentFailure(volume, instance, null, null, "Volume helper container unavailable");
         }
 
         int effectiveSize = volume.getSize() > 0 ? volume.getSize() : 8;
@@ -328,15 +331,12 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                     DEFAULT_TIMEOUT_SECONDS);
         }
         if (helperResult.exitCode() != 0) {
-            LOG.warnv("Failed to allocate loop device for volume {0} in helper: {1}",
-                    volume.getVolumeId(), helperResult.summary());
-            return Optional.empty();
+            throw attachmentFailure(volume, instance, helperId, null, helperResult.summary());
         }
 
         String loopDev = helperResult.summary();
         if (loopDev == null || !loopDev.startsWith("/dev/loop")) {
-            LOG.warnv("Unexpected loop device format for volume {0}: {1}", volume.getVolumeId(), loopDev);
-            return Optional.empty();
+            throw attachmentFailure(volume, instance, helperId, null, "Unexpected loop device: " + loopDev);
         }
         activeLoopDevices.put(volume.getVolumeId(), loopDev);
 
@@ -355,15 +355,13 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
                 + "else\n"
                 + "  ln -sf \"$loop\" \"$dev\"\n"
                 + "fi\n"
-                + "[ -b \"$dev\" ] || [ -L \"$dev\" ]";
+                + "[ -b \"$dev\" ]";
 
         ContainerExec.Result targetResult = execInContainer(targetContainerId,
                 new String[]{"sh", "-c", targetScript, "target", normalizedDevice, loopDev, minorStr},
                 DEFAULT_TIMEOUT_SECONDS);
         if (targetResult.exitCode() != 0) {
-            LOG.warnv("Failed to create block device {0} in container {1} for volume {2}: {3}",
-                    normalizedDevice, targetContainerId, volume.getVolumeId(), targetResult.summary());
-            return Optional.empty();
+            throw attachmentFailure(volume, instance, helperId, normalizedDevice, targetResult.summary());
         }
 
         LOG.infov("Attached volume {0} as block device {1} (loop device {2}) to instance {3}",
@@ -390,18 +388,45 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
 
         String helperId = ensureHelperContainer();
         if (helperId != null) {
-            String rawFile = "/volumes/" + volume.getVolumeId() + ".raw";
-            String script = SHELL_LOOP_FINDER
-                    + "raw=\"$1\"\n"
-                    + "while true; do\n"
-                    + "  loop=$(find_loops \"$raw\" | head -n1)\n"
-                    + "  [ -n \"$loop\" ] || break\n"
-                    + "  losetup -d \"$loop\" 2>/dev/null || break\n"
-                    + "done";
-            execInContainer(helperId,
-                    new String[]{"sh", "-c", script, "detach", rawFile}, DEFAULT_TIMEOUT_SECONDS);
+            releaseVolumeLoops(helperId, volume);
         }
-        activeLoopDevices.remove(volume.getVolumeId());
+    }
+
+    private AwsException attachmentFailure(Volume volume, Instance instance, String helperId,
+                                           String targetDevice, String reason) {
+        LOG.warnv("Failed to attach volume {0} to instance {1}: {2}",
+                volume.getVolumeId(), instance.getInstanceId(), reason);
+        if (targetDevice != null) {
+            ContainerExec.Result removed = execInContainer(instance.getDockerContainerId(),
+                    new String[]{"rm", "-f", targetDevice}, DEFAULT_TIMEOUT_SECONDS);
+            if (removed.exitCode() != 0) {
+                LOG.warnv("Could not clean up device {0} for volume {1}: {2}",
+                        targetDevice, volume.getVolumeId(), removed.summary());
+            }
+        }
+        if (helperId != null) {
+            releaseVolumeLoops(helperId, volume);
+        }
+        return new AwsException("InternalError", "Could not attach volume '" + volume.getVolumeId()
+                + "' to instance '" + instance.getInstanceId() + "'", 500);
+    }
+
+    private void releaseVolumeLoops(String helperId, Volume volume) {
+        String script = SHELL_LOOP_FINDER
+                + "raw=\"$1\"\n"
+                + "failed=0\n"
+                + "for loop in $(find_loops \"$raw\"); do\n"
+                + "  losetup -d \"$loop\" || failed=1\n"
+                + "done\n"
+                + "exit $failed";
+        ContainerExec.Result released = execInContainer(helperId,
+                new String[]{"sh", "-c", script, "detach", "/volumes/" + volume.getVolumeId() + ".raw"},
+                DEFAULT_TIMEOUT_SECONDS);
+        if (released.exitCode() != 0) {
+            LOG.warnv("Could not release loop devices for volume {0}: {1}", volume.getVolumeId(), released.summary());
+        } else {
+            activeLoopDevices.remove(volume.getVolumeId());
+        }
     }
 
     /**
@@ -416,7 +441,12 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
         for (VolumeAttachment att : attachments) {
             Optional<Volume> volumeOpt = volumeLookup.apply(att.getVolumeId());
             if (volumeOpt.isPresent()) {
-                attachVolume(volumeOpt.get(), instance, att.getDevice());
+                try {
+                    attachVolume(volumeOpt.get(), instance, att.getDevice());
+                } catch (AwsException e) {
+                    LOG.warnv("Could not restore volume {0} on instance {1}: {2}",
+                            att.getVolumeId(), instance.getInstanceId(), e.getMessage());
+                }
             }
         }
     }
