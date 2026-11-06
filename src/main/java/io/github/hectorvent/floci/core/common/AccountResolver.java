@@ -27,6 +27,19 @@ public class AccountResolver {
         this.defaultAccountId = defaultAccountId;
     }
 
+    static boolean isAccountId(String value) {
+        if (value == null || value.length() != 12) {
+            return false;
+        }
+        for (int i = 0; i < 12; i++) {
+            char c = value.charAt(i);
+            if (c < '0' || '9' < c) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * Returns the account ID for the given Authorization header.
      * When the access key ID is exactly 12 digits it is used directly as the account ID,
@@ -35,7 +48,7 @@ public class AccountResolver {
      */
     public String resolve(String authorizationHeader) {
         String akid = extractAccessKeyId(authorizationHeader);
-        if (akid != null && akid.matches("\\d{12}")) {
+        if (isAccountId(akid)) {
             return akid;
         }
         return defaultAccountId;
@@ -52,6 +65,10 @@ public class AccountResolver {
         String trimmed = authorizationHeader.trim();
         if (!trimmed.startsWith(SIGV4_PREFIX) && !trimmed.startsWith(SIGV4A_PREFIX)) {
             return null;
+        }
+        String akid = SigV4CredentialScope.segment(trimmed, SigV4CredentialScope.Segment.ACCESS_KEY);
+        if (akid != null) {
+            return akid;
         }
         Matcher m = AKID_PATTERN.matcher(trimmed);
         return m.find() ? m.group(1) : null;
@@ -81,7 +98,7 @@ public class AccountResolver {
             return defaultAccountId;
         }
         String akid = extractPresignedAccessKeyId(credentialValue);
-        if (akid != null && akid.matches("\\d{12}")) {
+        if (isAccountId(akid)) {
             return akid;
         }
         return defaultAccountId;

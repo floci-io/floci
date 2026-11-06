@@ -346,4 +346,58 @@ class RegionResolverTest {
             @Override public int getLength() { return 0; }
         };
     }
+
+    @Test
+    void regionFromAuthReadsHeadersWithoutSpacesAfterCommas() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/20260215/eu-west-1/s3/aws4_request,"
+                + "SignedHeaders=host,Signature=abc";
+        assertEquals("eu-west-1", resolver.resolveRegionFromAuth(header));
+        assertEquals("eu-west-1", resolver.resolveRegionFromAuthOrNull(header));
+    }
+
+    @Test
+    void regionFromAuthWithTwoCredentialsUsesTheFirstScope() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/20260215/eu-west-1/s3/aws4_request, "
+                + "SignedHeaders=host, Credential=AKID/20260215/ap-south-1/s3/aws4_request";
+        assertEquals("eu-west-1", resolver.resolveRegionFromAuth(header));
+    }
+
+    @Test
+    void regionFromAuthWithASlashInTheKey() {
+        String header = "AWS4-HMAC-SHA256 Credential=a/b/20260215/eu-west-1/s3/aws4_request, SignedHeaders=host";
+        assertEquals("eu-west-1", resolver.resolveRegionFromAuth(header));
+    }
+
+    @Test
+    void regionFromAuthWithASlashLaterInTheHeader() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/20260215/eu-west-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=ab/cd";
+        assertEquals("eu-west-1", resolver.resolveRegionFromAuth(header));
+    }
+
+    @Test
+    void regionFromAuthWithAnEightDigitRegion() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/20260215/12345678/s3/aws4_request, SignedHeaders=host";
+        assertEquals("s3", resolver.resolveRegionFromAuth(header));
+        assertEquals("s3", resolver.resolveRegionFromAuthOrNull(header));
+    }
+
+    @Test
+    void regionFromAuthOfASigV4aHeaderIsTheServiceSegment() {
+        String header = "AWS4-ECDSA-P256-SHA256 Credential=AKID/20260215/s3/aws4_request, SignedHeaders=host";
+        assertEquals("s3", resolver.resolveRegionFromAuthOrNull(header));
+    }
+
+    @Test
+    void regionFromAuthWithATrailingControlCharacter() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/20260215/eu-west-1/s3/aws4_request\u0001";
+        assertEquals("eu-west-1", resolver.resolveRegionFromAuth(header));
+    }
+
+    @Test
+    void regionFromAuthWithAShortDateStaysDefault() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/2026021/eu-west-1/s3/aws4_request";
+        assertEquals("us-east-1", resolver.resolveRegionFromAuth(header));
+        assertNull(resolver.resolveRegionFromAuthOrNull(header));
+    }
 }

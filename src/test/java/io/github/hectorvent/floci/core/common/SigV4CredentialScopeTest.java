@@ -65,4 +65,67 @@ class SigV4CredentialScopeTest {
         assertTrue(SigV4CredentialScope.serviceName("Bearer token").isEmpty());
         assertTrue(SigV4CredentialScope.serviceName("Basic dXNlcjpwYXNz").isEmpty());
     }
+
+    @Test
+    void readsScopeWhenCommasHaveNoSpaceAfterThem() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/20260707/us-east-1/s3/aws4_request,"
+                + "SignedHeaders=host;x-amz-date,Signature=deadbeef";
+        assertEquals(Optional.of("s3"), SigV4CredentialScope.serviceName(header));
+        assertEquals(Optional.of("AKID"), SigV4CredentialScope.accessKeyId(header));
+    }
+
+    @Test
+    void readsScopeWhenASecondCredentialFollowsABrokenOne() {
+        String header = "AWS4-HMAC-SHA256 Credential=broken, Credential=AKID/20260707/us-east-1/sqs/aws4_request,"
+                + " SignedHeaders=host, Signature=deadbeef";
+        assertEquals(Optional.of("sqs"), SigV4CredentialScope.serviceName(header));
+        assertEquals(Optional.of("AKID"), SigV4CredentialScope.accessKeyId(header));
+    }
+
+    @Test
+    void readsScopeWhenTheKeyContainsASlash() {
+        String header = "AWS4-HMAC-SHA256 Credential=a/b/20260707/us-east-1/s3/aws4_request,"
+                + " SignedHeaders=host, Signature=deadbeef";
+        assertEquals(Optional.of("s3"), SigV4CredentialScope.serviceName(header));
+        assertEquals(Optional.of("a"), SigV4CredentialScope.accessKeyId(header));
+    }
+
+    @Test
+    void readsScopeWhenASlashFollowsInTheSignature() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/20260707/us-east-1/s3/aws4_request,"
+                + " SignedHeaders=host, Signature=ab/cd";
+        assertEquals(Optional.of("s3"), SigV4CredentialScope.serviceName(header));
+        assertEquals(Optional.of("AKID"), SigV4CredentialScope.accessKeyId(header));
+    }
+
+    @Test
+    void readsScopeWhenTheRegionIsEightDigits() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/20260707/12345678/s3/aws4_request,"
+                + " SignedHeaders=host, Signature=deadbeef";
+        assertEquals(Optional.of("s3"), SigV4CredentialScope.serviceName(header));
+        assertEquals(Optional.of("AKID"), SigV4CredentialScope.accessKeyId(header));
+    }
+
+    @Test
+    void readsScopeWhenAControlCharacterFollowsTheScope() {
+        String header = "AWS4-HMAC-SHA256 Credential=AKID/20260707/us-east-1/s3/aws4_request\u0001";
+        assertEquals(Optional.of("s3"), SigV4CredentialScope.serviceName(header));
+        assertEquals(Optional.of("AKID"), SigV4CredentialScope.accessKeyId(header));
+    }
+
+    @Test
+    void readsScopeWhenTheDateIsNotEightAsciiDigits() {
+        assertTrue(SigV4CredentialScope.serviceName(
+                "AWS4-HMAC-SHA256 Credential=AKID/2026070/us-east-1/s3/aws4_request").isEmpty());
+        assertTrue(SigV4CredentialScope.serviceName(
+                "AWS4-HMAC-SHA256 Credential=AKID/٢٠٢٦٠٧٠٧/us-east-1/s3/aws4_request")
+                .isEmpty());
+    }
+
+    @Test
+    void readsKeyAndServiceOfASigV4aHeaderWithoutSpaces() {
+        String header = "AWS4-ECDSA-P256-SHA256 Credential=AKID/20260707/S3/aws4_request,SignedHeaders=host";
+        assertEquals(Optional.of("s3"), SigV4CredentialScope.serviceName(header));
+        assertEquals(Optional.of("AKID"), SigV4CredentialScope.accessKeyId(header));
+    }
 }
