@@ -4,7 +4,8 @@
 A REST request is authorized by its route: `IamActionRegistry` maps the HTTP method and path to the
 IAM action, by its rules first and then by these routes, and a route neither maps is left unchecked.
 This vendors, for each operation of the models below, its HTTP method and request URI exactly as the
-SDKs send them. A request no rule maps is the operation whose route it matches, checked as the action
+SDKs send them, plus the explicit access-denied HTTP status of each model when it declares one.
+A request no rule maps is the operation whose route it matches, checked as the action
 `iam-authorized-actions.json` names for it, or as its own; `IamRestRouteCoverageTest` builds a
 request on each route and compares the action the registry gives with that one.
 
@@ -59,15 +60,34 @@ MODELS: dict[str, str] = {
     "lambda-microvms": "lambda",
     "opensearch": "es",
     "pipes": "pipes",
+    "quicksight": "quicksight",
     "s3": "s3",
     "s3control": "s3",
     "scheduler": "scheduler",
 }
 
 
+def access_denied_status(model: dict) -> int | None:
+    """The HTTP status explicitly modelled for a declared AccessDenied or AccessDeniedException error."""
+    statuses = set()
+    for operation in model["operations"].values():
+        for reference in operation.get("errors", []):
+            name = reference["shape"]
+            error = model.get("shapes", {}).get(name, {}).get("error", {})
+            if error.get("code", name) in ("AccessDenied", "AccessDeniedException") and "httpStatusCode" in error:
+                status = error["httpStatusCode"]
+                if type(status) is not int or not 400 <= status <= 599:
+                    raise SystemExit(f"error: invalid access-denied HTTP status {status!r}")
+                statuses.add(status)
+    if len(statuses) > 1:
+        raise SystemExit(f"error: a REST model has conflicting access-denied HTTP statuses {sorted(statuses)}")
+    return next(iter(statuses), None)
+
+
 def build(models: dict[str, dict], provenance: str) -> dict:
     """The vendored document from each loaded model."""
     routes = {}
+    denial_statuses = {}
     for name in sorted(models):
         model = models[name]
         if model["metadata"].get("protocol") not in ("rest-json", "rest-xml"):
@@ -81,6 +101,13 @@ def build(models: dict[str, dict], provenance: str) -> dict:
             "apiVersion": model["metadata"]["apiVersion"],
             "operations": operations,
         }
+        status = access_denied_status(model)
+        if status is not None:
+            scope = MODELS[name]
+            if scope in denial_statuses and denial_statuses[scope] != status:
+                raise SystemExit(f"error: REST models of {scope} have conflicting access-denied HTTP statuses")
+            denial_statuses[scope] = status
+            routes[name]["accessDeniedStatus"] = status
     shared = shared_routes(routes)
     if shared:
         raise SystemExit("error: one route names more than one operation in a scope the rules do not route alone: "
@@ -132,6 +159,8 @@ def render(doc: dict) -> str:
         lines.append(f"    {json.dumps(name)}: {{")
         lines.append(f'      "credentialScope": {json.dumps(model["credentialScope"])},')
         lines.append(f'      "apiVersion": {json.dumps(model["apiVersion"])},')
+        if "accessDeniedStatus" in model:
+            lines.append(f'      "accessDeniedStatus": {model["accessDeniedStatus"]},')
         lines.append('      "operations": {')
         operations = list(model["operations"].items())
         for position, (operation, route) in enumerate(operations):

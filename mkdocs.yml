@@ -152,6 +152,7 @@ nav:
     - DocumentDB: services/docdb.md
     - DMS: services/dms.md
     - Athena: services/athena.md
+    - QuickSight: services/quicksight.md
     - Redshift: services/redshift.md
     - Redshift Data API: services/redshift-data.md
     - Redshift Serverless: services/redshift-serverless.md

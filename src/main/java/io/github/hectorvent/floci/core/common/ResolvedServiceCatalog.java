@@ -68,6 +68,8 @@ import io.github.hectorvent.floci.services.oam.OamController;
 import io.github.hectorvent.floci.services.opensearch.ElasticsearchController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
+import io.github.hectorvent.floci.services.quicksight.QuickSightController;
+import io.github.hectorvent.floci.services.quicksight.QuickSightEmbedController;
 import io.github.hectorvent.floci.services.ram.RamController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
 import io.github.hectorvent.floci.services.resourceexplorer2.ResourceExplorer2Controller;
@@ -816,6 +818,10 @@ public class ResolvedServiceCatalog {
                         "verifiedpermissions", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("VerifiedPermissions."), Set.of("verifiedpermissions"), Set.of(), Set.of()),
+                descriptor("quicksight", "quicksight", config.services().quicksight().enabled(), true,
+                        "quicksight", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON), Set.of(), Set.of("quicksight"), Set.of(),
+                        Set.of(QuickSightController.class, QuickSightEmbedController.class)),
                 descriptor("marketplace", "marketplace", config.services().marketplace().enabled(), true,
                         "marketplace", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON, ServiceProtocol.JSON, ServiceProtocol.CBOR),

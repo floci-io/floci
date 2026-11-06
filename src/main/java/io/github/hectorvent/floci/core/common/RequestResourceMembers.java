@@ -31,9 +31,11 @@ final class RequestResourceMembers {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Pattern VARIABLE = Pattern.compile("\\$\\{(\\w+)}");
-    private static final Pattern MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[])?");
-    /** A member holding an ARN may also be one level inside a structure or each of a list's structures. */
-    private static final Pattern ARN_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[])?(\\.[A-Za-z][A-Za-z0-9_]*(\\[])?)?");
+    private static final Pattern MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[]|\\{\\})?");
+    /** An ARN may be nested in structures, array elements or map values. */
+    private static final Pattern ARN_MEMBER = Pattern.compile(
+            "[A-Za-z][A-Za-z0-9_]*(\\[])?(\\.[A-Za-z][A-Za-z0-9_]*(\\[])?)?"
+                    + "|[A-Za-z][A-Za-z0-9_]*\\{\\}(\\.[A-Za-z][A-Za-z0-9_]*){1,2}");
     /**
      * A member filling a variable may also be a field of a structure, or of each of a list's structures, one value
      * for each.
@@ -56,18 +58,22 @@ final class RequestResourceMembers {
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
 
     /**
-     * A top-level request member that holds a string, or a list of them when {@code list}, or, with a
-     * {@code field}, a structure or a list of them, of which that field is read.
+     * A request selector that holds a string, an array when {@code list}, or map values when {@code map}.
+     * With a {@code field}, reads that field from each selected structure.
      */
-    record Member(String name, boolean list, Member field) {
+    record Member(String name, boolean list, Member field, boolean map) {
+
+        Member(String name, boolean list, Member field) {
+            this(name, list, field, false);
+        }
 
         Member(String name, boolean list) {
             this(name, list, null);
         }
 
-        /** As the file writes it: {@code Name}, {@code Name[]}, {@code Name.Field} or {@code Name[].Field}. */
+        /** The selector path, with {@code []} for array elements and {@code {}} for map values. */
         String path() {
-            return name + (list ? "[]" : "") + (field == null ? "" : "." + field.path());
+            return name + (map ? "{}" : list ? "[]" : "") + (field == null ? "" : "." + field.path());
         }
 
         /** Whether it is a field of each of a list's structures, which gives one value for each of them. */
@@ -419,6 +425,9 @@ final class RequestResourceMembers {
         if (!MEMBER.matcher(path).matches()) {
             throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path + ", which is no member");
         }
+        if (path.endsWith("{}")) {
+            return new Member(path.substring(0, path.length() - 2), false, null, true);
+        }
         return path.endsWith("[]") ? new Member(path.substring(0, path.length() - 2), true) : new Member(path, false);
     }
 
@@ -445,7 +454,7 @@ final class RequestResourceMembers {
         return !member.list() && (member.field() == null || !member.field().list());
     }
 
-    /** A member holding an ARN: {@code Name}, {@code Name[]}, or a field of it, {@code Name.Field} or {@code Name[].Field}. */
+    /** A possibly nested ARN selector; {@code []} reads array elements and {@code {}} reads map values. */
     private static Member arnMember(String operation, String path) {
         if (!ARN_MEMBER.matcher(path).matches()) {
             throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path + ", which is no member");
@@ -455,7 +464,7 @@ final class RequestResourceMembers {
             return member(operation, path);
         }
         Member outer = member(operation, path.substring(0, dot));
-        return new Member(outer.name(), outer.list(), member(operation, path.substring(dot + 1)));
+        return new Member(outer.name(), outer.list(), arnMember(operation, path.substring(dot + 1)), outer.map());
     }
 
     /**

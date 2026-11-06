@@ -13,6 +13,10 @@
 # tools/java_sources.py, so they do not change when the package moves.
 
 services:
+  - service: quicksight
+    doc: docs/services/quicksight.md
+    sources:
+      - { path: services/quicksight/QuickSightController.java, mode: rest }
   - service: account
     doc: docs/services/account.md
     sources:

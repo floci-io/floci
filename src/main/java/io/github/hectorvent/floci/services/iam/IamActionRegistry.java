@@ -743,6 +743,11 @@ public class IamActionRegistry {
         return null;
     }
 
+    /** A REST model's explicit denial status, retaining the protocol default when none is modelled. */
+    public static int accessDeniedStatus(String credentialScope, int fallback) {
+        return IamRestRoutes.vendored().accessDeniedStatus(credentialScope, fallback);
+    }
+
     /**
      * The value a REST request's path gives each label of the vendored route it matches, decoded, by the label's
      * name; empty when it matches none. {@link RequestResources} reads a member the table of request resources
