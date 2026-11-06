@@ -3248,10 +3248,11 @@ public class ApiGatewayExecuteController {
 
             List<String> audiences = authorizer.getJwtConfiguration().audience();
             if (audiences != null && !audiences.isEmpty()) {
-                // Cognito access tokens omit `aud` and use `client_id` instead.
-                // Match either to support both ID tokens and access tokens.
-                boolean audMatch = audiences.stream().anyMatch(a ->
-                        a.equals(claims.aud) || a.equals(claims.clientId));
+                // API Gateway checks `client_id` only when the token carries no `aud`
+                // claim (Cognito access tokens omit `aud`); when `aud` is present,
+                // only its entries are evaluated, so a matching `client_id` cannot
+                // rescue a token whose audiences do not match.
+                boolean audMatch = jwtAudienceMatches(audiences, claims.aud, claims.clientId);
                 if (!audMatch) {
                     return new JwtAuthorizerResult(Response.status(401)
                             .entity(jsonMessage("Unauthorized"))
@@ -3690,7 +3691,7 @@ public class ApiGatewayExecuteController {
     // `scopes` is the token's own scope list (scp claim first, else scope) or null when it has
     // neither - kept separate from `raw` because scope matching needs the pre-rendered values.
     // Package-private (like buildV2ProxyEvent) so the wire-format rendering is unit-testable.
-    record JwtClaims(String iss, String aud, String clientId, long exp,
+    record JwtClaims(String iss, List<String> aud, String clientId, long exp,
                      Map<String, String> raw, List<String> scopes) {}
 
     JwtClaims parseJwtClaims(String token) {
@@ -3701,7 +3702,7 @@ public class ApiGatewayExecuteController {
             String payload = new String(payloadBytes, StandardCharsets.UTF_8);
             JsonNode claims = objectMapper.readTree(payload);
             String iss = claims.path("iss").asText(null);
-            String aud = claims.path("aud").asText(null);
+            List<String> aud = parseAudClaim(claims.get("aud"));
             // Cognito access tokens omit `aud` and use `client_id` instead. AWS HTTP API
             // JWT authorizers accept either when matching the configured audience list.
             String clientId = claims.path("client_id").asText(null);
@@ -3724,6 +3725,55 @@ public class ApiGatewayExecuteController {
             LOG.debugv("JWT parse error: {0}", e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Parses the {@code aud} claim the way API Gateway's JWT authorizer does
+     * (RFC 7519 section 4.1.3): a string is a single audience, an array is one
+     * audience per entry. Returns null only when the token carries no {@code aud}
+     * claim at all, so the caller can fall back to {@code client_id} for
+     * Cognito access tokens. A claim that is present but not a string or an
+     * array of strings (null, an object, a number, a boolean) is an empty list:
+     * present but with no usable audience, which the audience check rejects
+     * without a {@code client_id} fallback. Array entries count only when they
+     * are strings; a numeric entry such as {@code 123} must not coerce to
+     * {@code "123"} and match a configured audience of that name. An array read
+     * with {@code asText()} would collapse to an empty string and reject every
+     * array audience, so arrays are read entry by entry. An empty array stays
+     * an empty list: present but empty, which the audience check rejects
+     * without a {@code client_id} fallback.
+     */
+    private static List<String> parseAudClaim(JsonNode aud) {
+        if (aud == null) {
+            return null;
+        }
+        if (aud.isArray()) {
+            List<String> audiences = new ArrayList<>();
+            for (JsonNode entry : aud) {
+                if (entry.isTextual()) {
+                    audiences.add(entry.asText());
+                }
+            }
+            return List.copyOf(audiences);
+        }
+        if (aud.isTextual()) {
+            return List.of(aud.asText());
+        }
+        return List.of();
+    }
+
+    /**
+     * Matches the authorizer's configured audiences against a token the way API
+     * Gateway's HTTP API JWT authorizer does: when the token carries an
+     * {@code aud} claim, a match is any configured audience among its entries;
+     * {@code client_id} is consulted only when the token has no {@code aud}
+     * claim at all. Package-private so the rule is unit-testable without HTTP.
+     */
+    static boolean jwtAudienceMatches(List<String> audiences, List<String> aud, String clientId) {
+        if (aud != null) {
+            return audiences.stream().anyMatch(aud::contains);
+        }
+        return audiences.stream().anyMatch(a -> a.equals(clientId));
     }
 
     /**
