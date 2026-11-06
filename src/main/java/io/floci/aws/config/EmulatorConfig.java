@@ -874,6 +874,7 @@ public interface EmulatorConfig {
         ConnectServiceConfig connect();
         AppIntegrationsServiceConfig appintegrations();
         DlmServiceConfig dlm();
+        XrayServiceConfig xray();
         CognitoIdentityServiceConfig cognitoidentity();
         GlobalAcceleratorServiceConfig globalaccelerator();
         DataSyncServiceConfig datasync();
@@ -946,6 +947,11 @@ public interface EmulatorConfig {
     }
 
     interface DlmServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface XrayServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

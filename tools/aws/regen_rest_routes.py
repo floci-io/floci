@@ -66,6 +66,7 @@ MODELS: dict[str, str] = {
     "s3": "s3",
     "s3control": "s3",
     "scheduler": "scheduler",
+    "xray": "xray",
 }
 
 # The models whose routes are rewritten onto an internal prefix, and the prefix they are rewritten

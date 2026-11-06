@@ -1071,6 +1071,8 @@ floci:
       enabled: true
     dlm:
       enabled: true
+    xray:
+      enabled: true
     cognitoidentity:
       enabled: true
     globalaccelerator:

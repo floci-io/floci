@@ -703,7 +703,8 @@ public class IamActionRegistry {
         String method = ctx.getMethod().toUpperCase();
         // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
         // bucket's one trailing slash, so an S3 path is matched as sent.
-        String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
+        String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo())
+                : withoutInternalPrefix(routedPath(ctx), credentialScope);
 
         if ("s3".equals(credentialScope)) {
             // An S3 Control route is matched before the query overrides below, which would read the
@@ -818,6 +819,19 @@ public class IamActionRegistry {
         return ctx instanceof ResteasyReactiveContainerRequestContext container
                 && container.getServerRequestContext() instanceof ResteasyReactiveRequestContext request
                 ? request : null;
+    }
+
+    /**
+     * A service whose routes collide with S3's path-style ones is rewritten onto {@code /_<service>}
+     * by its route filter before matching, which would leave the rule for the path AWS sent unmatched
+     * and the call unchecked. The rewrite is stripped so the action is resolved as the caller sent it.
+     */
+    private static String withoutInternalPrefix(String path, String credentialScope) {
+        String prefix = "/_" + credentialScope;
+        if (path.equals(prefix)) {
+            return "/";
+        }
+        return path.startsWith(prefix + "/") ? path.substring(prefix.length()) : path;
     }
 
     private static String rooted(String path) {
