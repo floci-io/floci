@@ -142,6 +142,66 @@ public class BedrockController {
         return Response.ok(response).build();
     }
 
+    // Foundation models and inference profiles
+
+    @GET
+    @Path("/foundation-models")
+    public Response listFoundationModels(@QueryParam("byProvider") String byProvider,
+                                         @QueryParam("byOutputModality") String byOutputModality,
+                                         @QueryParam("byInferenceType") String byInferenceType,
+                                         @QueryParam("byCustomizationType") String byCustomizationType,
+                                         @Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("modelSummaries");
+        for (BedrockModelCatalog.FoundationModel model : bedrockService.listFoundationModels(byProvider,
+                byOutputModality, byInferenceType, byCustomizationType, region)) {
+            summaries.add(foundationModelNode(model, region));
+        }
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/foundation-models/{modelIdentifier: .+}")
+    public Response getFoundationModel(@PathParam("modelIdentifier") String modelIdentifier,
+                                       @Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("modelDetails", foundationModelNode(bedrockService.getFoundationModel(modelIdentifier, region),
+                region));
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/inference-profiles")
+    public Response listInferenceProfiles(@QueryParam("type") String typeEquals,
+                                          @QueryParam("maxResults") String maxResults,
+                                          @QueryParam("nextToken") String nextToken,
+                                          @Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        PaginatedResult<BedrockModelCatalog.InferenceProfile> page = bedrockService.listInferenceProfiles(typeEquals,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("inferenceProfileSummaries");
+        for (BedrockModelCatalog.InferenceProfile profile : page.items()) {
+            summaries.add(inferenceProfileNode(profile, region));
+        }
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/inference-profiles/{inferenceProfileIdentifier: .+}")
+    public Response getInferenceProfile(@PathParam("inferenceProfileIdentifier") String inferenceProfileIdentifier,
+                                        @Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(inferenceProfileNode(
+                bedrockService.getInferenceProfile(inferenceProfileIdentifier, region), region)).build();
+    }
+
     // Resource policies
 
     @POST
@@ -248,6 +308,45 @@ public class BedrockController {
             node.put("kmsKeyArn", guardrail.getKmsKeyArn());
         }
         return node;
+    }
+
+    private ObjectNode foundationModelNode(BedrockModelCatalog.FoundationModel model, String region) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("modelArn", foundationModelArn(model.modelId(), region));
+        node.put("modelId", model.modelId());
+        node.put("modelName", model.modelName());
+        node.put("providerName", model.providerName());
+        model.inputModalities().forEach(node.putArray("inputModalities")::add);
+        model.outputModalities().forEach(node.putArray("outputModalities")::add);
+        node.put("responseStreamingSupported", model.responseStreamingSupported());
+        node.putArray("customizationsSupported");
+        ArrayNode inferenceTypes = node.putArray("inferenceTypesSupported");
+        if (model.servedInRegion(region)) {
+            inferenceTypes.add("ON_DEMAND");
+        }
+        node.putObject("modelLifecycle").put("status", model.lifecycleStatus());
+        return node;
+    }
+
+    private ObjectNode inferenceProfileNode(BedrockModelCatalog.InferenceProfile profile, String region) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("inferenceProfileName", profile.inferenceProfileName());
+        node.put("inferenceProfileArn", regionResolver.buildArn("bedrock", region,
+                "inference-profile/" + profile.inferenceProfileId()));
+        node.put("inferenceProfileId", profile.inferenceProfileId());
+        node.put("createdAt", iso8601(profile.createdAt()));
+        node.put("updatedAt", iso8601(profile.createdAt()));
+        ArrayNode models = node.putArray("models");
+        for (String destination : profile.routes().get(region)) {
+            models.addObject().put("modelArn", foundationModelArn(profile.modelId(), destination));
+        }
+        node.put("status", "ACTIVE");
+        node.put("type", "SYSTEM_DEFINED");
+        return node;
+    }
+
+    private String foundationModelArn(String modelId, String region) {
+        return regionResolver.buildArn("bedrock", region, "", "foundation-model/" + modelId);
     }
 
     private ObjectNode guardrailSummaryNode(Guardrail guardrail) {

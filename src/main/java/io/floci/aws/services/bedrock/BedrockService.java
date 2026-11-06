@@ -11,6 +11,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -30,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -66,6 +68,11 @@ public class BedrockService implements ResourceProvider {
 
     /** {@code MaxResults} on {@code ListGuardrails} is capped at 1000 by the AWS model. */
     private static final int MAX_PAGE = 1000;
+    // Wider than the published ModelModality enum: AWS also accepts SPEECH and VIDEO here.
+    private static final List<String> OUTPUT_MODALITIES = List.of("TEXT", "IMAGE", "EMBEDDING", "SPEECH", "VIDEO");
+    private static final List<String> INFERENCE_TYPES = List.of("ON_DEMAND", "PROVISIONED");
+    private static final List<String> CUSTOMIZATION_TYPES = List.of("FINE_TUNING", "CONTINUED_PRE_TRAINING", "DISTILLATION");
+    private static final List<String> INFERENCE_PROFILE_TYPES = List.of("SYSTEM_DEFINED", "APPLICATION");
 
     /** {@code TagList} from the AWS model: at most 200 items on one request. */
     private static final int TAG_LIST_MAX = 200;
@@ -263,6 +270,95 @@ public class BedrockService implements ResourceProvider {
         }
         return Pagination.paginate(matches, BedrockService::listCursor, maxResults, nextToken,
                 MAX_PAGE, "ValidationException");
+    }
+
+    // Foundation models and inference profiles
+
+    public List<BedrockModelCatalog.FoundationModel> listFoundationModels(String byProvider, String byOutputModality,
+                                                                         String byInferenceType,
+                                                                         String byCustomizationType, String region) {
+        requireOneOf("byOutputModality", byOutputModality, OUTPUT_MODALITIES);
+        requireOneOf("byInferenceType", byInferenceType, INFERENCE_TYPES);
+        requireOneOf("byCustomizationType", byCustomizationType, CUSTOMIZATION_TYPES);
+        if (byCustomizationType != null || "PROVISIONED".equals(byInferenceType)) {
+            // The catalog holds no customization or provisioned-throughput support.
+            return List.of();
+        }
+        return BedrockModelCatalog.modelsIn(region).stream()
+                .filter(model -> byProvider == null || model.providerName().equalsIgnoreCase(byProvider))
+                .filter(model -> byOutputModality == null || model.outputModalities().contains(byOutputModality))
+                .filter(model -> byInferenceType == null || model.servedInRegion(region))
+                .toList();
+    }
+
+    public BedrockModelCatalog.FoundationModel getFoundationModel(String modelIdentifier, String region) {
+        String modelId = resourceIdOf(modelIdentifier, "foundation-model/", region, Set.of(""));
+        Optional<BedrockModelCatalog.FoundationModel> served = BedrockModelCatalog.modelsIn(region).stream()
+                .filter(model -> model.modelId().equals(modelId))
+                .findFirst();
+        if (served.isPresent()) {
+            return served.get();
+        }
+        // AWS answers a model it knows but does not serve in the Region with a validation error.
+        if (BedrockModelCatalog.MODELS.stream().anyMatch(model -> model.modelId().equals(modelId))) {
+            throw new AwsException("ValidationException",
+                    "The provided model identifier is not valid in this Region.", 400);
+        }
+        throw new AwsException("ResourceNotFoundException", "The model " + modelIdentifier + " was not found.", 404);
+    }
+
+    public PaginatedResult<BedrockModelCatalog.InferenceProfile> listInferenceProfiles(String typeEquals,
+                                                                                    Integer maxResults,
+                                                                                    String nextToken, String region) {
+        requireOneOf("typeEquals", typeEquals, INFERENCE_PROFILE_TYPES);
+        // Only system-defined profiles exist: application inference profiles cannot be created yet.
+        List<BedrockModelCatalog.InferenceProfile> profiles = "APPLICATION".equals(typeEquals)
+                ? List.of()
+                : BedrockModelCatalog.profilesFrom(region);
+        return Pagination.paginate(profiles, BedrockModelCatalog.InferenceProfile::inferenceProfileId,
+                maxResults, nextToken, MAX_PAGE, "ValidationException");
+    }
+
+    public BedrockModelCatalog.InferenceProfile getInferenceProfile(String inferenceProfileIdentifier, String region) {
+        String profileId = resourceIdOf(inferenceProfileIdentifier, "inference-profile/", region,
+                Set.of("", regionResolver.getAccountId()));
+        return BedrockModelCatalog.profilesFrom(region).stream()
+                .filter(profile -> profile.inferenceProfileId().equals(profileId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The inference profile " + inferenceProfileIdentifier + " was not found.", 404));
+    }
+
+    /**
+     * The id an identifier names: the identifier itself, or the resource id of an ARN. An ARN must
+     * name a Bedrock {@code resourcePrefix} resource in the calling Region and its partition, owned
+     * by one of {@code accounts}; any other ARN names nothing here.
+     */
+    private String resourceIdOf(String identifier, String resourcePrefix, String region, Set<String> accounts) {
+        if (identifier == null || identifier.isBlank()) {
+            throw new AwsException("ValidationException", "The identifier is required.", 400);
+        }
+        if (!AwsArnUtils.looksLikeArn(identifier)) {
+            return identifier;
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(identifier);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException", "The identifier " + identifier + " is not a valid ARN.", 400);
+        }
+        if (!"bedrock".equals(arn.service()) || !regionResolver.partitionForRegion(region).equals(arn.partition())
+                || !region.equals(arn.region()) || !accounts.contains(arn.accountId())
+                || !arn.resource().startsWith(resourcePrefix)) {
+            throw new AwsException("ResourceNotFoundException", "Resource " + identifier + " does not exist.", 404);
+        }
+        return arn.resource().substring(resourcePrefix.length());
+    }
+
+    private static void requireOneOf(String parameter, String value, List<String> allowed) {
+        if (value != null && !allowed.contains(value)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(value, parameter, allowed));
+        }
     }
 
     public Guardrail createGuardrailVersion(String identifier, String description, String region) {
