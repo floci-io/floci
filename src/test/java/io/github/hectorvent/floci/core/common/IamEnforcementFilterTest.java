@@ -741,6 +741,27 @@ class IamEnforcementFilterTest {
     }
 
     @Test
+    void anExpiredSessionOnEc2UsesItsOwnEnvelope() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIAEXPIRED/20260629/us-east-1/ec2/aws4_request, "
+                + "SignedHeaders=host, Signature=garbage";
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIAEXPIRED");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+        when(actionRegistry.resolve("ec2", containerRequest)).thenReturn("ec2:DescribeVpcs");
+        when(iamService.isExpiredSession(eq("ASIAEXPIRED"), any())).thenReturn(true);
+
+        newFilter().filter(containerRequest);
+
+        ArgumentCaptor<Response> response = ArgumentCaptor.captor();
+        verify(containerRequest).abortWith(response.capture());
+        assertEquals(400, response.getValue().getStatus());
+        assertTrue(entityString(response.getValue()).contains("<Response><Errors><Error><Code>RequestExpired</Code>"),
+                entityString(response.getValue()));
+    }
+
+    @Test
     void anExpiredSessionOnAnS3RequestIsRejectedWithTheS3ErrorCode() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         String auth = "AWS4-HMAC-SHA256 Credential=ASIAEXPIRED/20260629/us-east-1/s3/aws4_request, "

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.MutableClock;
@@ -13,6 +14,9 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -24,6 +28,9 @@ import java.util.UUID;
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * With enforcement on, a session past its expiration on the injected clock is answered with AWS's
@@ -63,6 +70,21 @@ class ExpiredSessionEnforcementIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void ec2SdkReadsRequestExpiredWithoutDeletingTheSession() {
+        String key = expiredSession();
+        try (Ec2Client client = AwsTestClients.create(Ec2Client.builder(), key, "secret",
+                Region.US_EAST_1, baseUri)) {
+            for (int attempt = 0; attempt < 2; attempt++) {
+                Ec2Exception denied = assertThrows(Ec2Exception.class, client::describeVpcs);
+                assertEquals(400, denied.statusCode());
+                assertEquals("RequestExpired", denied.awsErrorDetails().errorCode());
+                assertNotNull(denied.requestId());
+            }
+        }
+        getCallerIdentity(key).then().statusCode(403).body(containsString("<Code>ExpiredTokenException</Code>"));
     }
 
     @Test
