@@ -786,6 +786,11 @@ public class ContainerBuilder {
             return this;
         }
 
+        /** The DNS servers the container will be given, in order. */
+        public List<String> dnsServers() {
+            return List.copyOf(dnsServers);
+        }
+
         /**
          * Builds the immutable ContainerSpec.
          */

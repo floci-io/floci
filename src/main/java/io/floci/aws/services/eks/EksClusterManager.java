@@ -136,6 +136,10 @@ public class EksClusterManager
     static final String POD_IDENTITY_MANIFEST_FILE = "floci-eks-pod-identity.yaml";
     static final String POD_IDENTITY_MANIFEST_TAR_ENTRY = "server/manifests/" + POD_IDENTITY_MANIFEST_FILE;
     private static final String ENDPOINT_MODE_NETWORK = "network";
+    // k3s hands pods the node's resolv.conf unless every server in it is loopback, and Docker's is
+    // always 127.0.0.11, so without a file of its own k3s falls back to 8.8.8.8 and skips Floci.
+    static final String RESOLV_CONF_FILE = "floci-resolv.conf";
+    static final String RESOLV_CONF_CONTAINER_PATH = WEBHOOK_CONFIG_DIR + "/" + RESOLV_CONF_FILE;
     public static final String DEFAULT_POD_CIDR = "10.42.0.0/16";
 
     public static final Map<String, String> SUPPORTED_K8S_VERSIONS = Map.of(
@@ -761,6 +765,13 @@ public class EksClusterManager
             serverArgs.addAll(callerArgs);
         }
 
+        String resolvConf = null;
+        List<String> dnsServers = specBuilder.dnsServers();
+        if (config.services().eks().embeddedDns() && !dnsServers.isEmpty() && !setsResolvConf(callerArgs)) {
+            resolvConf = buildResolvConf(dnsServers);
+            serverArgs.add("--resolv-conf=" + RESOLV_CONF_CONTAINER_PATH);
+        }
+
         if (config.services().eks().disableCni()) {
             // A container's /sys mount defaults to private propagation, which breaks
             // Cilium's BPF filesystem mount ("mounted on /sys but it is not a shared or
@@ -784,6 +795,9 @@ public class EksClusterManager
         }
         if (auditPolicyLocalFile != null) {
             copyAuditPolicyIntoContainer(containerId, auditPolicyLocalFile, cluster.getName());
+        }
+        if (resolvConf != null) {
+            copyResolvConfIntoContainer(containerId, resolvConf, cluster.getName());
         }
         injectEcrRegistryMirror(containerId, cluster);
         linkContainerdCertsDir(containerId, cluster.getName());
@@ -1589,6 +1603,41 @@ public class EksClusterManager
             }
         }
         return result;
+    }
+
+    /** Whether the caller already chose the resolv.conf kubelet hands pods. */
+    static boolean setsResolvConf(List<String> callerArgs) {
+        for (String arg : callerArgs) {
+            if (arg.startsWith("--resolv-conf")) {
+                return true;
+            }
+            if (arg.startsWith("--kubelet-arg=")) {
+                String flag = arg.substring("--kubelet-arg=".length()).split("=", 2)[0];
+                if ("resolvconf".equals(flag.replace("-", "").toLowerCase(Locale.ROOT))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static String buildResolvConf(List<String> dnsServers) {
+        StringBuilder sb = new StringBuilder();
+        for (String server : dnsServers) {
+            sb.append("nameserver ").append(server).append('\n');
+        }
+        return sb.toString();
+    }
+
+    private void copyResolvConfIntoContainer(String containerId, String content, String clusterName) {
+        try {
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, WEBHOOK_CONFIG_DIR,
+                    RESOLV_CONF_FILE, content.getBytes(StandardCharsets.UTF_8), 0644,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
+        } catch (Exception e) {
+            LOG.warnv("EKS pods may not resolve through Floci's DNS for cluster {0}: could not copy "
+                    + "{1} into the k3s container: {2}", clusterName, RESOLV_CONF_FILE, e.getMessage());
+        }
     }
 
     /**
