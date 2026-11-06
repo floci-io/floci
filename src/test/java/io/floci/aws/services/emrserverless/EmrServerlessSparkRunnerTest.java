@@ -82,8 +82,8 @@ class EmrServerlessSparkRunnerTest {
     private static final String ENDPOINT = "http://floci:4566";
     // A cluster's storage, its HDFS running on its primary node.
     private static final SparkJobRunner.Storage STORAGE = new SparkJobRunner.Storage(
-            "floci-aws-emr-j-2AXXXXXXGAPLF-home", "floci-aws-emr-j-2AXXXXXXGAPLF-mnt", "ip-10-0-0-1.ec2.internal",
-            "172.18.0.5", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs");
+            "floci-aws-emr-j-2AXXXXXXGAPLF-home", "floci-aws-emr-j-2AXXXXXXGAPLF-mnt")
+            .withHdfs("ip-10-0-0-1.ec2.internal", "172.18.0.5", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs");
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
@@ -249,10 +249,28 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
-    void anEmrHiveStepsHiveReachesItsClustersHdfsAndKeepsItsMetastoreInItsMnt() {
+    void anEmrHiveStepsHiveReachesItsClustersHdfsAndMetastoreServiceOnItsPrimaryNode() {
         List<String> arguments = EmrServerlessSparkRunner.hiveArguments(
                 hiveStep(List.of("--hiveconf", "hive.exec.reducers.max=8", "-f", "s3://bucket/queries/report.q")),
                 ENDPOINT);
+
+        int tez = arguments.indexOf("tez.am.client.am.port-range=40000-40100");
+        assertEquals(List.of(
+                "--hiveconf", "fs.defaultFS=hdfs://ip-10-0-0-1.ec2.internal:8020",
+                "--hiveconf", "hive.metastore.client.factory.class="
+                        + "org.apache.hadoop.hive.ql.metadata.SessionHiveMetaStoreClientFactory",
+                "--hiveconf", "hive.metastore.uris=thrift://ip-10-0-0-1.ec2.internal:9083",
+                "--hiveconf", "hive.exec.reducers.max=8", "-f", "s3://bucket/queries/report.q"),
+                arguments.subList(tez + 1, arguments.size()));
+    }
+
+    @Test
+    void anEmrHiveStepWhereNoMetastoreServiceRunsKeepsItsMetastoreInItsClustersMnt() {
+        // As in a network namespace the steps share, where the service would listen on every interface.
+        SparkJobRunner.Job step = hiveStep(List.of("-f", "s3://bucket/queries/report.q"));
+        List<String> arguments = EmrServerlessSparkRunner.hiveArguments(step.onStorage(
+                new SparkJobRunner.Storage("j-1-home", "j-1-mnt").withHdfs("ip-10-0-0-1.ec2.internal", "127.0.0.1",
+                        null)), ENDPOINT);
 
         int tez = arguments.indexOf("tez.am.client.am.port-range=40000-40100");
         assertEquals(List.of(
@@ -263,8 +281,11 @@ class EmrServerlessSparkRunnerTest {
                         + "jdbc:derby:;databaseName=/mnt/var/lib/hive/metastore_db;create=true",
                 "--hiveconf", "hive.metastore.schema.verification=false",
                 "--hiveconf", "datanucleus.schema.autoCreateAll=true",
-                "--hiveconf", "hive.exec.reducers.max=8", "-f", "s3://bucket/queries/report.q"),
+                "-f", "s3://bucket/queries/report.q"),
                 arguments.subList(tez + 1, arguments.size()));
+        // Nor does its Spark steps' Hive client get one.
+        assertFalse(EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of()), ENDPOINT).stream()
+                .anyMatch(argument -> argument.startsWith("spark.hadoop.hive.metastore.uris=")));
     }
 
     @Test
@@ -590,6 +611,23 @@ class EmrServerlessSparkRunnerTest {
                         + "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager",
                 "--conf", "spark.hadoop.fs.defaultFS=file:///",
                 "s3://bucket/jobs/report.py"), arguments.subList(20, arguments.size()));
+    }
+
+    @Test
+    void aSparkStepOnAClusterWithHiveUsesItsMetastoreServiceUnlessItsSparkHiveSiteNamesAnother() {
+        String glue = "spark.hadoop.hive.metastore.client.factory.class="
+                + "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory";
+        SparkJobRunner.Job job = stepJob(Map.of("spark.hadoop.hive.metastore.client.factory.class",
+                "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"))
+                .onStorage(STORAGE.withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"));
+
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job, ENDPOINT);
+
+        int metastore = arguments.indexOf("spark.hadoop.hive.metastore.uris=thrift://ip-10-0-0-1.ec2.internal:9083");
+        assertTrue(metastore > 0, arguments.toString());
+        assertEquals("--conf", arguments.get(metastore - 1));
+        // Floci's, before the cluster's spark-defaults and spark-hive-site, which win.
+        assertTrue(arguments.indexOf(glue) > metastore, arguments.toString());
     }
 
     @Test
@@ -1438,8 +1476,9 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr", "s-1", "123456789012", "eu-west-1", "emr-7.5.0", HIVE, null, null,
                 "floci-network", "arn:aws:iam::123456789012:role/emr-ec2", Map.of(), application,
                 List.of("hive-script", "--run-hive-script", "--args"), Duration.ZERO, null, null, Map.of(), List.of(),
-                new SparkJobRunner.Storage("j-1-home", "j-1-mnt", "ip-10-0-0-1.ec2.internal", "172.18.0.5",
-                        "j-1-hdfs"), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                new SparkJobRunner.Storage("j-1-home", "j-1-mnt").withHdfs("ip-10-0-0-1.ec2.internal", "172.18.0.5",
+                        "j-1-hdfs").withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"),
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
 
     private static SparkJobRunner.Job customImageJob(String customImage) {
