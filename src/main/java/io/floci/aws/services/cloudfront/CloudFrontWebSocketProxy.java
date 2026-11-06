@@ -225,11 +225,13 @@ public class CloudFrontWebSocketProxy {
         });
         response.endHandler(ignored -> {
             clock.stop();
+            WebSocketUpgrades.closeRefusedRequest(originRequest);
             viewerResponse.end();
         });
         response.exceptionHandler(err -> {
             clock.stop();
-            LOG.debugv("CloudFront origin failed while refusing a WebSocket upgrade: {0}", err.getMessage());
+            originRequest.reset();
+            LOG.warnv(err, "CloudFront origin failed while refusing a WebSocket upgrade");
             viewerResponse.reset();
         });
     }

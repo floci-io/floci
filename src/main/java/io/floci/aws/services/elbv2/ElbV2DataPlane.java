@@ -1598,7 +1598,15 @@ public class ElbV2DataPlane {
                                     if (resp.getHeader("Content-Length") == null) {
                                         req.response().setChunked(true);
                                     }
-                                    resp.pipeTo(req.response());
+                                    resp.pipeTo(req.response())
+                                            .onComplete(result -> {
+                                                if (result.failed()) {
+                                                    LOG.warnv(result.cause(),
+                                                            "Failed relaying refused WebSocket upgrade from {0}:{1}",
+                                                            host, port);
+                                                }
+                                                WebSocketUpgrades.closeRefusedRequest(clientReq);
+                                            });
                                     return;
                                 }
                                 req.response().putHeader("Connection", "Upgrade");
