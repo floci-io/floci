@@ -245,6 +245,109 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void iamRoleTagsComeFromStoredStateRatherThanRequestTags() {
+        IamRole role = new IamRole();
+        role.setTags(Map.of("Owner", "team-a"));
+        when(iamService.findRole("123456789012", "tagged")).thenReturn(Optional.of(role));
+        Map<String, List<String>> context = resolver.resolve("iam", "iam:PutRolePolicy",
+                formRequest("RoleName=tagged&Tags.member.1.Key=Owner&Tags.member.1.Value=other"));
+        assertEquals(List.of("team-a"), context.get("aws:ResourceTag/Owner"));
+        assertEquals(List.of("team-a"), context.get("iam:ResourceTag/Owner"));
+        assertNull(context.get("aws:RequestTag/Owner"));
+        assertNull(resolver.resolve("iam", "iam:PassRole", formRequest("RoleName=tagged")));
+        assertNull(resolver.resolve("iam", "iam:GetUser", formRequest("UserName=missing&RoleName=tagged")));
+        assertNull(resolver.resolve("iam", "iam:PutRolePolicy", formRequest("RoleName=missing")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"iam:TagRole", "iam:TagUser", "iam:TagInstanceProfile", "iam:TagMFADevice",
+            "iam:TagOpenIDConnectProvider", "iam:TagSAMLProvider", "iam:TagPolicy", "iam:TagServerCertificate"})
+    void iamTaggingCarriesRequestedValuesAndEveryKey(String action) {
+        Map<String, List<String>> context = resolver.resolve("iam", action,
+                formRequest("Tags.member.2.Key=Owner&Tags.member.2.Value=team-a&Tags.7.Key=Env&Tags.7.Value="));
+        assertEquals(List.of("team-a"), context.get("aws:RequestTag/Owner"));
+        assertEquals(List.of(""), context.get("aws:RequestTag/Env"));
+        assertEquals(List.of("Owner", "Env"), context.get("aws:TagKeys"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"iam:UntagRole", "iam:UntagUser", "iam:UntagInstanceProfile", "iam:UntagMFADevice",
+            "iam:UntagOpenIDConnectProvider", "iam:UntagSAMLProvider", "iam:UntagPolicy", "iam:UntagServerCertificate"})
+    void iamUntaggingReadsSparseKeysAndIgnoresTagValues(String action) {
+        assertEquals(Map.of("aws:TagKeys", List.of("Owner", "Env")), resolver.resolve("iam", action,
+                formRequest("TagKeys.member.2=Owner&TagKeys.7=Env&Tags.member.1.Key=Wrong&Tags.member.1.Value=x")));
+        assertNull(resolver.resolve("iam", action, formRequest("")));
+    }
+
+    @Test
+    void iamRoleTagsAreAccountScopedAndUseTheFirstBodyValue() {
+        IamRole role = new IamRole();
+        role.setTags(Map.of("Owner", "team-a"));
+        when(iamService.findRole("123456789012", "tagged")).thenReturn(Optional.of(role));
+        ContainerRequestContext request = formRequest("RoleName=missing&RoleName=tagged");
+        UriInfo uri = mock(UriInfo.class);
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("RoleName", "tagged");
+        when(request.getUriInfo()).thenReturn(uri);
+        when(uri.getQueryParameters()).thenReturn(query);
+        assertNull(resolver.resolve("iam", "iam:GetRole", request));
+        requestContext.setAccountId("222222222222");
+        assertNull(resolver.resolve("iam", "iam:GetRole", formRequest("RoleName=tagged")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"iam:GetUser", "iam:PutUserPolicy", "iam:TagUser", "iam:CreateAccessKey"})
+    void iamUserTagsFollowTheGeneratedTargetAndRequestAccount(String action) {
+        IamUser user = new IamUser();
+        user.setTags(Map.of("Owner", "user-team"));
+        IamRole role = new IamRole();
+        role.setTags(Map.of("Owner", "role-team"));
+        when(iamService.findUser("123456789012", "tagged")).thenReturn(Optional.of(user));
+        when(iamService.findRole("123456789012", "decoy")).thenReturn(Optional.of(role));
+        assertEquals(Map.of("aws:ResourceTag/Owner", List.of("user-team"),
+                        "iam:ResourceTag/Owner", List.of("user-team")),
+                resolver.resolve("iam", action, formRequest("UserName=tagged&RoleName=decoy")));
+        assertNull(resolver.resolve("iam", action, formRequest("UserName=missing&RoleName=decoy")));
+        assertNull(resolver.resolve("iam", action, formRequest("UserName=missing&UserName=tagged")));
+        requestContext.setAccountId("222222222222");
+        assertNull(resolver.resolve("iam", action, formRequest("UserName=tagged&RoleName=decoy")));
+    }
+
+    @Test
+    void secondaryRoleAndCreationTargetsDoNotSupplyStoredResourceTags() {
+        IamRole role = new IamRole();
+        role.setTags(Map.of("Owner", "team-a"));
+        when(iamService.findRole("123456789012", "tagged")).thenReturn(Optional.of(role));
+        for (String action : List.of("iam:AddRoleToInstanceProfile", "iam:RemoveRoleFromInstanceProfile",
+                "iam:CreateRole", "iam:PassRole")) {
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=tagged&InstanceProfileName=profile")));
+        }
+        IamUser user = new IamUser();
+        user.setTags(Map.of("Owner", "team-a"));
+        when(iamService.findUser("123456789012", "tagged")).thenReturn(Optional.of(user));
+        assertNull(resolver.resolve("iam", "iam:CreateUser", formRequest("UserName=tagged")));
+    }
+
+    @Test
+    void iamRequestTagValuesMatchTheQueryHandlerForGetAndDuplicateParameters() {
+        assertEquals(List.of("first"), resolver.resolve("iam", "iam:TagUser",
+                formRequest("Tags.member.1.Key=Owner&Tags.member.1.Value=first&Tags.member.1.Value=second"))
+                .get("aws:RequestTag/Owner"));
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        when(request.getMethod()).thenReturn("GET");
+        when(request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(new ProtocolClaim(WireProtocol.AWS_QUERY, null, "TagUser", null));
+        UriInfo uri = mock(UriInfo.class);
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("Tags.3.Key", "Owner");
+        query.putSingle("Tags.3.Value", "team-a");
+        when(request.getUriInfo()).thenReturn(uri);
+        when(uri.getQueryParameters()).thenReturn(query);
+        assertEquals(Map.of("aws:RequestTag/Owner", List.of("team-a"), "aws:TagKeys", List.of("Owner")),
+                resolver.resolve("iam", "iam:TagUser", request));
+    }
+
+    @Test
     void iamPolicyContextKeepsEmptyValuesAndOmitsMissingValues() {
         assertNull(resolver.resolve("iam", "iam:AttachRolePolicy", formRequest("RoleName=role")));
         assertEquals(Map.of("iam:PolicyARN", List.of("")),

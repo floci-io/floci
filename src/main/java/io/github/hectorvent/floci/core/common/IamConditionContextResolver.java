@@ -29,6 +29,7 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
@@ -48,6 +49,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * Builds the IAM request context: the condition keys a policy's Condition block can match,
@@ -235,7 +237,8 @@ public class IamConditionContextResolver {
     private Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, String> members = IamConditionKeys.members(action);
         Map<String, String> targets = IamConditionKeys.targets(action);
-        if (members.isEmpty() && targets.isEmpty()) {
+        Map<String, IamConditionKeys.RequestTags> requestTags = IamConditionKeys.requestTags(action);
+        if (members.isEmpty() && targets.isEmpty() && requestTags.isEmpty()) {
             return null;
         }
         Map<String, String> form = formParameters(ctx);
@@ -246,24 +249,61 @@ public class IamConditionContextResolver {
                 conditions.put(key, List.of(value));
             }
         });
-        // iam:PermissionsBoundary on an existing role or user is the boundary stored on it, left off when it has none.
         targets.forEach((key, target) -> {
-            String value = storedPermissionsBoundary(target, form.get(target));
-            if (value != null) {
-                conditions.put(key, List.of(value));
+            if (key.contains("${TagKey}")) {
+                Map<String, String> tags = storedTargetValue(target, form.get(target), IamRole::getTags, IamUser::getTags);
+                if (tags != null) {
+                    tags.forEach((tag, value) -> conditions.put(key.replace("${TagKey}", tag), List.of(value)));
+                }
+            } else {
+                String value = storedTargetValue(target, form.get(target),
+                        IamRole::getPermissionsBoundaryArn, IamUser::getPermissionsBoundaryArn);
+                if (value != null) {
+                    conditions.put(key, List.of(value));
+                }
             }
         });
+        if (!requestTags.isEmpty()) {
+            addIamRequestTags(conditions, form, requestTags);
+        }
         return conditions.isEmpty() ? null : conditions;
     }
 
-    private String storedPermissionsBoundary(String target, String name) {
+    private static void addIamRequestTags(Map<String, List<String>> conditions, Map<String, String> form,
+                                          Map<String, IamConditionKeys.RequestTags> requestTags) {
+        MultivaluedMap<String, String> parameters = new MultivaluedHashMap<>();
+        form.forEach(parameters::putSingle);
+        requestTags.forEach((key, fields) -> {
+            List<String> keys = new ArrayList<>();
+            for (AwsQueryLists.IndexedMember member : AwsQueryLists.members(parameters, fields.member(), null)) {
+                String tag = form.get(member.prefix() + (fields.keyMember() == null ? "" : "." + fields.keyMember()));
+                if (tag == null) {
+                    continue;
+                }
+                if ("aws:TagKeys".equals(key)) {
+                    if (!keys.contains(tag)) {
+                        keys.add(tag);
+                    }
+                } else {
+                    conditions.put(key.replace("${TagKey}", tag),
+                            List.of(form.getOrDefault(member.prefix() + "." + fields.valueMember(), "")));
+                }
+            }
+            if (!keys.isEmpty()) {
+                conditions.put(key, keys);
+            }
+        });
+    }
+
+    private <T> T storedTargetValue(String target, String name,
+                                    Function<IamRole, T> roleValue, Function<IamUser, T> userValue) {
         if (name == null || !iamService.isResolvable()) {
             return null;
         }
         String account = requestContext.getAccountId();
         return switch (target) {
-            case "RoleName" -> iamService.get().findRole(account, name).map(IamRole::getPermissionsBoundaryArn).orElse(null);
-            case "UserName" -> iamService.get().findUser(account, name).map(IamUser::getPermissionsBoundaryArn).orElse(null);
+            case "RoleName" -> iamService.get().findRole(account, name).map(roleValue).orElse(null);
+            case "UserName" -> iamService.get().findUser(account, name).map(userValue).orElse(null);
             default -> throw new IllegalStateException("Unknown IAM condition key target: " + target);
         };
     }
