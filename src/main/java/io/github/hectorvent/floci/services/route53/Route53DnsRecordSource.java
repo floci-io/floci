@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.ToIntFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -101,42 +103,29 @@ public class Route53DnsRecordSource implements DnsRecordSource {
         if (soaSet == null || soaSet.getRecords() == null || soaSet.getRecords().size() != 1) {
             return Optional.of(DnsAnswer.refused());
         }
-        List<DnsRecord> answers = new ArrayList<>();
-        int ttl = Integer.MAX_VALUE;
+        String recordType = switch (type) {
+            case 2 -> "NS";
+            case 6 -> "SOA";
+            default -> "TXT";
+        };
+        Function<String, DnsRecord> recordFactory = switch (type) {
+            case 2 -> DnsRecord.Ns::new;
+            case 6 -> DnsRecord.Soa::new;
+            default -> DnsRecord.Txt::new;
+        };
+        DnsAnswer answer = buildRecords(name, zone.matchingRecords().stream()
+                .filter(record -> record.getType().equals(recordType)).toList(),
+                recordFactory, Route53DnsRecordSource::publicTtlOf);
+        if (answer.responseCode() != 0) {
+            return Optional.of(answer);
+        }
+        boolean exists = !zone.matchingRecords().isEmpty() || zone.records().stream()
+                .anyMatch(record -> Route53Service.normalizeName(record.getName()).toLowerCase(Locale.ROOT)
+                        .endsWith("." + normalized));
+        if (answer.isEmpty()) {
+            answer = exists ? DnsAnswer.noData() : DnsAnswer.nxDomain();
+        }
         try {
-            for (ResourceRecordSet record : zone.matchingRecords()) {
-                if (!record.getType().equals(switch (type) {
-                    case 2 -> "NS";
-                    case 6 -> "SOA";
-                    default -> "TXT";
-                })) {
-                    continue;
-                }
-                if (record.getSetIdentifier() != null || record.getAliasTarget() != null
-                        || record.getWeight() != null || record.getRegion() != null
-                        || record.getFailover() != null || record.getHealthCheckId() != null
-                        || record.getRecords() == null) {
-                    return Optional.of(DnsAnswer.refused());
-                }
-                for (ResourceRecord value : record.getRecords()) {
-                    if (value == null || value.getValue() == null) {
-                        return Optional.of(DnsAnswer.refused());
-                    }
-                    DnsRecord answer = switch (type) {
-                        case 2 -> new DnsRecord.Ns(value.getValue());
-                        case 6 -> new DnsRecord.Soa(value.getValue());
-                        default -> new DnsRecord.Txt(value.getValue());
-                    };
-                    answer.data();
-                    answers.add(answer);
-                }
-                ttl = Math.min(ttl, publicTtlOf(record));
-            }
-            boolean exists = !zone.matchingRecords().isEmpty() || zone.records().stream()
-                    .anyMatch(record -> Route53Service.normalizeName(record.getName()).toLowerCase(Locale.ROOT)
-                            .endsWith("." + normalized));
-            DnsAnswer answer = answers.isEmpty() ? (exists ? DnsAnswer.noData() : DnsAnswer.nxDomain())
-                    : DnsAnswer.typedRecords(answers, ttl);
             ResourceRecord soaValue = soaSet.getRecords().getFirst();
             if (soaValue == null || soaValue.getValue() == null) {
                 return Optional.of(DnsAnswer.refused());
@@ -159,43 +148,53 @@ public class Route53DnsRecordSource implements DnsRecordSource {
             return Optional.empty();
         }
         List<ResourceRecordSet> sets = route53Service.findPrivateRecordsForName(name);
+        DnsAnswer answer = buildRecords(name, sets.stream()
+                .filter(set -> "SRV".equalsIgnoreCase(set.getType())).toList(),
+                Route53DnsRecordSource::srvRecord, Route53DnsRecordSource::ttlOf);
+        if (answer.responseCode() != 0 || !answer.isEmpty()) {
+            return Optional.of(answer);
+        }
+        return Optional.of(!sets.isEmpty() || route53Service.hasPrivateRecordsBeneath(name)
+                ? DnsAnswer.noData() : DnsAnswer.nxDomain());
+    }
+
+    private static DnsRecord srvRecord(String value) {
+        String[] fields = value.trim().split("\\s+");
+        if (fields.length != 4) {
+            throw new IllegalArgumentException("SRV record must contain priority, weight, port and target");
+        }
+        return new DnsRecord.Srv(Integer.parseInt(fields[0]), Integer.parseInt(fields[1]),
+                Integer.parseInt(fields[2]), fields[3]);
+    }
+
+    private static DnsAnswer buildRecords(String name, List<ResourceRecordSet> sets,
+                                         Function<String, DnsRecord> recordFactory,
+                                         ToIntFunction<ResourceRecordSet> ttlReader) {
         List<DnsRecord> records = new ArrayList<>();
         int ttl = Integer.MAX_VALUE;
         try {
             for (ResourceRecordSet set : sets) {
-                if (!"SRV".equalsIgnoreCase(set.getType())) {
-                    continue;
-                }
                 if (set.getSetIdentifier() != null || set.getAliasTarget() != null
                         || set.getWeight() != null || set.getRegion() != null
                         || set.getFailover() != null || set.getHealthCheckId() != null
                         || set.getRecords() == null) {
-                    return Optional.of(DnsAnswer.refused());
+                    return DnsAnswer.refused();
                 }
                 for (ResourceRecord value : set.getRecords()) {
                     if (value == null || value.getValue() == null) {
-                        return Optional.of(DnsAnswer.refused());
+                        return DnsAnswer.refused();
                     }
-                    String[] fields = value.getValue().trim().split("\\s+");
-                    if (fields.length != 4) {
-                        return Optional.of(DnsAnswer.refused());
-                    }
-                    DnsRecord.Srv record = new DnsRecord.Srv(Integer.parseInt(fields[0]),
-                            Integer.parseInt(fields[1]), Integer.parseInt(fields[2]), fields[3]);
+                    DnsRecord record = recordFactory.apply(value.getValue());
                     record.data();
                     records.add(record);
                 }
-                ttl = Math.min(ttl, ttlOf(set));
+                ttl = Math.min(ttl, ttlReader.applyAsInt(set));
             }
         } catch (IllegalArgumentException e) {
-            LOG.debugv("Cannot encode private SRV records for {0}: {1}", name, e.getMessage());
-            return Optional.of(DnsAnswer.refused());
+            LOG.debugv("Cannot encode DNS records for {0}: {1}", name, e.getMessage());
+            return DnsAnswer.refused();
         }
-        if (!records.isEmpty()) {
-            return Optional.of(DnsAnswer.typedRecords(records, ttl));
-        }
-        return Optional.of(!sets.isEmpty() || route53Service.hasPrivateRecordsBeneath(name)
-                ? DnsAnswer.noData() : DnsAnswer.nxDomain());
+        return records.isEmpty() ? DnsAnswer.noData() : DnsAnswer.typedRecords(records, ttl);
     }
 
     @Override

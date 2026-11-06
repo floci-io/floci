@@ -13,6 +13,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
@@ -424,6 +425,25 @@ class Route53DnsResolutionTest {
         addRecord(id, "_unavailable._tcp." + zone, "SRV", "0 0 0 .");
         assertEquals(List.of(new DnsRecord.Srv(0, 0, 0, ".")),
                 dnsRecordSource.resolve("_unavailable._tcp." + zone, 33).orElseThrow().records());
+    }
+
+    @ParameterizedTest
+    @CsvSource({", 60", "-1, 60", "0, 0", "42, 42", "2147483647, 2147483647", "2147483648, 2147483647"})
+    void privateSrvPreservesDefaultAndClampedTtls(Long ttl, int expectedTtl) {
+        String zone = uniqueZone();
+        String id = createPrivateZone(zone);
+        String name = "_api._tcp." + zone;
+        ResourceRecordSet set = new ResourceRecordSet();
+        set.setName(name);
+        set.setType("SRV");
+        set.setTtl(ttl);
+        set.setRecords(List.of(new ResourceRecord("0 0 8080 target." + zone)));
+        route53Service.changeResourceRecordSets(id, List.of(Map.of("action", "CREATE", "rrs", set)), null);
+
+        DnsAnswer answer = dnsRecordSource.resolve(name, 33).orElseThrow();
+        assertEquals(0, answer.responseCode());
+        assertEquals(expectedTtl, answer.ttlSeconds());
+        assertEquals(List.of(new DnsRecord.Srv(0, 0, 8080, "target." + zone)), answer.records());
     }
 
     @ParameterizedTest
