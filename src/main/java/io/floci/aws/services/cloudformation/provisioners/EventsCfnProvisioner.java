@@ -12,6 +12,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
 import io.floci.aws.services.eventbridge.model.BatchParameters;
+import io.floci.aws.services.eventbridge.model.Connection;
 import io.floci.aws.services.eventbridge.model.EcsParameters;
 import io.floci.aws.services.eventbridge.model.EventBus;
 import io.floci.aws.services.eventbridge.model.HttpParameters;
@@ -64,6 +65,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final Pattern STATEMENT_ID_PATTERN = Pattern.compile("[a-zA-Z0-9\\-_]+");
     private static final int STATEMENT_ID_MAX_LENGTH = 64;
+    /** Connection properties an update cannot clear (EventBridge keeps an omitted field) or replace. */
+    private static final Set<String> CONNECTION_REFUSED_DROPS = Set.of(
+            "Name", "Description", "AuthParameters", "InvocationConnectivityParameters", "KmsKeyIdentifier");
 
     private final EventBridgeService eventBridgeService;
 
@@ -75,7 +79,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public Set<String> resourceTypes() {
         return Set.of("AWS::Events::Rule", "AWS::Events::EventBus", "AWS::Events::EventBusPolicy",
-                "AWS::Events::ApiDestination");
+                "AWS::Events::ApiDestination", "AWS::Events::Connection");
     }
 
     @Override
@@ -85,6 +89,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             case "AWS::Events::EventBus" -> provisionEventBus(r, props, ctx);
             case "AWS::Events::EventBusPolicy" -> provisionEventBusPolicy(r, props, ctx);
             case "AWS::Events::ApiDestination" -> provisionApiDestination(r, props, ctx);
+            case "AWS::Events::Connection" -> provisionConnection(r, props, ctx);
             default -> throw new IllegalStateException(
                     "EventsCfnProvisioner cannot handle " + r.getResourceType());
         }
@@ -116,6 +121,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             case "AWS::Events::EventBus" -> deleteEventBusSafe(physicalId, region);
             case "AWS::Events::EventBusPolicy" -> removeEventBusPolicySafe(physicalId, region);
             case "AWS::Events::ApiDestination" -> deleteApiDestinationSafe(physicalId, region);
+            case "AWS::Events::Connection" -> deleteConnectionSafe(physicalId, region);
             default -> {
                 // no other type reaches this provisioner
             }
@@ -870,6 +876,69 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private void deleteApiDestinationSafe(String name, String region) {
         CfnDeletes.safeDelete("EventBridge API destination", name,
                 () -> eventBridgeService.deleteApiDestination(name, region),
+                "ResourceNotFoundException");
+    }
+
+    /**
+     * {@code AWS::Events::Connection}: {@code Ref} is the connection name, {@code Fn::GetAtt} gives
+     * {@code Arn} and {@code SecretArn}. An update changes the supplied properties in place.
+     * EventBridge's UpdateConnection leaves an omitted field as it is, so a property the new
+     * template drops cannot be cleared, and a different name is a replacement: both are refused
+     * rather than left silently stale.
+     */
+    private void provisionConnection(StackResource r, JsonNode props, ProvisionContext ctx) {
+        for (String dropped : ctx.droppedProperties(props)) {
+            if (CONNECTION_REFUSED_DROPS.contains(dropped)) {
+                throw new AwsException("ValidationError", "Removing " + dropped
+                        + " from a Connection is not supported: EventBridge keeps the value it has.", 400);
+            }
+        }
+        String name = ctx.stablePhysicalName(
+                ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
+        if (ctx.isUpdate() && ctx.priorPhysicalId() != null && !ctx.priorPhysicalId().equals(name)) {
+            throw new AwsException("ValidationError",
+                    "Updating Connection Name requires resource replacement, which is not supported.", 400);
+        }
+
+        String description = ctx.resolveOptional(props, "Description");
+        String authorizationType = ctx.resolveOptional(props, "AuthorizationType");
+        String authParameters = resolvedObjectAsJson(props, "AuthParameters", ctx);
+        String connectivityParameters = resolvedObjectAsJson(props, "InvocationConnectivityParameters", ctx);
+        String kmsKeyIdentifier = ctx.resolveOptional(props, "KmsKeyIdentifier");
+
+        Connection connection;
+        if (ctx.reusesPriorEntity(name)) {
+            connection = eventBridgeService.updateConnection(name, description, authorizationType,
+                    authParameters, connectivityParameters, kmsKeyIdentifier, ctx.region());
+        } else {
+            connection = eventBridgeService.createConnection(name, description, authorizationType,
+                    authParameters, connectivityParameters, kmsKeyIdentifier, ctx.region());
+        }
+
+        r.setPhysicalId(name);
+        String arn = connection.getConnectionArn();
+        r.getAttributes().put("Arn", arn);
+        // The ARN EventBridge allows in a policy is the one without the trailing id: connection/<name>
+        r.getAttributes().put("ArnForPolicy", arn.substring(0, arn.lastIndexOf('/')));
+        r.getAttributes().put("SecretArn", connection.getSecretArn());
+        r.getAttributes().put("Name", name);
+    }
+
+    /**
+     * A nested object property with its intrinsics resolved, as the JSON text EventBridge stores;
+     * null when the property is absent or empty, which the service reads as "not supplied".
+     */
+    private static String resolvedObjectAsJson(JsonNode props, String name, ProvisionContext ctx) {
+        if (props == null || !props.has(name) || props.get(name).isNull()) {
+            return null;
+        }
+        JsonNode resolved = ctx.engine().resolveNode(props.get(name));
+        return resolved != null && resolved.isObject() && !resolved.isEmpty() ? resolved.toString() : null;
+    }
+
+    private void deleteConnectionSafe(String name, String region) {
+        CfnDeletes.safeDelete("EventBridge connection", name,
+                () -> eventBridgeService.deleteConnection(name, region),
                 "ResourceNotFoundException");
     }
 
