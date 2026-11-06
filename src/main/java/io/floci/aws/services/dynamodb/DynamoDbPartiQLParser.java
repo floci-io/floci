@@ -735,6 +735,8 @@ public class DynamoDbPartiQLParser {
         requireSimplePathStart();
         String table = expectTableName();
         if (peek().type() == TType.DOT) {
+            advance();
+            expectDotComponent();
             throw validationEx("FROM clause may only contain a single table name");
         }
         if (peek().type() != TType.VALUE) {
@@ -841,7 +843,7 @@ public class DynamoDbPartiQLParser {
         components.add(expectIdent());
         while (peek().type() == TType.DOT) {
             advance();
-            components.add(expectIdent());
+            components.add(expectDotComponent());
         }
         if (components.contains("")) {
             fromClauseError = EMPTY_PATH_COMPONENT;
@@ -883,8 +885,11 @@ public class DynamoDbPartiQLParser {
     }
 
     private boolean isAliasName(Token token) {
-        return token.type() == TType.IDENT && !isStar(token)
-                && !(isBareWord(token) && KEYWORDS.contains(token.value().toLowerCase(Locale.ROOT)));
+        return token.type() == TType.IDENT && !isStar(token) && !isKeyword(token);
+    }
+
+    private boolean isKeyword(Token token) {
+        return isBareWord(token) && KEYWORDS.contains(token.value().toLowerCase(Locale.ROOT));
     }
 
     // DynamoDB never reads one of these words as a name.
@@ -1476,7 +1481,7 @@ public class DynamoDbPartiQLParser {
             switch (peek().type()) {
                 case DOT -> {
                     advance();
-                    segments.add(new Seg.Name(expectIdent()));
+                    segments.add(new Seg.Name(expectDotComponent()));
                 }
                 case LBRACKET -> {
                     advance();
@@ -1732,6 +1737,14 @@ public class DynamoDbPartiQLParser {
     private String expectIdent() {
         Token t = advance();
         if (t.type() != TType.IDENT) throw validationEx("Expected identifier, got: '" + t.value() + "'");
+        return t.value();
+    }
+
+    private String expectDotComponent() {
+        Token t = advance();
+        if (t.type() != TType.IDENT || isKeyword(t)) {
+            throw validationEx(NOT_WELL_FORMED + "Invalid path dot component");
+        }
         return t.value();
     }
 

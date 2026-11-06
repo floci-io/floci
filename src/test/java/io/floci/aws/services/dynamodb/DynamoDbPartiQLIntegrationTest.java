@@ -283,6 +283,14 @@ class DynamoDbPartiQLIntegrationTest {
     }
 
     @Test
+    @Order(16)
+    void aPathRefusesAKeywordAfterADot() {
+        statement("SELECT * FROM \"" + TABLE + "\" WHERE pk = 'x' AND m.inner = 1")
+            .statusCode(400)
+            .body("message", equalTo("Statement wasn't well formed, can't be processed: Invalid path dot component"));
+    }
+
+    @Test
     @Order(17)
     void aTransactionOfSelectsReadsTheItems() {
         putItem("txn-read", "\"data\":{\"S\":\"here\"}");
