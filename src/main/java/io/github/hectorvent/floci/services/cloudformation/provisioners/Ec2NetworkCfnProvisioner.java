@@ -691,7 +691,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         // puts all three under the stack.
         boolean managesSecondaries = Stream.of("SecondaryAllocationIds", "SecondaryPrivateIpAddresses",
                         "SecondaryPrivateIpAddressCount")
-                .anyMatch(name -> (props != null && props.has(name)) || ctx.previouslyDeclared(name));
+                .anyMatch(name -> (props != null && props.hasNonNull(name)) || ctx.previouslyDeclared(name));
         if (reuse) {
             CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
                 if (managesSecondaries && !holdsSecondaries(existing, secondaryAllocationIds, secondaryPrivateIps, secondaryCountValue)) {
