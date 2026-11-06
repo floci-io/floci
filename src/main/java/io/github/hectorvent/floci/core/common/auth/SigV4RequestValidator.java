@@ -16,6 +16,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
@@ -276,7 +277,8 @@ public final class SigV4RequestValidator {
     private static String canonicalQueryString(List<QueryParameter> parameters) {
         return parameters.stream()
                 .filter(parameter -> !"X-Amz-Signature".equals(parameter.name()))
-                .map(parameter -> new QueryParameter(uriEncode(parameter.name()), uriEncode(parameter.value())))
+                .map(parameter -> new QueryParameter(SigV4Canonicalization.uriEncode(parameter.name()),
+                        SigV4Canonicalization.uriEncode(parameter.value())))
                 .sorted(Comparator.comparing(QueryParameter::name).thenComparing(QueryParameter::value))
                 .map(parameter -> parameter.name() + "=" + parameter.value())
                 .collect(Collectors.joining("&"));
@@ -289,26 +291,6 @@ public final class SigV4RequestValidator {
      */
     private static String decodeQueryComponent(String value) {
         return URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8);
-    }
-
-    /**
-     * SigV4's UriEncode: every byte of the UTF-8 form except {@code A-Z a-z 0-9 - . _ ~} becomes
-     * {@code %XY} with uppercase hex, a space included ({@code %20}, never {@code +}) and {@code /}
-     * included.
-     */
-    private static String uriEncode(String value) {
-        StringBuilder encoded = new StringBuilder(value.length());
-        for (byte raw : value.getBytes(StandardCharsets.UTF_8)) {
-            int unsigned = Byte.toUnsignedInt(raw);
-            if ((unsigned >= 'A' && unsigned <= 'Z') || (unsigned >= 'a' && unsigned <= 'z')
-                    || (unsigned >= '0' && unsigned <= '9') || unsigned == '-' || unsigned == '.'
-                    || unsigned == '_' || unsigned == '~') {
-                encoded.append((char) unsigned);
-            } else {
-                encoded.append('%').append(String.format("%02X", unsigned));
-            }
-        }
-        return encoded.toString();
     }
 
     /**
@@ -368,10 +350,6 @@ public final class SigV4RequestValidator {
     }
 
     public static String hexEncode(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
+        return HexFormat.of().formatHex(bytes);
     }
 }

@@ -134,6 +134,48 @@ class KmsServiceTest {
         assertEquals("Enabled", key.getKeyState());
     }
 
+    @Test
+    void createKeyDefaultsNullSpecAndUsage() {
+        KmsKey key = kmsService.createKey("defaults", null, null, null, Map.of(), REGION);
+
+        assertEquals(KmsKeySpec.SYMMETRIC_DEFAULT, key.getKeySpec());
+        assertEquals(KmsKeyUsage.ENCRYPT_DECRYPT, key.getKeyUsage());
+    }
+
+    @Test
+    void createKeyDefaultsSpecWhenOnlyUsageIsPresent() {
+        KmsKey key = kmsService.createKey("defaults", "ENCRYPT_DECRYPT", null, null, Map.of(), REGION);
+
+        assertEquals(KmsKeySpec.SYMMETRIC_DEFAULT, key.getKeySpec());
+        assertEquals(KmsKeyUsage.ENCRYPT_DECRYPT, key.getKeyUsage());
+    }
+
+    @Test
+    void createKeyDefaultsUsageWhenOnlySpecIsPresent() {
+        KmsKey key = kmsService.createKey("defaults", null, "SYMMETRIC_DEFAULT", null, Map.of(), REGION);
+
+        assertEquals(KmsKeySpec.SYMMETRIC_DEFAULT, key.getKeySpec());
+        assertEquals(KmsKeyUsage.ENCRYPT_DECRYPT, key.getKeyUsage());
+    }
+
+    @Test
+    void createKeyRejectsBlankSpec() {
+        AwsException failure = assertThrows(AwsException.class, () ->
+                kmsService.createKey("invalid", null, "", null, Map.of(), REGION));
+
+        assertTrue(failure.getMessage().contains("KeySpec"));
+        assertTrue(keyStore.scan(id -> true).isEmpty());
+    }
+
+    @Test
+    void createKeyRejectsBlankUsage() {
+        AwsException failure = assertThrows(AwsException.class, () ->
+                kmsService.createKey("invalid", "", null, null, Map.of(), REGION));
+
+        assertTrue(failure.getMessage().contains("KeyUsage"));
+        assertTrue(keyStore.scan(id -> true).isEmpty());
+    }
+
     /**
      * The enforcement filter resolves the key a request names through this lookup rather than
      * through {@code describeKey}, which throws: an operation naming no key the account holds

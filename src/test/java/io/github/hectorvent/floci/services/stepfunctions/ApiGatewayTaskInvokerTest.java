@@ -15,10 +15,10 @@ import io.github.hectorvent.floci.services.apigateway.model.RestApi;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
-import io.github.hectorvent.floci.services.lambda.LambdaResourcePolicyProvider;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.AfterEach;
@@ -84,8 +84,9 @@ class ApiGatewayTaskInvokerTest {
     void setup() throws Exception {
         IamPolicyEvaluator policies = new IamPolicyEvaluator(mapper);
         AssumeRolePolicyEvaluator trust = new AssumeRolePolicyEvaluator(mapper, policies);
-        LambdaTaskAuthorizer authorizer = new LambdaTaskAuthorizer(iam, policies, trust,
-                mock(LambdaResourcePolicyProvider.class), scps);
+        Instance<ResourcePolicyProvider> resourcePolicies = mock(Instance.class);
+        when(resourcePolicies.isUnsatisfied()).thenReturn(true);
+        LambdaTaskAuthorizer authorizer = new LambdaTaskAuthorizer(iam, policies, trust, resourcePolicies, scps);
         when(config.services().iam().enforcementEnabled()).thenReturn(true);
         invoker = new ApiGatewayTaskInvoker(api, iam, trust, authorizer, config, mapper, listener);
         machine = new StateMachine();

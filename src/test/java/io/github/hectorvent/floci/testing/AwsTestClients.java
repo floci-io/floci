@@ -49,7 +49,8 @@ public final class AwsTestClients {
         return create(builder, account, "test", region, httpClientBuilder, endpoint);
     }
 
-    private static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
+    /** Explicit credentials and transport for status codes whose bodies URLConnection cannot read. */
+    public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
             B builder, String accessKey, String secretKey, Region region,
             SdkHttpClient.Builder<?> httpClientBuilder, URI endpoint) {
         return builder.endpointOverride(endpoint)

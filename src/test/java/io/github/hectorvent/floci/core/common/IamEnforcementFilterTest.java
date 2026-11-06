@@ -2249,7 +2249,7 @@ class IamEnforcementFilterTest {
 
     @Test
     void queryProtocolGetsXmlErrorResponse() {
-        // IAM/STS/EC2/SQS/SNS/RDS/ELBv2/CFN/... — Query protocol, form-encoded body, XML response.
+        // Ordinary Query services retain ErrorResponse; EC2 uses its own envelope.
         Response r = IamEnforcementFilter.accessDeniedResponse(
                 "iam:ListUsers", "iam", MediaType.APPLICATION_FORM_URLENCODED_TYPE);
 
@@ -2261,6 +2261,41 @@ class IamEnforcementFilterTest {
         assertTrue(body.contains("<Type>Sender</Type>"), body);
         assertTrue(body.contains("User is not authorized to perform: iam:ListUsers"), body);
         assertTrue(body.contains("<RequestId>"), body);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ec2,ec2:DescribeVpcs,UnauthorizedOperation", "iam,iam:ListUsers,AccessDenied",
+            "sts,sts:AssumeRole,AccessDenied", "sns,sns:ListTopics,AuthorizationError"})
+    void queryDenialsUseTheServiceErrorEnvelope(String scope, String action, String code) {
+        Response response = IamEnforcementFilter.accessDeniedResponse(
+                action, scope, MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+        String body = entityString(response);
+        assertEquals(403, response.getStatus());
+        assertEquals(MediaType.APPLICATION_XML_TYPE, response.getMediaType());
+        assertTrue(body.contains("<Code>" + code + "</Code>"), body);
+        if ("ec2".equals(scope)) {
+            assertTrue(body.contains("<Response><Errors><Error>"), body);
+            assertTrue(body.contains("<Message>You are not authorized to perform this operation."), body);
+            assertTrue(body.contains("<RequestID>"), body);
+        } else {
+            assertTrue(body.contains("<ErrorResponse><Error>"), body);
+            assertTrue(body.contains("<RequestId>"), body);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"ec2,AuthFailure", "iam,InvalidClientTokenId", "sts,InvalidClientTokenId"})
+    void unknownQueryAccessKeysUseTheServiceErrorEnvelope(String scope, String code) {
+        ContainerRequestContext context = mock(ContainerRequestContext.class);
+        when(context.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+        Response response = IamEnforcementFilter.unrecognizedClientResponse(scope, context);
+        String body = entityString(response);
+        assertEquals("ec2".equals(scope) ? 401 : 403, response.getStatus());
+        assertTrue(body.contains("ec2".equals(scope)
+                ? "AWS was not able to validate the provided access credentials"
+                : "The security token included in the request is invalid"), body);
+        assertTrue(body.contains("<Code>" + code + "</Code>"), body);
+        assertTrue(body.contains("ec2".equals(scope) ? "<RequestID>" : "<RequestId>"), body);
     }
 
     @ParameterizedTest

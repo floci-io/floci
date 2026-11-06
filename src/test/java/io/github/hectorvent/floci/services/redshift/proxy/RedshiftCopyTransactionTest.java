@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -36,11 +37,7 @@ import static org.mockito.Mockito.when;
 class RedshiftCopyTransactionTest {
     @Test
     void readyForQueryClearsDiscardStateBeforeTheClientParsesRollback() throws Exception {
-        try (ServerSocket clients = new ServerSocket(0); ServerSocket backends = new ServerSocket(0);
-                Socket client = new Socket("127.0.0.1", clients.getLocalPort()); Socket bridgeClient = clients.accept();
-                Socket bridgeBackend = new Socket("127.0.0.1", backends.getLocalPort()); Socket backend = backends.accept()) {
-            client.setSoTimeout(5000);
-            backend.setSoTimeout(5000);
+        withBridgeSockets((client, bridgeClient, bridgeBackend, backend) -> {
             CountDownLatch rollbackParsed = new CountDownLatch(1);
             AtomicBoolean readyForwarded = new AtomicBoolean();
             RedshiftInterceptingBridge.WireFrameTracker tracker = new RedshiftInterceptingBridge.WireFrameTracker(
@@ -136,7 +133,7 @@ class RedshiftCopyTransactionTest {
             assertEquals('2', responses.nextMessage().type());
             assertEquals('C', responses.nextMessage().type());
             assertEquals('T', responses.nextMessage().body()[0]);
-        }
+        });
     }
 
     @Test
@@ -156,11 +153,7 @@ class RedshiftCopyTransactionTest {
 
     @Test
     void commitFailureAtClientSyncReturnsErrorWithoutDroppingSession() throws Exception {
-        try (ServerSocket clients = new ServerSocket(0); ServerSocket backends = new ServerSocket(0);
-                Socket client = new Socket("127.0.0.1", clients.getLocalPort()); Socket bridgeClient = clients.accept();
-                Socket bridgeBackend = new Socket("127.0.0.1", backends.getLocalPort()); Socket backend = backends.accept()) {
-            client.setSoTimeout(5000);
-            backend.setSoTimeout(5000);
+        withBridgeSockets((client, bridgeClient, bridgeBackend, backend) -> {
             S3Service s3 = mock(S3Service.class);
             when(s3.objectExists("bucket", "data")).thenReturn(true);
             when(s3.getObject("bucket", "data")).thenReturn(new S3Object("bucket", "data",
@@ -196,20 +189,16 @@ class RedshiftCopyTransactionTest {
             assertTrue(sawError, "Commit failure must report an error frame to the client");
             assertTrue(sawReady, "The client must receive ReadyForQuery");
             server.get(5, TimeUnit.SECONDS);
-        }
+        });
     }
 
     private void runCycle(List<String> before, List<String> after, boolean fragmentNotice) throws Exception {
-        try (ServerSocket clients = new ServerSocket(0); ServerSocket backends = new ServerSocket(0);
-                Socket client = new Socket("127.0.0.1", clients.getLocalPort()); Socket bridgeClient = clients.accept();
-                Socket bridgeBackend = new Socket("127.0.0.1", backends.getLocalPort()); Socket backend = backends.accept()) {
-            client.setSoTimeout(5000);
-            backend.setSoTimeout(5000);
+        withBridgeSockets((client, bridgeClient, bridgeBackend, backend) -> {
             S3Service s3 = mock(S3Service.class);
             when(s3.objectExists("bucket", "data")).thenReturn(true);
             when(s3.getObject("bucket", "data")).thenReturn(new S3Object("bucket", "data",
                     "1\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
-            CountDownLatch midFrameTimeout = new CountDownLatch(1);
+            Semaphore midFrameTimeout = new Semaphore(0);
             Socket observedBackend = observePumpTimeout(bridgeBackend, midFrameTimeout);
             CompletableFuture<Void> server = CompletableFuture.runAsync(() -> {
                 try {
@@ -229,9 +218,17 @@ class RedshiftCopyTransactionTest {
             for (String sql : after) {
                 statement(pipeline, "stmt" + index++, sql);
             }
-            pipeline.writeBytes(PostgresWire.frame('S', new byte[0]));
+            if (!fragmentNotice) {
+                pipeline.writeBytes(PostgresWire.frame('S', new byte[0]));
+            }
             client.getOutputStream().write(pipeline.toByteArray());
             client.getOutputStream().flush();
+            if (fragmentNotice) {
+                assertTrue(midFrameTimeout.tryAcquire(5, TimeUnit.SECONDS),
+                        "Pump must read the incomplete notice before client Sync");
+                PostgresWire.write(client.getOutputStream(), 'S');
+                client.getOutputStream().flush();
+            }
             PostgresWireDecoder decoder = new PostgresWireDecoder(client.getInputStream());
             int completed = 0;
             while (true) {
@@ -248,7 +245,22 @@ class RedshiftCopyTransactionTest {
             }
             assertEquals(before.size() + after.size() + 1, completed);
             server.get(5, TimeUnit.SECONDS);
+        });
+    }
+
+    private static void withBridgeSockets(BridgeSocketTest test) throws Exception {
+        try (ServerSocket clients = new ServerSocket(0); ServerSocket backends = new ServerSocket(0);
+                Socket client = new Socket("127.0.0.1", clients.getLocalPort()); Socket bridgeClient = clients.accept();
+                Socket bridgeBackend = new Socket("127.0.0.1", backends.getLocalPort()); Socket backend = backends.accept()) {
+            client.setSoTimeout(5000);
+            backend.setSoTimeout(5000);
+            test.run(client, bridgeClient, bridgeBackend, backend);
         }
+    }
+
+    @FunctionalInterface
+    private interface BridgeSocketTest {
+        void run(Socket client, Socket bridgeClient, Socket bridgeBackend, Socket backend) throws Exception;
     }
 
     private static void statement(ByteArrayOutputStream output, String name, String sql) throws IOException {
@@ -257,7 +269,7 @@ class RedshiftCopyTransactionTest {
         PostgresWire.write(output, 'E', PostgresWire.cStringBytes(name), new byte[4]);
     }
 
-    private static Socket observePumpTimeout(Socket backend, CountDownLatch midFrameTimeout) throws IOException {
+    private static Socket observePumpTimeout(Socket backend, Semaphore midFrameTimeout) throws IOException {
         InputStream input = new FilterInputStream(backend.getInputStream()) {
             private final RedshiftInterceptingBridge.WireFrameTracker tracker =
                     new RedshiftInterceptingBridge.WireFrameTracker((type, body) -> {
@@ -274,7 +286,7 @@ class RedshiftCopyTransactionTest {
                     return count;
                 } catch (SocketTimeoutException exception) {
                     if (!tracker.betweenMessages()) {
-                        midFrameTimeout.countDown();
+                        midFrameTimeout.release();
                     }
                     throw exception;
                 }
@@ -286,14 +298,17 @@ class RedshiftCopyTransactionTest {
     }
 
     private static void serve(Socket socket, boolean fragmentNotice, boolean failCommit,
-                              CountDownLatch midFrameTimeout) throws Exception {
+                              Semaphore midFrameTimeout) throws Exception {
         new FakeCopyBackend(socket).serveUntilSync(failCommit, sql -> {
             if (fragmentNotice && sql.equals("SAVEPOINT client_sp")) {
                 byte[] notice = PostgresWire.frame('N', S3CopySimulator.errorBody("00000", "async notice"));
                 socket.getOutputStream().write(notice, 0, 3);
                 socket.getOutputStream().flush();
-                assertTrue(midFrameTimeout.await(5, TimeUnit.SECONDS),
-                        "Pump must time out while the notice frame is incomplete");
+                assertEquals('H', new PostgresWireDecoder(socket.getInputStream()).nextMessage().type(),
+                        "Client Sync must request backend completion while the notice is incomplete");
+                midFrameTimeout.drainPermits();
+                assertTrue(midFrameTimeout.tryAcquire(5, TimeUnit.SECONDS),
+                        "Pump must time out mid-notice while client Sync is pending");
                 socket.getOutputStream().write(notice, 3, notice.length - 3);
                 socket.getOutputStream().flush();
             }

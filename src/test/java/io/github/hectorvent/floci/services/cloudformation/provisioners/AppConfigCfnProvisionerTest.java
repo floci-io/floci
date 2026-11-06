@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.appconfig.AppConfigService;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
@@ -64,7 +65,7 @@ class AppConfigCfnProvisionerTest {
     @BeforeEach
     void setUp() {
         storage = new InMemoryStorageFactory(ACCOUNT);
-        service = spy(new AppConfigService(storage, null));
+        service = spy(new AppConfigService(storage, new RegionResolver(REGION, ACCOUNT)));
         provisioner = new AppConfigCfnProvisioner(service);
         engine = CloudFormationTemplateEngine.standalone(ACCOUNT, REGION, STACK, MAPPER, value -> value);
     }
@@ -576,6 +577,12 @@ class AppConfigCfnProvisionerTest {
                 null);
         service.startDeployment(appId, env.getPhysicalId(), Map.of("ConfigurationProfileId", profile.getPhysicalId(),
                 "ConfigurationVersion", "1", "DeploymentStrategyId", "AppConfig.AllAtOnce"));
+        String prefix = REGION + "/" + appId + "::";
+        assertEquals(1, storage.create("appconfig", "appconfig-deployments.json",
+                new TypeReference<Map<String, Deployment>>() {}).scan(key -> key.startsWith(prefix)).size());
+        assertEquals(1, storage.create("appconfig", "appconfig-versions.json",
+                new TypeReference<Map<String, HostedConfigurationVersion>>() {})
+                .scan(key -> key.startsWith(prefix)).size());
         service.deleteApplication(appId);
 
         provisioner.delete(ENVIRONMENT, env.getPhysicalId(), REGION);
@@ -584,10 +591,10 @@ class AppConfigCfnProvisionerTest {
         assertTrue(service.findEnvironment(env.getPhysicalId()).isEmpty());
         assertTrue(service.findConfigurationProfile(profile.getPhysicalId()).isEmpty());
         assertTrue(storage.create("appconfig", "appconfig-deployments.json",
-                new TypeReference<Map<String, Deployment>>() {}).scan(key -> key.startsWith(appId + "::")).isEmpty());
+                new TypeReference<Map<String, Deployment>>() {}).scan(key -> key.startsWith(prefix)).isEmpty());
         assertTrue(storage.create("appconfig", "appconfig-versions.json",
                 new TypeReference<Map<String, HostedConfigurationVersion>>() {})
-                .scan(key -> key.startsWith(appId + "::")).isEmpty());
+                .scan(key -> key.startsWith(prefix)).isEmpty());
     }
 
     @Test

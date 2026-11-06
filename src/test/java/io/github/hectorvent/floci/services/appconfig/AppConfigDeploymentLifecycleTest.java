@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.appconfig;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appconfig.model.Deployment;
@@ -162,7 +163,8 @@ class AppConfigDeploymentLifecycleTest {
         StorageFactory storage = factory();
         Clock clock = mock(Clock.class);
         when(clock.instant()).thenReturn(START);
-        AppConfigService service = new AppConfigService(storage, mock(EmulatorConfig.class), clock);
+        AppConfigService service = new AppConfigService(
+                storage, new RegionResolver("us-east-1", "000000000000"), clock);
         Scope scope = scope(service);
         Deployment baking = deploy(service, scope, "1", scope.bake());
         Deployment response = service.getDeployment(scope.app(), scope.env(), baking.getDeploymentNumber());
@@ -238,7 +240,8 @@ class AppConfigDeploymentLifecycleTest {
     }
 
     private AppConfigService service(StorageFactory storage, Instant time) {
-        return new AppConfigService(storage, mock(EmulatorConfig.class), Clock.fixed(time, ZoneOffset.UTC));
+        return new AppConfigService(storage, new RegionResolver("us-east-1", "000000000000"),
+                Clock.fixed(time, ZoneOffset.UTC));
     }
 
     private StorageFactory factory() {

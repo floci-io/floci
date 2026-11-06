@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
+import io.github.hectorvent.floci.services.redshift.proxy.CopyJobSql;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftSqlInterceptor;
 import io.github.hectorvent.floci.services.redshift.spectrum.BackendSql;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumQueryPreparation;
@@ -520,7 +521,7 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                 if (session != null && session.transactionFailed()) {
                     throw new SQLException("Current transaction is aborted; use COMMIT or ROLLBACK to end it", "25P02");
                 }
-                boolean autoCommit = AUTO_COMMIT_SQL.matcher(sql).find()
+                boolean autoCommit = AUTO_COMMIT_SQL.matcher(sql).find() || CopyJobSql.requiresAutoCommit(sql)
                         || preparation != null && target.spectrum() != null
                         && preparation.handlesDdl(sql, target.spectrum());
                 if (autoCommit) {
@@ -683,7 +684,8 @@ public class RedshiftDataService implements Resettable, StoredResourceArns {
                 throw new SQLException("External query preparation failed: " + exception.getMessage(), "58030", exception);
             }
         }
-        ParsedSql parsed = RedshiftDataSqlParameters.parse(RedshiftSqlInterceptor.rewrite(sql));
+        String rewritten = CopyJobSql.rewrite(sql, !autoCommit || !connection.getAutoCommit());
+        ParsedSql parsed = RedshiftDataSqlParameters.parse(RedshiftSqlInterceptor.rewrite(rewritten));
         execution.checkCancellation();
         if (!autoCommit) {
             connection.setAutoCommit(false);

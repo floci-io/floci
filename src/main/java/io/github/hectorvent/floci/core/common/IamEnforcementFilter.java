@@ -1429,7 +1429,21 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             ResourcePolicyDecision resourcePolicyDecision,
             String resourceOwnerAccountId) {
         authorizeAdditionalResource(authorizationHeader, action, resource, resourcePolicyDecision,
-                resourceOwnerAccountId, null);
+                resourceOwnerAccountId, null, null);
+    }
+
+    /**
+     * Authorizes a secondary resource with the condition keys {@code requestConditions} gives, values its
+     * handler reads from the request {@link #filter} has authorized: GetClusterCredentials checks
+     * {@code redshift:CreateClusterUser} with the {@code redshift:DbUser} of its own {@code DbUser}, so a
+     * policy can scope it to {@code dbuser:<cluster>/${redshift:DbUser}}.
+     */
+    public void authorizeAdditionalResource(
+            String authorizationHeader,
+            String action,
+            String resource,
+            Map<String, List<String>> requestConditions) {
+        authorizeAdditionalResource(authorizationHeader, action, resource, null, null, null, requestConditions);
     }
 
     /**
@@ -1443,21 +1457,25 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      */
     public void authorizePostObject(String authorizationHeader, String resource, String region) {
         authorizeAdditionalResource(authorizationHeader, "s3:PutObject", resource, null, null,
-                new DeniedEvent("PostObject", region));
+                new DeniedEvent("PostObject", region), null);
     }
 
     /** A CloudTrail record to write when IAM refuses a request: its event name and its Region. */
     private record DeniedEvent(String name, String region) {
     }
 
-    /** As the public overload; a denial is also recorded in CloudTrail when {@code deniedEvent} is given. */
+    /**
+     * As the public overloads; a denial is also recorded in CloudTrail when {@code deniedEvent} is given, and
+     * {@code requestConditions}, when given, joins the condition context.
+     */
     private void authorizeAdditionalResource(
             String authorizationHeader,
             String action,
             String resource,
             ResourcePolicyDecision resourcePolicyDecision,
             String resourceOwnerAccountId,
-            DeniedEvent deniedEvent) {
+            DeniedEvent deniedEvent,
+            Map<String, List<String>> requestConditions) {
         if (!config.services().iam().enforcementEnabled()) {
             return;
         }
@@ -1531,6 +1549,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 caller = caller.withPrincipalArn(callerArns.get().callerArn());
                 conditionContext = new HashMap<>();
                 callerArns.get().putPrincipalKeys(conditionContext);
+            }
+            if (requestConditions != null && !requestConditions.isEmpty()) {
+                if (conditionContext == null) {
+                    conditionContext = new HashMap<>();
+                }
+                conditionContext.putAll(requestConditions);
             }
 
             ResourcePolicyDecision effectiveDecision = resourcePolicyDecision;
@@ -1896,6 +1920,10 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     private static Response accessDeniedResponse(String action, String credentialScope, MediaType requestMediaType,
                                                  String resourceArn, WireProtocol protocol, boolean restXml) {
         String message = accessDeniedMessage(action);
+        if ("ec2".equals(credentialScope)) {
+            return Ec2ErrorResponses.of("UnauthorizedOperation",
+                    "You are not authorized to perform this operation. " + message, 403);
+        }
         if ("s3".equals(credentialScope)) {
             String resourcePath = formatS3ResourcePath(resourceArn);
             return s3XmlAccessDenied(message, resourcePath);
@@ -2007,7 +2035,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * The response for an access key that exists nowhere, in each protocol's own vocabulary for
      * the same failure. S3 answers with {@code InvalidAccessKeyId}, as
-     * {@code S3HeaderSignatureFilter} already does. Query services answer with
+     * {@code S3HeaderSignatureFilter} already does. EC2 answers {@code AuthFailure}
+     * in its own error envelope. Other Query services answer with
      * {@code InvalidClientTokenId}: neither code is modelled by sts, iam or sqs, but botocore's
      * own integration tests retry on {@code InvalidClientTokenId} from {@code sts:AssumeRole} and
      * {@code iam:ListGroups} while credentials propagate. JSON services answer with
@@ -2015,6 +2044,9 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * and what the API Gateway execute path already returns.
      */
     static Response unrecognizedClientResponse(String credentialScope, ContainerRequestContext ctx) {
+        if ("ec2".equals(credentialScope)) {
+            return Ec2ErrorResponses.authFailure();
+        }
         if ("s3".equals(credentialScope)) {
             return s3XmlError("InvalidAccessKeyId", S3_INVALID_ACCESS_KEY_ID, 403);
         }

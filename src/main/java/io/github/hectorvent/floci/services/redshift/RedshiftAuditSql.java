@@ -79,14 +79,14 @@ public final class RedshiftAuditSql {
         }
     }
 
-    private enum Kind { WORD, IDENTIFIER, STRING, SYMBOL }
+    public enum Kind { WORD, IDENTIFIER, STRING, SYMBOL, INVALID }
 
-    private record Token(String text, int start, int end, Kind kind) {
-        boolean keyword(String keyword) {
+    public record Token(String text, int start, int end, Kind kind) {
+        public boolean keyword(String keyword) {
             return kind == Kind.WORD && keyword.equalsIgnoreCase(text);
         }
 
-        String identifier() {
+        public String identifier() {
             return kind == Kind.IDENTIFIER
                     ? text.substring(1, text.length() - 1).replace("\"\"", "\"") : text.toLowerCase(Locale.ROOT);
         }
@@ -245,7 +245,7 @@ public final class RedshiftAuditSql {
         return name < tokens.size() ? new Savepoint(operation, tokens.get(name).identifier()) : null;
     }
 
-    private static List<Token> tokens(String sql) {
+    public static List<Token> tokens(String sql) {
         return tokens(sql, false);
     }
 
@@ -261,7 +261,12 @@ public final class RedshiftAuditSql {
                     i++;
                 }
             } else if (sql.startsWith("/*", i)) {
-                i = skipComment(sql, i);
+                int end = skipComment(sql, i);
+                if (end < 0) {
+                    tokens.add(new Token(sql.substring(i), i, sql.length(), Kind.INVALID));
+                    break;
+                }
+                i = end;
             } else {
                 int start = i;
                 Kind kind;
@@ -311,7 +316,7 @@ public final class RedshiftAuditSql {
                 i++;
             }
         }
-        return i;
+        return depth == 0 ? i : -1;
     }
 
     private static int skipQuoted(String sql, int start, char quote, boolean escapes) {

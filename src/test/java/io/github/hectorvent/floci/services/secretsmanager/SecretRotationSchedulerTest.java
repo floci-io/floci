@@ -10,16 +10,23 @@ import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 /**
  * Covers the background sweep that makes a rotation schedule actually fire. Rotation itself runs
@@ -32,19 +39,34 @@ class SecretRotationSchedulerTest {
     private static final String LAMBDA_ARN = "arn:aws:lambda:us-east-1:000000000000:function:rotate";
     private static final String TOKEN = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
 
+    private final LambdaService lambda = mock(LambdaService.class);
     private SecretsManagerService service;
     private SecretRotationScheduler scheduler;
 
     @BeforeEach
     void setUp() {
         service = new SecretsManagerService(new InMemoryStorage<>(), 30,
-                new RegionResolver(REGION, "000000000000"), mock(LambdaService.class), new ObjectMapper());
+                new RegionResolver(REGION, "000000000000"), lambda, new ObjectMapper());
         scheduler = new SecretRotationScheduler(service);
     }
 
     private void enableRotation(String name, Secret.RotationRules rules) {
         service.createSecret(name, "v1", null, null, null, null, REGION);
         service.rotateSecret(name, TOKEN, LAMBDA_ARN, rules, false, REGION);
+        awaitTestStep(service, lambda, name);
+    }
+
+    /**
+     * Enabling rotation tests it in the background against an AWSPENDING version, and a rotation
+     * requested while that version exists is refused. Waits until the test step has ended.
+     */
+    private static void awaitTestStep(SecretsManagerService service, LambdaService lambda, String name) {
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            verify(lambda).invoke(anyString(), anyString(),
+                    argThat(payload -> new String(payload, StandardCharsets.UTF_8).contains(name)), any());
+            assertTrue(service.describeSecret(name, REGION).getVersions().values().stream()
+                    .noneMatch(version -> version.getVersionStages().contains("AWSPENDING")));
+        });
     }
 
     // ─── Next-rotation-date computation ────────────────────────────────────────
@@ -198,13 +220,15 @@ class SecretRotationSchedulerTest {
         String foreignAccount = "111122223333";
         AccountAwareStorageBackend<Secret> store =
                 AccountAwareStorageBackend.inMemory("000000000000");
+        LambdaService foreignLambda = mock(LambdaService.class);
         SecretsManagerService accountAware = new SecretsManagerService(store, 30,
-                new RegionResolver(REGION, "000000000000"), mock(LambdaService.class), new ObjectMapper());
+                new RegionResolver(REGION, "000000000000"), foreignLambda, new ObjectMapper());
         SecretRotationScheduler sweep = new SecretRotationScheduler(accountAware);
 
         accountAware.createSecret("foreign", "v1", null, null, null, null, REGION);
         accountAware.rotateSecret("foreign", TOKEN, LAMBDA_ARN,
                 new Secret.RotationRules(14, null, null), false, REGION);
+        awaitTestStep(accountAware, foreignLambda, "foreign");
 
         // Re-home the secret into the other account, ARN included, and clear the default copy.
         Secret secret = accountAware.describeSecret("foreign", REGION);

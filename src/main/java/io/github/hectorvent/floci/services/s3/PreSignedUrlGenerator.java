@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,8 +15,6 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
@@ -169,7 +168,7 @@ public class PreSignedUrlGenerator {
             throw new IllegalArgumentException("Pre-signed URL base must include an authority: " + baseUrl);
         }
 
-        String path = "/" + PreSignedUrlFilter.awsUriEncode(bucket) + "/" + awsUriEncodePath(key);
+        String path = "/" + SigV4Canonicalization.uriEncode(bucket) + "/" + awsUriEncodePath(key);
         MultivaluedHashMap<String, String> queryParams = new MultivaluedHashMap<>();
         queryParams.putSingle("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
         queryParams.putSingle("X-Amz-Credential", credential);
@@ -208,7 +207,7 @@ public class PreSignedUrlGenerator {
 
         return baseUrl + "/" + bucket + "/" + key
                 + "?X-Amz-Algorithm=AWS4-HMAC-SHA256"
-                + "&X-Amz-Credential=" + PreSignedUrlFilter.awsUriEncode(credential)
+                + "&X-Amz-Credential=" + SigV4Canonicalization.uriEncode(credential)
                 + "&X-Amz-Date=" + amzDate
                 + "&X-Amz-Expires=" + expiry
                 + "&X-Amz-SignedHeaders=host"
@@ -314,7 +313,7 @@ public class PreSignedUrlGenerator {
 
     private static String awsUriEncodePath(String value) {
         return Arrays.stream(value.split("/", -1))
-                .map(PreSignedUrlFilter::awsUriEncode)
+                .map(SigV4Canonicalization::uriEncode)
                 .collect(Collectors.joining("/"));
     }
 
@@ -341,14 +340,8 @@ public class PreSignedUrlGenerator {
 
     private static String hmacSha256(String secret, String data) {
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] hash = mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte b : hash) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
+            return SigV4RequestValidator.hexEncode(
+                    SigV4RequestValidator.hmacSha256(secret.getBytes(StandardCharsets.UTF_8), data));
         } catch (Exception e) {
             throw new RuntimeException("Failed to compute HMAC-SHA256", e);
         }

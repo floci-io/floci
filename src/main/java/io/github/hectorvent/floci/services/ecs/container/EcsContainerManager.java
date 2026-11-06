@@ -479,12 +479,12 @@ public class EcsContainerManager {
                     boolean publishToHost = !containerDetector.isRunningInContainer()
                             || publishAwsvpcPorts;
                     for (PortMapping pm : def.getPortMappings()) {
+                        int hostPort = publishedHostPort(pm, taskDef.getNetworkMode(), publishAwsvpcPorts,
+                                config.services().ecs().dynamicAwsvpcHostPorts());
                         if (awsvpc && publishToHost) {
-                            int hostPort = awsvpcHostPort(pm, publishAwsvpcPorts,
-                                    config.services().ecs().dynamicAwsvpcHostPorts());
                             specBuilder.withPortBinding(pm.containerPort(), hostPort, hostPortBindAddress());
-                        } else if (!awsvpc && pm.hostPort() > 0) {
-                            specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
+                        } else if (hostPort > 0) {
+                            specBuilder.withPortBinding(pm.containerPort(), hostPort);
                         } else if (publishToHost) {
                             specBuilder.withDynamicPort(pm.containerPort());
                         } else {
@@ -1413,18 +1413,23 @@ public class EcsContainerManager {
                 continue;
             }
             for (PortMapping port : container.getPortMappings()) {
-                bindings.put(port.containerPort(), awsvpcHostPort(port, publishAwsvpcPortsToHost,
-                        dynamicAwsvpcHostPorts));
+                bindings.put(port.containerPort(), publishedHostPort(port, NetworkMode.awsvpc,
+                        publishAwsvpcPortsToHost, dynamicAwsvpcHostPorts));
             }
         }
         return bindings;
     }
 
-    private static int awsvpcHostPort(PortMapping port, boolean publishToHost, boolean dynamicHostPorts) {
-        if (publishToHost && !dynamicHostPorts) {
-            return port.hostPort() > 0 ? port.hostPort() : port.containerPort();
+    /** Host port to publish for a mapping; zero means no fixed host-port reservation. */
+    public static int publishedHostPort(PortMapping port, NetworkMode networkMode,
+                                        boolean publishAwsvpcPortsToHost, boolean dynamicAwsvpcHostPorts) {
+        if (networkMode != NetworkMode.awsvpc) {
+            return Math.max(0, port.hostPort());
         }
-        return 0;
+        if (!publishAwsvpcPortsToHost || dynamicAwsvpcHostPorts) {
+            return 0;
+        }
+        return port.hostPort() > 0 ? port.hostPort() : port.containerPort();
     }
 
     private record PreparedNetwork(NetworkInterface eni, SecurityGroupFirewallManager.Namespace namespace) {}
@@ -1546,18 +1551,21 @@ public class EcsContainerManager {
         // A force removal terminates Docker's follow-log transport even when the preceding stop failed.
         // Preserve handles for any container that still may be running after both operations failed.
         terminatedContainerIds.forEach(dockerId -> finalizeLogStream(handle, dockerId));
-        if (handle.allContainersRemoved()) {
-            cleanupProtectedNetwork(handle);
-            removeTaskVolumes(handle);
-            // Only now: a container that survived a failed removal still holds its address.
-            releaseTaskLinkLocalAddresses(handle.getTaskArn());
+        try {
+            if (handle.allContainersRemoved()) {
+                // Confirm the helper released its host ports before unregister forgets its identity.
+                if (firewallManager != null && handle.getNetworkInterfaceId() != null) {
+                    firewallManager.removeNamespaceStrict(handle.getNetworkInterfaceId());
+                }
+                cleanupProtectedNetwork(handle);
+                removeTaskVolumes(handle);
+                // Only now: a container that survived a failed removal still holds its address.
+                releaseTaskLinkLocalAddresses(handle.getTaskArn());
+            }
+        } finally {
+            // A failed container or helper removal must not keep the stopping task's credentials usable.
+            revokeTaskRoleCredentials(handle.getTaskArn());
         }
-        // Revoked whether or not removal succeeded, unlike everything above. A task being
-        // stopped must not keep usable credentials just because Docker could not remove one of
-        // its containers: the retry that would eventually revoke them depends on the handle
-        // being retained, which only happens while a log stream is still open, so a container
-        // without one (a FireLens router, say) would strand them for the life of the process.
-        revokeTaskRoleCredentials(handle.getTaskArn());
         return exitCodes;
     }
 

@@ -1,14 +1,14 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.iam.IamService;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
+import java.util.HexFormat;
 import java.util.Optional;
 
 /**
@@ -93,36 +93,13 @@ final class S3PostPolicySigner {
             String date = parts[1];
             String region = parts[2];
             String service = parts[3];
-            byte[] signingKey = deriveSigningKey(secretKey, date, region, service);
-            String expected = hexEncode(hmacSha256(signingKey, policyBase64));
+            byte[] signingKey = SigV4RequestValidator.deriveSigningKey(secretKey, date, region, service);
+            String expected = HexFormat.of().formatHex(SigV4RequestValidator.hmacSha256(signingKey, policyBase64));
             return MessageDigest.isEqual(
                     expected.getBytes(StandardCharsets.UTF_8),
                     signatureHex.getBytes(StandardCharsets.UTF_8));
         } catch (Exception e) {
             return false;
         }
-    }
-
-    private static byte[] deriveSigningKey(String secretKey, String date, String region,
-                                           String service) throws Exception {
-        byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
-        byte[] kDate = hmacSha256(kSecret, date);
-        byte[] kRegion = hmacSha256(kDate, region);
-        byte[] kService = hmacSha256(kRegion, service);
-        return hmacSha256(kService, "aws4_request");
-    }
-
-    private static byte[] hmacSha256(byte[] key, String data) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key, "HmacSHA256"));
-        return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String hexEncode(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 }

@@ -668,15 +668,41 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
      */
     private void clearDropped(Map<String, Object> req, JsonNode props, ProvisionContext ctx,
                               String resourceType) {
-        Set<String> kept = KEPT_ON_DROP.getOrDefault(resourceType, Set.of());
         Map<String, Object> defaults = DEFAULT_ON_DROP.getOrDefault(resourceType, Map.of());
         for (String name : ctx.droppedProperties(props)) {
-            if (NEVER_CLEARED.contains(name) || kept.contains(name)
-                    || CfnCreateOnlyProperties.isCreateOnly(resourceType, name)) {
+            if (NEVER_CLEARED.contains(name)) {
                 continue;
             }
-            req.put(apiMemberName(name), defaults.get(name));
+            String policy = dropPolicy(resourceType, name);
+            if ("clear".equals(policy) || policy.startsWith("default:")) {
+                req.put(apiMemberName(name), defaults.get(name));
+            }
         }
+    }
+
+    /**
+     * What an update does with a property of {@code resourceType} that the previous template declared
+     * and the new one drops: {@code clear}, {@code default:<value>}, {@code keep} or
+     * {@code create-only} (a create-only property: skipped or refused, never cleared).
+     * {@link #clearDropped} acts on it, and {@code drop-policy.tsv} is checked against it. For a
+     * {@link #NEVER_CLEARED} name it gives what the provisioner's own handling of that name does,
+     * which is why {@link #clearDropped} skips those names before asking.
+     */
+    static String dropPolicy(String resourceType, String property) {
+        if ("Name".equals(property)) {
+            return GRAPHQL_API.equals(resourceType) ? "default:generated name" : "keep";
+        }
+        if ("Tags".equals(property) || "EnvironmentVariables".equals(property)) {
+            return "clear";
+        }
+        if (KEPT_ON_DROP.getOrDefault(resourceType, Set.of()).contains(property)) {
+            return "keep";
+        }
+        if (CfnCreateOnlyProperties.isCreateOnly(resourceType, property)) {
+            return "create-only";
+        }
+        Object fallback = DEFAULT_ON_DROP.getOrDefault(resourceType, Map.of()).get(property);
+        return fallback == null ? "clear" : "default:" + fallback;
     }
 
     private boolean isPipeline(Map<String, Object> req, String apiId, String typeName,

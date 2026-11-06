@@ -294,6 +294,38 @@ UNLOAD ('SELECT * FROM people') TO 's3://my-data/export/' IAM_ROLE default CSV;
 See AWS's [default IAM role guide](https://docs.aws.amazon.com/redshift/latest/mgmt/default-iam-role.html)
 and [COPY authorization parameters](https://docs.aws.amazon.com/redshift/latest/dg/copy-parameters-authorization.html).
 
+### COPY JOB
+
+A job stores the parameters of a COPY from Amazon S3 so that they can be reused:
+
+```sql
+COPY public.target_table FROM 's3://my-bucket/staging/'
+IAM_ROLE 'arn:aws:iam::000000000000:role/Load'
+JOB CREATE my_copy_job AUTO ON;
+
+COPY JOB LIST;
+COPY JOB SHOW my_copy_job;
+COPY JOB ALTER my_copy_job AUTO OFF;
+COPY JOB DROP my_copy_job;
+```
+
+Jobs live in the cluster database and are listed in `sys_copy_job`, with AWS's columns. `JOB CREATE` and
+`COPY JOB DROP` are refused inside a transaction block. A job needs an S3 source and an explicit `IAM_ROLE`,
+and cannot use `MANIFEST`, access keys, `MAXERROR` or `IGNOREALLERRORS`. Names cannot contain a hyphen and
+must fit in 127 UTF-8 bytes. A database holds at most 200 jobs, including when jobs are created concurrently.
+Simple Query, Extended Query and the Redshift Data API are supported. Transaction restrictions are checked when a job
+command executes, including when a prepared statement is reused. Regular users can manage their own jobs
+and see their own rows in `sys_copy_job`; superusers can see all rows.
+
+COPY options are stored for execution time, including formats the ordinary COPY simulator does not yet
+implement. The COPY JOB restrictions above are checked at creation time.
+
+Jobs only record the COPY for now: nothing loads files automatically, and `COPY JOB RUN` is refused. The
+SQLSTATEs and messages of the refusals are Floci's own, not captured from AWS.
+
+See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.html) and
+[auto-copy](https://docs.aws.amazon.com/redshift/latest/dg/loading-data-copy-job.html) references.
+
 ### Snapshot copy grants
 
 - **`KmsKeyId` defaults to an alias ARN.** Floci has no per-account AWS-managed key, so

@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.s3.S3ControlArnUtils;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -1550,8 +1551,7 @@ public class ResourceArnBuilder {
             }
         }
         if (queueUrl != null && !queueUrl.isEmpty()) {
-            String queueName = queueUrl.substring(queueUrl.lastIndexOf('/') + 1);
-            return AwsArnUtils.Arn.of("sqs", region, accountId, queueName).toString();
+            return SqsService.queueArn(queueUrl, AwsRegions.partitionFor(region), region, accountId);
         }
         return AwsArnUtils.Arn.of("sqs", region, accountId, "*").toString();
     }

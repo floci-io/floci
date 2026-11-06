@@ -16,9 +16,11 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
@@ -89,6 +91,32 @@ class RedshiftDataServiceTest {
 
     private ObjectNode idOf(String id) {
         return om.createObjectNode().put("Id", id);
+    }
+
+    @Test
+    void redshiftTableDdlIsRewrittenThroughTheDataApi() {
+        String id = service.executeStatement(req("CREATE TABLE events (id int) DISTSTYLE ALL"), REGION)
+                .path("Id").asText();
+        assertEquals("FINISHED", service.describeStatement(idOf(id)).path("Status").asText());
+        String queryId = service.executeStatement(req("SELECT count(*) FROM events"), REGION).path("Id").asText();
+        assertEquals("FINISHED", service.describeStatement(idOf(queryId)).path("Status").asText());
+        assertEquals(0, service.getStatementResult(idOf(queryId)).path("Records").get(0).get(0)
+                .path("longValue").asLong());
+    }
+
+    @Test
+    void copyJobListAndShowReadTheCatalogThroughTheDataApi() throws SQLException {
+        try (Connection connection = DriverManager.getConnection(jdbcUrl, "sa", "");
+                Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE pg_catalog.sys_copy_job (job_id bigint, job_name varchar(128))");
+            statement.execute("INSERT INTO pg_catalog.sys_copy_job VALUES (1, 'saved_job')");
+        }
+        for (String sql : List.of("COPY JOB LIST", "COPY JOB SHOW saved_job")) {
+            String id = service.executeStatement(req(sql), REGION).path("Id").asText();
+            assertEquals("FINISHED", service.describeStatement(idOf(id)).path("Status").asText());
+            ObjectNode result = service.getStatementResult(idOf(id));
+            assertEquals("saved_job", result.path("Records").get(0).get(1).path("stringValue").asText());
+        }
     }
 
     @Test

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.appconfig.AppConfigService;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
@@ -53,7 +54,7 @@ class CloudFormationAppConfigLifecycleTest {
     @BeforeEach
     void setUp() {
         storage = new InMemoryStorageFactory(ACCOUNT);
-        appConfig = spy(new AppConfigService(storage, null));
+        appConfig = spy(new AppConfigService(storage, new RegionResolver(REGION, ACCOUNT)));
         CfnResourceDispatcher dispatcher = new CfnResourceDispatcher(MAPPER,
                 new CloudFormationResourceRegistry(List.of(new AppConfigCfnProvisioner(appConfig))), null, null);
         cfn = CloudFormationServiceFixture.create(dispatcher);
@@ -80,6 +81,12 @@ class CloudFormationAppConfigLifecycleTest {
                 "application/json", null);
         appConfig.startDeployment(oldApp, oldEnv, Map.of("ConfigurationProfileId", oldProfile,
                 "ConfigurationVersion", "1", "DeploymentStrategyId", "AppConfig.AllAtOnce"));
+        StorageBackend<String, Deployment> deployments = store("appconfig-deployments.json", new TypeReference<>() {});
+        StorageBackend<String, HostedConfigurationVersion> versions = store(
+                "appconfig-versions.json", new TypeReference<>() {});
+        String oldPrefix = REGION + "/" + oldApp + "::";
+        assertEquals(1, deployments.scan(key -> key.startsWith(oldPrefix)).size());
+        assertEquals(1, versions.scan(key -> key.startsWith(oldPrefix)).size());
 
         deploy("moved", "UPDATE", "{\"Resources\":{\"AppB\":{\"Type\":\"AWS::AppConfig::Application\","
                 + "\"Properties\":{\"Name\":\"orders\"}}," + children.formatted("AppB") + "}}");
@@ -90,10 +97,8 @@ class CloudFormationAppConfigLifecycleTest {
         assertTrue(appConfig.listApplications().stream().noneMatch(app -> app.getId().equals(oldApp)));
         assertTrue(appConfig.findEnvironment(oldEnv).isEmpty(), "the displaced environment is deleted");
         assertTrue(appConfig.findConfigurationProfile(oldProfile).isEmpty(), "the displaced profile is deleted");
-        assertTrue(store("appconfig-deployments.json", new TypeReference<Map<String, Deployment>>() {})
-                .scan(key -> key.startsWith(oldApp + "::")).isEmpty(), "with its deployments");
-        assertTrue(store("appconfig-versions.json", new TypeReference<Map<String, HostedConfigurationVersion>>() {})
-                .scan(key -> key.startsWith(oldApp + "::")).isEmpty(), "and its hosted configuration versions");
+        assertTrue(deployments.scan(key -> key.startsWith(oldPrefix)).isEmpty(), "with its deployments");
+        assertTrue(versions.scan(key -> key.startsWith(oldPrefix)).isEmpty(), "and its hosted configuration versions");
     }
 
     /**

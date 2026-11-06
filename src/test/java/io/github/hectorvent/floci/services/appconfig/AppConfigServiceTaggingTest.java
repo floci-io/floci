@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appconfig;
 
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
@@ -33,7 +34,8 @@ class AppConfigServiceTaggingTest {
 
     @Test
     void anApplicationReadBeforeATagOrUntagKeepsItsPriorTags() {
-        AppConfigService service = new AppConfigService(new InMemoryStorageFactory(ACCOUNT), null);
+        AppConfigService service = new AppConfigService(
+                new InMemoryStorageFactory(ACCOUNT), new RegionResolver("us-east-1", ACCOUNT));
         Application created = service.createApplication(Map.of("Name", "orders"));
         service.tagApplication(created.getId(), Map.of("team", "payments"));
         Application beforeTag = service.getApplication(created.getId());
@@ -90,6 +92,7 @@ class AppConfigServiceTaggingTest {
 
     /** An AppConfig service whose application store is {@code store} and every other store in memory. */
     private static AppConfigService serviceWithApplicationStore(StorageBackend<String, Application> store) {
-        return new AppConfigService(new InMemoryStorageFactory(ACCOUNT).withStore(APPLICATIONS, store), null);
+        return new AppConfigService(new InMemoryStorageFactory(ACCOUNT).withStore(APPLICATIONS, store),
+                new RegionResolver("us-east-1", ACCOUNT));
     }
 }

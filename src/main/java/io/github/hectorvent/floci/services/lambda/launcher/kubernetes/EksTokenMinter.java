@@ -4,18 +4,18 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
+import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.GeneralSecurityException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -285,7 +285,8 @@ final class EksTokenMinter {
         }
 
         String canonicalQueryString = queryParams.entrySet().stream()
-                .map(e -> uriEncode(e.getKey()) + "=" + uriEncode(e.getValue()))
+                .map(e -> SigV4Canonicalization.uriEncode(e.getKey()) + "="
+                        + SigV4Canonicalization.uriEncode(e.getValue()))
                 .collect(Collectors.joining("&"));
 
         // Sorted by header name ("host" < "x-k8s-aws-id"), matching X-Amz-SignedHeaders above.
@@ -295,8 +296,14 @@ final class EksTokenMinter {
 
         String stringToSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + credentialScope + "\n"
                 + Digests.sha256Hex(canonicalRequest);
-        byte[] signingKey = deriveSigningKey(credentials.secretAccessKey(), dateStamp, region, "sts");
-        String signature = hexEncode(hmacSha256(signingKey, stringToSign));
+        String signature;
+        try {
+            byte[] signingKey = SigV4RequestValidator.deriveSigningKey(
+                    credentials.secretAccessKey(), dateStamp, region, "sts");
+            signature = HexFormat.of().formatHex(SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not compute HMAC-SHA256: " + e.getMessage(), e);
+        }
 
         String url = "https://" + host + "/?" + canonicalQueryString + "&X-Amz-Signature=" + signature;
         return TOKEN_PREFIX + Base64Url.encode(url);
@@ -425,46 +432,5 @@ final class EksTokenMinter {
             throw new IllegalStateException("AWS credentials profile '" + profile + "' not found in " + path);
         }
         return result;
-    }
-
-    /** RFC 3986 percent-encoding, byte-wise over UTF-8, per the SigV4 spec (not {@link java.net.URLEncoder}). */
-    private static String uriEncode(String input) {
-        StringBuilder result = new StringBuilder();
-        for (byte b : input.getBytes(StandardCharsets.UTF_8)) {
-            char c = (char) (b & 0xFF);
-            if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-                    || c == '-' || c == '_' || c == '.' || c == '~') {
-                result.append(c);
-            } else {
-                result.append('%').append(String.format("%02X", b & 0xFF));
-            }
-        }
-        return result.toString();
-    }
-
-    private static byte[] deriveSigningKey(String secretKey, String date, String region, String service) {
-        byte[] kSecret = ("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8);
-        byte[] kDate = hmacSha256(kSecret, date);
-        byte[] kRegion = hmacSha256(kDate, region);
-        byte[] kService = hmacSha256(kRegion, service);
-        return hmacSha256(kService, "aws4_request");
-    }
-
-    private static byte[] hmacSha256(byte[] key, String data) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(key, "HmacSHA256"));
-            return mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("Could not compute HMAC-SHA256: " + e.getMessage(), e);
-        }
-    }
-
-    private static String hexEncode(byte[] bytes) {
-        StringBuilder sb = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
     }
 }

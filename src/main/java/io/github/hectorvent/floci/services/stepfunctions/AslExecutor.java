@@ -580,8 +580,8 @@ public class AslExecutor {
     }
 
     /**
-     * Runs {@code body} on this worker thread under a CDI request scope whose account is
-     * the one encoded in the state machine ARN, so service integrations (Lambda, DynamoDB,
+     * Runs {@code body} on this worker thread under a CDI request scope whose account and region
+     * are encoded in the state machine ARN, so service integrations (Lambda, DynamoDB,
      * SQS, ECS, …) and the execution-store writes resolve to the execution's account rather
      * than the configured default. Without this, an execution started under account B would
      * have its integrations run against account A's resources.
@@ -610,14 +610,15 @@ public class AslExecutor {
      * run Parallel branches on their own worker threads under the execution's account: the request
      * scope (and thus {@link RequestContext}) is thread-bound, so a branch submitted to the executor
      * pool would otherwise run with no active scope and resolve its Task integrations against the
-     * default account instead of the execution's. Each branch thread therefore activates its own
+     * default account and region instead of the execution's. Each branch thread therefore activates its own
      * scope here, mirroring how {@link #executeAsync}/{@link #executeSync} wrap {@code doExecute}.
      * Delegates to {@link RequestScopes#callAsChecked}, which restores a previously active scope's
-     * account so a reused thread does not keep the execution's account.
+     * account and region so a reused thread does not keep the execution's scope.
      */
     private <T> T callUnderExecutionAccount(StateMachine sm, Callable<T> body) throws Exception {
         String accountId = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
-        return RequestScopes.callAsChecked(accountId == null || accountId.isBlank() ? null : accountId, body);
+        String region = AwsArnUtils.regionOrDefault(sm.getStateMachineArn(), null);
+        return RequestScopes.callAsChecked(accountId == null || accountId.isBlank() ? null : accountId, region, body);
     }
 
     private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,
@@ -982,6 +983,9 @@ public class AslExecutor {
         JsonNode credentials = null;
         boolean readCredentials = stateDef.has("Credentials")
                 && (iamEnforcementEnabled() || (mockedInvocation == null && nestedTask));
+        // Otherwise only the scheduled event reads them, and what it cannot read it leaves out.
+        boolean recordCredentialsOnly = stateDef.has("Credentials") && !readCredentials && !isActivity;
+        JsonNode recordedCredentials = null;
         if (jsonata) {
             effectiveInput = input;
             if (stateDef.has("Arguments")) {
@@ -992,17 +996,26 @@ public class AslExecutor {
             if (readCredentials) {
                 credentials = jsonataEvaluator.resolveTemplate(stateDef.get("Credentials"), "Credentials",
                         buildStatesVar(input, null, context), variables);
+            } else if (recordCredentialsOnly) {
+                recordedCredentials = credentialsOrNull(stateName,
+                        () -> jsonataEvaluator.resolveTemplate(stateDef.get("Credentials"), "Credentials",
+                                buildStatesVar(input, null, context), variables));
             }
         } else {
             effectiveInput = applyInputPath(stateDef, input, context);
             if (readCredentials) {
                 credentials = resolveParameters(stateDef.get("Credentials"), effectiveInput, context);
+            } else if (recordCredentialsOnly) {
+                JsonNode credentialsInput = effectiveInput;
+                recordedCredentials = credentialsOrNull(stateName,
+                        () -> resolveParameters(stateDef.get("Credentials"), credentialsInput, context));
             }
             if (stateDef.has("Parameters")) {
                 effectiveInput = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
             }
         }
-        String credentialsRoleArn = credentials == null ? null : credentials.path("RoleArn").asText(null);
+        JsonNode taskCredentials = credentials;
+        JsonNode scheduledCredentials = credentials != null ? credentials : recordedCredentials;
 
         // Registered after the input template resolved, so a template failure leaves no token behind.
         CompletableFuture<JsonNode> tokenFuture = needsToken ? sfnService.get().registerPendingToken(taskToken,
@@ -1014,7 +1027,7 @@ public class AslExecutor {
         // does not extend the Task's own TimeoutSeconds.
         long taskDeadlineNanos = taskDeadlineNanos(stateDef);
         try {
-            addTaskScheduledEvent(chain, profile, stateDef, effectiveInput, sm);
+            addTaskScheduledEvent(chain, profile, stateDef, effectiveInput, sm, scheduledCredentials);
             addTaskStartedEvent(chain, profile);
             try {
                 String taskAccount = null;
@@ -1032,7 +1045,7 @@ public class AslExecutor {
                                 effectiveResource, resourceInput, sm, resourceToken,
                                 context.path("Execution").path("Id").asText(null),
                                 executionDeadlineNanos, taskDeadlineNanos,
-                                jsonata ? null : stateDef.path("Parameters"), credentialsRoleArn,
+                                jsonata ? null : stateDef.path("Parameters"), taskCredentials,
                                 jobResponse -> RequestScopes.runAs(
                                         AwsArnUtils.parse(sm.getStateMachineArn()).accountId(),
                                         () -> addTaskSubmittedEvent(chain, profile, jobResponse))));
@@ -1089,6 +1102,17 @@ public class AslExecutor {
             JsonNode output = mergeResult(stateDef, input, taskResult);
             output = applyOutputPath(stateDef, output, context);
             return new StateResult(output, stateDef.path("Next").asText(null));
+        }
+    }
+
+    /** A task's {@code Credentials} when only the history reads them, so a failure is not the task's. */
+    private JsonNode credentialsOrNull(String stateName, Callable<JsonNode> resolve) throws Exception {
+        try {
+            return resolve.call();
+        } catch (FailStateException e) {
+            LOG.debugv("Task state {0}: Credentials did not resolve, so its history omits them: {1}",
+                    stateName, e.getMessage());
+            return null;
         }
     }
 
@@ -1233,6 +1257,19 @@ public class AslExecutor {
         return colon >= 0 ? fn.substring(colon + 1) : null;
     }
 
+    /** Integrations {@link TaskPermissions} does not map stay unchecked, Lambda and API Gateway check their own. */
+    private void authorizeTask(StatesIntegration integration, JsonNode input, StateMachine sm, JsonNode credentials) {
+        Optional<TaskPermissions> required = TaskPermissions.of(integration, input, sm);
+        if (required.isEmpty()) {
+            return;
+        }
+        if (credentials != null) {
+            NestedTaskCredentials.validateShape(credentials);
+        }
+        lambdaTaskAuthorizer.authorize(sm, credentials == null ? null : credentials.path("RoleArn").asText(),
+                required.get().errorPrefix(), required.get().permissions());
+    }
+
     private boolean iamEnforcementEnabled() {
         return config != null && config.services() != null && config.services().iam() != null
                 && config.services().iam().enforcementEnabled();
@@ -1293,15 +1330,16 @@ public class AslExecutor {
     }
 
     /**
-     * @param credentialsRoleArn the role the task's {@code Credentials} name, read only under IAM
-     *                           enforcement, or null when the task runs as the execution role
+     * @param credentials the task's resolved {@code Credentials}, read only under IAM enforcement or
+     *                    for a nested execution, or null when the task runs as the execution role
      * @param jobSubmitted called with the response of the call that started a {@code .sync} job,
      *                     once it has returned and before the job is waited on
      */
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
                                     String executionArn, long executionDeadlineNanos, long taskDeadlineNanos,
-                                    JsonNode rawParameters, String credentialsRoleArn,
+                                    JsonNode rawParameters, JsonNode credentials,
                                     Consumer<JsonNode> jobSubmitted) throws Exception {
+        String credentialsRoleArn = credentials == null ? null : credentials.path("RoleArn").asText(null);
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         String functionRef = null;
@@ -1413,6 +1451,10 @@ public class AslExecutor {
 
         if (integration == null) {
             return invokeNonIntegrationResource(resource, input, taskToken);
+        }
+
+        if (iamEnforcementEnabled()) {
+            authorizeTask(integration, input, sm, credentials);
         }
 
         if (integration.is("apigateway", "invoke") && integration.suffix().isEmpty()) {
@@ -6125,7 +6167,7 @@ public class AslExecutor {
     }
 
     private void addTaskScheduledEvent(HistoryChain chain, TaskEventProfile profile, JsonNode stateDef,
-                                       JsonNode effectiveInput, StateMachine sm) {
+                                       JsonNode effectiveInput, StateMachine sm, JsonNode credentials) {
         LinkedHashMap<String, Object> details = new LinkedHashMap<>();
         if (profile.resourceType() != null) {
             details.put("resourceType", profile.resourceType());
@@ -6143,6 +6185,10 @@ public class AslExecutor {
         }
         if (stateDef.path("HeartbeatSeconds").isNumber()) {
             details.put("heartbeatInSeconds", stateDef.path("HeartbeatSeconds").asLong());
+        }
+        // ActivityScheduledEventDetails has no taskCredentials member.
+        if (credentials != null && credentials.path("RoleArn").isTextual() && !"Activity".equals(profile.prefix())) {
+            details.put("taskCredentials", Map.of("roleArn", credentials.path("RoleArn").asText()));
         }
         chain.publish(profile.prefix() + "Scheduled", details);
     }
