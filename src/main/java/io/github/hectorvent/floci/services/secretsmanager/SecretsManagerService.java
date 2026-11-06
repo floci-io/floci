@@ -1705,12 +1705,27 @@ public class SecretsManagerService implements ResourceProvider {
             }
 
             synchronized (lockFor(secretArn)) {
+                // Only this rotation's own version, or the current one a finished rotation left
+                // AWSPENDING on: a version another rotation or client staged keeps its stage.
                 Secret refreshed = resolveSecret(secretArn, region);
-                SecretVersion pending = findVersionByStage(refreshed, "AWSPENDING");
-                if (pending != null) {
-                    List<String> stages = new ArrayList<>(pending.getVersionStages());
-                    stages.remove("AWSPENDING");
-                    pending.setVersionStages(stages);
+                List<SecretVersion> retirable = new ArrayList<>();
+                if (refreshed.getVersions() != null && refreshed.getVersions().containsKey(clientRequestToken)) {
+                    retirable.add(refreshed.getVersions().get(clientRequestToken));
+                }
+                SecretVersion current = findVersionByStage(refreshed, AWSCURRENT);
+                if (current != null) {
+                    retirable.add(current);
+                }
+                boolean retired = false;
+                for (SecretVersion version : retirable) {
+                    if (version.getVersionStages() != null && version.getVersionStages().contains("AWSPENDING")) {
+                        List<String> stages = new ArrayList<>(version.getVersionStages());
+                        stages.remove("AWSPENDING");
+                        version.setVersionStages(stages);
+                        retired = true;
+                    }
+                }
+                if (retired) {
                     persist(refreshed, region);
                 }
             }
@@ -1762,13 +1777,13 @@ public class SecretsManagerService implements ResourceProvider {
         }
     }
 
-    /** Removes the version {@link #stagePendingVersion} added, unless something has written to it since. */
+    /** Removes the version {@link #stagePendingVersion} added, unless it has since gained a value or another stage. */
     private void removeUntouchedPlaceholder(String secretArn, String versionId, String region) {
         synchronized (lockFor(secretArn)) {
             Secret secret = resolveSecret(secretArn, region);
             SecretVersion version = secret.getVersions() == null ? null : secret.getVersions().get(versionId);
             if (version == null || version.getSecretString() != null || version.getSecretBinary() != null
-                    || !List.of("AWSPENDING").equals(version.getVersionStages())) {
+                    || version.getVersionStages().stream().anyMatch(stage -> !"AWSPENDING".equals(stage))) {
                 return;
             }
             secret.getVersions().remove(versionId);
