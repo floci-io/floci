@@ -29,6 +29,61 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class Ec2MetadataProxyTest {
 
     @Test
+    void everyProxyCommandLeavesTheRootCgroupBeforeItStartsAnything() {
+        // A process left in the root of a systemd guest's private cgroup namespace keeps cgroup v2
+        // from enabling controllers there, and kubelet (cgroupfs driver) cannot create kubepods.
+        String prelude = Ec2MetadataProxy.LEAVE_ROOT_CGROUP;
+        assertTrue(prelude.startsWith("if [ \"$(cat /proc/self/cgroup 2>/dev/null)\" = 0::/ ]"
+                + " && [ -w /sys/fs/cgroup/cgroup.procs ]; then"));
+        assertTrue(prelude.contains("mkdir -p /sys/fs/cgroup/floci && echo $$ >/sys/fs/cgroup/floci/cgroup.procs;"));
+        // Best effort: a read-only cgroupfs must not abort a script running under set -e.
+        assertTrue(prelude.contains("2>/dev/null || true;"));
+        for (String[] command : new String[][]{
+                Ec2MetadataProxy.installCommand(),
+                Ec2MetadataProxy.startCommand("10.0.0.1", 9169),
+                Ec2MetadataProxy.podIdentityStartCommand("10.0.0.1", 4566)}) {
+            assertTrue(command[2].startsWith("set -eu\n" + prelude + "\n"), command[2]);
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @CsvSource(delimiter = '|', value = {
+            "private v2 namespace root     | 0::/                            | procs | true",
+            "host namespace (full path)    | 0::/system.slice/docker-1.scope | procs | false",
+            "cgroup v1 hierarchy line      | 4:pids:/                        | procs | false",
+            "cgroupfs not writable         | 0::/                            | none  | false",
+            "mkdir fails under set -e      | 0::/                            | block | false"})
+    void leaveRootCgroupMovesTheShellOnlyFromAWritableV2NamespaceRoot(String scenario, String selfCgroup,
+            String layout, boolean moved, @TempDir Path directory) throws Exception {
+        // Runs the real prelude with /proc/self/cgroup and /sys/fs/cgroup pointed at fakes.
+        Path proc = directory.resolve("self-cgroup");
+        Path root = Files.createDirectories(directory.resolve("cgroup"));
+        Files.writeString(proc, selfCgroup + "\n");
+        if (!layout.equals("none")) {
+            Files.writeString(root.resolve("cgroup.procs"), "");
+        }
+        if (layout.equals("block")) {
+            Files.writeString(root.resolve("floci"), "");  // a file, so mkdir -p fails even as root
+        }
+        String prelude = Ec2MetadataProxy.LEAVE_ROOT_CGROUP;
+        String faked = prelude.replace("/proc/self/cgroup", proc.toString())
+                .replace("/sys/fs/cgroup", root.toString());
+        assertTrue(prelude.contains("/proc/self/cgroup") && !faked.contains("/sys/fs/cgroup"), faked);
+
+        int exit = HelperShellFixture.run(new String[]{"sh", "-c", "set -eu\n" + faked + "\necho $$"},
+                directory, Map.of());
+
+        String output = HelperShellFixture.output(directory);
+        assertEquals(0, exit, scenario + ": " + output);
+        Path procs = root.resolve("floci/cgroup.procs");
+        if (moved) {
+            assertEquals(output, Files.readString(procs), "shell pid not written to the leaf cgroup");
+        } else {
+            assertTrue(Files.notExists(procs), scenario + ": shell moved out of " + selfCgroup);
+        }
+    }
+
+    @Test
     void installCommandContainsSupportedPackageManagers() {
         String[] command = Ec2MetadataProxy.installCommand();
         assertEquals(3, command.length);
