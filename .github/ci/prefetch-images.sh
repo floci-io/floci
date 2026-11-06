@@ -72,10 +72,19 @@ starts ContainerHostNetworkDockerIntegrationTest ContainerBindDirectoryDockerInt
        BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest \
     && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
 # Bind-directory ownership uses the default OpenSearch image, whose cold pull can outlast a test.
-OPENSEARCH_VERSIONS="src/main/java/io/github/hectorvent/floci/services/opensearch/OpenSearchVersions.java"
-OPENSEARCH_DEFAULT="$(grep -oE 'DEFAULT_VERSION = "[^"]+"' "$OPENSEARCH_VERSIONS" | cut -d '"' -f 2)"
-OPENSEARCH_IMAGE="$(grep -F "VERSION_TO_IMAGE.put(\"$OPENSEARCH_DEFAULT\"" "$OPENSEARCH_VERSIONS" \
-    | grep -oE 'opensearchproject/opensearch:[^"]+')"
+OPENSEARCH_VERSIONS="$(find src/main/java -name OpenSearchVersions.java -print -quit)"
+opensearch_default_image() {
+    file="${OPENSEARCH_VERSIONS:-/dev/null}"
+    default_version="$(grep -oE 'DEFAULT_VERSION = "[^"]+"' "$file" | cut -d '"' -f 2)"
+    image=""
+    if [ -n "$default_version" ]; then
+        image="$(grep -F "VERSION_TO_IMAGE.put(\"$default_version\"" "$file" \
+            | grep -oE 'opensearchproject/opensearch:[^"]+')"
+    fi
+    [ -n "$image" ] || echo "$(date -u +%H:%M:%S) prefetch skipped: OpenSearch default image not readable" >> "$PREFETCH_LOG"
+    echo "$image"
+}
+OPENSEARCH_IMAGE="$(opensearch_default_image)"
 starts ContainerBindDirectoryDockerIntegrationTest && [ -n "$OPENSEARCH_IMAGE" ] && pull "$OPENSEARCH_IMAGE"
 # EcsImagePullDockerIntegrationTest runs its own registry to move a tag in; the /ecr/ line below
 # covers the shards that run the ECR tests.
