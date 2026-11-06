@@ -761,6 +761,9 @@ key in. A role named as the policy source is not a session, so there is no sessi
 `aws:userid` and no documented `aws:PrincipalType` for it; those keys stay absent and a statement
 matching on one does not match.
 
+`aws:PrincipalTag/<key>` must be supplied in `ContextEntries`, even when the policy source is a
+tagged user or role. The simulator does not populate stored identity tags.
+
 `PolicySourceArn` on `SimulatePrincipalPolicy` and `GetContextKeysForPrincipalPolicy` resolves an
 IAM user or role only, not a group. It is held to the 20 characters `arnType` declares before it
 is resolved, so a value too short to be any ARN is a `ValidationError` with status 400 naming the
@@ -2709,6 +2712,13 @@ floci populates:
   `assumed-role` session ARN, as AWS reports it ("For IAM roles, the request context returns the
   ARN of the role"); a condition naming the session ARN does not match. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
+- `aws:PrincipalTag/<key>`: the stored tags of the IAM user making the request, including a
+  `GetSessionToken` session, or of the role an assumed-role session represents. Tags are read
+  from that identity's account and copied for the request; later requests see tag updates and
+  removals. Identity policies, resource policies and `AssumeRole` trust policies see the same
+  caller tags. A role session uses its role's tags, not those of the user that assumed it.
+  Untagged identities, account-root principals and federated users have no stored principal tags.
+  STS session tags, their overrides and transitive inheritance are not implemented.
 - `aws:PrincipalType` and `aws:userid`: resolved from the same lookup as `aws:PrincipalArn`, so
   they always describe the same credential. The values follow the user guide's principal key
   values list: `Account` with the account id for the account-root principal and for a session
