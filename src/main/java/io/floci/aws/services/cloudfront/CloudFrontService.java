@@ -26,6 +26,7 @@ import io.floci.aws.services.cloudfront.model.FieldLevelEncryptionConfig;
 import io.floci.aws.services.cloudfront.model.FieldLevelEncryptionProfile;
 import io.floci.aws.services.cloudfront.model.Invalidation;
 import io.floci.aws.services.cloudfront.model.KeyGroup;
+import io.floci.aws.services.cloudfront.model.KeyValueStore;
 import io.floci.aws.services.cloudfront.model.MonitoringSubscription;
 import io.floci.aws.services.cloudfront.model.Origin;
 import io.floci.aws.services.cloudfront.model.OriginAccessControl;
@@ -141,6 +142,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final RegionResolver regionResolver;
     private final IamService iamService;
     private final CertificateReferenceResolver certificates;
+    private final CloudFrontKeyValueStoreService keyValueStores;
     private final String configuredDomainSuffix;
     /**
      * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
@@ -155,14 +157,17 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final Pattern lambdaOriginHost;
 
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
-        this(factory, config, regionResolver, null, null);
+        this(factory, config, regionResolver, null, null,
+                new CloudFrontKeyValueStoreService(factory, config, regionResolver));
     }
 
     @Inject
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver,
-                             IamService iamService, CertificateReferenceResolver certificates) {
+                             IamService iamService, CertificateReferenceResolver certificates,
+                             CloudFrontKeyValueStoreService keyValueStores) {
         this.iamService = iamService;
         this.certificates = certificates;
+        this.keyValueStores = keyValueStores;
         this.distStore = factory.create("cloudfront", "cloudfront-distributions.json",
                 new TypeReference<Map<String, Distribution>>() {});
         this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
@@ -1666,6 +1671,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public synchronized CloudFrontFunction createFunction(CloudFrontFunction fn) {
         validateFunctionRuntime(fn.getRuntime());
+        validateKeyValueStoreAssociations(fn);
         // The bare name holds the DEVELOPMENT stage, and the LIVE stage of releases before
         // stage-aware keys.
         if (functionStore.get(fn.getName()).isPresent()
@@ -1698,6 +1704,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     public synchronized CloudFrontFunction updateFunction(String name, String ifMatch,
                                                           CloudFrontFunction updated) {
         validateFunctionRuntime(updated.getRuntime());
+        validateKeyValueStoreAssociations(updated);
         CloudFrontFunction existing = describeFunction(name, null);
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
@@ -1777,6 +1784,60 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         }
     }
 
+    private void validateKeyValueStoreAssociations(CloudFrontFunction fn) {
+        List<String> arns = fn.getKeyValueStoreArns();
+        if (arns == null || arns.isEmpty()) {
+            return;
+        }
+        if (arns.size() > 1) {
+            throw new AwsException("InvalidArgument",
+                    "A function can be associated with at most one key value store.", 400);
+        }
+        if ("cloudfront-js-1.0".equals(fn.getRuntime())) {
+            throw new AwsException("InvalidArgument",
+                    "A key value store can only be associated with a cloudfront-js-2.0 function.", 400);
+        }
+        for (String arn : arns) {
+            if (keyValueStores.findByArn(arn).isEmpty()) {
+                throw new AwsException("EntityNotFound", "The specified KeyValueStore does not exist.", 404);
+            }
+        }
+    }
+
+    // ── Key value stores ──────────────────────────────────────────────────────
+
+    public KeyValueStore createKeyValueStore(String name, String comment, boolean hasImportSource) {
+        KeyValueStore created = keyValueStores.create(name, comment);
+        if (hasImportSource) {
+            keyValueStores.warnImportSourceIgnored(name);
+        }
+        return created;
+    }
+
+    public KeyValueStore describeKeyValueStore(String name) {
+        return keyValueStores.describe(name);
+    }
+
+    public List<KeyValueStore> listKeyValueStores(String marker, int maxItems) {
+        return keyValueStores.list(marker, maxItems);
+    }
+
+    public KeyValueStore updateKeyValueStore(String name, String ifMatch, String comment) {
+        return keyValueStores.update(name, ifMatch, comment);
+    }
+
+    public synchronized void deleteKeyValueStore(String name, String ifMatch) {
+        KeyValueStore existing = keyValueStores.describe(name);
+        boolean inUse = functionStore.scan(key -> true).stream()
+                .anyMatch(fn -> fn.getKeyValueStoreArns() != null
+                        && fn.getKeyValueStoreArns().contains(existing.getArn()));
+        if (inUse) {
+            throw new AwsException("CannotDeleteEntityWhileInUse",
+                    "Cannot delete KeyValueStore " + name + " because it is associated with a function", 409);
+        }
+        keyValueStores.delete(name, ifMatch);
+    }
+
     private static AwsException invalidFunctionStage(String stage) {
         return new AwsException("InvalidArgument",
                 "The parameter Stage must be DEVELOPMENT or LIVE: " + stage, 400);
@@ -1790,6 +1851,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         copy.setFunctionCode(source.getFunctionCode());
         copy.setRuntime(source.getRuntime());
         copy.setComment(source.getComment());
+        copy.setKeyValueStoreArns(source.getKeyValueStoreArns() == null
+                ? new ArrayList<>() : new ArrayList<>(source.getKeyValueStoreArns()));
         copy.setEtag(source.getEtag());
         copy.setCreatedTime(source.getCreatedTime());
         copy.setLastModifiedTime(source.getLastModifiedTime());
