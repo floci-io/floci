@@ -592,6 +592,9 @@
     "ArchiveName",
     "SourceArn"
   ],
+  "AWS::Events::Connection": [
+    "Name"
+  ],
   "AWS::Events::EventBus": [
     "Name"
   ],
