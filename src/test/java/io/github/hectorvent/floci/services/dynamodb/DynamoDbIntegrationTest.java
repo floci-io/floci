@@ -1147,7 +1147,8 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
-            .body("message", equalTo("The requestItems parameter is required for BatchWriteItem"));
+            .body("message", equalTo("1 validation error detected: Value at 'RequestItems' failed to satisfy "
+                    + "constraint: Member must have length greater than or equal to 1"));
     }
 
     @Test
@@ -5870,8 +5871,12 @@ given()
             PutItem    | {"TableName": "Missing", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "attribute_exists(pk)", "ExpressionAttributeNames": {}, "ExpressionAttributeValues": {}} | 1 validation error detected: ExpressionAttributeNames must not be empty
             DeleteItem | {"TableName": "Missing", "Key": {"pk": {"S": "a"}}, "ExpressionAttributeValues": {":v": {"S": "x"}}} | 1 validation error detected: ExpressionAttributeValues can only be specified when using expressions
             DeleteItem | {"TableName": "Missing", "Key": {"pk": {"S": "a"}}, "ConditionExpression": ""} | 1 validation error detected: Invalid ConditionExpression: The expression can not be empty;
+            BatchGetItem   | {"RequestItems": {"bad!name": {"Keys": [{"pk": {"S": "a"}}]}}, "ReturnConsumedCapacity": "BOGUS"} | 2 validation errors detected: Value '{"bad!name":{"Keys":[{"pk":{"S":"a"}}]}}' at 'requestItems' failed to satisfy constraint: Map keys must satisfy constraint: [Member must have length less than or equal to 255, Member must have length greater than or equal to 3, Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+]; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            BatchGetItem   | {"RequestItems": {"Missing": {"Keys": []}}} | 1 validation error detected: Value at 'RequestItems.Missing.member.Keys' failed to satisfy constraint: Member must have length greater than or equal to 1
+            BatchWriteItem | {"RequestItems": {"Missing": [{"PutRequest": {"Item": {"pk": {"S": "x"}}}}]}, "ReturnConsumedCapacity": "BOGUS", "ReturnItemCollectionMetrics": "BOGUS2"} | 2 validation errors detected: Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value 'BOGUS2' at 'returnItemCollectionMetrics' failed to satisfy constraint: Member must satisfy enum value set: [SIZE, NONE]
+            BatchWriteItem | {"RequestItems": {"bad!name": [{"PutRequest": {"Item": {"pk": {"S": "x"}}}}]}} | 1 validation error detected: Value '{"bad!name":[{"PutRequest":{"Item":{"pk":{"S":"x"}}}}]}' at 'requestItems' failed to satisfy constraint: Map keys must satisfy constraint: [Member must have length less than or equal to 255, Member must have length greater than or equal to 3, Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+]
             """)
-    void putAndDeleteItemReportTheirNewerChecksInsideTheEnvelope(String operation, String body, String message) {
+    void itemAndBatchCallsReportTheirNewerChecksInsideTheEnvelope(String operation, String body, String message) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810." + operation)
             .contentType(DYNAMODB_CONTENT_TYPE)

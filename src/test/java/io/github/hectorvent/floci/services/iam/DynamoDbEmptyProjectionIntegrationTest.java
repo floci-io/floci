@@ -248,7 +248,10 @@ class DynamoDbEmptyProjectionIntegrationTest {
             JsonNode error = response(send(root, action, protocol, request), protocol, 400);
             assertTrue(error.path("__type").asText().contains("ValidationException"), error.toString());
             assertTrue(error.path("message").asText().contains("greater than or equal to 1"), error.toString());
-            assertTrue(error.path("message").asText().contains("Value '[]' at 'attributesToGet'"), error.toString());
+            String member = "BatchGetItem".equals(action)
+                    ? "Value at 'RequestItems." + table + ".member.AttributesToGet'"
+                    : "Value '[]' at 'attributesToGet'";
+            assertTrue(error.path("message").asText().contains(member), error.toString());
         } finally {
             response(send(root, "DeleteTable", "json", JSON.createObjectNode().put("TableName", table)), "json", 200);
         }

@@ -1668,11 +1668,11 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleBatchWriteItem(JsonNode request, String region) {
         JsonNode requestItems = request.get("RequestItems");
-        if (requestItems == null || requestItems.isNull() || requestItems.isMissingNode()
-                || !requestItems.fields().hasNext()) {
+        if (requestItems == null || requestItems.isNull() || requestItems.isMissingNode()) {
             throw new AwsException("ValidationException",
                     "The requestItems parameter is required for BatchWriteItem", 400);
         }
+        requireValidBatchMembers(request, region, true);
         Map<String, List<JsonNode>> items = new HashMap<>();
         Iterator<Map.Entry<String, JsonNode>> tables = requestItems.fields();
         while (tables.hasNext()) {
@@ -1686,25 +1686,6 @@ public class NativeDynamoDbJsonHandler {
             items.put(entry.getKey(), writes);
         }
 
-        // Per-table check: max 25 write requests
-        for (Map.Entry<String, List<JsonNode>> entry : items.entrySet()) {
-            if (entry.getValue().size() > 25) {
-                // Build a representation of the requestItems
-                StringBuilder sb = new StringBuilder("{");
-                sb.append(entry.getKey()).append("=[");
-                List<String> reprs = new ArrayList<>();
-                for (JsonNode w : entry.getValue()) {
-                    reprs.add(w.toString());
-                }
-                sb.append(String.join(", ", reprs)).append("]}");
-                throw SmithyValidationErrors.validationException(
-                        "Value '" + sb + "' at 'requestItems' failed to satisfy constraint: "
-                        + "Map value must satisfy constraint: [Member must have length less than or equal to 25, "
-                        + "Member must have length greater than or equal to 1]");
-            }
-        }
-
-        requireValidReturnConsumedCapacity(request);
         // BatchWriteItem still reads a value the way a PartiQL parameter is read.
         for (List<JsonNode> writes : items.values()) {
             for (JsonNode writeReq : writes) {
@@ -1776,13 +1757,7 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "The requestItems parameter is required for BatchGetItem", 400);
         }
-        // BatchGetItem answers an empty map from the validation framework, BatchWriteItem
-        // still answers with its own sentence.
-        if (!requestItems.fields().hasNext()) {
-            throw SmithyValidationErrors.validationException(
-                    "Value at 'RequestItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1");
-        }
+        requireValidBatchMembers(request, region, false);
         Map<String, JsonNode> items = new HashMap<>();
         Iterator<Map.Entry<String, JsonNode>> tables = requestItems.fields();
         while (tables.hasNext()) {
@@ -1795,7 +1770,6 @@ public class NativeDynamoDbJsonHandler {
         boolean usesAttributesToGet = false;
         boolean usesProjectionExpression = false;
         for (JsonNode tableRequest : items.values()) {
-            DynamoDbAccessPathValidator.validateAttributesToGet(tableRequest.get("AttributesToGet"));
             usesAttributesToGet |= tableRequest.hasNonNull("AttributesToGet");
             usesProjectionExpression |= tableRequest.hasNonNull("ProjectionExpression");
         }
@@ -1805,20 +1779,12 @@ public class NativeDynamoDbJsonHandler {
                     + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
         }
 
-        // Per-table check: max 100 keys
         for (Map.Entry<String, JsonNode> entry : items.entrySet()) {
             JsonNode projection = entry.getValue().path("ProjectionExpression");
             if (projection.isTextual()) {
                 DynamoDbExpressionSize.checkRead(projection.asText(), "ProjectionExpression");
                 ProjectionEvaluator.validateExpression(projection.asText(),
                         entry.getValue().get("ExpressionAttributeNames"));
-            }
-            JsonNode keysNode = entry.getValue().has("Keys") ? entry.getValue().get("Keys") : null;
-            if (keysNode != null && keysNode.size() > 100) {
-                throw SmithyValidationErrors.validationException(
-                        "Value at 'RequestItems." + entry.getKey()
-                        + ".member.Keys' failed to satisfy constraint: "
-                        + "Member must have length less than or equal to 100");
             }
         }
 
@@ -3065,6 +3031,18 @@ public class NativeDynamoDbJsonHandler {
         if (error != null) {
             validationErrors.add(error);
         }
+    }
+
+    private static void requireValidBatchMembers(JsonNode request, String region, boolean write) {
+        JsonNode requestItems = request.get("RequestItems");
+        DynamoDbBatchRequestItems.requireValidLengths(requestItems, write);
+        List<String> validationErrors = new ArrayList<>();
+        addIfPresent(validationErrors, DynamoDbBatchRequestItems.tableNamesViolation(requestItems, region, write));
+        addReturnConsumedCapacityError(request, validationErrors);
+        if (write) {
+            addIfPresent(validationErrors, returnItemCollectionMetricsError(request));
+        }
+        throwValidationErrors(validationErrors);
     }
 
     private static void requireValidReturnConsumedCapacity(JsonNode request) {
