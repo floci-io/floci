@@ -10,7 +10,6 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class AccountResolver {
 
-    private static final Pattern AKID_PATTERN = Pattern.compile("Credential=([^/]+)/");
     private static final Pattern S3_SIGV2_AKID_PATTERN = Pattern.compile("AWS ([^\\s:]+):[^\\s:]+");
     public static final String SIGV4_SCHEME = "AWS4-HMAC-SHA256";
     private static final String SIGV4_PREFIX = SIGV4_SCHEME + " ";
@@ -66,12 +65,18 @@ public class AccountResolver {
         if (!trimmed.startsWith(SIGV4_PREFIX) && !trimmed.startsWith(SIGV4A_PREFIX)) {
             return null;
         }
-        String akid = SigV4CredentialScope.segment(trimmed, SigV4CredentialScope.Segment.ACCESS_KEY);
-        if (akid != null) {
-            return akid;
+        for (int credential = trimmed.indexOf(SigV4CredentialScope.CREDENTIAL); credential >= 0;
+                credential = trimmed.indexOf(SigV4CredentialScope.CREDENTIAL, credential + 1)) {
+            int start = credential + SigV4CredentialScope.CREDENTIAL.length();
+            int slash = trimmed.indexOf('/', start);
+            if (slash < 0) {
+                return null;
+            }
+            if (start < slash) {
+                return trimmed.substring(start, slash);
+            }
         }
-        Matcher m = AKID_PATTERN.matcher(trimmed);
-        return m.find() ? m.group(1) : null;
+        return null;
     }
 
     /** Extracts S3 routing metadata without adding SigV2 authentication support. */

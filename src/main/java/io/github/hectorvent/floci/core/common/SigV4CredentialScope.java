@@ -17,9 +17,8 @@ public final class SigV4CredentialScope {
     // SigV4A drops the region segment: Credential=<key>/<date>/<service>/aws4_request
     private static final Pattern SIGV4A_SERVICE_PATTERN =
             Pattern.compile("Credential=[^,\\s]+/\\d{8}/([^/,\\s]+)/aws4_request");
-    private static final Pattern ACCESS_KEY_PATTERN = Pattern.compile("Credential=([^/\\s,]+)/");
 
-    private static final String CREDENTIAL = "Credential=";
+    static final String CREDENTIAL = "Credential=";
     private static final String TERMINATOR = "aws4_request";
 
     private SigV4CredentialScope() {
@@ -27,7 +26,6 @@ public final class SigV4CredentialScope {
 
     /** A credential scope segment that {@link #segment} reads. */
     enum Segment {
-        ACCESS_KEY,
         /** The region, or the service in the SigV4A form, which has no region. */
         THIRD,
         SERVICE
@@ -74,10 +72,14 @@ public final class SigV4CredentialScope {
             return null;
         }
         return switch (segment) {
-            case ACCESS_KEY -> header.substring(start, slash1);
             case THIRD -> header.substring(slash2 + 1, slash3);
             case SERVICE -> slash4 < 0 ? header.substring(slash2 + 1, slash3) : header.substring(slash3 + 1, slash4);
         };
+    }
+
+    /** Every credential scope pattern starts with {@link #CREDENTIAL}, so a header without it matches none. */
+    static boolean hasCredential(String header) {
+        return header.contains(CREDENTIAL);
     }
 
     private static boolean isRegexWhitespace(char c) {
@@ -105,6 +107,9 @@ public final class SigV4CredentialScope {
         if (service != null) {
             return Optional.of(service.toLowerCase(Locale.ROOT));
         }
+        if (!hasCredential(authorization)) {
+            return Optional.empty();
+        }
         Matcher matcher = SERVICE_PATTERN.matcher(authorization);
         if (matcher.find()) {
             return Optional.of(matcher.group(1).toLowerCase(Locale.ROOT));
@@ -122,12 +127,22 @@ public final class SigV4CredentialScope {
         if (authorization == null) {
             return Optional.empty();
         }
-        String accessKeyId = segment(authorization, Segment.ACCESS_KEY);
-        if (accessKeyId != null) {
-            return Optional.of(accessKeyId);
+        for (int credential = authorization.indexOf(CREDENTIAL); credential >= 0;
+                credential = authorization.indexOf(CREDENTIAL, credential + 1)) {
+            int start = credential + CREDENTIAL.length();
+            int end = start;
+            while (end < authorization.length()) {
+                char c = authorization.charAt(end);
+                if (c == '/' || c == ',' || isRegexWhitespace(c)) {
+                    break;
+                }
+                end++;
+            }
+            if (start < end && end < authorization.length() && authorization.charAt(end) == '/') {
+                return Optional.of(authorization.substring(start, end));
+            }
         }
-        Matcher matcher = ACCESS_KEY_PATTERN.matcher(authorization);
-        return matcher.find() ? Optional.of(matcher.group(1)) : Optional.empty();
+        return Optional.empty();
     }
 
     public static Optional<String> serviceNameFromCredential(String credential) {

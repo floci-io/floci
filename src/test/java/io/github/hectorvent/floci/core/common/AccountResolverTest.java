@@ -189,4 +189,15 @@ class AccountResolverTest {
         assertFalse(AccountResolver.isAccountId("00000000000\n"));
         assertFalse(AccountResolver.isAccountId("٠٠٠٠٠٠٠٠٠٠٠٠"));
     }
+
+    @Test
+    void extractAccessKeyIdSkipsAFirstCredentialFollowedDirectlyBySlash() {
+        assertEquals("AKID", resolver.extractAccessKeyId(
+                "AWS4-HMAC-SHA256 Credential=/x Credential=AKID/20260101/us-east-1/s3/aws4_request"));
+    }
+
+    @Test
+    void extractAccessKeyIdWithoutASlashIsNull() {
+        assertNull(resolver.extractAccessKeyId("AWS4-HMAC-SHA256 Credential=AKID"));
+    }
 }

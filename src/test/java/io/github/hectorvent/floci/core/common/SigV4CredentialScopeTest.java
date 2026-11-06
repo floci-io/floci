@@ -128,4 +128,31 @@ class SigV4CredentialScopeTest {
         assertEquals(Optional.of("s3"), SigV4CredentialScope.serviceName(header));
         assertEquals(Optional.of("AKID"), SigV4CredentialScope.accessKeyId(header));
     }
+
+    @Test
+    void accessKeyIdSkipsAFirstCredentialWithAnEmptyKey() {
+        assertEquals(Optional.of("AKID"), SigV4CredentialScope.accessKeyId(
+                "AWS4-HMAC-SHA256 Credential=/x, Credential=AKID/20260101/us-east-1/s3/aws4_request"));
+    }
+
+    @Test
+    void accessKeyIdSkipsAFirstCredentialWhoseKeyEndsAtASpace() {
+        assertEquals(Optional.of("AKID"), SigV4CredentialScope.accessKeyId(
+                "AWS4-HMAC-SHA256 Credential=a b, Credential=AKID/20260101/us-east-1/s3/aws4_request"));
+    }
+
+    @Test
+    void accessKeyIdOfACredentialWithoutASlashIsEmpty() {
+        assertTrue(SigV4CredentialScope.accessKeyId("Credential=AKID").isEmpty());
+    }
+
+    @Test
+    void headersWithoutACredentialGiveNothing() {
+        String bearer = "Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxIn0.c2ln";
+        String sigV2 = "AWS AKIAIOSFODNN7EXAMPLE:frJIUN8DYpKDtOLCwo//yllqDzg=";
+        assertTrue(SigV4CredentialScope.serviceName(bearer).isEmpty());
+        assertTrue(SigV4CredentialScope.accessKeyId(bearer).isEmpty());
+        assertTrue(SigV4CredentialScope.serviceName(sigV2).isEmpty());
+        assertTrue(SigV4CredentialScope.accessKeyId(sigV2).isEmpty());
+    }
 }
