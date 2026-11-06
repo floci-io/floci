@@ -944,6 +944,7 @@ public class S3Service implements Resettable, ResourceProvider {
         object.setCacheControl(effectiveOptions.getCacheControl());
         object.setServerSideEncryption(normalizedServerSideEncryption);
         object.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption)
+            || "aws:kms:dsse".equals(normalizedServerSideEncryption)
                 ? effectiveOptions.getSseKmsKeyId()
                 : null);
         if (sseCustomerKey != null) {
