@@ -450,6 +450,32 @@ approximation to indicate that initial backfill is in progress); it becomes `act
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
 
+### S3 event integrations
+
+`CreateIntegration` also takes an Amazon S3 bucket as the source (`arn:aws:s3:::<bucket>`), the first step of
+auto-copy. The target is a Serverless namespace ARN, or the provisioned cluster ARN described above; AWS's
+`arn:aws:redshift:<region>:<account>:namespace:<id>` form of a provisioned target is not accepted yet.
+`SourceType` is `s3-event-notifications`, and the `source-types` filter of `DescribeIntegrations` matches it.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift create-integration \
+  --integration-name lake-auto-copy \
+  --source-arn arn:aws:s3:::my-bucket \
+  --target-arn arn:aws:redshift-serverless:us-east-1:000000000000:namespace/<namespace-id>
+```
+
+The bucket has to exist in the caller's account (`IntegrationSourceNotFoundFault` otherwise), to be in the
+Region of the integration, and to have no period in its name. A bucket with no stored Region is treated as
+Floci's default Region. Its ARN must have empty Region and account fields and the integration's partition. A provisioned
+target must match the local cluster's full ARN (`IntegrationTargetNotFoundFault` otherwise).
+A bucket joins a target once (`IntegrationConflictOperationFault`), and a
+target takes at most 50 S3 event integrations (`IntegrationQuotaExceededFault`). Those two fault names are
+Floci's reading of the AWS API's fault list; their messages are not captured from AWS.
+
+The integration is `active` as soon as it is created, where AWS reports `creating` first. It does not load
+anything yet, and the bucket policy, the namespace resource policy and the existing notifications of the bucket
+are not checked. [COPY JOB](#copy-job) statements work independently of the integration.
+
 ### Resource policies
 
 A zero-ETL integration needs a resource policy on its target that lets the source in.

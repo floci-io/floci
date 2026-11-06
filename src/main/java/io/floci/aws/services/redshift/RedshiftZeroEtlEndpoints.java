@@ -2,11 +2,13 @@ package io.floci.aws.services.redshift;
 
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
+import io.floci.aws.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -19,11 +21,40 @@ public class RedshiftZeroEtlEndpoints {
 
     private final DynamoDbFacade dynamoDb;
     private final RedshiftServerlessService serverless;
+    private final S3Service s3;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public RedshiftZeroEtlEndpoints(DynamoDbFacade dynamoDb, RedshiftServerlessService serverless) {
+    public RedshiftZeroEtlEndpoints(DynamoDbFacade dynamoDb, RedshiftServerlessService serverless, S3Service s3,
+                                    RegionResolver regionResolver) {
         this.dynamoDb = dynamoDb;
         this.serverless = serverless;
+        this.s3 = s3;
+        this.regionResolver = regionResolver;
+    }
+
+    /**
+     * The Region of the bucket an S3 event integration takes as its source, read as {@code accountId}. A bucket
+     * that does not exist is an integration source that cannot be found.
+     */
+    public String sourceBucketRegion(String accountId, String region, String bucketName) {
+        try {
+            return RequestScopes.callAs(accountId, region, () -> {
+                if (!s3.ownsBucket(bucketName)) {
+                    throw sourceNotFound();
+                }
+                String bucketRegion = s3.getBucketRegion(bucketName);
+                if (bucketRegion == null || bucketRegion.isBlank()) {
+                    return regionResolver.getDefaultRegion();
+                }
+                return bucketRegion;
+            });
+        } catch (AwsException e) {
+            if ("NoSuchBucket".equals(e.getErrorCode())) {
+                throw sourceNotFound();
+            }
+            throw e;
+        }
     }
 
     /**

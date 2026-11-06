@@ -87,6 +87,8 @@ public class RedshiftService implements ManagedSecretRotator {
     private final AccountAwareStorageBackend<ClusterParameterGroup> parameterGroups;
     private final AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroups;
     private static final int MIN_INTEGRATION_RECORDS = 20;
+    private static final String S3_EVENT_SOURCE_TYPE = "s3-event-notifications";
+    private static final int MAX_S3_INTEGRATIONS_PER_TARGET = 50;
     private static final int MAX_INTEGRATION_RECORDS = 100;
     private static final int MAX_INTEGRATION_DESCRIPTION = 1000;
     private static final int MAX_INTEGRATION_NAME = 63;
@@ -601,23 +603,28 @@ public class RedshiftService implements ManagedSecretRotator {
         if (targetArn == null || targetArn.isBlank()) {
             throw new AwsException("InvalidParameterValue", "TargetArn is required.", 400);
         }
-        // AWS takes a DynamoDB table as the source. A stream ARN is Floci's original form and is kept.
-        AwsArnUtils.Arn source = parseZeroEtlArn(sourceArn, "DynamoDB table");
-        if (!"dynamodb".equals(source.service()) || !source.resource().startsWith("table/")) {
-            throw new AwsException("InvalidParameterValue",
-                    "SourceArn must identify a DynamoDB table or stream.", 400);
-        }
-        String sourceStreamArn;
-        if (RedshiftZeroEtlEndpoints.isStreamArn(sourceArn)) {
-            if (streamReader == null) {
-                throw new AwsException("InternalFailure", "DynamoDB stream service is unavailable.", 500);
-            }
-            streamReader.describeStream(DynamoDbStreamReader.Stream.of(sourceArn), null, null);
-            sourceStreamArn = sourceArn;
+        boolean s3Source = AwsArnUtils.isArnFor(sourceArn, "s3");
+        String sourceStreamArn = null;
+        if (s3Source) {
+            requireS3SourceBucket(sourceArn, region);
         } else {
-            TableDefinition table = requireZeroEtlEndpoints().sourceTable(integrations.accountId(), sourceArn);
-            // Changes are read from the table's latest stream; the consumer follows one enabled later.
-            sourceStreamArn = table.getStreamArn();
+            // AWS takes a DynamoDB table as the source. A stream ARN is Floci's original form and is kept.
+            AwsArnUtils.Arn source = parseZeroEtlArn(sourceArn, "DynamoDB table");
+            if (!"dynamodb".equals(source.service()) || !source.resource().startsWith("table/")) {
+                throw new AwsException("InvalidParameterValue",
+                        "SourceArn must identify a DynamoDB table or stream.", 400);
+            }
+            if (RedshiftZeroEtlEndpoints.isStreamArn(sourceArn)) {
+                if (streamReader == null) {
+                    throw new AwsException("InternalFailure", "DynamoDB stream service is unavailable.", 500);
+                }
+                streamReader.describeStream(DynamoDbStreamReader.Stream.of(sourceArn), null, null);
+                sourceStreamArn = sourceArn;
+            } else {
+                TableDefinition table = requireZeroEtlEndpoints().sourceTable(integrations.accountId(), sourceArn);
+                // Changes are read from the table's latest stream; the consumer follows one enabled later.
+                sourceStreamArn = table.getStreamArn();
+            }
         }
         // AWS takes a Redshift Serverless namespace as the target. A provisioned cluster ARN is
         // Floci's original form and is kept.
@@ -630,7 +637,10 @@ public class RedshiftService implements ManagedSecretRotator {
             if (clusterIdentifier.isBlank()) {
                 throw new AwsException("InvalidParameterValue", "TargetArn must identify a Redshift cluster.", 400);
             }
-            describeClusters(clusterIdentifier);
+            if (findClusterByArn(targetArn).isEmpty()) {
+                throw new AwsException("IntegrationTargetNotFoundFault",
+                        "The specified integration target can't be found.", 404);
+            }
         } else {
             throw new AwsException("InvalidParameterValue",
                     "TargetArn must identify a Redshift Serverless namespace or a provisioned Redshift cluster.",
@@ -654,6 +664,10 @@ public class RedshiftService implements ManagedSecretRotator {
                     "The integration " + integrationName + " already exists.", 400);
         }
 
+        if (s3Source) {
+            requireRoomForS3Integration(sourceArn, targetArn);
+        }
+
         String integrationId = UUID.randomUUID().toString();
         Integration integration = new Integration();
         integration.setAccountId(integrations.accountId());
@@ -664,21 +678,70 @@ public class RedshiftService implements ManagedSecretRotator {
         integration.setTargetArn(targetArn);
         integration.setSourceStreamArn(sourceStreamArn);
         integration.setTargetClusterIdentifier(clusterIdentifier);
-        integration.setLandingTableName("floci_zetl_" + integrationId.replace('-', '_'));
         integration.setRetryCount(0);
         integration.setLastError(null);
-        integration.setPollingEnabled(true);
-        // Floci approximation: report `syncing` while the backfill scan runs, then `active`.
-        integration.setStatus("syncing");
+        if (s3Source) {
+            // Nothing is replicated by a poll: the files an S3 event integration loads come from S3 events.
+            integration.setSourceType(S3_EVENT_SOURCE_TYPE);
+            integration.setPollingEnabled(false);
+            // Floci approximation: AWS reports `creating` first, and there is no setup here to wait for.
+            integration.setStatus("active");
+        } else {
+            integration.setLandingTableName("floci_zetl_" + integrationId.replace('-', '_'));
+            integration.setPollingEnabled(true);
+            // Floci approximation: report `syncing` while the backfill scan runs, then `active`.
+            integration.setStatus("syncing");
+        }
         integration.setKmsKeyId(kmsKeyId);
         integration.setCreateTime(DateTimeFormatter.ISO_INSTANT.format(Instant.now()));
         integration.setDescription(description);
         integration.setAdditionalEncryptionContext(additionalEncryptionContext);
         integration.setTags(tags);
         integrations.put(integrationId, integration);
-        LOG.infov("Created Redshift zero-ETL integration: {0}", integration.getIntegrationArn());
-        queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.SYNCHRONIZING, integration);
+        LOG.infov("Created Redshift integration: {0}", integration.getIntegrationArn());
+        if (!s3Source) {
+            queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.SYNCHRONIZING, integration);
+        }
         return integration;
+    }
+
+    /**
+     * AWS takes the bucket of an S3 event integration as {@code arn:aws:s3:::bucket}. The bucket has to exist,
+     * to be in the Region of the integration, and to have no period in its name.
+     */
+    private void requireS3SourceBucket(String sourceArn, String region) {
+        AwsArnUtils.Arn source = parseZeroEtlArn(sourceArn, "S3 bucket");
+        String bucket = source.resource();
+        if (!source.region().isEmpty() || !source.accountId().isEmpty()
+                || !source.partition().equals(regionResolver.partitionForRegion(region))
+                || bucket.isBlank() || bucket.contains("/") || bucket.contains(":")) {
+            throw new AwsException("InvalidParameterValue", "SourceArn must identify an Amazon S3 bucket.", 400);
+        }
+        if (bucket.indexOf('.') >= 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "An S3 event integration cannot use a bucket whose name contains a period.", 400);
+        }
+        String bucketRegion = requireZeroEtlEndpoints().sourceBucketRegion(integrations.accountId(), region, bucket);
+        if (!bucketRegion.equals(region)) {
+            throw new AwsException("InvalidParameterValue",
+                    "The source bucket and the integration must be in the same Region.", 400);
+        }
+    }
+
+    /** One S3 event integration joins a bucket to a target, and a target takes at most 50 of them. */
+    private void requireRoomForS3Integration(String sourceArn, String targetArn) {
+        List<Integration> onTarget = integrations.scan(k -> true).stream()
+                .filter(existing -> S3_EVENT_SOURCE_TYPE.equals(existing.getSourceType())
+                        && targetArn.equals(existing.getTargetArn()))
+                .toList();
+        if (onTarget.stream().anyMatch(existing -> sourceArn.equals(existing.getSourceArn()))) {
+            throw new AwsException("IntegrationConflictOperationFault",
+                    "An S3 event integration between this bucket and this target already exists.", 400);
+        }
+        if (onTarget.size() >= MAX_S3_INTEGRATIONS_PER_TARGET) {
+            throw new AwsException("IntegrationQuotaExceededFault",
+                    "A target can have at most " + MAX_S3_INTEGRATIONS_PER_TARGET + " S3 event integrations.", 400);
+        }
     }
 
     private RedshiftZeroEtlEndpoints requireZeroEtlEndpoints() {
@@ -878,7 +941,8 @@ public class RedshiftService implements ManagedSecretRotator {
             case "source-arn" -> integration.getSourceArn();
             case "status" -> integration.getStatus();
             // source-types filters on the source's AWS service, which the ARN's third field names.
-            case "source-types" -> sourceType(integration.getSourceArn());
+            case "source-types" -> integration.getSourceType() != null ? integration.getSourceType()
+                    : sourceType(integration.getSourceArn());
             default -> throw new AwsException("InvalidParameterValue",
                     "Unrecognized filter name: " + name, 400);
         };
@@ -916,10 +980,12 @@ public class RedshiftService implements ManagedSecretRotator {
             if (stored.isPresent() && integrationArn.equals(stored.get().getIntegrationArn())) {
                 integrations.delete(key);
                 LOG.infov("Deleted Redshift zero-ETL integration: {0}", integrationArn);
-                // Deletion is immediate here, so both the start and the end of it are reported.
-                queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.DELETION_INITIATED,
-                        stored.get());
-                queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.DELETED, stored.get());
+                if (stored.get().getSourceType() == null) {
+                    // Deletion is immediate here, so both the start and the end of it are reported.
+                    queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.DELETION_INITIATED,
+                            stored.get());
+                    queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.DELETED, stored.get());
+                }
                 return stored.get();
             }
         }
