@@ -368,6 +368,39 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchLimitsMemoryAndSwapTogetherToTheDeclaredMemorySize() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("memory-fn");
+        fn.setHotReloadHostPath("/home/ci/code");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setMemorySize(256);
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals(256L * 1024 * 1024, spec.memoryBytes());
+        assertEquals(256L * 1024 * 1024, spec.linuxOptions().memorySwapBytes(),
+                "memory plus swap equal to the memory limit: no swap");
+    }
+
+    @Test
+    void launchLimitsMemoryAndSwapTogetherToLambdasDefaultWhereNoneIsDeclared() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("default-memory-fn");
+        fn.setHotReloadHostPath("/home/ci/code");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals(128L * 1024 * 1024, spec.memoryBytes());
+        assertEquals(128L * 1024 * 1024, spec.linuxOptions().memorySwapBytes(),
+                "memory plus swap equal to the memory limit: no swap");
+    }
+
+    @Test
     void launchFunction_hotReloadMountsTheHostDirectoryReadOnlyAtVarTask() {
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("hot-reload-fn");

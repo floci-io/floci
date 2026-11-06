@@ -292,10 +292,14 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             env.add("AWS_LAMBDA_INITIALIZATION_TYPE=provisioned-concurrency");
         }
 
+        // Memory and swap together at the function's MemorySize, so the container cannot swap
+        // and has what Lambda gives the function, whatever swap the host has.
+        long memoryBytes = (long) fn.getMemorySize() * 1024 * 1024;
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv(env)
-                .withMemoryMb(fn.getMemorySize())
+                .withMemoryBytes(memoryBytes)
+                .withMemorySwapBytes(memoryBytes)
                 .withDockerNetwork(config.services().lambda().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
