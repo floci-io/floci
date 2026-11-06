@@ -21,6 +21,8 @@ import software.amazon.awssdk.services.ecs.model.Volume;
 
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -47,7 +49,7 @@ class EcsEphemeralVolumeTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void nameOnlyAndEmptyHostVolumesShareFilesBetweenContainers(boolean emptyHost) {
+    void nameOnlyAndEmptyHostVolumesShareFilesBetweenContainers(boolean emptyHost) throws InterruptedException {
         String name = "sdk-ephemeral-volume-" + UUID.randomUUID().toString().substring(0, 8);
         Volume.Builder volume = Volume.builder().name("shared");
         if (emptyHost) {
@@ -82,10 +84,15 @@ class EcsEphemeralVolumeTest {
                     Task task = started.tasks().get(0);
                     try {
                         assertThat(task.containers()).hasSize(2);
-                        assumeTrue(task.containers().stream().allMatch(container -> container.runtimeId() != null),
-                                "ECS Docker mode is required to check files shared by running containers");
                         DescribeTasksRequest describe = DescribeTasksRequest.builder()
                                 .cluster(name).tasks(task.taskArn()).build();
+                        // RunTask answers before the images are pulled, so whether Docker started the
+                        // containers shows only once the launch is over.
+                        Task launched = awaitLaunched(ecs, describe);
+                        assertThat(launched.stopCodeAsString()).as(launched.stoppedReason())
+                                .isNotEqualTo("TaskFailedToStart");
+                        assumeTrue(launched.containers().stream().allMatch(container -> container.runtimeId() != null),
+                                "ECS Docker mode is required to check files shared by running containers");
                         assertThat(ecs.waiter().waitUntilTasksStopped(describe,
                                 TestFixtures.waiterOverride(Duration.ofSeconds(30)))
                                 .matched().response()).isPresent();
@@ -104,6 +111,20 @@ class EcsEphemeralVolumeTest {
                 ecs.deleteCluster(request -> request.cluster(name));
             }
         }
+    }
+
+    /**
+     * Polls until the task has left PROVISIONING and PENDING. The TasksRunning waiter cannot stand
+     * in: it fails on STOPPED, and this task's containers exit as soon as they have run.
+     */
+    private static Task awaitLaunched(EcsClient ecs, DescribeTasksRequest describe) throws InterruptedException {
+        AtomicReference<Task> latest = new AtomicReference<>();
+        TestFixtures.await(() -> {
+            Task current = ecs.describeTasks(describe).tasks().get(0);
+            latest.set(current);
+            return !"PROVISIONING".equals(current.lastStatus()) && !"PENDING".equals(current.lastStatus());
+        }, describe.tasks().get(0), "the launch to finish", TimeUnit.SECONDS.toNanos(60), 500);
+        return latest.get();
     }
 
     private static ContainerDefinition container(String name, boolean readOnly, String command) {

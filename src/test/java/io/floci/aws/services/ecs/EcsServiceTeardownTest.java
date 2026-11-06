@@ -88,6 +88,7 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "volume-retry", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        awaitLastStatus(service, taskArn, "RUNNING");
 
         if (exitsNaturally) {
             service.reconcile();
@@ -126,8 +127,10 @@ class EcsServiceTeardownTest {
         definition.setImage("busybox:stable");
         service.registerTaskDefinition("failed-volume-launch", List.of(definition), null, null, null,
                 null, null, List.of(), REGION);
-        EcsTask task = service.runTask(null, "failed-volume-launch", 1, LaunchType.FARGATE, null, null,
-                List.of(), null, REGION).getFirst();
+        String taskArn = service.runTask(null, "failed-volume-launch", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst().getTaskArn();
+        awaitLastStatus(service, taskArn, "STOPPED");
+        EcsTask task = service.describeTasks(null, List.of(taskArn), REGION).getFirst();
         assertEquals("STOPPED", task.getLastStatus());
         assertEquals("Failed to start: launch failed", task.getStoppedReason());
         assertTrue(partial.hasTaskVolumes());
@@ -184,9 +187,11 @@ class EcsServiceTeardownTest {
         CountDownLatch startEntered = new CountDownLatch(1);
         CountDownLatch finishStart = new CountDownLatch(1);
         AtomicReference<EcsTask> startingTask = new AtomicReference<>();
+        AtomicReference<Thread> startingThread = new AtomicReference<>();
         when(containerManager.startTask(any(), any(), any(), anyString())).thenAnswer(invocation -> {
             EcsTask task = invocation.getArgument(0);
             startingTask.set(task);
+            startingThread.set(Thread.currentThread());
             startEntered.countDown();
             if (!finishStart.await(5, TimeUnit.SECONDS)) {
                 throw new IllegalStateException("container startup was not released");
@@ -214,15 +219,19 @@ class EcsServiceTeardownTest {
         launch.start();
         try {
             assertTrue(startEntered.await(5, TimeUnit.SECONDS));
+            // The launch runs on the task launcher's thread.
+            Thread starter = startingThread.get();
             synchronized (startingTask.get()) {
                 finishStart.countDown();
                 long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                while (launch.getState() != Thread.State.BLOCKED) {
-                    assertTrue(launch.isAlive(), "startup finished without acquiring the task lock");
+                while (starter.getState() != Thread.State.BLOCKED) {
+                    assertTrue(starter.isAlive(), "startup finished without acquiring the task lock");
                     assertTrue(System.nanoTime() < deadline, "startup did not wait for the task lock");
                     Thread.onSpinWait();
                 }
             }
+            starter.join(5000);
+            assertFalse(starter.isAlive());
             launch.join(5000);
             assertFalse(launch.isAlive());
             assertNull(launchFailure.get());
@@ -276,12 +285,16 @@ class EcsServiceTeardownTest {
                         List.of(), null, REGION));
         try {
             assertTrue(startEntered.await(5, TimeUnit.SECONDS));
-            assertEquals("STOPPING", service.stopTask(null, taskArn.get(), null, REGION).getLastStatus());
+            // Still launching: the stop is recorded and the launch lands it once the handle arrives.
+            EcsTask stopping = service.stopTask(null, taskArn.get(), null, REGION);
+            assertEquals("PENDING", stopping.getLastStatus());
+            assertEquals("STOPPED", stopping.getDesiredStatus());
         } finally {
             finishStart.countDown();
         }
 
         launch.get(5, TimeUnit.SECONDS);
+        awaitLastStatus(service, taskArn.get(), "STOPPED");
         assertEquals("STOPPED", service.describeTasks(null, List.of(taskArn.get()), REGION).getFirst().getLastStatus());
         verify(containerManager).stopTaskAndCollectExitCodes(handle);
         service.stopManagedContainers();
@@ -367,6 +380,7 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "retry-removal", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        awaitLastStatus(service, taskArn, "RUNNING");
 
         service.stopTask(null, taskArn, null, REGION);
         assertEquals("STOPPING", service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus());
@@ -410,6 +424,7 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "unknown-exit", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        awaitLastStatus(service, taskArn, "RUNNING");
 
         EcsTask stopped = service.stopTask(null, taskArn, null, REGION);
         assertEquals("STOPPED", stopped.getLastStatus());
@@ -449,6 +464,7 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "concurrent-stop", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        awaitLastStatus(service, taskArn, "RUNNING");
 
         CompletableFuture<EcsTask> first = CompletableFuture.supplyAsync(() ->
                 service.stopTask(null, taskArn, null, REGION));
@@ -586,6 +602,7 @@ class EcsServiceTeardownTest {
                 null, null, List.of(), REGION);
         String taskArn = service.runTask(null, "retry-fam", 1, LaunchType.FARGATE, null, null,
                 List.of(), null, REGION).getFirst().getTaskArn();
+        awaitLastStatus(service, taskArn, "RUNNING");
 
         service.stopTask(null, taskArn, null, REGION);
         verify(containerManager, times(1)).stopTaskAndCollectExitCodes(handle);
@@ -595,6 +612,12 @@ class EcsServiceTeardownTest {
 
         service.reconcile();
         verify(containerManager, times(2)).stopTaskAndCollectExitCodes(handle);
+    }
+
+    /** RunTask answers before the launch, which lands the task on the task launcher's thread. */
+    private static void awaitLastStatus(EcsService service, String taskArn, String status) {
+        await().atMost(Duration.ofSeconds(5)).until(() ->
+                status.equals(service.describeTasks(null, List.of(taskArn), REGION).getFirst().getLastStatus()));
     }
 
     private static final class SingleUseStorageFactory extends StorageFactory {

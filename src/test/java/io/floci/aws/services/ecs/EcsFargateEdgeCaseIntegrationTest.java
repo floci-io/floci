@@ -51,6 +51,13 @@ class EcsFargateEdgeCaseIntegrationTest {
                 .extract().response();
     }
 
+    /** RunTask answers before the launch; the task reaches RUNNING in the background. */
+    private static void awaitRunning(String cluster, String taskArn) {
+        await().atMost(Duration.ofSeconds(10)).until(() -> "RUNNING".equals(
+                call("DescribeTasks", "{\"cluster\":\"" + cluster + "\",\"tasks\":[\"" + taskArn + "\"]}", 200)
+                        .jsonPath().getString("tasks[0].lastStatus")));
+    }
+
     private static void registerSize(String family, String cpu, String memory, int expectedStatus) {
         call("RegisterTaskDefinition", "{\"family\":\"" + family + "\","
                 + "\"requiresCompatibilities\":[\"FARGATE\"],\"networkMode\":\"awsvpc\","
@@ -556,6 +563,7 @@ class EcsFargateEdgeCaseIntegrationTest {
         String taskArn = call("RunTask", "{\"cluster\":\"" + CLUSTER + "\",\"taskDefinition\":\""
                 + family + "\",\"launchType\":\"FARGATE\"," + NETWORK + "}", 200)
                 .jsonPath().getString("tasks[0].taskArn");
+        awaitRunning(CLUSTER, taskArn);
 
         Response stopped = call("StopTask", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\""
                 + taskArn + "\",\"reason\":\"edge\"}", 200);
@@ -1014,8 +1022,10 @@ class EcsFargateEdgeCaseIntegrationTest {
         String cluster = "edge-stats-cluster";
         call("CreateCluster", "{\"clusterName\":\"" + cluster + "\"}", 200);
         registerSize("edge-stats", "256", "512", 200);
-        call("RunTask", "{\"cluster\":\"" + cluster + "\",\"taskDefinition\":\"edge-stats\","
-                + "\"launchType\":\"FARGATE\"," + NETWORK + "}", 200);
+        String taskArn = call("RunTask", "{\"cluster\":\"" + cluster + "\",\"taskDefinition\":\"edge-stats\","
+                + "\"launchType\":\"FARGATE\"," + NETWORK + "}", 200)
+                .jsonPath().getString("tasks[0].taskArn");
+        awaitRunning(cluster, taskArn);
 
         List<Map<String, String>> statistics = call("DescribeClusters",
                 "{\"clusters\":[\"" + cluster + "\"],\"include\":[\"STATISTICS\"]}", 200)

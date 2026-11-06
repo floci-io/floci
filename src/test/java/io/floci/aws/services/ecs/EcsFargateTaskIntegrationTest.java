@@ -7,9 +7,11 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -63,10 +65,22 @@ class EcsFargateTaskIntegrationTest {
                 + "\"launchType\":\"FARGATE\"," + NETWORK + extraMembers + "}", 200);
     }
 
+    private static Response describe(String taskArn) {
+        return call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\"" + taskArn + "\"]}", 200);
+    }
+
+    /** RunTask answers before the launch; the task reaches RUNNING in the background. */
+    private static Response awaitRunning(Response launched) {
+        String taskArn = launched.jsonPath().getString("tasks[0].taskArn");
+        await().atMost(Duration.ofSeconds(10)).until(() ->
+                "RUNNING".equals(describe(taskArn).jsonPath().getString("tasks[0].lastStatus")));
+        return describe(taskArn);
+    }
+
     @Test
     void runTaskReportsThePlatformAndConnectivityMembersOfAFargateTask() {
         String family = seed("fargate-task-platform");
-        Response response = runTask(family, "");
+        Response response = awaitRunning(runTask(family, ""));
 
         response.then()
                 .body("tasks", hasSize(1))
@@ -89,7 +103,7 @@ class EcsFargateTaskIntegrationTest {
     @Test
     void runTaskGivesAnAwsvpcTaskItsOwnEni() {
         String family = seed("fargate-task-eni");
-        Response response = runTask(family, "");
+        Response response = awaitRunning(runTask(family, ""));
 
         // The ENI is what a client waits on to find a Fargate task's address, so it is reported
         // whether or not security-group enforcement is on and whether or not Docker is in play.
@@ -189,7 +203,7 @@ class EcsFargateTaskIntegrationTest {
     @Test
     void stopTaskReportsTheStopCodeAndAdvancesTheVersion() {
         String family = seed("fargate-task-stop");
-        Response launched = runTask(family, "");
+        Response launched = awaitRunning(runTask(family, ""));
         String taskArn = launched.jsonPath().getString("tasks[0].taskArn");
         long versionWhenRunning = launched.jsonPath().getLong("tasks[0].version");
 

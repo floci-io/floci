@@ -11,9 +11,11 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -59,10 +61,15 @@ class EcsExecuteCommandIntegrationTest {
                 + "\"requiresCompatibilities\":[\"FARGATE\"],\"networkMode\":\"awsvpc\","
                 + "\"cpu\":\"256\",\"memory\":\"512\",\"containerDefinitions\":"
                 + "[{\"name\":\"app\",\"image\":\"nginx:latest\"}]}", 200);
-        return call("RunTask", "{\"cluster\":\"" + CLUSTER + "\",\"taskDefinition\":\"" + family
+        String taskArn = call("RunTask", "{\"cluster\":\"" + CLUSTER + "\",\"taskDefinition\":\"" + family
                 + "\",\"launchType\":\"FARGATE\"," + NETWORK + ",\"enableExecuteCommand\":"
                 + enableExecuteCommand + "}", 200)
                 .jsonPath().getString("tasks[0].taskArn");
+        // RunTask answers before the launch; the task reaches RUNNING in the background.
+        await().atMost(Duration.ofSeconds(10)).until(() -> "RUNNING".equals(
+                call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\"" + taskArn + "\"]}", 200)
+                        .jsonPath().getString("tasks[0].lastStatus")));
+        return taskArn;
     }
 
     @ParameterizedTest

@@ -12,10 +12,12 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.ListContainerInstancesRequest;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -53,6 +55,13 @@ class EcsContainerInstanceFilterIntegrationTest {
                 .extract().response();
     }
 
+    /** StartTask answers before the launch; the task reaches its status in the background. */
+    private static void awaitTaskStatus(String cluster, String taskArn, String status) {
+        await().atMost(Duration.ofSeconds(10)).until(() -> status.equals(
+                call("DescribeTasks", "{\"cluster\":\"" + cluster + "\",\"tasks\":[\"" + taskArn + "\"]}")
+                        .jsonPath().getString("tasks[0].lastStatus")));
+    }
+
     @Test
     void listContainerInstancesHonorsRunningTaskCountFilter() {
         String cluster = "query-filter-running-tasks";
@@ -88,8 +97,10 @@ class EcsContainerInstanceFilterIntegrationTest {
         Response started = call("StartTask", "{\"cluster\":\"" + cluster + "\","
                 + "\"containerInstances\":[\"" + excluded + "\"],"
                 + "\"taskDefinition\":\"query-filter-task\"}");
-        started.then().body("tasks[0].lastStatus", equalTo("RUNNING"));
         String task = started.jsonPath().getString("tasks[0].taskArn");
+        awaitTaskStatus(cluster, task, "RUNNING");
+        call("DescribeTasks", "{\"cluster\":\"" + cluster + "\",\"tasks\":[\"" + task + "\"]}")
+                .then().body("tasks[0].lastStatus", equalTo("RUNNING"));
         call("DescribeContainerInstances", "{\"cluster\":\"" + cluster
                 + "\",\"containerInstances\":[\"" + excluded + "\"]}")
                 .then().body("containerInstances[0].runningTasksCount", equalTo(1));

@@ -19,11 +19,13 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -77,8 +79,15 @@ class EcsLeftoverContainersDockerIntegrationTest {
         String foreignId = null;
         String previousRunId = null;
         try {
-            String taskContainerId = task.getContainers().getFirst().getDockerId();
-            assertNotNull(taskContainerId, "the task must have started a container: " + task.getStoppedReason());
+            // RunTask answers before the launch; wait for it to land the task RUNNING or STOPPED.
+            await().atMost(Duration.ofMinutes(2)).until(() -> {
+                String status = ecsService.describeTasks(clusterName, List.of(task.getTaskArn()), REGION)
+                        .getFirst().getLastStatus();
+                return !"PROVISIONING".equals(status) && !"PENDING".equals(status);
+            });
+            EcsTask launched = ecsService.describeTasks(clusterName, List.of(task.getTaskArn()), REGION).getFirst();
+            String taskContainerId = launched.getContainers().getFirst().getDockerId();
+            assertNotNull(taskContainerId, "the task must have started a container: " + launched.getStoppedReason());
             assertEquals(ContainerStorageHelper.ownerIdentity(config), labels(taskContainerId)
                     .get(ContainerStorageHelper.OWNER_LABEL), "a task container must carry its owner");
 

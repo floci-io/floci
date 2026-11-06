@@ -104,7 +104,7 @@ class EcsOneShotTaskLifecycleTest {
 
     @Test
     @Order(1)
-    @DisplayName("RunTask - task starts RUNNING")
+    @DisplayName("RunTask - task starts PROVISIONING or PENDING")
     void runTask() {
         List<Task> launched = ecs.runTask(RunTaskRequest.builder()
                 .cluster(clusterName)
@@ -115,7 +115,9 @@ class EcsOneShotTaskLifecycleTest {
 
         assertThat(launched).hasSize(1);
         taskArn = launched.get(0).taskArn();
-        assertThat(launched.get(0).lastStatus()).isEqualTo("RUNNING");
+        // RunTask answers before the images are pulled, as AWS does. The task runs for ~2 s, so the
+        // TasksStopped waiter below, not TasksRunning (which fails on STOPPED), follows it from here.
+        assertThat(launched.get(0).lastStatus()).isIn("PROVISIONING", "PENDING");
     }
 
     @Test
@@ -226,6 +228,16 @@ class EcsOneShotTaskLifecycleTest {
 
         assertThat(stopping.desiredStatus()).isEqualTo("STOPPED");
         assertThat(stopping.stoppedReason()).isEqualTo("test-explicit-stop");
+
+        // A stop that reaches the task while it is still launching lands asynchronously.
+        WaiterResponse<DescribeTasksResponse> stopped = ecs.waiter().waitUntilTasksStopped(
+                DescribeTasksRequest.builder()
+                        .cluster(clusterName)
+                        .tasks(explicitTaskArn)
+                        .build(),
+                TestFixtures.waiterOverride(Duration.ofSeconds(60)));
+        assertThat(stopped.matched().response()).isPresent();
+        assertThat(stopped.matched().response().get().tasks().get(0).lastStatus()).isEqualTo("STOPPED");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
