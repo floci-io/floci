@@ -127,6 +127,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
     private final Ec2Service ec2Service;
+    private final LambdaContainerReconciler containerReconciler;
     /** The VPC address each VpcConfig function's container holds, returned once it is removed. */
     private final Map<String, VpcLease> vpcLeases = new ConcurrentHashMap<>();
 
@@ -155,6 +156,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         this.awsEnv = awsEnv;
         this.executionRoleCredentials = executionRoleCredentials;
         this.ec2Service = ec2Service;
+        this.containerReconciler = new LambdaContainerReconciler(config, lifecycleManager);
         this.populateSemaphore = new Semaphore(resolvePopulateConcurrency(config));
     }
 
@@ -171,6 +173,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     public ContainerHandle launch(LambdaFunction fn) {
         return launch(fn, false);
+    }
+
+    public void removeLeftoverContainers() {
+        containerReconciler.reconcile();
     }
 
     @Override
@@ -209,6 +215,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             }
         }
 
+        removeLeftoverContainers();
         // Start Runtime API server first so container can connect on boot
         RuntimeApiServer runtimeApiServer = runtimeApiServerFactory.create();
         runtimeApiServer.setFunctionMetadata(fn.getFunctionName(), fn.getVersion(), fn.getHandler(),
@@ -306,6 +313,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                         "lambda", fn.getFunctionName(), lambdaAccountId, lambdaRegion));
         List<String> configuredExtraHosts = config.services().lambda().extraHosts().orElse(List.of());
         applyDockerFlags(specBuilder, dockerFlags);
+        specBuilder.withLabels(containerReconciler.ownershipLabels());
 
         specBuilder.withEmbeddedDns();
         // A container image's runtime is its own, Java as likely as any.
@@ -1054,6 +1062,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 .withEnv(List.of())
                 .withEntrypoint(List.of("sleep"))
                 .withCmd(List.of("3600"))
+                .withLabels(containerReconciler.ownershipLabels())
                 .withNamedVolume(volName, TASK_DIR, false);
         ContainerSpec helperSpec = helperBuilder.build();
         // Gate the heavy work (helper create + ~90MB tar copy) so a burst of first-time populates
