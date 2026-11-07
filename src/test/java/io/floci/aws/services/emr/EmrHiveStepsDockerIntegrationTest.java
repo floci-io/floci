@@ -12,6 +12,7 @@ import io.floci.aws.testing.S3TestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,6 +34,7 @@ import java.util.zip.GZIPInputStream;
 
 import static io.floci.aws.testing.EmrRequests.awaitStep;
 import static io.floci.aws.testing.EmrRequests.emr;
+import static io.floci.aws.testing.EmrRequests.terminateClusterAndAwaitCleanup;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -55,6 +57,9 @@ class EmrHiveStepsDockerIntegrationTest {
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
+
+    @Inject
+    EmrService emrService;
 
     private S3Client s3;
     private String bucket;
@@ -179,8 +184,7 @@ class EmrHiveStepsDockerIntegrationTest {
                 .put("InstanceCount", 1);
         clusterId = emr("RunJobFlow", request.toString()).then().statusCode(200).extract().jsonPath()
                 .getString("JobFlowId");
-        cleanup.register(() -> emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
-                .then().statusCode(200));
+        cleanup.register(() -> terminateClusterAndAwaitCleanup(clusterId, emrService));
     }
 
     /** Runs the AWS CLI's Hive step with {@code args} and returns the state it ended in. */

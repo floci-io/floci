@@ -43,6 +43,7 @@ import java.util.stream.Stream;
 
 import static io.floci.aws.testing.EmrRequests.awaitStep;
 import static io.floci.aws.testing.EmrRequests.emr;
+import static io.floci.aws.testing.EmrRequests.terminateClusterAndAwaitCleanup;
 import static io.floci.aws.testing.EmrServerlessRequests.awaitJobRun;
 import static io.floci.aws.testing.EmrServerlessRequests.createSparkApplication;
 import static io.floci.aws.testing.EmrServerlessRequests.deleteApplication;
@@ -89,6 +90,9 @@ class EmrDockerRunnerDockerIntegrationTest {
 
     @Inject
     EmulatorConfig config;
+
+    @Inject
+    EmrService emrService;
 
     private S3Client s3;
     private String bucket;
@@ -308,8 +312,7 @@ class EmrDockerRunnerDockerIntegrationTest {
                 + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceGroups\":[{\"Name\":\"primary\","
                 + "\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
                 .then().statusCode(200).extract().jsonPath().getString("JobFlowId");
-        cleanup.register(() -> emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
-                .then().statusCode(200));
+        cleanup.register(() -> terminateClusterAndAwaitCleanup(clusterId, emrService));
     }
 
     /** Adds one step to the cluster and returns the state it ended in. */
