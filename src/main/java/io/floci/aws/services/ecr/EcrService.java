@@ -594,6 +594,27 @@ public class EcrService implements ResourceProvider {
         return out;
     }
 
+    public PaginatedResult<Repository> describeRepositories(List<String> repositoryNames, String registryId,
+                                                            String region, Integer maxResults, String nextToken) {
+        if (repositoryNames != null && !repositoryNames.isEmpty()) {
+            if (maxResults != null || nextToken != null) {
+                throw new AwsException("InvalidParameterException",
+                        "Pagination cannot be used with repositoryNames.", 400);
+            }
+            return new PaginatedResult<>(describeRepositories(repositoryNames, registryId, region), null);
+        }
+        if (maxResults != null && (maxResults < 1 || maxResults > 1000)) {
+            throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 1000.", 400);
+        }
+        if (nextToken != null && nextToken.isEmpty()) {
+            throw new AwsException("InvalidParameterException", "Invalid nextToken.", 400);
+        }
+        return Pagination.paginate(describeRepositories(repositoryNames, registryId, region),
+                Repository::getRepositoryName, maxResults == null ? 100 : maxResults, nextToken,
+                "ecr-describe-repositories:" + region + ":" + effectiveAccount(registryId),
+                token -> new AwsException("InvalidParameterException", "Invalid nextToken.", 400));
+    }
+
     public record ScanningConfigurationFailure(String repositoryName, String failureCode, String failureReason) {}
 
     public record BatchScanningConfigurationResult(List<Repository> repositories,
