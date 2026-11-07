@@ -221,11 +221,16 @@ final class CopyRecordTransformer {
 
     private void writeField(Field field, int column, ByteArrayOutputStream out) {
         byte[] value = field.value();
+        boolean isVarchar = columnKinds == null
+                || (column < columnKinds.size() && columnKinds.get(column) == ColumnKind.TEXT);
+        if (transforms.trimBlanks() && isVarchar) {
+            value = trimTrailingSpaces(value, csv);
+        }
         boolean emptyField = !field.quoted() && value.length == 0;
         boolean nonCharacter = columnKinds != null && column < columnKinds.size()
                 && columnKinds.get(column) != ColumnKind.TEXT
                 && columnKinds.get(column) != ColumnKind.CHAR;
-        boolean nulled = (transforms.blanksAsNull() && isBlank(value))
+        boolean nulled = (transforms.blanksAsNull() && isBlank(field.value()))
                 || (transforms.emptyAsNull() && value.length == 0)
                 || (emptyField && nonCharacter);
         if (nulled) {
@@ -255,6 +260,26 @@ final class CopyRecordTransformer {
         } else {
             out.writeBytes(escapeTextField(limited));
         }
+    }
+
+    private static byte[] trimTrailingSpaces(byte[] value, boolean csv) {
+        int end = value.length;
+        while (end > 0) {
+            if (value[end - 1] != ' ') {
+                break;
+            }
+            if (!csv) {
+                int backslashes = 0;
+                for (int k = end - 2; k >= 0 && value[k] == BACKSLASH; k--) {
+                    backslashes++;
+                }
+                if ((backslashes % 2) != 0) {
+                    break;
+                }
+            }
+            end--;
+        }
+        return end == value.length ? value : Arrays.copyOf(value, end);
     }
 
     private boolean containsDelimiter(byte[] value) {

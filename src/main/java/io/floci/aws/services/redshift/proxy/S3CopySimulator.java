@@ -577,7 +577,7 @@ public final class S3CopySimulator {
         }
         if (spec.transforms().needsColumnTypes() && columnKinds == null) {
             throw new S3TransferException(SQLSTATE_INTERNAL,
-                    "COPY ... DATEFORMAT, TIMEFORMAT and FILLRECORD need catalog column types, which are only "
+                    "COPY ... DATEFORMAT, TIMEFORMAT, FILLRECORD and TRIMBLANKS need catalog column types, which are only "
                             + "available over the Simple Query protocol; connect with preferQueryMode=simple", null);
         }
         byte[] buffer = new byte[CHUNK];
@@ -626,7 +626,7 @@ public final class S3CopySimulator {
                     "COPY object exceeds the " + COPY_TRANSFORM_MAX_OBJECT_BYTES
                             + "-byte limit for the field-level options "
                             + "(EMPTYASNULL, BLANKSASNULL, REMOVEQUOTES, ACCEPTINVCHARS, TRUNCATECOLUMNS, "
-                            + "DATEFORMAT, TIMEFORMAT, FILLRECORD)", null);
+                            + "DATEFORMAT, TIMEFORMAT, FILLRECORD, TRIMBLANKS)", null);
         }
     }
 
