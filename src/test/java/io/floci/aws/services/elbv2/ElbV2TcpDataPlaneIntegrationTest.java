@@ -135,12 +135,7 @@ class ElbV2TcpDataPlaneIntegrationTest {
         client.registerTargets(request -> request.targetGroupArn(targetGroupArn)
                 .targets(TargetDescription.builder().id("127.0.0.1").port(backend.actualPort()).build()));
 
-        completeInitialHealthChecks(1);
-
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertEquals(
-                TargetHealthStateEnum.HEALTHY,
-                client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
-                        .targetHealthDescriptions().getFirst().targetHealth().state()));
+        awaitHealthyTarget();
 
         try (ServerSocket reservation = new ServerSocket(0)) {
             listenerPort = reservation.getLocalPort();
@@ -157,6 +152,14 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 assertEquals(listenerPort, socket.getPort());
             }
         });
+    }
+
+    private void awaitHealthyTarget() {
+        completeInitialHealthChecks(1);
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertEquals(
+                TargetHealthStateEnum.HEALTHY,
+                client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
+                        .targetHealthDescriptions().getFirst().targetHealth().state()));
     }
 
     private void completeInitialHealthChecks(int expectedTargets) {
@@ -538,11 +541,7 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 .targets(TargetDescription.builder().id("127.0.0.1").port(oldPort).build()));
         client.registerTargets(request -> request.targetGroupArn(targetGroupArn)
                 .targets(TargetDescription.builder().id("127.0.0.1").port(backend.actualPort()).build()));
-        completeInitialHealthChecks(1);
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertEquals(
-                TargetHealthStateEnum.HEALTHY,
-                client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
-                        .targetHealthDescriptions().getFirst().targetHealth().state()));
+        awaitHealthyTarget();
     }
 
     private static Socket connect(int port) throws IOException {
