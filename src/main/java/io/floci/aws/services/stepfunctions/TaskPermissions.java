@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.services.cloudformation.CloudFormationQueryHandler;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.dynamodb.DynamoDbTableNames;
 import io.floci.aws.services.ecs.EcsService;
@@ -21,6 +22,7 @@ import io.floci.aws.services.stepfunctions.model.StateMachine;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -31,16 +33,14 @@ import java.util.Set;
  * What a task's call to its integrated service needs from IAM. A request that names no resource
  * needs no permission here: the integrated service refuses it with its own validation error.
  *
- * @param deniedError the error a refused permission fails the task with: the integration's prefix and
- *                    the exception the integrated service's SDK raises for an access denial
- * @param permissions the actions the call performs
+ * @param deniedError         the error a refused permission fails the task with: the integration's prefix
+ *                            and the exception the integrated service's SDK raises for an access denial
+ * @param permissions         the actions the call performs
+ * @param checksExecutionRole whether the task also needs its execution role to exist and to trust Step Functions,
+ *                            which a nested execution does not, on the maintainer's decision to leave nested and
+ *                            Lambda tasks as they are
  */
-record TaskPermissions(String deniedError, List<Permission> permissions) {
-
-    /** The permissions of an integration whose refusal is its prefix and {@code AccessDeniedException}. */
-    static TaskPermissions accessDenied(String errorPrefix, List<Permission> permissions) {
-        return new TaskPermissions(errorPrefix + "AccessDeniedException", permissions);
-    }
+record TaskPermissions(String deniedError, List<Permission> permissions, boolean checksExecutionRole) {
 
     private static final Logger LOG = Logger.getLogger(TaskPermissions.class);
     private static final String ANY_RESOURCE = "*";
@@ -52,6 +52,8 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
     private static final String ECS_SDK_PREFIX = "Ecs.";
     private static final String EMR_PREFIX = "EMR.";
     private static final String EMR_SERVERLESS_PREFIX = "EmrServerless.";
+    private static final String LAMBDA_PREFIX = "Lambda.";
+    private static final String SECRETS_MANAGER_PREFIX = "SecretsManager.";
     private static final Set<String> DYNAMODB_OPTIMIZED =
             Set.of("putItem", "getItem", "deleteItem", "updateItem", "scan");
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -67,6 +69,46 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
             "cancelStep", List.of("CancelSteps"),
             "modifyInstanceFleetByName", List.of("ListInstanceFleets", "ModifyInstanceFleet"),
             "modifyInstanceGroupByName", List.of("ListInstanceGroups", "ModifyInstanceGroups"));
+    private static final String SCHEDULER_PREFIX = "Scheduler.";
+    private static final String CLOUDFORMATION_PREFIX = "CloudFormation.";
+    private static final String HTTP_PREFIX = "States.Http.";
+    private static final String SFN_SDK_PREFIX = "Sfn.";
+    private static final String NESTED_PREFIX = "StepFunctions.";
+    private static final Set<String> SCHEDULER = Set.of("createSchedule", "updateSchedule", "deleteSchedule");
+    private static final Set<String> SFN_SDK = Set.of("startExecution", "startSyncExecution", "sendTaskSuccess",
+            "sendTaskFailure", "describeMapRun");
+    private static final Set<String> CFN_ANY_RESOURCE = Set.of("ValidateTemplate", "ListStacks", "ListExports",
+            "DescribeOrganizationsAccess", "ActivateOrganizationsAccess", "CreateStackSet", "ListStackSets");
+    private static final Set<String> CFN_OPTIONAL_STACK = Set.of("DescribeStacks", "GetTemplateSummary");
+    private static final Set<String> CFN_CREATES_STACK = Set.of("CreateStack", "CreateChangeSet");
+    private static final Set<String> CFN_NAMES_CHANGE_SET =
+            Set.of("DescribeChangeSet", "ExecuteChangeSet", "DeleteChangeSet");
+    private static final Set<String> CFN_STACK = Set.of("UpdateStack", "DeleteStack", "ContinueUpdateRollback",
+            "UpdateTerminationProtection", "ListChangeSets", "DescribeStackEvents", "DescribeStackResources",
+            "ListStackResources", "DescribeStackResource", "GetTemplate", "SetStackPolicy", "GetStackPolicy");
+    private static final Set<String> CFN_STACK_SET = Set.of("DescribeStackSet", "UpdateStackSet", "DeleteStackSet",
+            "CreateStackInstances", "ListStackInstances", "DescribeStackInstance", "DeleteStackInstances",
+            "ListStackSetOperations", "DescribeStackSetOperation", "ListStackSetAutoDeploymentTargets");
+
+    TaskPermissions(String deniedError, List<Permission> permissions) {
+        this(deniedError, permissions, true);
+    }
+
+    /** The permissions of an integration whose refusal is its prefix and {@code AccessDeniedException}. */
+    static TaskPermissions accessDenied(String errorPrefix, List<Permission> permissions) {
+        return new TaskPermissions(errorPrefix + "AccessDeniedException", permissions);
+    }
+
+    /**
+     * What finds the resources of a control task's request, reading only; without one such a request names nothing.
+     *
+     * @param cloudFormation the stack or stack set of a CloudFormation request
+     * @param sdkManagement  the secret of a Secrets Manager request
+     * @param states         the state machine or activity whose task a callback's token names
+     */
+    record ControlServices(CloudFormationQueryHandler cloudFormation, SdkManagementTaskInvoker sdkManagement,
+                           StoredResourceArns states) {
+    }
 
     /** The permissions of a mapped integration, or nothing for one that is not checked. */
     static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine) {
@@ -96,6 +138,48 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
      */
     static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine,
                                         StoredResourceArns redshiftData, EcsService ecs, boolean callback) {
+        return of(integration, input, machine, redshiftData, ecs, callback, new ControlServices(null, null, null));
+    }
+
+    /**
+     * The permissions of a mapped integration, or nothing for one that is not checked.
+     *
+     * @param redshiftData finds the workgroup or the session target a Data API request names; without it a
+     *                     workgroup is any workgroup and a session names nothing
+     * @param ecs          finds the task definition revision or the service a request reaches, reading only; without
+     *                     it such a request names nothing
+     * @param callback     whether the state's resource ended in {@code .waitForTaskToken}, which {@code integration}
+     *                     no longer shows: EMR and EMR Serverless have no such form, so theirs stays unsupported
+     * @param control      finds what a control task's request names
+     */
+    static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine,
+                                        StoredResourceArns redshiftData, EcsService ecs, boolean callback,
+                                        ControlServices control) {
+        if (integration.isSdkService("scheduler") && SCHEDULER.contains(integration.api())) {
+            return Optional.of(scheduler(integration.api(), input, machine));
+        }
+        if (integration.isSdkService("cloudformation") && servedByCloudFormation(integration.api())) {
+            return Optional.of(cloudFormation(AslExecutor.capitalizeFirst(integration.api()), input, machine,
+                    control.cloudFormation()));
+        }
+        if (integration.is("http", "invoke")) {
+            return Optional.of(httpInvoke(input, machine));
+        }
+        if (integration.isSdk("ec2", "describeRegions")) {
+            return Optional.of(ec2DescribeRegions(input, machine));
+        }
+        if (integration.isSdkService("lambda") && SdkManagementTaskInvoker.supports(integration)) {
+            return Optional.of(lambdaSdk(integration.api(), input, machine));
+        }
+        if (integration.isSdkService("secretsmanager") && SdkManagementTaskInvoker.supports(integration)) {
+            return Optional.of(secretsManagerDescribeSecret(input, machine, control.sdkManagement()));
+        }
+        if (integration.isSdkService("sfn") && SFN_SDK.contains(integration.api())) {
+            return Optional.of(sfnSdk(AslExecutor.capitalizeFirst(integration.api()), input, machine, control.states()));
+        }
+        if (integration.isAnySuffix("states", "startExecution")) {
+            return Optional.of(nestedStartExecution(input, machine));
+        }
         if (integration.isAnySuffix("ecs", "runTask")
                 && (integration.suffix().isEmpty() || ".sync".equals(integration.suffix()))) {
             return Optional.of(ecsRunTask(input, machine, ecs));
@@ -395,6 +479,21 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
         return accessDenied(EMR_PREFIX, permissions);
     }
 
+    /**
+     * {@code DescribeRegions}, checked as the vendored request resources check the same call made directly: it acts
+     * on no resource type, so on any resource.
+     */
+    private static TaskPermissions ec2DescribeRegions(JsonNode input, StateMachine machine) {
+        String namedAs = "ec2:DescribeRegions";
+        String action = IamAuthorizedActions.actionFor("ec2", "DescribeRegions");
+        if (RequestResources.actsOnNoResource(namedAs)) {
+            return accessDenied("Ec2.", List.of(new Permission(action, ANY_RESOURCE)));
+        }
+        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        return accessDenied("Ec2.", RequestResources.ofBody(namedAs, input, owner.partition(), owner.region(),
+                owner.accountId(), null).stream().map(resource -> new Permission(action, resource)).toList());
+    }
+
     /** The members of the EMR request the integration sends that name the cluster. */
     private static JsonNode emrRequest(String operation, String clusterId) {
         return switch (operation) {
@@ -426,6 +525,175 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
         String resource = "/applications/" + application + ("cancelJobRun".equals(api) ? "/jobruns/" + jobRun : "");
         return accessDenied(EMR_SERVERLESS_PREFIX,
                 List.of(new Permission(action, arn(machine, "emr-serverless", resource))));
+    }
+
+    /**
+     * The action on the schedule its name and group give, read as the integration reads them, a group left out being
+     * {@code default}. A request naming no schedule is refused by Scheduler.
+     */
+    private static TaskPermissions scheduler(String api, JsonNode input, StateMachine machine) {
+        String name = text(input.path("Name"));
+        if (name == null) {
+            return accessDenied(SCHEDULER_PREFIX, List.of());
+        }
+        String group = text(input.path("GroupName"));
+        return accessDenied(SCHEDULER_PREFIX, List.of(new Permission(
+                "scheduler:" + AslExecutor.capitalizeFirst(api),
+                arn(machine, "scheduler", "schedule/" + (group == null ? "default" : group) + "/" + name))));
+    }
+
+    /** Every action the CloudFormation handler serves; any other is its own {@code UnknownAction}. */
+    private static boolean servedByCloudFormation(String api) {
+        String operation = AslExecutor.capitalizeFirst(api);
+        return CFN_ANY_RESOURCE.contains(operation) || CFN_OPTIONAL_STACK.contains(operation)
+                || CFN_CREATES_STACK.contains(operation) || CFN_NAMES_CHANGE_SET.contains(operation)
+                || CFN_STACK.contains(operation) || CFN_STACK_SET.contains(operation);
+    }
+
+    /**
+     * The action of the API's own name, on the stack or stack set the request reaches under the id CloudFormation
+     * holds for it, in the service reference's resource types, so a name and the id it stands for are the same
+     * resource. A stack not there yet has its id open for the APIs that create it; for any other API a stack or
+     * stack set CloudFormation does not have names nothing, so CloudFormation answers it.
+     */
+    private static TaskPermissions cloudFormation(String operation, JsonNode input, StateMachine machine,
+                                                  CloudFormationQueryHandler stored) {
+        String action = "cloudformation:" + operation;
+        if (CFN_ANY_RESOURCE.contains(operation)) {
+            return accessDenied(CLOUDFORMATION_PREFIX, List.of(new Permission(action, ANY_RESOURCE)));
+        }
+        String resource;
+        if (CFN_STACK_SET.contains(operation)) {
+            resource = cloudFormationStackSet(input, machine, stored);
+        } else if (CFN_OPTIONAL_STACK.contains(operation) && text(input.path("StackName")) == null) {
+            resource = ANY_RESOURCE;
+        } else {
+            resource = cloudFormationStack(operation, input, machine, stored);
+        }
+        return accessDenied(CLOUDFORMATION_PREFIX,
+                resource == null ? List.of() : List.of(new Permission(action, resource)));
+    }
+
+    private static String cloudFormationStackSet(JsonNode input, StateMachine machine,
+                                                 CloudFormationQueryHandler stored) {
+        String name = text(input.path("StackSetName"));
+        if (name == null || stored == null) {
+            return null;
+        }
+        return stored.stackSetId(name).map(id -> arn(machine, "cloudformation", "stackset/" + id)).orElse(null);
+    }
+
+    /** The stack as each API finds it: by name or id, or else by the change set or the resource the API can name it by. */
+    private static String cloudFormationStack(String operation, JsonNode input, StateMachine machine,
+                                              CloudFormationQueryHandler stored) {
+        String stack = text(input.path("StackName"));
+        String region = regionOf(machine);
+        if (stored == null) {
+            return null;
+        }
+        if (stack != null) {
+            Optional<String> id = stored.stackId(stack, region);
+            boolean opensId = CFN_CREATES_STACK.contains(operation) && !AwsArnUtils.looksLikeArn(stack);
+            return id.orElseGet(() -> opensId ? arn(machine, "cloudformation", "stack/" + stack + "/*") : null);
+        }
+        String changeSet = text(input.path("ChangeSetName"));
+        if (CFN_NAMES_CHANGE_SET.contains(operation) && AwsArnUtils.looksLikeArn(changeSet)) {
+            return stored.stackIdOfChangeSet(changeSet, region).orElse(null);
+        }
+        String resource = text(input.path("PhysicalResourceId"));
+        if ("DescribeStackResources".equals(operation) && resource != null) {
+            return stored.stackIdOfResource(resource, region).orElse(null);
+        }
+        return null;
+    }
+
+    /**
+     * {@code states:InvokeHTTPEndpoint} on the state machine, the resource the Developer Guide's policy scopes it to:
+     * a role allowed it on {@code *}, as the CDK grants it, is allowed it there too. The two condition keys the guide
+     * and the CDK write are given. The connection's own permissions, {@code events:RetrieveConnectionCredentials}
+     * and its secret's, are not evaluated, although the task reads the connection to authorize its request: a role
+     * lacking them succeeds here and fails on AWS. A request naming no endpoint is refused by the integration.
+     */
+    private static TaskPermissions httpInvoke(JsonNode input, StateMachine machine) {
+        String endpoint = text(input.path("ApiEndpoint"));
+        if (endpoint == null) {
+            return accessDenied(HTTP_PREFIX, List.of());
+        }
+        Map<String, List<String>> keys = new LinkedHashMap<>();
+        keys.put("states:HTTPEndpoint", List.of(endpoint));
+        String method = text(input.path("Method"));
+        if (method != null) {
+            keys.put("states:HTTPMethod", List.of(method));
+        }
+        return accessDenied(HTTP_PREFIX, List.of(new Permission("states:InvokeHTTPEndpoint",
+                machine.getStateMachineArn(), keys)));
+    }
+
+    /**
+     * {@code ListEventSourceMappings} has no resource type in the service reference, and
+     * {@code UpdateEventSourceMapping} acts on the mapping its {@code Uuid} names; a request naming none is refused
+     * by the integration.
+     */
+    private static TaskPermissions lambdaSdk(String api, JsonNode input, StateMachine machine) {
+        String action = "lambda:" + AslExecutor.capitalizeFirst(api);
+        if ("listEventSourceMappings".equals(api)) {
+            return accessDenied(LAMBDA_PREFIX, List.of(new Permission(action, ANY_RESOURCE)));
+        }
+        String uuid = text(input.path("Uuid"));
+        return accessDenied(LAMBDA_PREFIX, uuid == null ? List.of()
+                : List.of(new Permission(action, arn(machine, "lambda", "event-source-mapping:" + uuid))));
+    }
+
+    /**
+     * {@code secretsmanager:DescribeSecret} on the secret's stored ARN, random suffix included, as a direct request is.
+     * An ARN naming no secret here is evaluated as given, which only a grant on it or the owner's policy allows; a name
+     * no secret goes by names nothing, so Secrets Manager answers it.
+     */
+    private static TaskPermissions secretsManagerDescribeSecret(JsonNode input, StateMachine machine,
+                                                                SdkManagementTaskInvoker stored) {
+        String secretId = text(input.path("SecretId"));
+        if (secretId == null || stored == null) {
+            return accessDenied(SECRETS_MANAGER_PREFIX, List.of());
+        }
+        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        Optional<String> secret = stored.secretArn(owner.accountId(), secretId, owner.region());
+        String resource = secret.orElse(AwsArnUtils.isArnFor(secretId, "secretsmanager") ? secretId : null);
+        return accessDenied(SECRETS_MANAGER_PREFIX, resource == null ? List.of()
+                : List.of(new Permission("secretsmanager:DescribeSecret", resource)));
+    }
+
+    /**
+     * The check a direct request of the operation gets, on what it names: the state machine it starts, the Map Run it
+     * describes, or the activity or state machine waiting on the callback's token. A token naming no task, or anything
+     * that is not the ARN the request needs, names nothing, so Step Functions answers it.
+     */
+    private static TaskPermissions sfnSdk(String operation, JsonNode input, StateMachine machine,
+                                          StoredResourceArns stored) {
+        return accessDenied(SFN_SDK_PREFIX, statesPermissions(operation, input, machine, stored));
+    }
+
+    /**
+     * {@code states:StartExecution} on the child, without the execution role checks the other integrations make, which
+     * a nested execution has never had. A request naming no state machine is refused by the integration.
+     */
+    private static TaskPermissions nestedStartExecution(JsonNode input, StateMachine machine) {
+        return new TaskPermissions(NESTED_PREFIX + "AccessDeniedException",
+                statesPermissions("StartExecution", input, machine, null), false);
+    }
+
+    private static List<Permission> statesPermissions(String operation, JsonNode input, StateMachine machine,
+                                                      StoredResourceArns stored) {
+        String namedAs = "states:" + operation;
+        AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        try {
+            return RequestResources.ofBody(namedAs, AslExecutor.recaseKeys(MAPPER, input, false), owner.partition(),
+                            owner.region(), owner.accountId(), stored).stream()
+                    .map(resource -> new Permission(namedAs, resource))
+                    .toList();
+        } catch (AwsException expected) {
+            LOG.debugv("The {0} request names no task: {1}", operation, expected.getMessage());
+            return List.of();
+        }
     }
 
     /** The ARN of a resource of the state machine's partition, Region and account. */

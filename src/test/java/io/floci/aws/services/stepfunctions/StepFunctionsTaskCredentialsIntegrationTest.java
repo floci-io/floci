@@ -319,6 +319,22 @@ class StepFunctionsTaskCredentialsIntegrationTest {
         assertDataTaskIsNotEvaluated(integration, arguments, status);
     }
 
+    /** Past authorization, the service answers: these name what it does not have, or nothing it needs. */
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"aws-sdk:scheduler:deleteSchedule|{\"Name\":\"no-such-schedule\"}|FAILED",
+            "aws-sdk:cloudformation:listStacks|{}|SUCCEEDED",
+            "aws-sdk:cloudformation:describeStacks|{\"StackName\":\"no-such-stack\"}|FAILED",
+            "http:invoke|{\"Method\":\"GET\"}|FAILED",
+            "aws-sdk:ec2:describeRegions|{}|SUCCEEDED",
+            "aws-sdk:lambda:listEventSourceMappings|{}|SUCCEEDED",
+            "aws-sdk:secretsmanager:describeSecret|{\"SecretId\":\"no-such-secret\"}|FAILED",
+            "aws-sdk:sfn:describeMapRun|{\"MapRunArn\":\"arn:aws:states:us-east-1:000000000001:mapRun:m/l:i\"}|FAILED",
+            "aws-sdk:sfn:sendTaskSuccess|{\"TaskToken\":\"no-such-token\"}|FAILED"})
+    void controlCredentialsRetainDefaultIamDisabledBehavior(String integration, String arguments, String status)
+            throws Exception {
+        assertDataTaskIsNotEvaluated(integration, MAPPER.readValue(arguments, Map.class), status);
+    }
+
     private void assertDataTaskIsNotEvaluated(String integration, Map<String, Object> arguments, String status)
             throws Exception {
         String taskRole = "arn:aws:iam::" + TARGET + ":role/no-such-role";

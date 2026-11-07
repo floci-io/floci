@@ -398,6 +398,32 @@ public class CloudFormationService implements ResourceProvider {
 
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
+    /** The id of the stack a stack name or id names, as a request describing it finds it, reading only. */
+    public Optional<String> stackId(String stackNameOrId, String region) {
+        return Optional.ofNullable(resolveStackForDescribe(stackNameOrId, region)).map(Stack::getStackId);
+    }
+
+    /** The id of the stack holding the change set {@code changeSetArn} names, reading only. */
+    public Optional<String> stackIdOfChangeSet(String changeSetArn, String region) {
+        try {
+            return Optional.ofNullable(findStackForChangeSetArn(changeSetArn, region, currentAccount()))
+                    .map(Stack::getStackId);
+        } catch (AwsException expected) {
+            LOG.debugv("The change set ARN {0} names no change set: {1}", changeSetArn, expected.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /** The id of the stack that owns the resource {@code physicalResourceId} names, reading only. */
+    public Optional<String> stackIdOfResource(String physicalResourceId, String region) {
+        try {
+            return Optional.of(stackContaining(physicalResourceId, region).getStackId());
+        } catch (AwsException expected) {
+            LOG.debugv("No stack owns the resource {0}: {1}", physicalResourceId, expected.getMessage());
+            return Optional.empty();
+        }
+    }
+
     public List<Stack> describeStacks(String stackName, String region) {
         return describeStacks(stackName, region, currentAccount());
     }

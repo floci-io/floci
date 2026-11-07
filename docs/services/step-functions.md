@@ -90,11 +90,11 @@ With IAM enforcement enabled, the existing task authorizer checks the execution 
 permission to assume the task role, its trust policy, and the task role's permission to
 start the child. Account routing also works with enforcement disabled. The `.sync`
 polling and cancellation paths retain the task account; their additional IAM permissions
-are not evaluated. Lambda, API Gateway, SQS, SNS, EventBridge, DynamoDB, S3 `putObject`, RDS Data,
-Redshift Data, ECS, EMR and EMR Serverless tasks evaluate `Credentials` themselves
+are not evaluated. Every other integration evaluates `Credentials` itself
 ([Lambda](#lambda-tasks-under-iam-enforcement), [messaging](#messaging-tasks-under-iam-enforcement),
-[data](#data-tasks-under-iam-enforcement), [jobs](#job-tasks-under-iam-enforcement)); other
-integrations retain their existing credential handling.
+[data](#data-tasks-under-iam-enforcement), [jobs](#job-tasks-under-iam-enforcement),
+[control](#control-tasks-under-iam-enforcement)), and so does a nested task in its `.waitForTaskToken`
+form, which this routing does not serve: it runs in the state machine's account.
 A foreign state-machine ARN without task credentials grants no account access.
 
 A missing or mismatched task role fails with `States.TaskFailed`. A target account
@@ -762,9 +762,70 @@ AWS; the prefix is the one each integration's other errors carry. EMR's own erro
 global condition keys are available to the policies: `ecs:cluster` and the like are absent, so an Allow
 conditioned on them does not apply. With enforcement off nothing here is evaluated.
 
-Integrations other than these, the data and messaging tasks, Lambda, API Gateway and nested executions
-are not evaluated yet: they run in the state machine's account whatever the execution role's policies
-say.
+## Control tasks under IAM enforcement
+
+With `floci.services.iam.enforcement-enabled`, these tasks are authorized like the
+[messaging tasks](#messaging-tasks-under-iam-enforcement), in the same order. Each action and resource
+type comes from the Service Authorization Reference:
+
+| Resource | Action | Resource evaluated | Refused with |
+|---|---|---|---|
+| `arn:aws:states:::aws-sdk:scheduler:createSchedule`, `updateSchedule`, `deleteSchedule` | `scheduler:CreateSchedule` and so on | `schedule/<GroupName>/<Name>`, `default` for a group left out | `Scheduler.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:cloudformation:<api>` | `cloudformation:<Action>` | See below | `CloudFormation.AccessDeniedException` |
+| `arn:aws:states:::http:invoke` | `states:InvokeHTTPEndpoint` | The state machine | `States.Http.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:ec2:describeRegions` | `ec2:DescribeRegions` | `*` | `Ec2.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:lambda:listEventSourceMappings` | `lambda:ListEventSourceMappings` | `*` | `Lambda.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:lambda:updateEventSourceMapping` | `lambda:UpdateEventSourceMapping` | `event-source-mapping:<UUID>` | `Lambda.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:secretsmanager:describeSecret` | `secretsmanager:DescribeSecret` | The secret's stored ARN, suffix included | `SecretsManager.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:sfn:startExecution`, `startSyncExecution` | `states:StartExecution`, `states:StartSyncExecution` | The child state machine | `Sfn.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:sfn:sendTaskSuccess`, `sendTaskFailure` | `states:SendTaskSuccess`, `states:SendTaskFailure` | The activity or state machine waiting on the token | `Sfn.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:sfn:describeMapRun` | `states:DescribeMapRun` | The Map Run | `Sfn.AccessDeniedException` |
+| `arn:aws:states:::states:startExecution`, with `.sync`, `.sync:2` or `.waitForTaskToken` | `states:StartExecution` | The child state machine | `StepFunctions.AccessDeniedException` |
+
+A CloudFormation action is evaluated on the stack or stack set the request reaches, under the id
+CloudFormation holds for it, so a name and the id it stands for are one resource:
+`stack/<StackName>/<id>` and `stackset/<StackSetName>:<id>`. `createStack` and `createChangeSet` on a stack
+not there yet evaluate `stack/<StackName>/*`. A change set named by its ARN, or a `describeStackResources`
+naming a `PhysicalResourceId`, is evaluated on the stack that holds it. `describeStacks` and
+`getTemplateSummary` without a `StackName` are on `*`, as are `validateTemplate`, `listStacks`, `listExports`,
+`createStackSet`, `listStackSets`, `describeOrganizationsAccess` and `activateOrganizationsAccess`, which
+have no resource type.
+
+`states:InvokeHTTPEndpoint` has no resource type in the Service Authorization Reference, and the CDK grants
+it on `*`, while the Developer Guide's example scopes it to the state machine, so the state machine is what is
+evaluated: both policies allow it. The task gives `states:HTTPEndpoint` and `states:HTTPMethod`, both of which
+those policies use. The value of `states:HTTPEndpoint` is `ApiEndpoint` as resolved, without `QueryParameters`.
+The guide also requires `events:RetrieveConnectionCredentials` and the connection secret's Secrets Manager
+permissions. Floci does not evaluate them, although the task reads the connection to authorize its request:
+a role lacking them succeeds here and fails on AWS.
+
+A nested `states:startExecution` task does not refuse its execution role for not existing or not
+trusting Step Functions, as a Lambda task does not. It only needs the action, which a role that does not
+exist does not have. `.sync` needs the starting call alone, not `states:DescribeExecution`, `states:StopExecution`
+or the EventBridge permissions the CDK grants for its wait. With `Credentials`, a nested task other than
+the `.waitForTaskToken` form keeps the checks and errors of
+[nested task credentials](#nested-task-credentials).
+
+Every integration that evaluates a role is refused on its `.waitForTaskToken` form the same way: the refused
+task starts nothing and waits for nothing. With the permission, it calls its service and then waits on its
+token.
+
+A request naming nothing it can reach has only the role checks, and its service answers it: no `Name`, a stack,
+stack set or secret name its service does not have, no `UUID`, no `ApiEndpoint`, a `StateMachineArn` or `MapRunArn`
+that is not one, or a token naming no task. A secret or stack named by an ARN of what does not exist here is
+evaluated on that ARN, for a secret, or left to the service, for a stack. An API Floci does not serve keeps its
+answer, whatever the role: it is "Unsupported", or CloudFormation's `UnknownAction`, and the role is not checked.
+
+An activity task is not evaluated: the CDK's own task needs no permission for it, and the worker calling
+`GetActivityTask` is authorized by its own request. `Map`'s `ItemReader` and `ResultWriter` S3 calls are not
+evaluated yet; they run in the state machine's account whatever the execution role's policies say.
+
+`<prefix>.AccessDeniedException` and `States.Http.AccessDeniedException` are Floci's reading and have not
+been verified against AWS; a nested task with `Credentials` reports a refused action as
+`StepFunctions.AWSStepFunctionsException` or `Sfn.SfnException` instead, so a state machine catching this should
+name both. `iam:PassRole` is not evaluated for the roles a schedule or a stack names, and only
+the condition keys above and global ones are available to the policies. With enforcement off nothing here is
+evaluated.
 
 ## Task credentials in history
 
@@ -828,11 +889,9 @@ their `UUID` spelling.
 ECS `listServices` supports the same `MaxResults` and opaque `NextToken` as the
 direct ECS API. Lambda mapping tasks currently return an unpaginated list;
 `Marker` and `MaxItems` are rejected with `Lambda.InvalidParameterValueException`
-instead of being silently ignored. The three Lambda mapping and Secrets Manager integrations do not
-evaluate the state-machine execution role's per-action IAM policies; the three ECS ones
-[do](#job-tasks-under-iam-enforcement), and among the task integrations so do Lambda, API
-Gateway, nested executions, the [messaging tasks](#messaging-tasks-under-iam-enforcement) and the
-[data tasks](#data-tasks-under-iam-enforcement). Name-based lookups use the
+instead of being silently ignored. Under IAM enforcement the [ECS](#job-tasks-under-iam-enforcement)
+and [Lambda and Secrets Manager](#control-tasks-under-iam-enforcement) ones evaluate the
+state-machine execution role's per-action IAM policies. Name-based lookups use the
 execution scope; explicit ARNs retain the underlying service's cross-account lookup
 behavior. The underlying services' validation still applies. They implement
 request-response calls, without job-completion polling.
