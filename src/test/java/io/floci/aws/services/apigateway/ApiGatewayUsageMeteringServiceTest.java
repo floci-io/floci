@@ -3,9 +3,11 @@ package io.floci.aws.services.apigateway;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.apigateway.model.GatewayResponseType;
 import io.floci.aws.services.apigateway.model.UsagePlan;
+import io.floci.aws.services.apigateway.model.UsagePlanKey;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.ManualClock;
@@ -22,6 +24,8 @@ import java.time.LocalDate;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -229,6 +233,29 @@ class ApiGatewayUsageMeteringServiceTest {
         assertNull(service.meterApiKeyCall(REGION, planId, keyId));
         service.createUsagePlanKey(REGION, planId, Map.of("keyId", keyId, "keyType", "API_KEY"));
         assertEquals(List.of(List.of(0L, 1L)), usage(planId, keyId, "2026-11-06", "2026-11-06"));
+    }
+
+    @Test
+    void keyAddedWhileItsPlanIsDeletedGoesWithThePlan() {
+        String[] planId = new String[1];
+        CompletableFuture<?>[] deletion = new CompletableFuture<?>[1];
+        InMemoryStorage<String, UsagePlanKey> keys = new InMemoryStorage<>() {
+            @Override
+            public void put(String key, UsagePlanKey value) {
+                deletion[0] = CompletableFuture.runAsync(() -> service.deleteUsagePlan(REGION, planId[0]));
+                // Unless adding a key holds the plan lock, the deletion completes here, before the write.
+                deletion[0].copy().completeOnTimeout(null, 200, TimeUnit.MILLISECONDS).join();
+                super.put(key, value);
+            }
+        };
+        service = service(new InMemoryStorageFactory(ACCOUNT).withStore("apigateway-usageplankeys.json", keys));
+        planId[0] = plan(Map.of());
+        String keyId = service.createApiKey(REGION, Map.of("name", "racing", "enabled", true)).getId();
+
+        service.createUsagePlanKey(REGION, planId[0], Map.of("keyId", keyId, "keyType", "API_KEY"));
+        deletion[0].join();
+
+        assertEquals(List.of(), service.getUsagePlanKeys(REGION, planId[0]));
     }
 
     @Test

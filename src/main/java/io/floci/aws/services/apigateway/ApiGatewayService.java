@@ -1744,22 +1744,25 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     // ──────────────────────────── Usage Plan Keys ────────────────────────────
 
+    /** Under the plan lock, so a key cannot be written after DeleteUsagePlan swept the plan's keys. */
     public UsagePlanKey createUsagePlanKey(String region, String usagePlanId, Map<String, Object> request) {
-        getUsagePlan(region, usagePlanId);
-        String keyId = (String) request.get("keyId");
-        String keyType = (String) request.get("keyType");
+        synchronized (usagePlanLock) {
+            getUsagePlan(region, usagePlanId);
+            String keyId = (String) request.get("keyId");
+            String keyType = (String) request.get("keyType");
 
-        ApiKey apiKey = getApiKey(region, keyId);
+            ApiKey apiKey = getApiKey(region, keyId);
 
-        UsagePlanKey usagePlanKey = new UsagePlanKey();
-        usagePlanKey.setId(apiKey.getId());
-        usagePlanKey.setName(apiKey.getName());
-        usagePlanKey.setType(keyType);
-        usagePlanKey.setValue(apiKey.getValue());
+            UsagePlanKey usagePlanKey = new UsagePlanKey();
+            usagePlanKey.setId(apiKey.getId());
+            usagePlanKey.setName(apiKey.getName());
+            usagePlanKey.setType(keyType);
+            usagePlanKey.setValue(apiKey.getValue());
 
-        usagePlanKeyStore.put(usagePlanKeyPathKey(region, usagePlanId, keyId), usagePlanKey);
-        LOG.infov("Created Usage Plan Key {0} for Usage Plan {1}", keyId, usagePlanId);
-        return usagePlanKey;
+            usagePlanKeyStore.put(usagePlanKeyPathKey(region, usagePlanId, keyId), usagePlanKey);
+            LOG.infov("Created Usage Plan Key {0} for Usage Plan {1}", keyId, usagePlanId);
+            return usagePlanKey;
+        }
     }
 
     public UsagePlanKey getUsagePlanKey(String region, String usagePlanId, String keyId) {
