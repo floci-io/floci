@@ -366,8 +366,9 @@ public class PaymentCryptographyPinOperations {
             String pin = PinCrypto.decipherPinBlock(inFormat, text(request, "EncryptedPinBlock"),
                     inPan, in.keyBytes);
             if (!isRecoveredPin(pin)) {
-                throw validation("unable to translate PIN block: the incoming block does not carry "
-                        + "a well-formed " + inFormat.label() + " PIN field");
+                // The block deciphered, but what it carries is not a PIN, so it is not a block
+                // the service can read.
+                throw invalidPinBlock();
             }
             pinBlock = PinCrypto.encipherPinBlock(outFormat, pin, outPan, out.keyBytes, random);
         } catch (IllegalArgumentException e) {
