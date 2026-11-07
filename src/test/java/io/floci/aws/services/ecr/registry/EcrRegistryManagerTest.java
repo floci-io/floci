@@ -27,6 +27,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.HostBlindPortAllocator;
 import io.floci.aws.core.common.docker.PortAllocator;
+import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -34,6 +35,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -869,6 +872,10 @@ class EcrRegistryManagerTest {
     @Test
     @SuppressWarnings("unchecked")
     void runGarbageCollectTimeoutWithExecStillRunningKeepsAdmissionClosed() throws Exception {
+        ManualClock clock = new ManualClock(Instant.now());
+        manager.setClock(clock);
+        manager.setSleeper(millis -> clock.advance(Duration.ofMillis(millis)));
+
         when(lifecycleManager.createAndStart(any()))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
         when(lifecycleManager.presenceOf("container-id")).thenReturn(ContainerPresence.RUNNING);
