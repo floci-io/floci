@@ -44,9 +44,9 @@ import java.util.function.LongSupplier;
  * emr-7.14.0 on, "When you select Trino as the only application at launch, Amazon EMR no longer starts YARN and
  * HDFS", a cluster Floci does not run), is a NameNode and a DataNode in a container of their own, the cluster's
  * primary node's, with their data in a third volume, so that the first container to mount the {@code /mnt} one is a
- * step's, which fills it from the step's image. On a cluster with Hive the same container runs Hive's metastore
- * service, as EMR's primary node does, with its database in that third volume, reaching S3 with a session for the
- * cluster's instance profile's role, which goes with the container.
+ * step's, which fills it from the step's image. On a cluster with Hive or HCatalog the same container runs Hive's
+ * metastore service, as EMR's primary node does, with its database in that third volume, reaching S3 with a session
+ * for the cluster's instance profile's role, which goes with the container.
  */
 @ApplicationScoped
 public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
@@ -65,9 +65,11 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // starting a JVM of hdfs's own each time it is asked; each look is given five seconds, so one the NameNode does not
     // answer while it starts is asked again.
     private static final String NAMENODE_JMX = "http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=";
-    // The metastore service's --hiveconf settings, Floci's S3 among them; set only on a cluster with Hive.
+    // The metastore service's --hiveconf settings, Floci's S3 among them; set only on a cluster with Hive or
+    // HCatalog.
     private static final String HIVE_METASTORE_VARIABLE = "FLOCI_HIVE_METASTORE";
-    // The cluster's core-site and hive-site, as --hiveconf settings one to a line, which the service gets after its own.
+    // The cluster's core-site and hive-site, as --hiveconf settings one to a line, which the service gets after its
+    // own.
     private static final String HIVE_METASTORE_SITE_VARIABLE = "FLOCI_HIVE_METASTORE_SITE";
     private static final int HIVE_METASTORE_PORT = 9083;
     // The folder a Hive session uploads Hive's exec jar to when it is not there, named after its SHA-256, under the
