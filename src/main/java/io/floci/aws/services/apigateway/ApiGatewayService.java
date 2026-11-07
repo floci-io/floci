@@ -1477,8 +1477,8 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         getApiKey(region, apiKeyId);
         for (UsagePlan plan : getUsagePlans(region)) {
             usagePlanKeyStore.delete(usagePlanKeyPathKey(region, plan.getId(), apiKeyId));
-            forgetUsage(usagePlanKeyPathKey(region, plan.getId(), apiKeyId) + "::");
         }
+        forgetUsage(meterKey -> meterKey.startsWith(region + "::") && meterKey.endsWith("::" + apiKeyId));
         apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
     }
 
@@ -1676,7 +1676,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         synchronized (usagePlanLock) {
             getUsagePlan(region, usagePlanId);
             usagePlanStore.delete(usagePlanKey(region, usagePlanId));
-            forgetUsage(region + "::" + usagePlanId + "::");
+            forgetUsage(meterKey -> meterKey.startsWith(region + "::" + usagePlanId + "::"));
         }
     }
 
@@ -1938,12 +1938,17 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     private record TokenBucket(double tokens, Instant refilledAt) {}
 
-    /** Drops the counts and buckets under {@code prefix}, so a plan or key recreated with its id starts unused. */
-    private void forgetUsage(String prefix) {
+    /**
+     * Drops, in one pass, the counts and buckets of each meter key ({@code region::plan::key}) matched,
+     * so a plan or key recreated with its id starts unused.
+     */
+    private void forgetUsage(Predicate<String> meterKey) {
         synchronized (usageLock) {
-            usageStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(usageStore::delete);
-            String bucketPrefix = regionResolver.getAccountId() + "::" + prefix;
-            throttleBuckets.keySet().removeIf(k -> (k + "::").startsWith(bucketPrefix));
+            usageStore.keys().stream().filter(k -> meterKey.test(k.substring(0, k.lastIndexOf("::"))))
+                    .forEach(usageStore::delete);
+            String accountPrefix = regionResolver.getAccountId() + "::";
+            throttleBuckets.keySet().removeIf(k -> k.startsWith(accountPrefix)
+                    && meterKey.test(k.substring(accountPrefix.length())));
         }
     }
 

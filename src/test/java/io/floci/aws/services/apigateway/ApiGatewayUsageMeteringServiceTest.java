@@ -233,12 +233,15 @@ class ApiGatewayUsageMeteringServiceTest {
 
     @Test
     void keyRecreatedWithTheIdOfADeletedOneStartsWithNoUse() {
-        String planId = plan(Map.of("quota", Map.of("limit", 1, "period", "DAY")));
+        String planId = plan(Map.of("quota", Map.of("limit", 1, "period", "DAY"),
+                "throttle", Map.of("burstLimit", 1, "rateLimit", 0.0)));
         Map<String, Object> keyRequest = Map.of("name", "fixed", "enabled", true,
                 "value", "fixed-value-0123456789", "generateDistinctId", false);
         String keyId = service.createApiKey(REGION, keyRequest).getId();
         service.createUsagePlanKey(REGION, planId, Map.of("keyId", keyId, "keyType", "API_KEY"));
         assertNull(service.meterApiKeyCall(REGION, planId, keyId));
+        String otherKeyId = keyOn(planId);
+        assertNull(service.meterApiKeyCall(REGION, planId, otherKeyId));
 
         service.deleteApiKey(REGION, keyId);
         service.createApiKey(REGION, keyRequest);
@@ -246,6 +249,7 @@ class ApiGatewayUsageMeteringServiceTest {
 
         assertEquals(List.of(List.of(0L, 1L)), usage(planId, keyId, "2026-11-06", "2026-11-06"));
         assertNull(service.meterApiKeyCall(REGION, planId, keyId));
+        assertEquals(List.of(List.of(1L, 0L)), usage(planId, otherKeyId, "2026-11-06", "2026-11-06"));
     }
 
     @Test
