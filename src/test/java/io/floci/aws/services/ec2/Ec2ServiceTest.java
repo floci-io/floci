@@ -6833,9 +6833,7 @@ class Ec2ServiceTest {
         assertFalse(attached.getAttachments().getFirst().isDeleteOnTermination());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {true, false})
-    void attachmentExceptionsLeaveStoredVolumeAvailableAndRetryable(boolean awsError) {
+    private static VolumeAttachmentFixture volumeAttachmentFixture() {
         Ec2VolumeBlockDeviceManager blockDevices = mock(Ec2VolumeBlockDeviceManager.class);
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
@@ -6845,6 +6843,21 @@ class Ec2ServiceTest {
         instance.setState(InstanceState.running());
         Volume volume = service.createVolume("us-east-1", instance.getPlacement().getAvailabilityZone(), "gp3", 1,
                 false, 0, null, null, List.of());
+        return new VolumeAttachmentFixture(blockDevices, service, instance, volume);
+    }
+
+    private record VolumeAttachmentFixture(Ec2VolumeBlockDeviceManager blockDevices, Ec2Service service,
+                                           Instance instance, Volume volume) {
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void attachmentExceptionsLeaveStoredVolumeAvailableAndRetryable(boolean awsError) {
+        VolumeAttachmentFixture fixture = volumeAttachmentFixture();
+        Ec2VolumeBlockDeviceManager blockDevices = fixture.blockDevices();
+        Ec2Service service = fixture.service();
+        Instance instance = fixture.instance();
+        Volume volume = fixture.volume();
         RuntimeException failure = awsError ? new AwsException("InternalError", "attachment failed", 500)
                 : new IllegalStateException("unexpected backend failure");
         when(blockDevices.attachVolume(any(), any(), anyString())).thenThrow(failure);
@@ -6867,15 +6880,11 @@ class Ec2ServiceTest {
 
     @Test
     void concurrentAttachmentWaitsForThePhysicalOperation() throws Exception {
-        Ec2VolumeBlockDeviceManager blockDevices = mock(Ec2VolumeBlockDeviceManager.class);
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), null, null, blockDevices);
-        Instance instance = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
-                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
-        instance.setState(InstanceState.running());
-        Volume volume = service.createVolume("us-east-1", instance.getPlacement().getAvailabilityZone(), "gp3", 1,
-                false, 0, null, null, List.of());
+        VolumeAttachmentFixture fixture = volumeAttachmentFixture();
+        Ec2VolumeBlockDeviceManager blockDevices = fixture.blockDevices();
+        Ec2Service service = fixture.service();
+        Instance instance = fixture.instance();
+        Volume volume = fixture.volume();
         CountDownLatch attaching = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         when(blockDevices.attachVolume(any(), any(), anyString())).thenAnswer(invocation -> {
@@ -6910,16 +6919,12 @@ class Ec2ServiceTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void differentVolumesCannotClaimTheSameDeviceDuringPhysicalAttachment(boolean firstFails) throws Exception {
-        Ec2VolumeBlockDeviceManager blockDevices = mock(Ec2VolumeBlockDeviceManager.class);
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), null, null, blockDevices);
-        Instance instance = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
-                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
-        instance.setState(InstanceState.running());
+        VolumeAttachmentFixture fixture = volumeAttachmentFixture();
+        Ec2VolumeBlockDeviceManager blockDevices = fixture.blockDevices();
+        Ec2Service service = fixture.service();
+        Instance instance = fixture.instance();
+        Volume firstVolume = fixture.volume();
         String zone = instance.getPlacement().getAvailabilityZone();
-        Volume firstVolume = service.createVolume("us-east-1", zone, "gp3", 1,
-                false, 0, null, null, List.of());
         Volume secondVolume = service.createVolume("us-east-1", zone, "gp3", 1,
                 false, 0, null, null, List.of());
         CountDownLatch attaching = new CountDownLatch(1);
