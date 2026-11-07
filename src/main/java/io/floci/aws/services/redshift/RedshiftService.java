@@ -2055,16 +2055,61 @@ public class RedshiftService implements ManagedSecretRotator {
 
     public Snapshot copyClusterSnapshot(String sourceSnapshotIdentifier, String targetSnapshotIdentifier,
                                         String sourceSnapshotClusterIdentifier, Integer manualRetention) {
+        return copyClusterSnapshot(sourceSnapshotIdentifier, targetSnapshotIdentifier,
+                sourceSnapshotClusterIdentifier, manualRetention, null, null);
+    }
+
+    public Snapshot copyClusterSnapshot(String sourceSnapshotIdentifier, String targetSnapshotIdentifier,
+                                        String sourceSnapshotClusterIdentifier, Integer manualRetention,
+                                        Map<String, String> tags, String kmsKeyId) {
         validateSnapshotIdentifier(targetSnapshotIdentifier);
         if (manualRetention != null && manualRetention != -1 && (manualRetention < 1 || manualRetention > 3653)) {
-            throw new AwsException("InvalidParameterValue",
+            throw new AwsException("InvalidRetentionPeriod",
                     "ManualSnapshotRetentionPeriod must be -1 or between 1 and 3653.", 400);
         }
         String accountId = clusters.accountId();
         String region = regionResolver.getRegion();
-        String sourceId = AwsArnUtils.looksLikeArn(sourceSnapshotIdentifier)
-                ? parseSnapshotIdentifierFromArn(sourceSnapshotIdentifier)
-                : sourceSnapshotIdentifier;
+
+        String sourceId;
+        String expectedClusterFromArn;
+        if (AwsArnUtils.looksLikeArn(sourceSnapshotIdentifier)) {
+            AwsArnUtils.Arn arn;
+            try {
+                arn = AwsArnUtils.parse(sourceSnapshotIdentifier);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid source snapshot identifier: " + sourceSnapshotIdentifier, 400);
+            }
+            String resource = arn.resource();
+            int slash = resource.lastIndexOf('/');
+            if (!"redshift".equals(arn.service()) || !resource.startsWith("snapshot:")
+                    || slash < 0 || slash == resource.length() - 1) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid source snapshot identifier: " + sourceSnapshotIdentifier, 400);
+            }
+            if (!arn.accountId().equals(accountId)
+                    || !arn.region().equals(region)
+                    || !arn.partition().equals(AwsRegions.partitionFor(region))) {
+                throw new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + sourceSnapshotIdentifier + " not found", 404);
+            }
+            String arnCluster = resource.substring("snapshot:".length(), slash);
+            if (arnCluster.isBlank()) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid source snapshot identifier: " + sourceSnapshotIdentifier, 400);
+            }
+            if (sourceSnapshotClusterIdentifier != null && !sourceSnapshotClusterIdentifier.isBlank()
+                    && !sourceSnapshotClusterIdentifier.equals(arnCluster)) {
+                throw new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + sourceSnapshotIdentifier + " does not belong to cluster "
+                                + sourceSnapshotClusterIdentifier, 404);
+            }
+            expectedClusterFromArn = arnCluster;
+            sourceId = resource.substring(slash + 1);
+        } else {
+            expectedClusterFromArn = null;
+            sourceId = sourceSnapshotIdentifier;
+        }
 
         return withResourceLock("snapshot", targetSnapshotIdentifier, () -> {
             boolean shadowedByCopy = snapshotCopies.get(copyKey(region, targetSnapshotIdentifier)).isPresent();
@@ -2075,6 +2120,10 @@ public class RedshiftService implements ManagedSecretRotator {
 
             Snapshot source = findSnapshot(sourceId).orElse(null);
             if (source == null) {
+                throw new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + sourceSnapshotIdentifier + " not found", 404);
+            }
+            if (expectedClusterFromArn != null && !expectedClusterFromArn.equals(source.getClusterIdentifier())) {
                 throw new AwsException("ClusterSnapshotNotFound",
                         "Snapshot " + sourceSnapshotIdentifier + " not found", 404);
             }
@@ -2103,25 +2152,60 @@ public class RedshiftService implements ManagedSecretRotator {
             copy.setAutomatedSnapshotRetentionPeriod(null);
             copy.setScheduledTime(null);
             copy.setSnapshotArn(snapshotArn(source.getClusterIdentifier(), targetSnapshotIdentifier));
+            copy.setCopiedToRegions(new LinkedHashSet<>());
+            copy.setSqlDump(null);
 
+            if (tags != null && !tags.isEmpty()) {
+                copy.setTags(new LinkedHashMap<>(tags));
+            } else if (source.getTags() != null) {
+                copy.setTags(new LinkedHashMap<>(source.getTags()));
+            } else {
+                copy.setTags(new LinkedHashMap<>());
+            }
+
+            if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+                copy.setKmsKeyId(kmsKeyId);
+            }
+
+            Path dumpDir = accountDumpDir(accountId);
+            Path targetDumpFile = dumpDir.resolve(targetSnapshotIdentifier + ".sql").normalize();
+            if (!targetDumpFile.startsWith(dumpDir)) {
+                throw new AwsException("InvalidParameterValue", "Invalid snapshot identifier", 400);
+            }
+
+            boolean dumpCreated = false;
             if (source.getSqlDump() != null) {
-                Path dumpDir = accountDumpDir(accountId);
-                Path targetDumpFile = dumpDir.resolve(targetSnapshotIdentifier + ".sql").normalize();
-                if (targetDumpFile.startsWith(dumpDir)) {
-                    try {
-                        Path sourceDumpFile = Paths.get(source.getSqlDump());
-                        if (Files.exists(sourceDumpFile)) {
-                            Files.copy(sourceDumpFile, targetDumpFile, StandardCopyOption.REPLACE_EXISTING);
-                            copy.setSqlDump(targetDumpFile.toString());
-                        }
-                    } catch (IOException e) {
-                        LOG.warnv(e, "Could not copy dump file from {0} to {1}", source.getSqlDump(), targetDumpFile);
-                    }
+                Path sourceDumpFile = Paths.get(source.getSqlDump()).toAbsolutePath().normalize();
+                if (!isTrustedDumpPath(source.getSqlDump()) || !Files.isRegularFile(sourceDumpFile)) {
+                    throw new AwsException("InvalidClusterSnapshotState",
+                            "Snapshot dump file is missing: " + source.getSqlDump(), 400);
+                }
+                try {
+                    Files.createDirectories(dumpDir);
+                    Files.copy(sourceDumpFile, targetDumpFile, StandardCopyOption.REPLACE_EXISTING);
+                    dumpCreated = true;
+                    copy.setSqlDump(targetDumpFile.toString());
+                } catch (IOException e) {
+                    LOG.warnv(e, "Could not copy dump file from {0} to {1}", source.getSqlDump(), targetDumpFile);
+                    throw new AwsException("InternalFailure", "Failed to copy snapshot dump", 500);
                 }
             }
 
-            snapshots.putAllAtomically(Map.of(targetSnapshotIdentifier, copy));
-            snapshots.flush();
+            boolean committed = false;
+            try {
+                snapshots.putAllAtomically(Map.of(targetSnapshotIdentifier, copy));
+                committed = true;
+                snapshots.flush();
+            } catch (Exception e) {
+                if (dumpCreated) {
+                    try {
+                        Files.deleteIfExists(targetDumpFile);
+                    } catch (IOException cleanupFailure) {
+                        e.addSuppressed(cleanupFailure);
+                    }
+                }
+                throw e;
+            }
 
             emitSnapshotEvent(accountId, region, RedshiftEventCatalog.SNAPSHOT_STARTED,
                     targetSnapshotIdentifier, "A user snapshot '" + targetSnapshotIdentifier
@@ -2130,16 +2214,6 @@ public class RedshiftService implements ManagedSecretRotator {
 
             return copy;
         });
-    }
-
-    private static String parseSnapshotIdentifierFromArn(String snapshotArn) {
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(snapshotArn);
-        String resource = arn.resource();
-        int slash = resource.lastIndexOf('/');
-        if (slash >= 0 && slash < resource.length() - 1) {
-            return resource.substring(slash + 1);
-        }
-        return resource.replaceFirst("^snapshot:", "");
     }
 
     public Snapshot deleteSnapshot(String snapshotIdentifier) {

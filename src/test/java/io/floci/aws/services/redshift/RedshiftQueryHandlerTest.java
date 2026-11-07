@@ -1505,7 +1505,7 @@ class RedshiftQueryHandlerTest {
         snapshot.setManualSnapshotRetentionPeriod(15);
         snapshot.setSnapshotArn("arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/target-snap");
 
-        when(service.copyClusterSnapshot("source-snap", "target-snap", "my-cluster", 15))
+        when(service.copyClusterSnapshot("source-snap", "target-snap", "my-cluster", 15, Map.of(), null))
                 .thenReturn(snapshot);
 
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
@@ -1524,6 +1524,42 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<ClusterIdentifier>my-cluster</ClusterIdentifier>"));
         assertTrue(xml.contains("<SnapshotType>manual</SnapshotType>"));
         assertTrue(xml.contains("<SnapshotArn>arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/target-snap</SnapshotArn>"));
-        verify(service).copyClusterSnapshot("source-snap", "target-snap", "my-cluster", 15);
+        verify(service).copyClusterSnapshot("source-snap", "target-snap", "my-cluster", 15, Map.of(), null);
+    }
+
+    @Test
+    void copyClusterSnapshotParsesTagsAndKmsKey() {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier("target-snap");
+        snapshot.setClusterIdentifier("my-cluster");
+        snapshot.setSnapshotType("manual");
+        snapshot.setStatus("available");
+        snapshot.setMasterUsername("admin");
+        snapshot.setPort(5439);
+        snapshot.setManualSnapshotRetentionPeriod(-1);
+        snapshot.setSnapshotArn("arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/target-snap");
+        snapshot.setKmsKeyId("kms-key-arn");
+        snapshot.setTags(Map.of("Env", "Prod"));
+
+        when(service.copyClusterSnapshot("source-snap", "target-snap", null, null, Map.of("Env", "Prod"), "kms-key-arn"))
+                .thenReturn(snapshot);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SourceSnapshotIdentifier", "source-snap");
+        params.putSingle("TargetSnapshotIdentifier", "target-snap");
+        params.putSingle("KmsKeyId", "kms-key-arn");
+        params.putSingle("Tags.Tag.1.Key", "Env");
+        params.putSingle("Tags.Tag.1.Value", "Prod");
+
+        Response response = handler.handle("CopyClusterSnapshot", params);
+        assertEquals(200, response.getStatus());
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<Encrypted>true</Encrypted>"));
+        assertTrue(xml.contains("<KmsKeyId>kms-key-arn</KmsKeyId>"));
+        assertTrue(xml.contains("<Tags>"));
+        assertTrue(xml.contains("<Key>Env</Key>"));
+        assertTrue(xml.contains("<Value>Prod</Value>"));
+        verify(service).copyClusterSnapshot("source-snap", "target-snap", null, null, Map.of("Env", "Prod"), "kms-key-arn");
     }
 }
