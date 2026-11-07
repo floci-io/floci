@@ -16,6 +16,8 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.IOException;
 import java.net.URI;
@@ -406,6 +408,79 @@ class IamTagOnCreateEnforcementIntegrationTest {
     }
 
     /**
+     * A domain created with tags needs {@code es:AddTags} on the domain its body names, in both OpenSearch API
+     * versions, as the OpenSearch Service developer guide's policy for creating a domain only with a tag grants
+     * {@code es:CreateDomain} and {@code es:AddTags}; the create's own action is checked with the tags it carries,
+     * and one created with none needs that action alone.
+     */
+    @ParameterizedTest
+    @CsvSource({"/2021-01-01/opensearch/domain, es:CreateDomain",
+            "/2015-01-01/es/domain, es:CreateElasticsearchDomain"})
+    void aDomainCreatedWithTagsNeedsAddTagsOnTheDomain(String path, String create) {
+        User user = user("tag-domain");
+        String name = "tag-os-" + suffix();
+        String arn = "arn:aws:es:us-east-1:" + ACCOUNT + ":domain/" + name;
+        String addTags = "{\"Effect\":\"Allow\",\"Action\":\"es:AddTags\",\"Resource\":\"" + arn + "\"}";
+        user.policy(allow(create));
+        refusedRest(user.rest("es").body(domain(name, "blue")).post(path).then(), "es:AddTags");
+
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"" + create + "\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"blue\"}}}," + addTags);
+        refusedRest(user.rest("es").body(domain(name, "red")).post(path).then(), create);
+        refusedRest(user.rest("es").body(domain(name + "-other", "blue")).post(path).then(), "es:AddTags");
+        user.rest("es").body(domain(name, "blue")).post(path).then().statusCode(200);
+        cleanup.register(() -> admin("es").delete(path + "/{name}", name));
+        admin("es").queryParam("arn", arn).get("/2021-01-01/tags/").then().statusCode(200)
+                .body("TagList.find { it.Key == 'team' }.Value", equalTo("blue"));
+
+        user.policy(allow(create));
+        user.rest("es").body(domain(name + "-bare", null)).post(path).then().statusCode(200);
+        cleanup.register(() -> admin("es").delete(path + "/{name}", name + "-bare"));
+    }
+
+    /**
+     * OpenSearch refuses a {@code TagList} that is not as its model has it, before it changes anything, so no reading
+     * of one can differ from the tags a domain gets: under every grant and a deny on {@code team=red}, none of these
+     * creates a domain, among them an object whose structure's key is also its member's name and a tag of the denied
+     * key with no value after it. {@code AddTags} shares the reader, and tags at the model's limits are kept.
+     */
+    @ParameterizedTest
+    @CsvSource({"/2021-01-01/opensearch/domain, es:CreateDomain",
+            "/2015-01-01/es/domain, es:CreateElasticsearchDomain"})
+    void aDomainIsNotCreatedWithATagListItsModelDoesNotAllow(String path, String create) {
+        User user = user("tag-domain-shapes");
+        String name = "tag-os-" + suffix();
+        String arn = "arn:aws:es:us-east-1:" + ACCOUNT + ":domain/" + name;
+        String red = "{\"Key\":\"team\",\"Value\":\"red\"}";
+        user.policy(allow(create));
+        refusedRest(user.rest("es").body(domainWithTagList(name, "{\"team\":" + red + "}")).post(path).then(),
+                "es:AddTags");
+
+        user.policy(allow(create) + "," + allow("es:AddTags") + ",{\"Effect\":\"Deny\",\"Action\":\"es:AddTags\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}");
+        refusedRest(user.rest("es").body(domainWithTagList(name, "[" + red + "]")).post(path).then(), "es:AddTags");
+        for (String tagList : List.of("{\"team\":" + red + "}", "[" + red + ",{\"Key\":\"team\"}]",
+                "[" + red + ",{\"Key\":\"team\",\"Value\":null}]", "[{\"Value\":\"blue\"}]",
+                "[{\"Key\":\"\",\"Value\":\"blue\"}]", "[{\"Key\":123,\"Value\":\"blue\"}]",
+                "[{\"Key\":\"team\",\"Value\":{\"a\":1}}]", "[\"team\"]",
+                "[{\"Key\":\"" + "k".repeat(129) + "\",\"Value\":\"blue\"}]",
+                "[{\"Key\":\"team\",\"Value\":\"" + "v".repeat(257) + "\"}]")) {
+            user.rest("es").body(domainWithTagList(name, tagList)).post(path).then().statusCode(400);
+            admin("es").get("/2021-01-01/opensearch/domain/{name}", name).then().statusCode(409);
+        }
+
+        String longest = "k".repeat(128);
+        user.rest("es").body(domainWithTagList(name, "[{\"Key\":\"team\",\"Value\":\"\"},{\"Key\":\"" + longest
+                + "\",\"Value\":\"" + "v".repeat(256) + "\"}]")).post(path).then().statusCode(200);
+        cleanup.register(() -> admin("es").delete(path + "/{name}", name));
+        admin("es").contentType("application/json").body("{\"ARN\":\"" + arn + "\",\"TagList\":[{\"Key\":\"team\"}]}")
+                .post("/2021-01-01/tags").then().statusCode(400);
+        admin("es").queryParam("arn", arn).get("/2021-01-01/tags/").then().statusCode(200)
+                .body("TagList.find { it.Key == 'team' }.Value", equalTo(""))
+                .body("TagList.size()", equalTo(2));
+    }
+
+    /**
      * CodeDeploy's handler reads a tag's key and value in either case, so the tagging action is checked for both,
      * and the create's own action sees them.
      */
@@ -470,6 +545,16 @@ class IamTagOnCreateEnforcementIntegrationTest {
     private static String analyzer(String name, String team) {
         String tags = team == null ? "" : ",\"tags\":{\"team\":\"" + team + "\"}";
         return "{\"analyzerName\":\"" + name + "\",\"type\":\"ORGANIZATION\"" + tags + "}";
+    }
+
+    /** A body creating a domain, in either API version, tagged with the {@code team} given, or with no tags. */
+    private static String domain(String name, String team) {
+        return team == null ? "{\"DomainName\":\"" + name + "\"}"
+                : domainWithTagList(name, "[{\"Key\":\"team\",\"Value\":\"" + team + "\"}]");
+    }
+
+    private static String domainWithTagList(String name, String tagList) {
+        return "{\"DomainName\":\"" + name + "\",\"TagList\":" + tagList + "}";
     }
 
     private static ValidatableResponse createTopic(User user, String name, Map<String, String> tags) {

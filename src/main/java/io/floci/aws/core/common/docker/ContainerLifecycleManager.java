@@ -1032,6 +1032,53 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Connects the running container {@code containerId} to {@code networkName}, where its other containers reach it
+     * as {@code alias}, unless it is on it already.
+     */
+    public void ensureConnected(String containerId, String networkName, String alias) {
+        if (networksOf(containerId).containsKey(networkName)) {
+            return;
+        }
+        dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(networkName)
+                .withContainerNetwork(new ContainerNetwork().withAliases(alias))
+                .exec();
+        LOG.debugv("Connected {0} to network {1} as {2}", containerId, networkName, alias);
+    }
+
+    /**
+     * Disconnects the container {@code containerId} from {@code networkName} when it is on it: true once it is not,
+     * false when Docker kept it there.
+     */
+    public boolean disconnectFromNetwork(String containerId, String networkName) {
+        try {
+            if (networksOf(containerId).containsKey(networkName)) {
+                dockerClient.disconnectFromNetworkCmd()
+                        .withContainerId(containerId)
+                        .withNetworkId(networkName)
+                        .withForce(true)
+                        .exec();
+                LOG.debugv("Disconnected {0} from network {1}", containerId, networkName);
+            }
+            return true;
+        } catch (NotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Error disconnecting {0} from network {1}: {2}", containerId, networkName, e.getMessage());
+            return false;
+        }
+    }
+
+    // The networks a container is on, by name.
+    private Map<String, ContainerNetwork> networksOf(String containerId) {
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        Map<String, ContainerNetwork> networks = inspect.getNetworkSettings() != null
+                ? inspect.getNetworkSettings().getNetworks() : null;
+        return networks != null ? networks : Map.of();
+    }
+
+    /**
      * Removes the network {@code networkName}: true once it is gone, false when Docker kept it, as
      * {@link #removeVolume} says of a volume.
      */

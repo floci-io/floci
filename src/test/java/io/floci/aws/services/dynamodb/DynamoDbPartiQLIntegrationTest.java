@@ -742,6 +742,22 @@ class DynamoDbPartiQLIntegrationTest {
             .body("message", equalTo("Statement wasn't well formed, can't be processed: Invalid path dot component"));
     }
 
+    @Test
+    @Order(35)
+    void aCallIsRefusedByWhereItStands() {
+        String where = "SELECT * FROM \"" + TABLE + "\" WHERE ";
+        statement(where + "foo(1)")
+            .statusCode(400)
+            .body("message", equalTo("Unrecognized function: foo at 1:" + (where.length() + 1) + ":3"));
+        statement("SELECT foo(1) FROM \"" + TABLE + "\"")
+            .statusCode(400)
+            .body("message", equalTo("Unexpected path component at 1:8:3"));
+        String insert = "INSERT INTO \"" + TABLE + "\" VALUE {'pk': ";
+        statement(insert + "foo(1)}")
+            .statusCode(400)
+            .body("message", equalTo("Unsupported data type: foo under key root at 1:" + (insert.length() + 1) + ":3"));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}

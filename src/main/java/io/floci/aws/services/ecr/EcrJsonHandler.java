@@ -241,14 +241,18 @@ public class EcrJsonHandler {
         List<String> names = parseStringList(request.path("repositoryNames"));
         String registryId = request.path("registryId").asText(null);
 
-        List<Repository> repos = service.describeRepositories(names, registryId, region);
+        PaginatedResult<Repository> page = service.describeRepositories(names, registryId, region,
+                parseMaxResults(request.path("maxResults")), request.path("nextToken").asText(null));
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
-        for (Repository r : repos) {
+        for (Repository r : page.items()) {
             arr.add(buildRepository(r));
         }
         response.set("repositories", arr);
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 

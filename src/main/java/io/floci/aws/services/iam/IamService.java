@@ -4599,7 +4599,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
             return List.of();
         }
-        return aware.scanAllAccountEntries(accessKeyId::equals);
+        return aware.findAllAccountEntries(accessKeyId);
     }
 
     private Optional<String> activeAccessKeySecret(String accessKeyId) {

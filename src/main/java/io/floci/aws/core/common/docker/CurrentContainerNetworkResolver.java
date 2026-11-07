@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 
 /**
  * Resolves the Docker network used by the Floci container itself.
@@ -154,13 +155,25 @@ public class CurrentContainerNetworkResolver {
         }
     }
 
+    // Docker lists a container's networks by name. One Floci made and joined, an EC2 VPC's or an EMR cluster's, is not
+    // where its containers belong: a Floci that crashed is still on it when it starts again, and what it launches would
+    // join that network, reaching what only its owner should. It is taken only when Floci is on no other.
     private Optional<CurrentContainerNetwork> selectNetwork(Map<String, ContainerNetwork> networks) {
+        return selectNetwork(networks, networkName -> !isMadeByFloci(networkName))
+                .or(() -> selectNetwork(networks, networkName -> true));
+    }
+
+    // The first usable network eligible says, a user-defined one before the others.
+    private Optional<CurrentContainerNetwork> selectNetwork(Map<String, ContainerNetwork> networks,
+                                                            Predicate<String> eligible) {
         return networks.entrySet().stream()
                 .filter(entry -> isUsable(entry.getValue()))
                 .filter(entry -> isUserDefinedNetwork(entry.getKey()))
+                .filter(entry -> eligible.test(entry.getKey()))
                 .findFirst()
                 .or(() -> networks.entrySet().stream()
                         .filter(entry -> isUsable(entry.getValue()))
+                        .filter(entry -> eligible.test(entry.getKey()))
                         .findFirst())
                 .map(entry -> new CurrentContainerNetwork(entry.getKey(), entry.getValue().getIpAddress()));
     }
@@ -171,6 +184,21 @@ public class CurrentContainerNetworkResolver {
 
     private boolean isUserDefinedNetwork(String networkName) {
         return !"bridge".equals(networkName) && !"host".equals(networkName) && !"none".equals(networkName);
+    }
+
+    // Whether Floci made the network, as its owner label says, or the label an EC2 VPC's had before it. One Docker
+    // cannot inspect is taken as Floci's, so it is not mistaken for the user's own.
+    private boolean isMadeByFloci(String networkName) {
+        try {
+            Map<String, String> labels = dockerClient.inspectNetworkCmd().withNetworkId(networkName).exec().getLabels();
+            return labels != null && (labels.containsKey(ContainerStorageHelper.OWNER_LABEL)
+                    || ContainerStorageHelper.NETWORK_LABEL_ALIASES.legacyValue(labels,
+                            ContainerStorageHelper.OWNER_LABEL) != null);
+        } catch (Exception e) {
+            LOG.warnv(e, "Could not inspect Docker network {0}, so it is not taken for Floci's own: {1}", networkName,
+                    e.getMessage());
+            return true;
+        }
     }
 
     String currentContainerId() {

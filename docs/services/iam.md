@@ -411,8 +411,22 @@ model. A comma is therefore still admitted, and an empty principal is still refu
 same split the enum order above takes, the captured rendering over the model's, and one object
 decides which text any violation quotes, so no other member moves with it.
 
-What a second capture would settle is the comma: `CreateServiceLinkedRole` with one in the
-principal, which AWS either refuses as a pattern violation or takes.
+The comma was the half left open, and what settles it is what AWS publishes rather than a second
+capture. The API Reference entry for `CreateServiceLinkedRole`, read on 2026-11-03, gives
+`AWSServiceName` a minimum length of 1 and the pattern `[\w+=,.@-]+`, the comma included, which is
+the pattern botocore declares for the shape it aliases the member to as well. The comma is
+therefore what AWS documents for this member rather than an artifact of that aliasing, and the
+captured message is the only source that drops it: a message is evidence of the text a violation
+carries, not of what a value is held to. The minimum is published there too, so the empty principal
+the message's `*` would admit stays refused for a reason of AWS's own rather than the model's alone.
+A principal carrying a comma clears the shape here and reaches
+the lookup, where a service no recording covers has its role name derived from the principal's
+labels rather than refused, which is this emulator's own decision and the answer any unrecorded
+principal gets. This paragraph is where that reasoning lives: the generator and the test that pins
+the comma point here rather than repeating it. A capture of AWS refusing a comma as a pattern
+violation moves the quoted-pattern entry in `tools/aws/regen_iam_shapes.py`, the
+`src/main/resources/aws/iam-request-shapes.json` a regeneration writes from it, which that
+generator's own test holds the entry to, the test that pins the comma, and this paragraph.
 
 ### Permission Boundaries
 
@@ -2202,7 +2216,11 @@ tags and adds tags (`TagResource`, `CreateTags`, `AddTags`, `AddTagsToResource`,
 IAM's `TagRole`, STS's `TagSession` and the like), in the services Floci serves over the JSON and
 Query protocols and Smithy RPC v2 CBOR and in the REST services whose routes are authorized as
 operations, is checked from a second table generated the same way,
-`src/main/resources/aws/iam-tag-on-create.json`.
+`src/main/resources/aws/iam-tag-on-create.json`. The Service Reference lists OpenSearch Service's
+operations for the `es` client alone, so a REST operation it lists for no client is read as the action
+of its own name, needing the tagging actions of the operations it lists that action for: the
+`opensearch` client's `CreateDomain` needs `es:AddTags`, as `CreateElasticsearchDomain`, listed with
+`es:CreateDomain`, does.
 When the request carries tags, the tagging action is checked for each resource's tags apart, with
 each tag as `aws:RequestTag/<key>` and their keys as `aws:TagKeys`, so a policy that allows tagging
 only with some tags or keys holds at creation too. A tag specification's tags are checked on the
@@ -2213,8 +2231,8 @@ on: Lambda's `CreateFunction` is checked on the function its body names, in the 
 Region, as the Service Reference gives it the `function` resource, so a function's tags are checked
 there too, and a create of a service the table of request resources reads is checked on the resource
 it creates (a target group on `targetgroup/<Name>/*`, an application load balancer on
-`loadbalancer/app/<Name>/*`, an Access Analyzer analyzer on `analyzer/<analyzerName>`). A create of
-a resource under a parent its action acts on tags the new
+`loadbalancer/app/<Name>/*`, an Access Analyzer analyzer on `analyzer/<analyzerName>`, an OpenSearch
+domain on `domain/<DomainName>`). A create of a resource under a parent its action acts on tags the new
 resource, so its tags are checked on that one, built from the parent's ARN with its own id open:
 `CreateListener` acts on a load balancer and its tags are checked on
 `listener/app/<load balancer name>/<load balancer id>/*`, and `CreateRule`'s on the new
@@ -2229,7 +2247,7 @@ its namespace's `CreateAction` key, as `ec2:CreateTags`, `ecs:TagResource`, Clou
 `TagResource` and Elastic Load Balancing's `AddTags` do, the key is the operation's name:
 `ec2:CreateAction` is `RunInstances` for an instance launched with tags. The operation's own action
 is checked with the same `aws:RequestTag/<key>` and `aws:TagKeys`, once for each resource's tags,
-wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 546 of the operations read, so
+wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 548 of the operations read, so
 "allow `sqs:CreateQueue` only with `aws:RequestTag/team`" and "deny it when `aws:RequestTag/team` is
 null" hold as on AWS; keys a service's own condition keys already give, as EC2's `RunInstances`
 does, are kept. It is checked once for each reading of the tags and refused if any is denied: the

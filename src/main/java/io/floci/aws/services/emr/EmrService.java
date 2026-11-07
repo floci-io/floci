@@ -1470,13 +1470,17 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             String image = cluster.getBootstrapImage() != null ? cluster.getBootstrapImage() : imageTemplate;
             Supplier<String> releaseImage = cluster.getBootstrapImage() == null ? releaseImage(cluster) : null;
             // Every EMR cluster runs HDFS on its primary node, which the step's thread starts when it is not running:
-            // a NameNode and a DataNode, in a container of the release's Hive image, the one with HDFS's daemons.
+            // a NameNode and a DataNode, in a container of the release's Hive image, the one with HDFS's daemons, and
+            // on a cluster with Hive its metastore service.
             String clusterId = cluster.getId();
             String hdfsHost = masterPrivateDnsName(cluster);
             String hdfsImage = hdfsImage(cluster.getReleaseLabel());
+            ClusterStorage.HiveMetastore hiveMetastore = EmrSparkSteps.installsHive(cluster.getApplications(),
+                    SNAPSHOT_MAPPER) ? new ClusterStorage.HiveMetastore(instanceProfileRole(cluster, accountId),
+                    EmrSparkSteps.hiveMetastoreSettings(cluster.getConfigurations(), SNAPSHOT_MAPPER)) : null;
             Function<BooleanSupplier, SparkJobRunner.Storage> hdfs = storage == null ? null
                     : stopped -> clusterStorage.hdfs(clusterId, accountId, region, hdfsHost, hdfsImage, dockerNetwork,
-                            stopped);
+                            hiveMetastore, stopped);
             SparkJobRunner.Job job;
             if (hive != null) {
                 job = new SparkJobRunner.Job(SERVICE, step.getId(), accountId, region, cluster.getReleaseLabel(),

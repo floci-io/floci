@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+import regen_apigateway_documentation_shapes
 import regen_apigateway_shapes
 import regen_dynamodb_shapes
 import regen_ecr_shapes
@@ -328,6 +329,8 @@ def test_build_constraints_output_is_stable():
 
 
 @pytest.mark.parametrize("script, model, output, extra", [
+    (regen_apigateway_documentation_shapes, "apigateway/2015-07-09",
+     "apigateway-documentation-request-shapes.json", {}),
     # IAM vendors some operations in part, so it hands the driver its reductions as well as the
     # list: the required members an operation answers for itself and the members it answers in a
     # wording of its own.
@@ -359,7 +362,8 @@ def vendored(script) -> tuple[str, ...]:
 
 
 @pytest.mark.parametrize("script", [
-    regen_ecr_shapes, regen_iam_shapes, regen_logs_delivery_shapes, regen_payment_cryptography_shapes,
+    regen_apigateway_documentation_shapes, regen_ecr_shapes, regen_iam_shapes, regen_logs_delivery_shapes,
+    regen_payment_cryptography_shapes,
     regen_resource_groups_shapes, regen_sts_shapes,
     regen_securityhub_shapes,
 ])
@@ -408,6 +412,18 @@ def test_securityhub_shapes_keep_required_findings_and_resource_strings():
     assert shapes["Resource"]["members"] == {"Type": "NonEmptyString", "Id": "NonEmptyString"}
     assert shapes["ResourceList"]["member"] == "Resource"
     assert shapes["NonEmptyString"]["pattern"] == r".*\S.*"
+
+
+def test_apigateway_documentation_shapes_keep_path_query_and_body_constraints():
+    doc = json.loads(regen_apigateway_documentation_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+
+    assert shapes["CreateDocumentationPartRequest"]["required"] == ["restApiId", "location", "properties"]
+    assert shapes["DocumentationPartLocation"]["required"] == ["type"]
+    assert shapes["DocumentationPartLocationStatusCode"]["pattern"] == r"^([1-5]\d\d|\*|\s*)$"
+    assert "API" in shapes["DocumentationPartType"]["enum"]
+    assert shapes["GetDocumentationPartsRequest"]["members"]["locationStatus"] == "LocationStatusType"
+    assert shapes["LocationStatusType"]["enum"] == ["DOCUMENTED", "UNDOCUMENTED"]
 
 
 def test_ecr_shapes_name_the_ecr_model_and_its_registry_setting_actions():

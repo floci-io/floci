@@ -150,18 +150,29 @@ but for its bootstrap actions and its storage.
   container of their own, `emr-<cluster-id>-hdfs`, from the release's EMR Serverless Hive image, which has HDFS
   where the release's image has only its client (`hive-image-template` names another), or, for an `emr-spark-*`
   release, which has no Hive image, from `emr-7.5.0`'s, with their data in a third volume, one copy of each block,
-  and permissions off. The container is on a Docker network of the cluster's own, also `emr-<cluster-id>-hdfs`,
-  which the cluster's steps join besides their own, so the steps of other clusters, another account's included,
-  cannot reach its files; each cluster whose HDFS runs takes one network from the Docker daemon's address pools.
-  The cluster's first step starts it, and waits for it: a step whose cluster's HDFS is not ready within two minutes
-  fails ("The step could not start: The HDFS of EMR cluster ... did not start within 120 seconds"). If its NameNode or DataNode exits, its container ends with it, and the
-  cluster's next step starts it again on its data. Their warnings and errors are the container's output, which
-  `docker logs` shows. With `docker-network` set to `host`, steps reach it on the host's loopback, and its daemons
-  listen there only, as anyone reaching them could change its files, on the host's own ports (8020, 9870, 9866,
-  9864, 9867), so only one cluster's HDFS runs at a time. With `container:<id>`, its container joins that
-  namespace as the steps do, and listens on its loopback in the same way; the primary node's name goes in the hosts
-  file that namespace's containers share, `<id>`'s own included. With `none`, steps have no network, so the
-  cluster runs no HDFS, and its steps run as without one. Steps reach
+  and permissions off. On a cluster whose `Applications` name Hive, the same container runs Hive's metastore
+  service, on port 9083, its Derby database in that volume and its warehouse in the HDFS; it reaches the S3
+  locations of tables through Floci's S3 as the role of the cluster's EC2 instance profile, as the bootstrap actions
+  do, with a session that goes with the container. It gets the cluster's `core-site` and `hive-site` after its own
+  settings, as EMR's primary node does, so a `hive-site` setting of `hive.metastore.warehouse.dir`, say, holds for the
+  service as for the Hive steps. A primary node with the service that an earlier Floci left running starts again, on
+  the data its volume keeps, as its session went with that Floci. The container is on a Docker network of the cluster's own, also
+  `emr-<cluster-id>-hdfs`, which the cluster's steps join besides their own, so the steps of other clusters, another
+  account's included, cannot reach its files or tables; each cluster whose HDFS runs takes one network from the
+  Docker daemon's address pools. When Floci runs in a container, that container joins the network of each cluster
+  with Hive too, as `floci`, which is how the metastore reaches Floci's S3, and leaves it when the HDFS container
+  goes. The cluster's first step starts it, and waits for it: a step whose cluster's HDFS is not ready within two
+  minutes fails ("The step could not start: The HDFS of EMR cluster ... did not start within 120 seconds"). If its
+  NameNode, DataNode or metastore exits, its container ends with it, and the cluster's next step starts it again on
+  its data. Their warnings and errors are the container's output, which `docker logs` shows. With `docker-network`
+  set to `host`, steps reach it on the host's loopback, and its daemons listen there only, as anyone reaching them
+  could change its files, on the host's own ports (8020, 9870, 9866, 9864, 9867), so only one cluster's HDFS runs at
+  a time. With `container:<id>`, its container joins that namespace as the steps do, and listens on its loopback in
+  the same way; the primary node's name goes in the hosts file that namespace's containers share, `<id>`'s own
+  included. In both, the metastore service does not run: Hive 3's has no setting for the address it listens on, so
+  it would take 9083 on every interface of the namespace, the host's own for `host`, and Hive steps keep a metastore
+  of their own (see **Hive steps**). With `none`, steps have no network, so the cluster runs no HDFS, and its steps
+  run as without one. Steps reach
   it by the primary node's `PrivateDnsName`, as `ListInstances` gives it (`ip-10-0-0-1.ec2.internal`, say), on port
   8020: `hdfs://` paths without a host, and paths without a scheme ("hdfs:// (or no prefix)"), lead there through
   `fs.defaultFS`, a relative path under `/user/hadoop`, and the cluster's `spark-defaults` and `core-site` can set
@@ -228,23 +239,28 @@ but for its bootstrap actions and its storage.
   running `hive-script`, as the AWS CLI writes a `Type=Hive` step (`hive-script --run-hive-script --args` and the
   step's `Args`), or `hive` itself, runs Hive: `hive-script` runs `hive` with the arguments after `--args`, as the
   image's `hadoop` user in `/home/hadoop`, with Tez in local mode in its JVM, as an [EMR Serverless Hive job
-  run](emr-serverless.md#running-hive-job-runs)'s does, on the cluster's storage. It gets the cluster's
-  `core-site`, `tez-site` and `hive-site` properties, each a `--hiveconf`, then the step's own arguments, so a
-  `--hiveconf` of the step's wins over a classification's, as it does over `hive-site.xml`; the cluster's
-  `hive-env` exports are its environment. Floci's settings come before them all, and any of them replaces one: S3A
-  on Floci's S3 for `s3://`, Tez in local mode, the cluster's HDFS, and its metastore. "By default, Hive records
-  metastore information in a MySQL database on the primary node's file system", which Floci keeps as an embedded
-  Derby database in the cluster's `/mnt`, so a table one Hive step makes is there for the next, until the cluster
-  ends. The `hive-site` setting of `hive.metastore.client.factory.class` the Release Guide gives for the Glue Data
-  Catalog uses Floci's Glue instead, with the cluster's account as its `hive.metastore.glue.catalogid`, which a
-  `hive-site` one replaces. A table without a `LOCATION` is in the cluster's HDFS, under `/user/hive/warehouse` ("By
-  default, this is a location in HDFS"), which other steps read as `hdfs:///user/hive/warehouse/<table>`, and an
-  `hdfs://` `LOCATION` is there too. Spark steps do not use the cluster's Hive metastore, so they see a Hive step's
-  tables only through the Glue Data Catalog. Only one Hive step at a time can use the cluster's metastore: with
-  `StepConcurrencyLevel` above 1, a Hive step that starts while another runs fails ("Another instance of Derby may
-  have already booted the database"). What the bootstrap actions installed is there for every step, Hive's
-  included. A script or command that starts `hive` itself gets none of these settings: only a Hive step runs Hive.
-  Hive's own log stays in the container.
+  run](emr-serverless.md#running-hive-job-runs)'s does, on the cluster's storage. It gets the cluster's `core-site`,
+  `tez-site` and `hive-site` properties, each a `--hiveconf`, then the step's own arguments, so a `--hiveconf` of
+  the step's wins over a classification's, as it does over `hive-site.xml`; the cluster's `hive-env` exports are its
+  environment. Floci's settings come before them all, and any of them replaces one: S3A on Floci's S3 for `s3://`,
+  Tez in local mode, the cluster's HDFS, and its metastore. "By default, Hive records metastore information in a
+  MySQL database on the primary node's file system", which Floci keeps in a Derby database of the metastore service
+  its primary node runs (see **Storage**), so a table one Hive step makes is there for the next, until the cluster
+  ends, and any number of Hive steps use it at once. The `hive-site` setting of
+  `hive.metastore.client.factory.class` the Release Guide gives for the Glue Data Catalog uses Floci's Glue instead,
+  with the cluster's account as its `hive.metastore.glue.catalogid`, which a `hive-site` one replaces. A table
+  without a `LOCATION` is in the cluster's HDFS, under `/user/hive/warehouse` ("By default, this is a location in
+  HDFS"), which other steps read as `hdfs:///user/hive/warehouse/<table>`, and an `hdfs://` `LOCATION` is there too.
+  The cluster's Spark steps use that metastore too, so a Spark step with Hive support reads a Hive step's tables and
+  makes tables Hive steps read, as the Glue Data Catalog is the one to pick "when you require a persistent Hive
+  metastore or a Hive metastore shared by different clusters"; a `spark-hive-site` naming its client factory still
+  uses Floci's Glue. Where that service does not run, with `docker-network` set to `host` or `container:<id>`, or to
+  `none`, the metastore is an embedded Derby database in the cluster's `/mnt` instead, which only one Hive step at a
+  time can use: with `StepConcurrencyLevel` above 1, a Hive step that starts while another runs fails ("Another
+  instance of Derby may have already booted the database"), and Spark steps see a Hive step's tables only through
+  the Glue Data Catalog. What the bootstrap actions installed is there for every step, Hive's included. A script or
+  command that starts `hive` itself gets none of these settings: only a Hive step runs Hive. Hive's own log stays in
+  the container.
 * **S3DistCp**: the image has no `s3-dist-cp`, so a `command-runner.jar` step whose
   first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
   `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
@@ -377,6 +393,15 @@ but for its bootstrap actions and its storage.
   cluster's HDFS (see **Storage**), so a mirror sets both, and carries `emr-7.5.0`'s Hive image for an `emr-spark-*`
   release. A release with no EMR Serverless image, or another with no EMR Serverless Hive image, fails its steps
   with "The step could not start: Could not pull image".
+
+### Known limitations
+
+- **No Hive metastore service in a network namespace the steps share.** With `docker-network` set to `host` or
+  `container:<id>`, the primary node runs HDFS but not Hive's metastore service: Hive 3's has no setting for the
+  address it listens on, so it would serve its tables, and the files under them, on every interface of the
+  namespace, the host's own for `host`. Hive steps there keep an embedded Derby database in the cluster's `/mnt`, so
+  only one Hive step at a time can use it, and Spark steps see a Hive step's tables only through the Glue Data
+  Catalog. On a cluster's own network, the default, the service runs (see **Storage** and **Hive steps**).
 
 ## EventBridge events
 

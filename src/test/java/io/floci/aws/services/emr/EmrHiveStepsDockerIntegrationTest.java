@@ -12,6 +12,7 @@ import io.floci.aws.testing.S3TestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -33,6 +34,7 @@ import java.util.zip.GZIPInputStream;
 
 import static io.floci.aws.testing.EmrRequests.awaitStep;
 import static io.floci.aws.testing.EmrRequests.emr;
+import static io.floci.aws.testing.EmrRequests.terminateClusterAndAwaitCleanup;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -56,6 +58,9 @@ class EmrHiveStepsDockerIntegrationTest {
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
+    @Inject
+    EmrService emrService;
+
     private S3Client s3;
     private String bucket;
     private String clusterId;
@@ -77,7 +82,7 @@ class EmrHiveStepsDockerIntegrationTest {
     }
 
     @Test
-    void hiveStepsKeepTheirTablesInTheClustersMetastoreAndHdfsForTheStepsAfterThem() {
+    void hiveAndSparkStepsShareTheClustersMetastoreServiceAndHdfs() {
         startCluster(HIVE_AND_SPARK, "[]", null);
         put("queries/load.q", """
                 create external table kv (k string, v int)
@@ -107,8 +112,39 @@ class EmrHiveStepsDockerIntegrationTest {
         String pinned = addStep("command-runner.jar", "hadoop", "fs", "-cat", "hdfs:///floci/pinned/*");
         assertEquals("COMPLETED", state(pinned));
         assertEquals("a\nb\nc\n", stepLog(pinned, "stdout.gz"));
-        // The metastore is the cluster's own, a database in its /mnt.
-        assertEquals("COMPLETED", state(addStep("command-runner.jar", "test", "-d", "/mnt/var/lib/hive/metastore_db")));
+        // A Spark step uses the cluster's metastore too: it reads Hive's table, and makes one a Hive step reads.
+        put("jobs/catalog.py", """
+                import sys
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.enableHiveSupport().getOrCreate()
+                rows = sorted(f"{row.k}{row.v}" for row in spark.sql("select k, v from scaled").collect())
+                spark.createDataFrame([(" ".join(rows),)], ["value"]).coalesce(1).write.text(sys.argv[1])
+                spark.sql("create table from_spark stored as textfile as select upper(k) as k from scaled")
+                """);
+        assertEquals("COMPLETED", state(addStep("command-runner.jar", "spark-submit", s3Uri("jobs/catalog.py"),
+                s3Uri("out/spark/"))));
+        assertEquals("a10 b20 c30\n", objects("out/spark/"));
+        String fromSpark = addStep("command-runner.jar", "hive-script", "--run-hive-script", "--args",
+                "-e", "select k from from_spark order by k;");
+        assertEquals("COMPLETED", state(fromSpark));
+        assertTrue(stepLog(fromSpark, "stdout.gz").contains("A\nB\nC\n"));
+    }
+
+    @Test
+    void hiveStepsRunningAtOnceShareTheClustersMetastoreService() {
+        startCluster(HIVE_AND_SPARK, "[]", null, 2);
+
+        // The first holds its session past the second's, which an embedded Derby database would refuse.
+        String slow = addStep("command-runner.jar", "hive-script", "--run-hive-script", "--args",
+                "-e", "create table slow (k string); !sleep 20; insert into slow values ('s');");
+        String quick = addStep("command-runner.jar", "hive-script", "--run-hive-script", "--args",
+                "-e", "create table quick as select 'q' as k;");
+        assertEquals("COMPLETED", state(quick));
+        assertEquals("COMPLETED", state(slow));
+        String both = addStep("command-runner.jar", "hive-script", "--run-hive-script", "--args",
+                "-e", "select k from slow union all select k from quick order by k;");
+        assertEquals("COMPLETED", state(both));
+        assertTrue(stepLog(both, "stdout.gz").contains("q\ns\n"));
     }
 
     @Test
@@ -162,8 +198,14 @@ class EmrHiveStepsDockerIntegrationTest {
 
     /** A cluster with {@code applications}, {@code configurations} and a bootstrap action's script, if not null. */
     private void startCluster(String applications, String configurations, String bootstrapScript) {
+        startCluster(applications, configurations, bootstrapScript, 1);
+    }
+
+    /** As {@link #startCluster(String, String, String)}, running up to {@code stepConcurrency} steps at once. */
+    private void startCluster(String applications, String configurations, String bootstrapScript,
+                              int stepConcurrency) {
         ObjectNode request = JSON.createObjectNode().put("Name", "hive-steps").put("ReleaseLabel", "emr-7.5.0")
-                .put("LogUri", s3Uri("logs/"));
+                .put("LogUri", s3Uri("logs/")).put("StepConcurrencyLevel", stepConcurrency);
         try {
             request.set("Applications", JSON.readTree(applications));
             request.set("Configurations", JSON.readTree(configurations));
@@ -179,8 +221,7 @@ class EmrHiveStepsDockerIntegrationTest {
                 .put("InstanceCount", 1);
         clusterId = emr("RunJobFlow", request.toString()).then().statusCode(200).extract().jsonPath()
                 .getString("JobFlowId");
-        cleanup.register(() -> emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
-                .then().statusCode(200));
+        cleanup.register(() -> terminateClusterAndAwaitCleanup(clusterId, emrService));
     }
 
     /** Runs the AWS CLI's Hive step with {@code args} and returns the state it ended in. */

@@ -298,6 +298,27 @@ class EmrSparkStepsTest {
     }
 
     @Test
+    void aClustersHiveMetastoreServiceGetsItsCoreSiteThenItsHiveSiteWhichWins() {
+        String configurations = """
+                [{"Classification": "core-site", "Properties": {"fs.s3a.connection.maximum": "50",
+                  "hive.exec.scratchdir": "/tmp/core"}},
+                 {"Classification": "hive-site", "Properties": {"hive.exec.scratchdir": "/tmp/hive",
+                  "hive.metastore.warehouse.dir": "s3://bucket/warehouse/"}},
+                 {"Classification": "spark-hive-site", "Properties": {"hive.metastore.warehouse.dir": "s3://other/"}},
+                 {"Classification": "tez-site", "Properties": {"tez.am.resource.memory.mb": "2048"}}]
+                """;
+
+        Map<String, String> settings = EmrSparkSteps.hiveMetastoreSettings(configurations, objectMapper);
+
+        // Not spark-hive-site, Spark's own, nor tez-site, which the service does not read.
+        assertEquals(Map.of("fs.s3a.connection.maximum", "50", "hive.exec.scratchdir", "/tmp/hive",
+                "hive.metastore.warehouse.dir", "s3://bucket/warehouse/"), settings);
+        assertEquals(List.of("fs.s3a.connection.maximum", "hive.exec.scratchdir", "hive.metastore.warehouse.dir"),
+                List.copyOf(settings.keySet()));
+        assertEquals(Map.of(), EmrSparkSteps.hiveMetastoreSettings(null, objectMapper));
+    }
+
+    @Test
     void theClustersSparkLog4j2PropertiesComeFromItsConfigurations() {
         String configurations = """
                 [{"Classification": "spark-log4j2", "Properties": {"rootLogger.level": "warn",
