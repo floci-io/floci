@@ -81,7 +81,7 @@ class NativeDynamoDbJsonHandlerTest {
         return node;
     }
 
-    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression, 
+    private JsonNode createRequest(String tableName, JsonNode key, String updateExpression,
     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValues){
         ObjectNode node = mapper.createObjectNode();
         node.put("TableName", tableName);
@@ -109,12 +109,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "UPDATED_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -136,7 +136,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesUpdatedNewOnNewItem() throws Exception {
         createUsersTable("us-east-1");
@@ -186,12 +186,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "UPDATED_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -213,7 +213,7 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertFalse(attr.has("sameAttr"), "Attributes should not have sameAttr");
     }
-    
+
     @Test
     void updateItemReturnValuesAllOld()  throws Exception {
         createUsersTable("us-east-1");
@@ -226,12 +226,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "ALL_OLD");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -255,7 +255,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesAllNew()  throws Exception {
         createUsersTable("us-east-1");
@@ -268,12 +268,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "ALL_NEW");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -297,7 +297,7 @@ class NativeDynamoDbJsonHandlerTest {
         assertTrue(attr.get("sameAttr").has("S"), "sameAttr should have S");
         assertEquals("static", attr.get("sameAttr").get("S").asText());
     }
-    
+
     @Test
     void updateItemReturnValuesNone()  throws Exception {
         createUsersTable("us-east-1");
@@ -310,12 +310,12 @@ class NativeDynamoDbJsonHandlerTest {
         exprValues.put(":changeVal", attributeValue("S", "val2"));
         exprValues.put(":newVal", attributeValue("S", "newVal"));
 
-        JsonNode request = createRequest("Users", key, 
+        JsonNode request = createRequest("Users", key,
         "SET changeAttr = :changeVal,  newAttr = :newVal, REMOVE delAttr",
         null, exprValues, "NONE");
 
         Response response = null;
-        
+
         response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);
 
@@ -602,6 +602,64 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals(5, warmThroughput.get("ReadUnitsPerSecond").asLong());
         assertEquals(5, warmThroughput.get("WriteUnitsPerSecond").asLong());
         assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void describeTableReportsProvisionedTableCapacityAsWarmThroughput() throws Exception {
+        service.createTable("table-warm-provisioned",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        Response response = handler.handle("DescribeTable",
+                mapper.createObjectNode().put("TableName", "table-warm-provisioned"), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        JsonNode warmThroughput = body.get("Table").get("WarmThroughput");
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void describeTableReportsOnDemandTableWarmThroughput() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-on-demand",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+
+        Response response = handler.handle("DescribeTable",
+                mapper.createObjectNode().put("TableName", "table-warm-on-demand"), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        JsonNode warmThroughput = body.get("Table").get("WarmThroughput");
+
+        assertNotNull(warmThroughput);
+        assertEquals(12000, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void createTableOmitsTableWarmThroughput() throws Exception {
+        Response response = handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-create",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 4}
+                }
+                """), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        assertFalse(body.get("TableDescription").has("WarmThroughput"),
+                "CreateTable must omit table-level WarmThroughput");
     }
 
     @Test
