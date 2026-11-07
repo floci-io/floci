@@ -1,7 +1,7 @@
 # Amazon Bedrock (control plane)
 
 **Protocol:** REST-JSON
-**Endpoint:** `http://localhost:4566/guardrails` (SigV4 service `bedrock`)
+**Endpoint:** `http://localhost:4566/guardrails`, `/foundation-models`, `/inference-profiles` (SigV4 service `bedrock`)
 
 This page covers the Bedrock control plane. Model invocation is a separate service
 that shares the same signing name: see [Bedrock Runtime](bedrock-runtime.md).
@@ -17,6 +17,10 @@ that shares the same signing name: see [Bedrock Runtime](bedrock-runtime.md).
 | `CreateGuardrailVersion` | Snapshot the `DRAFT` under the next numerical version |
 | `DeleteGuardrail` | Delete one numerical version, or the guardrail and all its versions |
 | `ListGuardrails` | List every guardrail's `DRAFT`, or every version of one guardrail |
+| `ListFoundationModels` | List the catalog's foundation models served in the calling Region, filtered by provider and output modality |
+| `GetFoundationModel` | Read one foundation model by id or ARN |
+| `ListInferenceProfiles` | List the system-defined inference profiles the calling Region can use, with `type`, `maxResults` and `nextToken` |
+| `GetInferenceProfile` | Read one system-defined inference profile by id or ARN, with its destination Regions |
 | `PutResourcePolicy` | Attach a resource-based policy to a guardrail or a guardrail profile (`POST /resource-policy`) |
 | `GetResourcePolicy` | Read the resource-based policy of a guardrail or a guardrail profile |
 | `DeleteResourcePolicy` | Remove the resource-based policy of a guardrail or a guardrail profile |
@@ -102,18 +106,57 @@ Guardrails are listed by the Resource Groups Tagging API (resource type `bedrock
 and Resource Explorer with their own tags, and `TagResources` / `UntagResources` there change
 those tags, as `TagResource` and `UntagResource` do.
 
+## Foundation models and inference profiles
+
+`ListFoundationModels`, `GetFoundationModel`, `ListInferenceProfiles` and
+`GetInferenceProfile` read a fixed catalog, `bedrock/model-catalog.yaml`. It is a seed
+rather than a mirror of AWS: a few real models (Amazon Nova Micro and Nova Lite, Titan Text
+Embeddings V2, Llama 3.1 8B Instruct and Claude Sonnet 4.5) with the modalities, streaming
+support, lifecycle status and Regional availability their
+[model cards](https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html) publish,
+and their US and EU system-defined inference profiles.
+
+The answers depend on the calling Region, as on AWS:
+
+- A model is listed when its card shows it served in that Region, or when one of its
+  inference profiles can be called from it. `GetFoundationModel` answers a catalog model
+  the Region does not serve, an unknown model id, and an ARN that does not name a
+  foundation model in the calling Region and partition with `ValidationException`, as AWS
+  does.
+- `byOutputModality` accepts `SPEECH` and `VIDEO` as well as the published `TEXT`,
+  `IMAGE` and `EMBEDDING`, as AWS does. No catalog model produces speech or video, so
+  those filters return an empty list.
+- An inference profile is listed only in its source Regions, and its `models` are the
+  foundation models in the destination Regions the card gives for the calling Region, so
+  `us.amazon.nova-lite-v1:0` called from `us-west-1` routes to four Regions and from
+  `us-east-1` to three. `GetInferenceProfile` on a profile the Region cannot use returns
+  `ResourceNotFoundException`.
+- `inferenceTypesSupported` is `ON_DEMAND` only where the model is served in the Region
+  itself, and empty where it is reachable only through an inference profile, so
+  `byInferenceType=ON_DEMAND` leaves those out.
+- `modelArn` is `arn:<partition>:bedrock:<region>::foundation-model/<modelId>`, and
+  `inferenceProfileArn` carries the calling Region and account. `GetInferenceProfile`
+  answers an ARN of another service or without an account with `ValidationException`,
+  one of another account with `AccessDeniedException`, and one of another Region,
+  partition or resource type with `ResourceNotFoundException`.
+- The error codes and statuses follow AWS; the message text is Floci's own.
+
+Deviations: models that are not in the catalog are not listed, provisioned throughput is
+never reported, and `customizationsSupported` is always empty, so `byCustomizationType`
+and `byInferenceType=PROVISIONED` return no models. Application inference profiles cannot
+be created yet, so `type=APPLICATION` returns an empty list. `ListInferenceProfiles` pages
+up to 1000 profiles; `maxResults` outside 1 to 1000 is rejected with `ValidationException`.
+
 ## Not implemented
 
 The rest of the Bedrock control plane is absent rather than stubbed, because
 emulating it faithfully would require behaviour Floci has no way to model:
 
-- `ListFoundationModels` and `GetFoundationModel`. The AWS service model carries no
-  enumeration of foundation model ids, so any catalogue would be invented data.
 - Custom model, model customization, model import and distillation jobs. These
   depend on real training runs.
 - Model evaluation and evaluation jobs. These depend on real inference.
-- Provisioned throughput, inference profiles and prompt routers. These describe real
-  capacity reservations and routing.
+- Provisioned throughput, application inference profiles and prompt routers. These
+  describe real capacity reservations and routing.
 - Model invocation logging, batch inference and async invoke. These are data-plane
   operations backed by real model execution.
 
@@ -152,4 +195,10 @@ aws bedrock get-resource-policy \
   --resource-arn arn:aws:bedrock:us-east-1:000000000000:guardrail/abc123def456
 
 aws bedrock delete-guardrail --guardrail-identifier abc123def456
+
+aws bedrock list-foundation-models --by-output-modality EMBEDDING
+
+aws bedrock list-inference-profiles --type-equals SYSTEM_DEFINED
+
+aws bedrock get-inference-profile --inference-profile-identifier us.amazon.nova-lite-v1:0
 ```
