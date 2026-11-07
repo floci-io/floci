@@ -651,6 +651,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>dlm</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>xray</artifactId>
+        </dependency>
         <!-- DataSync client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

@@ -1,5 +1,5 @@
 {
-  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.43.118 (installed package)"},
+  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.43.118 (local/aws/botocore)"},
   "handRouted": {
     "apigateway": "API Gateway's management API is authorized by HTTP method, apigateway:GET, apigateway:POST and so on, on the resource path a route names, not by its operations' names, and the registry's rules give every route its method's action",
     "s3": "S3 tells apart the operations it serves on one route by their query parameters and headers, which the registry's S3 rules and sub-resource overrides read, and an S3 Control route Floci does not serve runs as the S3 data plane, checked as the bucket or object operation that runs"
@@ -1275,6 +1275,50 @@
         "TagResource": {"method": "POST", "requestUri": "/tags/{ResourceArn}"},
         "UntagResource": {"method": "DELETE", "requestUri": "/tags/{ResourceArn}"},
         "UpdateSchedule": {"method": "PUT", "requestUri": "/schedules/{Name}"}
+      }
+    },
+    "xray": {
+      "credentialScope": "xray",
+      "apiVersion": "2016-04-12",
+      "operations": {
+        "BatchGetTraces": {"method": "POST", "requestUri": "/Traces"},
+        "CancelTraceRetrieval": {"method": "POST", "requestUri": "/CancelTraceRetrieval"},
+        "CreateGroup": {"method": "POST", "requestUri": "/CreateGroup"},
+        "CreateSamplingRule": {"method": "POST", "requestUri": "/CreateSamplingRule"},
+        "DeleteGroup": {"method": "POST", "requestUri": "/DeleteGroup"},
+        "DeleteResourcePolicy": {"method": "POST", "requestUri": "/DeleteResourcePolicy"},
+        "DeleteSamplingRule": {"method": "POST", "requestUri": "/DeleteSamplingRule"},
+        "GetEncryptionConfig": {"method": "POST", "requestUri": "/EncryptionConfig"},
+        "GetGroup": {"method": "POST", "requestUri": "/GetGroup"},
+        "GetGroups": {"method": "POST", "requestUri": "/Groups"},
+        "GetIndexingRules": {"method": "POST", "requestUri": "/GetIndexingRules"},
+        "GetInsight": {"method": "POST", "requestUri": "/Insight"},
+        "GetInsightEvents": {"method": "POST", "requestUri": "/InsightEvents"},
+        "GetInsightImpactGraph": {"method": "POST", "requestUri": "/InsightImpactGraph"},
+        "GetInsightSummaries": {"method": "POST", "requestUri": "/InsightSummaries"},
+        "GetRetrievedTracesGraph": {"method": "POST", "requestUri": "/GetRetrievedTracesGraph"},
+        "GetSamplingRules": {"method": "POST", "requestUri": "/GetSamplingRules"},
+        "GetSamplingStatisticSummaries": {"method": "POST", "requestUri": "/SamplingStatisticSummaries"},
+        "GetSamplingTargets": {"method": "POST", "requestUri": "/SamplingTargets"},
+        "GetServiceGraph": {"method": "POST", "requestUri": "/ServiceGraph"},
+        "GetTimeSeriesServiceStatistics": {"method": "POST", "requestUri": "/TimeSeriesServiceStatistics"},
+        "GetTraceGraph": {"method": "POST", "requestUri": "/TraceGraph"},
+        "GetTraceSegmentDestination": {"method": "POST", "requestUri": "/GetTraceSegmentDestination"},
+        "GetTraceSummaries": {"method": "POST", "requestUri": "/TraceSummaries"},
+        "ListResourcePolicies": {"method": "POST", "requestUri": "/ListResourcePolicies"},
+        "ListRetrievedTraces": {"method": "POST", "requestUri": "/ListRetrievedTraces"},
+        "ListTagsForResource": {"method": "POST", "requestUri": "/ListTagsForResource"},
+        "PutEncryptionConfig": {"method": "POST", "requestUri": "/PutEncryptionConfig"},
+        "PutResourcePolicy": {"method": "POST", "requestUri": "/PutResourcePolicy"},
+        "PutTelemetryRecords": {"method": "POST", "requestUri": "/TelemetryRecords"},
+        "PutTraceSegments": {"method": "POST", "requestUri": "/TraceSegments"},
+        "StartTraceRetrieval": {"method": "POST", "requestUri": "/StartTraceRetrieval"},
+        "TagResource": {"method": "POST", "requestUri": "/TagResource"},
+        "UntagResource": {"method": "POST", "requestUri": "/UntagResource"},
+        "UpdateGroup": {"method": "POST", "requestUri": "/UpdateGroup"},
+        "UpdateIndexingRule": {"method": "POST", "requestUri": "/UpdateIndexingRule"},
+        "UpdateSamplingRule": {"method": "POST", "requestUri": "/UpdateSamplingRule"},
+        "UpdateTraceSegmentDestination": {"method": "POST", "requestUri": "/UpdateTraceSegmentDestination"}
       }
     }
   }

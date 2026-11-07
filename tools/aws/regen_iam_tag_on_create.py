@@ -131,7 +131,8 @@ NOT_COVERED = {
     "ram": _NO_ROUTES,
     "resource-explorer-2": _NO_ROUTES, "rum": _NO_ROUTES, "s3tables": _NO_ROUTES, "securityhub": _NO_ROUTES,
     "s3": "authorized by route; S3 checks s3:PutObjectTagging for an object it creates with tags itself",
-    "servicecatalog": "its operations that tag are AppRegistry's, whose REST routes no rule maps yet",
+    "servicecatalog": "its operations that tag are AppRegistry's, whose REST rules no rule maps yet",
+    "xray": "groups are not served yet, and CreateGroup is the only operation that carries tags",
 }
 
 # An action that adds tags, among those the reference marks as only tagging.
