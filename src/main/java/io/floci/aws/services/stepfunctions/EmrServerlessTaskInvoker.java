@@ -80,9 +80,15 @@ public class EmrServerlessTaskInvoker {
 
     private record Wait(Set<String> done, Set<String> deadEnds) {}
 
+    /** Whether {@link #start} takes the integration, as one of the six APIs itself or its {@code .sync}. */
+    static boolean serves(StatesIntegration integration) {
+        return WAITS.containsKey(integration.api())
+                && (integration.suffix().isEmpty() || ".sync".equals(integration.suffix()));
+    }
+
     Job start(StatesIntegration integration, JsonNode input, String region) {
         String api = integration.api();
-        if (!WAITS.containsKey(api) || !integration.suffix().isEmpty() && !".sync".equals(integration.suffix())) {
+        if (!serves(integration)) {
             throw unsupported(integration);
         }
         JsonNode request = input != null && input.isObject() ? input : objectMapper.createObjectNode();
@@ -274,7 +280,7 @@ public class EmrServerlessTaskInvoker {
     }
 
     /** The first of {@code node}'s fields named {@code name} in any case, or a missing node. */
-    private static JsonNode field(JsonNode node, String name) {
+    static JsonNode field(JsonNode node, String name) {
         for (Map.Entry<String, JsonNode> field : node.properties()) {
             if (field.getKey().equalsIgnoreCase(name)) {
                 return field.getValue();
