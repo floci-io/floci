@@ -51,4 +51,5 @@ public class PaymentCryptographyPinController extends PaymentCryptographyDataPla
     public Response generateMacEmvPinChange(String body, @Context HttpHeaders headers) {
         return respond(operations.generateMacEmvPinChange(parse(body), region(headers)));
     }
+
 }

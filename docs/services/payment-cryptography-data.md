@@ -20,7 +20,6 @@ client that talks to the control plane does not reach it by accident.
 | `GeneratePinData` | Generate a PIN block and the verification value that goes with it, on `POST /pindata/generate` |
 | `VerifyPinData` | Verify a PIN block against the verification value the issuer holds, on `POST /pindata/verify` |
 | `TranslatePinData` | Re-encipher a PIN block from one key to another, on `POST /pindata/translate` |
-| `GenerateMacEmvPinChange` | The MAC of an EMV PIN change, on `POST /macemvpinchange/generate` |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -50,7 +49,9 @@ client that talks to the control plane does not reach it by accident.
   twelve-digit account field. The blocks are enciphered in ECB mode, which is what the standard
   defines, and they are not padded. The verification value is the Visa PIN verification value,
   computed under a key of the `TR31_V2_VISA_PIN_VERIFICATION_KEY` usage, and it is a four-digit
-  verification value, so the PIN it is computed over is a four-digit one. A PIN that does not
+  verification value. The algorithm's transformed security parameter is sixteen digits: eleven
+  of account number, one of verification key index and four of PIN, so the PIN it is computed
+  over is a four-digit one and a longer PIN has no verification value. A PIN that does not
   verify fails the request with `VerificationFailedException`, because the answer of a
   verification has no verdict in it.
 - **A PIN block that is not one the service can read is a different failure.** A block that
@@ -62,9 +63,9 @@ client that talks to the control plane does not reach it by accident.
 - **The PIN operations are not the IBM 3624 ones, and the AS2805 translation is not made.** A
   request that asks for one of them is refused with the error that says so, rather than
   answered with something of another kind. The EMV PIN change MAC is refused as well: it needs
-  the session key the EMV secure messaging rules define, which this service does not make. The
-  wrapped-key form of a PIN encryption key is refused too, because the unwrapping is part of
-  the key exchange.
+  the session key the EMV secure messaging rules define, which this service does not make. It
+  is not one of the actions the service lists as supported. The wrapped-key form of a PIN
+  encryption key is refused too, because the unwrapping is part of the key exchange.
 
 The two-segment paths are moved to an internal prefix for the requests signed for this
 service, so a path-style request for a bucket of that name still reaches S3.
