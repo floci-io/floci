@@ -682,6 +682,16 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
     finishes or fails. It runs no Lambda code; actual execution environments retain
     their normal shutdown and extension-drain behavior.
 
+!!! note "Cleanup after an unclean Docker shutdown"
+    At startup, Floci removes running and exited Lambda containers left by a previous run,
+    including temporary code-copy helpers. Cleanup is scoped to the Docker resource namespace
+    and Floci API port, and preserves containers from the current run and named code volumes.
+    If Docker is unavailable or removal fails, the next cold start retries cleanup.
+
+    This applies to containers created with ownership and run labels. Containers from older
+    versions without those labels are left alone because their deployment cannot be identified
+    safely. Use distinct `FLOCI_DOCKER_RESOURCE_NAMESPACE` values for deployments sharing a daemon.
+
 !!! note "Bounding warm containers"
     After an invocation the container stays warm so the next call skips the cold start, and is
     reaped only after `container-idle-timeout-seconds` of inactivity. Each function keeps up to
