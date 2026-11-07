@@ -2449,6 +2449,42 @@ class IamServiceTest {
     }
 
     @Test
+    void theActiveCopyOfADuplicateAccessKeyIdPicksTheAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        putDuplicateKey(accessKeys, "AKIADUPFIRSTACTIVE", "111122223333", "Active");
+        putDuplicateKey(accessKeys, "AKIADUPFIRSTACTIVE", "444455556666", "Inactive");
+        putDuplicateKey(accessKeys, "AKIADUPSECONDACTIVE", "111122223333", "Inactive");
+        putDuplicateKey(accessKeys, "AKIADUPSECONDACTIVE", "444455556666", "Active");
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals(Optional.of("111122223333"), service.resolveAccountId("AKIADUPFIRSTACTIVE"));
+        assertEquals(Optional.of("444455556666"), service.resolveAccountId("AKIADUPSECONDACTIVE"));
+    }
+
+    private static void putDuplicateKey(AccountAwareStorageBackend<AccessKey> accessKeys, String id,
+                                        String account, String status) {
+        AccessKey accessKey = new AccessKey(id, "secret", "dev");
+        accessKey.setStatus(status);
+        accessKeys.putForAccount(account, id, accessKey);
+    }
+
+    @Test
+    void resolvingAnAccountDoesNotScanTheAccessKeys() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        AccessKey other = new AccessKey("AKIAOTHERACCOUNTKEY", "secret", "dev");
+        accessKeys.putForAccount("111122223333", other.getAccessKeyId(), other);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals(Optional.of("111122223333"), service.resolveAccountId(other.getAccessKeyId()));
+        assertTrue(service.resolveAccountId("test").isEmpty());
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
     void findSecretKeyDoesNotResolveAnotherAccountsKey() {
         // The ElastiCache, MemoryDB and RDS IAM-auth proxies verify through findSecretKey and do
         // not compare the key's account with the cluster's, so another account's key must stay unknown.
