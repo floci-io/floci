@@ -1,0 +1,42 @@
+{{- if .Values.tests.lambda.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "floci.fullname" . }}-test-lambda
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "floci.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-1"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+data:
+  index.py: |
+    def handler(event, context):
+        return {"message": "hello " + event.get("name", "world")}
+---
+{{- $script := `
+endpoint="$FLOCI_ENDPOINT"
+fn="helm-test-$(date +%s)"
+account="$(aws --endpoint-url "$endpoint" sts get-caller-identity --query Account --output text)"
+python3 -c 'import zipfile; z = zipfile.ZipFile("/tmp/function.zip", "w"); z.write("/fixtures/index.py", "index.py"); z.close()'
+
+aws --endpoint-url "$endpoint" lambda create-function --function-name "$fn" \
+  --runtime python3.12 --handler index.handler --timeout 30 \
+  --role "arn:aws:iam::$account:role/helm-test" \
+  --zip-file fileb:///tmp/function.zip --query State --output text
+aws --endpoint-url "$endpoint" lambda wait function-active-v2 --function-name "$fn"
+
+# The first invocation waits for the node to pull the runtime image and start the pod.
+aws --endpoint-url "$endpoint" --cli-read-timeout 600 lambda invoke --function-name "$fn" \
+  --cli-binary-format raw-in-base64-out --payload '{"name": "helm"}' /tmp/out.json
+cat /tmp/out.json; echo
+python3 -c 'import json, sys; body = json.load(open("/tmp/out.json")); sys.exit(0 if body == {"message": "hello helm"} else "unexpected payload: %r" % body)'
+aws --endpoint-url "$endpoint" lambda delete-function --function-name "$fn"
+echo "Lambda smoke test passed"
+` }}
+{{- $volumes := list (dict "name" "fixtures" "configMap" (dict "name" (printf "%s-test-lambda" (include "floci.fullname" .)))) }}
+{{- $mounts := list (dict "name" "fixtures" "mountPath" "/fixtures" "readOnly" true) }}
+{{- include "floci.testPod" (dict "root" . "name" "lambda" "script" $script "volumes" $volumes "volumeMounts" $mounts) }}
+{{- end }}

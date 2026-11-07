@@ -1,0 +1,16 @@
+# ct install: state on a PersistentVolumeClaim (storage mode defaults to persistent) and a
+# ready hook that seeds resources with the AWS CLI, which needs the compat image. The pod
+# only turns Ready after the hook has run, and a failing hook stops Floci, so the install
+# itself fails if the hook does.
+image:
+  variant: compat
+persistence:
+  enabled: true
+  size: 1Gi
+initHooks:
+  ready:
+    01-seed.sh: |
+      #!/bin/sh
+      set -eu
+      aws s3api head-bucket --bucket seeded-by-hook 2>/dev/null || aws s3 mb s3://seeded-by-hook
+      aws ssm put-parameter --name /helm/seeded --value ok --type String --overwrite

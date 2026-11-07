@@ -1,0 +1,19 @@
+# Snapshots of the default render. A change to them is intended only when the chart's
+# output is meant to change: review the diff, then refresh with `helm unittest -u charts/floci`.
+suite: default render snapshot
+templates:
+  - templates/deployment.yaml
+  - templates/service.yaml
+  - templates/serviceaccount.yaml
+  - templates/rbac.yaml
+release:
+  name: floci
+  namespace: aws
+# Fixed so a chart or app version bump does not churn the snapshots.
+chart:
+  version: 0.0.0
+  appVersion: 0.0.0
+tests:
+  - it: matches the default manifests
+    asserts:
+      - matchSnapshot: {}

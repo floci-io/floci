@@ -1,0 +1,14 @@
+# Patterns to ignore when building packages.
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/
+# Chart tests and CI values are not part of the packaged chart.
+/tests/
+/ci/

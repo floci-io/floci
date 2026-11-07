@@ -1,0 +1,171 @@
+suite: service, ingress and persistence
+templates:
+  - templates/service.yaml
+  - templates/ingress.yaml
+  - templates/pvc.yaml
+release:
+  name: floci
+  namespace: aws
+tests:
+  - it: exposes the API port as a ClusterIP Service
+    template: templates/service.yaml
+    asserts:
+      - equal:
+          path: spec.type
+          value: ClusterIP
+      - equal:
+          path: spec.ports
+          value:
+            - name: http
+              port: 4566
+              targetPort: http
+              protocol: TCP
+      - equal:
+          path: spec.selector
+          value:
+            app.kubernetes.io/name: floci
+            app.kubernetes.io/instance: floci
+
+  - it: publishes each port of a range as its own Service port
+    template: templates/service.yaml
+    set:
+      service.portRanges:
+        - name: elasticache
+          start: 6379
+          end: 6399
+        - name: rds
+          start: 7001
+          end: 7003
+    asserts:
+      - lengthEqual:
+          path: spec.ports
+          count: 25
+      - contains:
+          path: spec.ports
+          content:
+            name: elasticache-6399
+            port: 6399
+            targetPort: 6399
+            protocol: TCP
+      - contains:
+          path: spec.ports
+          content:
+            name: rds-7001
+            port: 7001
+            targetPort: 7001
+            protocol: TCP
+
+  - it: rejects a range whose start is above its end
+    template: templates/service.yaml
+    set:
+      service.portRanges:
+        - name: rds
+          start: 7099
+          end: 7001
+    asserts:
+      - failedTemplate:
+          errorMessage: "service.portRanges rds: start 7099 is above end 7001"
+
+  - it: sets the node port and traffic policy for NodePort
+    template: templates/service.yaml
+    set:
+      service.type: NodePort
+      service.nodePort: 30566
+      service.externalTrafficPolicy: Local
+    asserts:
+      - equal:
+          path: spec.ports[0].nodePort
+          value: 30566
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+
+  - it: ignores the node port for ClusterIP
+    template: templates/service.yaml
+    set:
+      service.nodePort: 30566
+    asserts:
+      - notExists:
+          path: spec.ports[0].nodePort
+
+  - it: renders no Ingress by default
+    template: templates/ingress.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: routes the Ingress hosts to the Service port
+    template: templates/ingress.yaml
+    set:
+      service.port: 80
+      ingress.enabled: true
+      ingress.className: nginx
+      ingress.hosts:
+        - host: floci.example.test
+          paths:
+            - path: /
+      ingress.tls:
+        - hosts: [floci.example.test]
+          secretName: floci-tls
+    asserts:
+      - equal:
+          path: spec.ingressClassName
+          value: nginx
+      - equal:
+          path: spec.rules
+          value:
+            - host: floci.example.test
+              http:
+                paths:
+                  - path: /
+                    pathType: Prefix
+                    backend:
+                      service:
+                        name: floci
+                        port:
+                          number: 80
+      - equal:
+          path: spec.tls[0].secretName
+          value: floci-tls
+
+  - it: creates a claim only when persistence is on and no claim is given
+    template: templates/pvc.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: creates the claim with the requested class and size
+    template: templates/pvc.yaml
+    set:
+      persistence.enabled: true
+      persistence.size: 2Gi
+      persistence.storageClass: fast
+    asserts:
+      - equal:
+          path: metadata.name
+          value: floci-data
+      - equal:
+          path: spec.storageClassName
+          value: fast
+      - equal:
+          path: spec.resources.requests.storage
+          value: 2Gi
+
+  - it: turns storageClass "-" into an empty storageClassName
+    template: templates/pvc.yaml
+    set:
+      persistence.enabled: true
+      persistence.storageClass: "-"
+    asserts:
+      - equal:
+          path: spec.storageClassName
+          value: ""
+
+  - it: skips the claim for an existing one
+    template: templates/pvc.yaml
+    set:
+      persistence.enabled: true
+      persistence.existingClaim: shared-data
+    asserts:
+      - hasDocuments:
+          count: 0
