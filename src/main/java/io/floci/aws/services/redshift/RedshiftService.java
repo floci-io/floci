@@ -1504,16 +1504,18 @@ public class RedshiftService implements ManagedSecretRotator {
                                               String s3TableKmsKeyId, String s3TableGranularity) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+
+        String destination = "s3";
         if (logDestinationType != null && !logDestinationType.isBlank()) {
-            String norm = logDestinationType.trim().toLowerCase();
-            if (!List.of("cloudwatch", "s3", "s3table").contains(norm)) {
+            destination = logDestinationType.trim().toLowerCase();
+            if (!List.of("cloudwatch", "s3", "s3table").contains(destination)) {
                 throw new AwsException("InvalidParameterValue",
                         "LogDestinationType must be one of: cloudwatch, s3, s3table", 400);
             }
         }
 
-        boolean cloudWatch = "cloudwatch".equalsIgnoreCase(logDestinationType);
-        boolean s3Table = "s3table".equalsIgnoreCase(logDestinationType);
+        boolean cloudWatch = "cloudwatch".equals(destination);
+        boolean s3Table = "s3table".equals(destination);
         if (cloudWatch && (bucketName != null || s3KeyPrefix != null)) {
             throw new AwsException("InvalidParameterCombination",
                     "BucketName and S3KeyPrefix cannot be specified when LogDestinationType is cloudwatch", 400);
@@ -1535,24 +1537,25 @@ public class RedshiftService implements ManagedSecretRotator {
                 throw new AwsException("InvalidS3KeyPrefixFault",
                         "The S3 key prefix cannot start with a forward slash (/)", 400);
             }
-            validateS3BucketLogging(clusters.accountId(), cluster, bucketName, s3KeyPrefix);
+            validateS3BucketLogging(clusters.accountId(), cluster, bucketName, s3KeyPrefix, regionResolver.getRegion());
         }
         cluster.setLoggingEnabled(true);
         cluster.setLoggingGeneration(cluster.getLoggingGeneration() + 1);
-        cluster.setLoggingBucketName(bucketName);
-        cluster.setLoggingDestinationType(cloudWatch ? "cloudwatch" : s3Table ? "s3table" : "s3");
+        cluster.setLoggingBucketName(cloudWatch || s3Table ? null : bucketName);
+        cluster.setLoggingDestinationType(destination);
         cluster.setLoggingRegion(regionResolver.getRegion());
         cluster.setLoggingExports(logExports == null || logExports.isEmpty() ? null : List.copyOf(logExports));
-        cluster.setLoggingS3KeyPrefix(s3KeyPrefix);
-        cluster.setLoggingS3TableKmsKeyId(s3TableKmsKeyId);
-        cluster.setLoggingS3TableGranularity(s3TableGranularity);
+        cluster.setLoggingS3KeyPrefix(cloudWatch || s3Table ? null : s3KeyPrefix);
+        cluster.setLoggingS3TableKmsKeyId(s3Table ? s3TableKmsKeyId : null);
+        cluster.setLoggingS3TableGranularity(s3Table ? s3TableGranularity : null);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         registerAuditLogging(clusters.accountId(), cluster);
         return cluster;
     }
 
-    private void validateS3BucketLogging(String accountId, Cluster cluster, String bucketName, String s3KeyPrefix) {
+    private void validateS3BucketLogging(String accountId, Cluster cluster, String bucketName,
+                                        String s3KeyPrefix, String region) {
         if (s3Service == null) {
             return;
         }
@@ -1561,15 +1564,14 @@ public class RedshiftService implements ManagedSecretRotator {
                     "Could not find the specified S3 bucket", 400);
         }
         if (serviceCallAuthorizer != null) {
-            String clusterRegion = cluster.getLoggingRegion() != null ? cluster.getLoggingRegion() : regionResolver.getRegion();
             String partition = s3Service.bucketPartition(bucketName);
-            String sampleKey = RedshiftAuditLogPublisher.s3DeliveryKey(s3KeyPrefix, accountId, clusterRegion,
+            String sampleKey = RedshiftAuditLogPublisher.s3DeliveryKey(s3KeyPrefix, accountId, region,
                     cluster.getClusterIdentifier(), "connectionlog", Instant.now());
             String bucketArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName).toString();
             String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName + "/" + sampleKey).toString();
-            String clusterArn = AwsArnUtils.Arn.of("redshift", clusterRegion, accountId,
+            String clusterArn = AwsArnUtils.Arn.of("redshift", region, accountId,
                     "cluster:" + cluster.getClusterIdentifier()).toString();
-            Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(clusterRegion));
+            Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(region));
 
             Decision getAcl = serviceCallAuthorizer.authorize("redshift", "s3:GetBucketAcl", bucketArn, clusterArn, accountId, requestKeys);
             Decision putObj = serviceCallAuthorizer.authorize("redshift", "s3:PutObject", objectArn, clusterArn, accountId, requestKeys);
@@ -1583,7 +1585,7 @@ public class RedshiftService implements ManagedSecretRotator {
     public void recordAuditDeliveryOutcome(String accountId, String clusterIdentifier, long generation,
                                            Instant timestamp, boolean success, String failureMessage) {
         try {
-            withResourceLock(accountId, "cluster", clusterIdentifier, () -> {
+            withResourceLock(accountId, "cluster", clusterIdentifier, () -> mutate(() -> {
                 Optional<Cluster> existing = clusters.getForAccount(accountId, clusterIdentifier);
                 if (existing.isEmpty()) {
                     return null;
@@ -1601,7 +1603,7 @@ public class RedshiftService implements ManagedSecretRotator {
                 clusters.putForAccount(accountId, clusterIdentifier, cluster);
                 clusters.flush();
                 return null;
-            });
+            }));
         } catch (Exception e) {
             LOG.warnv(e, "Failed to record audit delivery outcome for cluster {0}", clusterIdentifier);
         }

@@ -2545,6 +2545,37 @@ class RedshiftServiceTest {
                 service.enableLogging("my-cluster", "my-bucket", "logs", "unsupported-dest", null));
         assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertTrue(ex.getMessage().contains("LogDestinationType must be one of"));
+        assertFalse(cluster.isLoggingEnabled());
+        verify(clusterBackend, never()).put(anyString(), any());
+        verify(clusterBackend, never()).putForAccount(anyString(), anyString(), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void enableLoggingAuthorizesBucketPolicyWithRequestedRegionCondition() {
+        S3Service mockS3 = mock(S3Service.class);
+        when(mockS3.bucketExists("audit-bucket")).thenReturn(true);
+        when(mockS3.bucketPartition("audit-bucket")).thenReturn("aws"); // partition-literal: mock test partition
+        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
+        when(authorizer.authorize(eq("redshift"), anyString(), anyString(), anyString(), anyString(), anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, List<String>> keys = invocation.getArgument(5);
+                    if (keys != null && List.of("us-east-1").equals(keys.get("aws:RequestedRegion"))) {
+                        return Decision.ALLOW;
+                    }
+                    return Decision.DENY;
+                });
+
+        RedshiftService s3AwareService = new RedshiftService(sf, cm, config, regionResolver, proxyManager,
+                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
+                null, null, events, integrationEvents, null, null, mockS3, authorizer);
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = s3AwareService.enableLogging("my-cluster", "audit-bucket", "cluster-logs", "s3", null);
+        assertTrue(result.isLoggingEnabled());
     }
 
     @Test
