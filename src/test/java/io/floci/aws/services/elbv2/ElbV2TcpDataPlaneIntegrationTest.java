@@ -9,6 +9,7 @@ import io.floci.aws.testutil.LogCapture;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -68,6 +69,8 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @QuarkusTest
 @TestProfile(RealElbV2DataPlaneProfile.class)
@@ -132,12 +135,7 @@ class ElbV2TcpDataPlaneIntegrationTest {
         client.registerTargets(request -> request.targetGroupArn(targetGroupArn)
                 .targets(TargetDescription.builder().id("127.0.0.1").port(backend.actualPort()).build()));
 
-        completeInitialHealthChecks(1);
-
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertEquals(
-                TargetHealthStateEnum.HEALTHY,
-                client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
-                        .targetHealthDescriptions().getFirst().targetHealth().state()));
+        awaitHealthyTarget();
 
         try (ServerSocket reservation = new ServerSocket(0)) {
             listenerPort = reservation.getLocalPort();
@@ -154,6 +152,14 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 assertEquals(listenerPort, socket.getPort());
             }
         });
+    }
+
+    private void awaitHealthyTarget() {
+        completeInitialHealthChecks(1);
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertEquals(
+                TargetHealthStateEnum.HEALTHY,
+                client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
+                        .targetHealthDescriptions().getFirst().targetHealth().state()));
     }
 
     private void completeInitialHealthChecks(int expectedTargets) {
@@ -257,6 +263,36 @@ class ElbV2TcpDataPlaneIntegrationTest {
         try (Socket socket = connect(listenerPort)) {
             assertArrayEquals(greeting, socket.getInputStream().readNBytes(greeting.length));
             assertEcho(socket, new byte[]{1, 2, 3});
+        }
+    }
+
+    @Test
+    void replacingBackendDoesNotRequireItsReleasedPort() throws Exception {
+        NetServer original = backend;
+        int oldPort = original.actualPort();
+        NetServer competingListener = vertx.createNetServer().connectHandler(NetSocket::close);
+        NetServer closingBackend = mock(NetServer.class);
+        try {
+            backend = closingBackend;
+            when(backend.actualPort()).thenReturn(oldPort);
+            when(backend.close()).thenAnswer(invocation -> {
+                original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                competingListener.listen(oldPort, "127.0.0.1")
+                        .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                return Future.succeededFuture();
+            });
+            replaceBackend(new NetServerOptions(), socket -> socket.handler(socket::write));
+            assertEquals(oldPort, competingListener.actualPort());
+            try (Socket socket = connect(listenerPort)) {
+                assertEcho(socket, new byte[]{0, 42, (byte) 0xff});
+            }
+        } finally {
+            if (backend == closingBackend) {
+                backend = original;
+            }
+            assertAll("Close the original backend and the competing listener",
+                    () -> original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS),
+                    () -> competingListener.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS));
         }
     }
 
@@ -497,10 +533,15 @@ class ElbV2TcpDataPlaneIntegrationTest {
     }
 
     private void replaceBackend(NetServerOptions options, Handler<NetSocket> handler) throws Exception {
-        int port = backend.actualPort();
+        int oldPort = backend.actualPort();
         backend.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
-        backend = vertx.createNetServer(options).connectHandler(handler).listen(port, "127.0.0.1")
-                .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        backend = vertx.createNetServer(options).connectHandler(handler);
+        backend.listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        client.deregisterTargets(request -> request.targetGroupArn(targetGroupArn)
+                .targets(TargetDescription.builder().id("127.0.0.1").port(oldPort).build()));
+        client.registerTargets(request -> request.targetGroupArn(targetGroupArn)
+                .targets(TargetDescription.builder().id("127.0.0.1").port(backend.actualPort()).build()));
+        awaitHealthyTarget();
     }
 
     private static Socket connect(int port) throws IOException {
