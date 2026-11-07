@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -120,6 +121,23 @@ class CloudFormationEventsConnectionIntegrationTest {
     }
 
     @Test
+    void aFailedUpdateRollsTheConnectionBack() throws Exception {
+        String name = "orders-" + suffix();
+        String stack = createStack(template(connection(name, "first"), false));
+        awaitStatus(stack, "CREATE_COMPLETE");
+
+        // The connection is updated first; the destination after it points at a connection that
+        // does not exist, so the update fails and the connection has to go back to "first".
+        updateStack(stack, withBrokenDestination(template(connection(name, "second"), false)));
+        awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        assertEquals("first", describeConnection(name).then().statusCode(200).extract().jsonPath()
+                .getString("Description"));
+        assertEquals("AUTHORIZED", describeConnection(name).then().statusCode(200).extract().jsonPath()
+                .getString("ConnectionState"));
+    }
+
+    @Test
     void deleteStackRemovesTheConnection() throws Exception {
         String name = "orders-" + suffix();
         String stack = createStack(template(connection(name, null), false));
@@ -130,6 +148,19 @@ class CloudFormationEventsConnectionIntegrationTest {
 
         assertEquals("ResourceNotFoundException", describeConnection(name).then().statusCode(400)
                 .extract().jsonPath().getString("__type"));
+    }
+
+    /** The template plus an API destination whose connection ARN does not exist, which fails the update. */
+    private static String withBrokenDestination(String template) throws Exception {
+        ObjectNode root = (ObjectNode) MAPPER.readTree(template);
+        ((ObjectNode) root.get("Resources")).set("Broken", MAPPER.valueToTree(Map.of(
+                "Type", "AWS::Events::ApiDestination",
+                "Properties", Map.of(
+                        "Name", "broken-" + suffix(),
+                        "ConnectionArn", "arn:aws:events:us-east-1:000000000000:connection/missing/00000000",
+                        "HttpMethod", "POST",
+                        "InvocationEndpoint", "https://example.com/events"))));
+        return root.toString();
     }
 
     private static String suffix() {

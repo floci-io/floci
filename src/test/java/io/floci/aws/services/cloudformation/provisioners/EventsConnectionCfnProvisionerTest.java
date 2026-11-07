@@ -8,13 +8,17 @@ import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridge.model.Connection;
+import io.floci.aws.services.eventbridge.model.ConnectionState;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
 import java.util.HashMap;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -121,6 +125,7 @@ class EventsConnectionCfnProvisionerTest {
 
     @Test
     void anUpdateChangesTheConnectionInPlace() {
+        when(events.describeConnection(NAME, REGION)).thenReturn(stored());
         when(events.updateConnection(eq(NAME), eq("new description"), eq("API_KEY"), anyString(),
                 isNull(), isNull(), eq(REGION))).thenReturn(stored());
 
@@ -160,6 +165,82 @@ class EventsConnectionCfnProvisionerTest {
         assertEquals("ValidationError", e.getErrorCode());
         assertTrue(e.getMessage().contains("Removing Description"), e.getMessage());
         verify(events, never()).updateConnection(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    private Connection priorConnection() {
+        Connection connection = stored();
+        connection.setDescription("old description");
+        connection.setAuthorizationType("API_KEY");
+        connection.setAuthParameters(apiKeyAuth("old-key").toString());
+        connection.setKmsKeyIdentifier("alias/old");
+        connection.setConnectionState(ConnectionState.AUTHORIZED);
+        connection.setLastModifiedTime(Instant.parse("2026-11-01T10:00:00Z"));
+        connection.setLastAuthorizedTime(Instant.parse("2026-11-01T10:00:05Z"));
+        return connection;
+    }
+
+    private StackResource updatedConnection() {
+        when(events.describeConnection(NAME, REGION)).thenReturn(priorConnection());
+        when(events.updateConnection(any(), any(), any(), any(), any(), any(), any())).thenReturn(stored());
+        StackResource r = resource("ApiDestinationConnection");
+        provisioner.provision(r, props("new description", "rotated"), ctx(NAME, props("old description", "old-key")));
+        return r;
+    }
+
+    @Test
+    void aRollbackPutsBackTheConnectionTheUpdateChanged() {
+        StackResource r = updatedConnection();
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<Connection> restored = ArgumentCaptor.forClass(Connection.class);
+        verify(events).restoreConnection(restored.capture(), eq(REGION));
+        Connection previous = restored.getValue();
+        assertEquals(NAME, previous.getName());
+        assertEquals("old description", previous.getDescription());
+        assertEquals("API_KEY", previous.getAuthorizationType());
+        assertEquals(apiKeyAuth("old-key").toString(), previous.getAuthParameters());
+        assertEquals("alias/old", previous.getKmsKeyIdentifier());
+        assertEquals(ConnectionState.AUTHORIZED, previous.getConnectionState());
+        assertEquals(Instant.parse("2026-11-01T10:00:00Z"), previous.getLastModifiedTime());
+        assertEquals(Instant.parse("2026-11-01T10:00:05Z"), previous.getLastAuthorizedTime());
+        assertFalse(provisioner.rollbackUpdate(r), "the snapshot is spent once restored");
+    }
+
+    @Test
+    void aRollbackKeepsAFailedRestoreForTheNextAttempt() {
+        StackResource r = updatedConnection();
+        doThrow(new AwsException("InternalException", "boom", 500)).when(events).restoreConnection(any(), any());
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertNotNull(r.getAttributes().get(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aSnapshotLeftByAnEarlierUpdateIsReplacedByTheOneInFlight() {
+        StackResource r = updatedConnection();
+        Connection later = priorConnection();
+        later.setDescription("description after the first update");
+        when(events.describeConnection(NAME, REGION)).thenReturn(later);
+
+        provisioner.provision(r, props("third", "rotated"), ctx(NAME, props("new description", "rotated")));
+        provisioner.rollbackUpdate(r);
+
+        ArgumentCaptor<Connection> restored = ArgumentCaptor.forClass(Connection.class);
+        verify(events).restoreConnection(restored.capture(), eq(REGION));
+        assertEquals("description after the first update", restored.getValue().getDescription());
+    }
+
+    @Test
+    void aConnectionCreateTakesNoSnapshotToRollBack() {
+        when(events.createConnection(any(), any(), any(), any(), any(), any(), any())).thenReturn(stored());
+        StackResource r = resource("ApiDestinationConnection");
+
+        provisioner.provision(r, props("Events to orders", "tok"), ctx(null, null));
+
+        assertFalse(provisioner.rollbackUpdate(r));
+        verify(events, never()).restoreConnection(any(), any());
     }
 
     @Test
