@@ -278,7 +278,7 @@ class DocDbIntegrationTest {
         given()
             .header("Authorization", AUTH)
             .contentType(FORM)
-            .formParam("Action", "RestoreDBClusterFromSnapshot")
+            .formParam("Action", "CopyDBClusterSnapshot")
         .when().post("/")
         .then()
             .statusCode(400)
