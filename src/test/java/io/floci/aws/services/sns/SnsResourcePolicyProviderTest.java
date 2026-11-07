@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class SnsResourcePolicyProviderTest {
@@ -53,5 +54,27 @@ class SnsResourcePolicyProviderTest {
         assertTrue(provider.getResourcePolicies("sns",
                 "arn:aws:sns:us-east-1:" + OWNER + ":app/GCM/my-app").isEmpty());
         assertTrue(provider.getResourcePolicies("sqs", "arn:aws:sqs:us-east-1:" + OWNER + ":queue").isEmpty());
+    }
+
+    @Test
+    void malformedRegionalOwnersDoNotReadPolicies() {
+        for (String arn : List.of(
+                "arn:aws:sns:us-east-1:123:orders",
+                "arn:aws:sns:us-east-1:11112222333x:orders",
+                "arn:aws:sns:us-east-1:１１１１２２２２３３３３:orders",
+                "arn:aws:sns::111122223333:orders",
+                "arn:aws:sns: :111122223333:orders")) {
+            assertTrue(provider.getResourcePolicies("states", arn).isEmpty(), arn);
+        }
+        assertTrue(provider.getResourcePolicies("states", null).isEmpty());
+        verifyNoInteractions(snsService);
+    }
+
+    @Test
+    void aForeignCredentialScopeStillReadsThePartitionResourceOwner() {
+        String arn = "arn:aws-us-gov:sns:us-gov-west-1:" + OWNER + ":orders";
+        when(snsService.findTopicPolicy(arn)).thenReturn(Optional.of(POLICY));
+
+        assertEquals(List.of(new ResourcePolicy(POLICY, OWNER)), provider.getResourcePolicies("states", arn));
     }
 }

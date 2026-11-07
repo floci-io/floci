@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class EventBridgeResourcePolicyProviderTest {
@@ -49,5 +50,27 @@ class EventBridgeResourcePolicyProviderTest {
         assertTrue(provider.getResourcePolicies("events", events + "rule/orders/r").isEmpty());
         assertTrue(provider.getResourcePolicies("events", "arn:aws:events:::event-bus/orders").isEmpty());
         assertTrue(provider.getResourcePolicies("sqs", "arn:aws:sqs:us-east-1:" + OWNER + ":orders").isEmpty());
+    }
+
+    @Test
+    void malformedRegionalOwnersDoNotReadPolicies() {
+        for (String arn : List.of(
+                "arn:aws:events:us-east-1:123:event-bus/orders",
+                "arn:aws:events:us-east-1:11112222333x:event-bus/orders",
+                "arn:aws:events:us-east-1:１１１１２２２２３３３３:event-bus/orders",
+                "arn:aws:events::111122223333:event-bus/orders",
+                "arn:aws:events: :111122223333:event-bus/orders")) {
+            assertTrue(provider.getResourcePolicies("states", arn).isEmpty(), arn);
+        }
+        assertTrue(provider.getResourcePolicies("states", null).isEmpty());
+        verifyNoInteractions(eventBridgeService);
+    }
+
+    @Test
+    void aForeignCredentialScopeStillReadsThePartitionResourceOwner() {
+        String arn = "arn:aws-us-gov:events:us-gov-west-1:" + OWNER + ":event-bus/orders";
+        when(eventBridgeService.findBusPolicy(arn)).thenReturn(Optional.of(POLICY));
+
+        assertEquals(List.of(new ResourcePolicy(POLICY, OWNER)), provider.getResourcePolicies("states", arn));
     }
 }

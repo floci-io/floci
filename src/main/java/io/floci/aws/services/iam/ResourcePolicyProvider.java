@@ -1,6 +1,9 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.core.common.AwsArnUtils;
+
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Supplies the resource-based policy documents that apply to a given (credentialScope, resourceArn).
@@ -12,6 +15,23 @@ import java.util.List;
 public interface ResourcePolicyProvider {
 
     record ResourcePolicy(String policyDocument, String ownerAccountId) {}
+
+    /**
+     * Parses a regional, account-owned ARN for the service. Resource-name constraints remain
+     * with the provider, since a queue, topic and event bus have different name shapes.
+     */
+    static Optional<AwsArnUtils.Arn> regionalArn(String resourceArn, String service) {
+        if (!AwsArnUtils.isArnFor(resourceArn, service)) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        String accountId = arn.accountId();
+        if (arn.region().isBlank() || accountId.length() != 12
+                || !accountId.chars().allMatch(character -> character >= '0' && character <= '9')) {
+            return Optional.empty();
+        }
+        return Optional.of(arn);
+    }
 
     /**
      * Returns the resource-based policies that apply to the specified resource,

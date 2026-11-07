@@ -6,7 +6,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
-import java.util.regex.Pattern;
+import java.util.Optional;
 
 /**
  * Supplies SQS queue policies to IAM policy evaluation, together with the account that owns the
@@ -16,7 +16,6 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class SqsResourcePolicyProvider implements ResourcePolicyProvider {
 
-    private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
 
     private final SqsService sqsService;
 
@@ -27,13 +26,13 @@ public class SqsResourcePolicyProvider implements ResourcePolicyProvider {
 
     @Override
     public List<ResourcePolicy> getResourcePolicies(String credentialScope, String resourceArn) {
-        if (!AwsArnUtils.isArnFor(resourceArn, "sqs")) {
+        Optional<AwsArnUtils.Arn> parsed = ResourcePolicyProvider.regionalArn(resourceArn, "sqs");
+        if (parsed.isEmpty()) {
             return List.of();
         }
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        AwsArnUtils.Arn arn = parsed.get();
         // ListQueues and a request with no QueueUrl name every queue, which is not one queue's call.
-        if (!ACCOUNT_ID.matcher(arn.accountId()).matches() || arn.region().isBlank()
-                || arn.resource().isBlank() || arn.resource().contains("*")) {
+        if (arn.resource().isBlank() || arn.resource().contains("*")) {
             return List.of();
         }
         return List.of(new ResourcePolicy(sqsService.findQueuePolicy(resourceArn).orElse(null), arn.accountId()));

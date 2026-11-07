@@ -6,6 +6,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 /**
@@ -20,7 +21,6 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class SnsResourcePolicyProvider implements ResourcePolicyProvider {
 
-    private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
     /** A topic name, as CreateTopic accepts it; subscriptions, endpoints and applications are not topics. */
     private static final Pattern TOPIC_NAME = Pattern.compile("[A-Za-z0-9_-]{1,256}(\\.fifo)?");
 
@@ -33,12 +33,12 @@ public class SnsResourcePolicyProvider implements ResourcePolicyProvider {
 
     @Override
     public List<ResourcePolicy> getResourcePolicies(String credentialScope, String resourceArn) {
-        if (!AwsArnUtils.isArnFor(resourceArn, "sns")) {
+        Optional<AwsArnUtils.Arn> parsed = ResourcePolicyProvider.regionalArn(resourceArn, "sns");
+        if (parsed.isEmpty()) {
             return List.of();
         }
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
-        if (!ACCOUNT_ID.matcher(arn.accountId()).matches() || arn.region().isBlank()
-                || !TOPIC_NAME.matcher(arn.resource()).matches()) {
+        AwsArnUtils.Arn arn = parsed.get();
+        if (!TOPIC_NAME.matcher(arn.resource()).matches()) {
             return List.of();
         }
         String policy = snsService.findTopicPolicy(resourceArn).orElse(null);
