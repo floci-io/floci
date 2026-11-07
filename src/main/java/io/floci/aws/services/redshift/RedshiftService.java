@@ -53,6 +53,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -2050,6 +2051,95 @@ public class RedshiftService implements ManagedSecretRotator {
     private static boolean takenFrom(Snapshot snapshot, String clusterIdentifier) {
         return clusterIdentifier == null || clusterIdentifier.isBlank()
                 || clusterIdentifier.equals(snapshot.getClusterIdentifier());
+    }
+
+    public Snapshot copyClusterSnapshot(String sourceSnapshotIdentifier, String targetSnapshotIdentifier,
+                                        String sourceSnapshotClusterIdentifier, Integer manualRetention) {
+        validateSnapshotIdentifier(targetSnapshotIdentifier);
+        if (manualRetention != null && manualRetention != -1 && (manualRetention < 1 || manualRetention > 3653)) {
+            throw new AwsException("InvalidParameterValue",
+                    "ManualSnapshotRetentionPeriod must be -1 or between 1 and 3653.", 400);
+        }
+        String accountId = clusters.accountId();
+        String region = regionResolver.getRegion();
+        String sourceId = AwsArnUtils.looksLikeArn(sourceSnapshotIdentifier)
+                ? parseSnapshotIdentifierFromArn(sourceSnapshotIdentifier)
+                : sourceSnapshotIdentifier;
+
+        return withResourceLock("snapshot", targetSnapshotIdentifier, () -> {
+            boolean shadowedByCopy = snapshotCopies.get(copyKey(region, targetSnapshotIdentifier)).isPresent();
+            if (shadowedByCopy || snapshots.get(targetSnapshotIdentifier).isPresent()) {
+                throw new AwsException("ClusterSnapshotAlreadyExists",
+                        "Snapshot " + targetSnapshotIdentifier + " already exists", 400);
+            }
+
+            Snapshot source = findSnapshot(sourceId).orElse(null);
+            if (source == null) {
+                throw new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + sourceSnapshotIdentifier + " not found", 404);
+            }
+            if (sourceSnapshotClusterIdentifier != null && !sourceSnapshotClusterIdentifier.isBlank()
+                    && !sourceSnapshotClusterIdentifier.equals(source.getClusterIdentifier())) {
+                throw new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + sourceSnapshotIdentifier + " does not belong to cluster "
+                                + sourceSnapshotClusterIdentifier, 404);
+            }
+            if (!"available".equals(source.getStatus())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Snapshot " + sourceSnapshotIdentifier + " is not available", 400);
+            }
+            if (!"automated".equals(source.getSnapshotType())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Cannot copy a manual snapshot: " + sourceSnapshotIdentifier
+                                + ". Only automated snapshots can be copied.", 400);
+            }
+
+            Snapshot copy = new Snapshot(source);
+            copy.setSnapshotIdentifier(targetSnapshotIdentifier);
+            copy.setSnapshotType("manual");
+            copy.setStatus("available");
+            copy.setSnapshotCreateTime(Instant.now());
+            copy.setManualSnapshotRetentionPeriod(manualRetention != null ? manualRetention : -1);
+            copy.setAutomatedSnapshotRetentionPeriod(null);
+            copy.setScheduledTime(null);
+            copy.setSnapshotArn(snapshotArn(source.getClusterIdentifier(), targetSnapshotIdentifier));
+
+            if (source.getSqlDump() != null) {
+                Path dumpDir = accountDumpDir(accountId);
+                Path targetDumpFile = dumpDir.resolve(targetSnapshotIdentifier + ".sql").normalize();
+                if (targetDumpFile.startsWith(dumpDir)) {
+                    try {
+                        Path sourceDumpFile = Paths.get(source.getSqlDump());
+                        if (Files.exists(sourceDumpFile)) {
+                            Files.copy(sourceDumpFile, targetDumpFile, StandardCopyOption.REPLACE_EXISTING);
+                            copy.setSqlDump(targetDumpFile.toString());
+                        }
+                    } catch (IOException e) {
+                        LOG.warnv(e, "Could not copy dump file from {0} to {1}", source.getSqlDump(), targetDumpFile);
+                    }
+                }
+            }
+
+            snapshots.putAllAtomically(Map.of(targetSnapshotIdentifier, copy));
+            snapshots.flush();
+
+            emitSnapshotEvent(accountId, region, RedshiftEventCatalog.SNAPSHOT_STARTED,
+                    targetSnapshotIdentifier, "A user snapshot '" + targetSnapshotIdentifier
+                            + "' for Amazon Redshift cluster '" + source.getClusterIdentifier()
+                            + "' was copied from snapshot '" + sourceId + "'.");
+
+            return copy;
+        });
+    }
+
+    private static String parseSnapshotIdentifierFromArn(String snapshotArn) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(snapshotArn);
+        String resource = arn.resource();
+        int slash = resource.lastIndexOf('/');
+        if (slash >= 0 && slash < resource.length() - 1) {
+            return resource.substring(slash + 1);
+        }
+        return resource.replaceFirst("^snapshot:", "");
     }
 
     public Snapshot deleteSnapshot(String snapshotIdentifier) {
