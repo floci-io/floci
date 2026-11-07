@@ -49,6 +49,7 @@ import io.floci.aws.services.ecs.model.EcsTaskAddress;
 import io.floci.aws.services.ecs.model.EphemeralStorage;
 import io.floci.aws.services.ecs.model.Failure;
 import io.floci.aws.services.ecs.model.FirelensConfiguration;
+import io.floci.aws.services.ecs.model.HealthCheck;
 import io.floci.aws.services.ecs.model.KeyValuePair;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.ListTasksRequest;
@@ -957,6 +958,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     public TaskDefinition registerTaskDefinition(RegisterTaskDefinitionRequest request, String region) {
         List<ContainerDefinition> containerDefs = request.getContainerDefinitions();
         boolean fargate = request.isFargate();
+        validateHealthChecks(containerDefs);
         validateTaskSize(request, fargate);
         validateEphemeralStorage(request.getEphemeralStorage());
         validateContainerDependencies(containerDefs);
@@ -1132,6 +1134,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     "Invalid setting for ephemeral storage. Size must be between "
                             + (EphemeralStorage.DEFAULT_SIZE_IN_GIB + 1) + " GiB and "
                             + EphemeralStorage.MAX_SIZE_IN_GIB + " GiB.", 400);
+        }
+    }
+
+    private static void validateHealthChecks(List<ContainerDefinition> containerDefs) {
+        if (containerDefs == null) {
+            return;
+        }
+        for (ContainerDefinition def : containerDefs) {
+            HealthCheck healthCheck = def.getHealthCheck();
+            if (healthCheck != null && (healthCheck.command() == null || healthCheck.command().isEmpty())) {
+                throw new AwsException("ClientException", "HealthCheck command is required.", 400);
+            }
         }
     }
 
@@ -2948,6 +2962,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                     throw new AwsException("ServiceNotActiveException",
                             "Service " + serviceName + " is not active.", 400);
                 }
+                // Resolved before anything is applied: a request naming a task definition that cannot
+                // launch fails without changing the service.
+                TaskDefinition resolved = request.getTaskDefinition() == null ? null
+                        : resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
                 // Settle the outgoing deployment against the service as it stands, before this request
                 // changes its desired count or task definition: one whose tasks are up has finished,
                 // whether or not anything read it. recordServiceDeployment stops it if it has not.
@@ -3019,8 +3037,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 boolean taskDefChanged = false;
                 String platformVersionBefore = svc.getPlatformVersion();
-                if (request.getTaskDefinition() != null) {
-                    TaskDefinition resolved = resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
+                if (resolved != null) {
                     taskDefChanged = !resolved.getTaskDefinitionArn().equals(svc.getTaskDefinition());
                     svc.setTaskDefinition(resolved.getTaskDefinitionArn());
                     applyServicePlatform(svc, resolved, request.getPlatformVersion() != null
