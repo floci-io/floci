@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.paymentcryptographydata.model.PinGenerati
 import software.amazon.awssdk.services.paymentcryptographydata.model.PinVerificationAttributes;
 import software.amazon.awssdk.services.paymentcryptographydata.model.TranslationIsoFormats;
 import software.amazon.awssdk.services.paymentcryptographydata.model.TranslationPinDataIsoFormat034;
+import software.amazon.awssdk.services.paymentcryptographydata.model.ValidationException;
 import software.amazon.awssdk.services.paymentcryptographydata.model.VerificationFailedException;
 import software.amazon.awssdk.services.paymentcryptographydata.model.VisaPin;
 import software.amazon.awssdk.services.paymentcryptographydata.model.VisaPinVerification;
@@ -203,6 +204,6 @@ class PaymentCryptographyPinTest {
                                 .pinVerificationKeyIndex(VERIFICATION_KEY_INDEX)
                                 .build())
                         .build())))
-                .isNotNull();
+                .isInstanceOf(ValidationException.class);
     }
 }
