@@ -52,6 +52,7 @@ class LambdaMicrovmsIntegrationTest {
                 .statusCode(201)
                 .body("name", equalTo(IMAGE))
                 .body("state", equalTo("CREATING"))
+                .body("baseImageVersion", equalTo("1.0"))
                 .body("imageVersion", equalTo("1.0"))
                 .extract().response();
         JsonNode responseBody = new ObjectMapper().readTree(response.asString());
