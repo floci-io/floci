@@ -75,7 +75,8 @@ final class EmrSparkSteps {
     // files, a later one winning: core-site, tez-site, which will "Change values in Tez's tez-site.xml file", and
     // hive-site, which will "Change values in Hive's hive-site.xml"; and hive-env's exports, which will "Change
     // values in the Hive environment".
-    private static final List<String> HIVE_CLASSIFICATIONS = List.of(CORE_SITE, "tez-site", "hive-site");
+    private static final String HIVE_SITE = "hive-site";
+    private static final List<String> HIVE_CLASSIFICATIONS = List.of(CORE_SITE, "tez-site", HIVE_SITE);
     private static final String HIVE_ENV = "hive-env";
     // EMR's MapReduce jars are in /usr/lib/hadoop-mapreduce, as the image's own hadoop-streaming script has it,
     // which the image does not have; its streaming jar is in /usr/lib/hadoop.
@@ -260,6 +261,16 @@ final class EmrSparkSteps {
     /** The properties of a cluster's {@code core-site}, which its steps' {@code hadoop} command gets too. */
     static Map<String, String> coreSite(String configurations, ObjectMapper objectMapper) {
         return properties(configurations, objectMapper, CORE_SITE);
+    }
+
+    /**
+     * The properties of a cluster's {@code core-site}, then its {@code hive-site}, which configure its Hive metastore
+     * service as they do on EMR's primary node.
+     */
+    static Map<String, String> hiveMetastoreSettings(String configurations, ObjectMapper objectMapper) {
+        Map<String, String> settings = new LinkedHashMap<>(properties(configurations, objectMapper, CORE_SITE));
+        settings.putAll(properties(configurations, objectMapper, HIVE_SITE));
+        return settings;
     }
 
     /** The properties of a cluster's {@code spark-log4j2}, which its steps' Spark gets in its log4j2.properties. */

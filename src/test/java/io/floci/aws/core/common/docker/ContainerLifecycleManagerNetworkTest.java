@@ -461,6 +461,43 @@ class ContainerLifecycleManagerNetworkTest {
     }
 
     @Test
+    void ensureConnectedJoinsARunningContainerToTheNetworkUnderItsAliasOnlyWhenItIsNotOnIt() {
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(inspectOf("floci").getNetworkSettings()).thenReturn(networks);
+        when(networks.getNetworks()).thenReturn(Map.of("floci_default", new ContainerNetwork()),
+                Map.of("floci_default", new ContainerNetwork(), "emr-j-1-hdfs", new ContainerNetwork()));
+
+        manager().ensureConnected("floci", "emr-j-1-hdfs", "floci");
+        manager().ensureConnected("floci", "emr-j-1-hdfs", "floci");
+
+        verify(connectCmd).withContainerId("floci");
+        verify(connectCmd).withNetworkId("emr-j-1-hdfs");
+        ArgumentCaptor<ContainerNetwork> endpoint = ArgumentCaptor.forClass(ContainerNetwork.class);
+        verify(connectCmd).withContainerNetwork(endpoint.capture());
+        assertEquals(List.of("floci"), endpoint.getValue().getAliases());
+        // Docker refuses to join a container to a network it is on.
+        verify(connectCmd, times(1)).exec();
+    }
+
+    @Test
+    void disconnectFromNetworkLeavesOnlyANetworkTheContainerIsOnAndSaysWhetherItLeft() {
+        NetworkSettings networks = mock(NetworkSettings.class);
+        when(inspectOf("floci").getNetworkSettings()).thenReturn(networks);
+        when(networks.getNetworks()).thenReturn(Map.of("emr-j-1-hdfs", new ContainerNetwork()));
+
+        assertTrue(manager().disconnectFromNetwork("floci", "emr-j-1-hdfs"));
+        assertTrue(manager().disconnectFromNetwork("floci", "emr-j-2-hdfs"));
+
+        verify(disconnectCmd).withContainerId("floci");
+        verify(disconnectCmd).withNetworkId("emr-j-1-hdfs");
+        verify(disconnectCmd).withForce(true);
+        verify(disconnectCmd, times(1)).exec();
+        // One Docker keeps it on is not left.
+        doThrow(new ConflictException("the daemon is busy")).when(disconnectCmd).exec();
+        assertFalse(manager().disconnectFromNetwork("floci", "emr-j-1-hdfs"));
+    }
+
+    @Test
     void removeNetworkSaysWhetherTheNetworkIsGone() {
         when(dockerClient.removeNetworkCmd("removed")).thenReturn(mock(RemoveNetworkCmd.class));
         RemoveNetworkCmd missing = mock(RemoveNetworkCmd.class);
