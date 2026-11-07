@@ -13,6 +13,7 @@ import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.model.ServerCertificate;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
@@ -55,10 +56,22 @@ class CloudFrontViewerCertificateTest {
     }
 
     private ServerCertificate uploadCertificate(String name) {
+        return uploadCertificate(name, "/cloudfront/");
+    }
+
+    private ServerCertificate uploadCertificate(String name, String path) {
         CertificateGenerator.GeneratedCertificate pair = GENERATOR.generateSelfSignedCertificate(
                 "cf.certs.test.local", List.of(), KeyAlgorithm.EC_prime256v1);
-        return iamService.uploadServerCertificate(name, "/cloudfront/", pair.certificatePem(),
+        return iamService.uploadServerCertificate(name, path, pair.certificatePem(),
                 pair.privateKeyPem(), null, Map.of());
+    }
+
+    private ValidatableResponse deleteServerCertificate(String name) {
+        return given().header("Authorization", IAM_AUTH)
+                .contentType(ContentType.URLENC)
+                .formParam("Action", "DeleteServerCertificate")
+                .formParam("ServerCertificateName", name)
+            .when().post("/").then();
     }
 
     private Certificate importAcmCertificate() {
@@ -118,22 +131,14 @@ class CloudFrontViewerCertificateTest {
         Distribution created = cloudFrontService.createDistribution(
                 distributionWithCertificate(certificate.getServerCertificateId()), Map.of());
 
-        given().header("Authorization", IAM_AUTH)
-                .contentType(ContentType.URLENC)
-                .formParam("Action", "DeleteServerCertificate")
-                .formParam("ServerCertificateName", name)
-            .when().post("/").then()
+        deleteServerCertificate(name)
                 .statusCode(409)
                 .body("ErrorResponse.Error.Code", equalTo("DeleteConflict"))
                 .body("ErrorResponse.Error.Message", containsString(created.getId()));
 
         cloudFrontService.removeDistribution(created.getId());
 
-        given().header("Authorization", IAM_AUTH)
-                .contentType(ContentType.URLENC)
-                .formParam("Action", "DeleteServerCertificate")
-                .formParam("ServerCertificateName", name)
-            .when().post("/").then().statusCode(200);
+        deleteServerCertificate(name).statusCode(200);
     }
 
     @Test
@@ -191,5 +196,88 @@ class CloudFrontViewerCertificateTest {
 
         cloudFrontService.removeDistribution(created.getId());
         acmService.deleteCertificate(newArn, ACM_REGION);
+    }
+
+    /**
+     * A distribution on the CloudFront domain name is told to set
+     * {@code CloudFrontDefaultCertificate} and leave the other fields empty, and an element left
+     * empty reaches this protocol as a blank value. So a blank {@code IAMCertificateId} names no
+     * certificate: the create is accepted rather than refused for an id nothing matches, and IAM
+     * is told of no reference it would refuse a delete for.
+     */
+    @Test
+    void aBlankIamCertificateIdNamesNoCertificate() {
+        String body = """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <CallerReference>blank-iam-cert-%s</CallerReference>
+                  <Origins>
+                    <Quantity>1</Quantity>
+                    <Items>
+                      <Origin>
+                        <Id>blank-cert-origin</Id>
+                        <DomainName>example.com</DomainName>
+                        <CustomOriginConfig>
+                          <HTTPPort>80</HTTPPort>
+                          <HTTPSPort>443</HTTPSPort>
+                          <OriginProtocolPolicy>http-only</OriginProtocolPolicy>
+                        </CustomOriginConfig>
+                      </Origin>
+                    </Items>
+                  </Origins>
+                  <DefaultCacheBehavior>
+                    <TargetOriginId>blank-cert-origin</TargetOriginId>
+                    <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                  </DefaultCacheBehavior>
+                  <ViewerCertificate>
+                    <CloudFrontDefaultCertificate>true</CloudFrontDefaultCertificate>
+                    <IAMCertificateId></IAMCertificateId>
+                  </ViewerCertificate>
+                  <Comment>blank-viewer-certificate</Comment>
+                  <Enabled>false</Enabled>
+                </DistributionConfig>
+                """.formatted(suffix());
+
+        String location = given()
+                .contentType(ContentType.XML)
+                .body(body)
+            .when()
+                .post("/2020-05-31/distribution")
+            .then()
+                .statusCode(201)
+                .extract().header("Location");
+        String id = location.substring(location.lastIndexOf('/') + 1);
+
+        assertEquals(List.of(), cloudFrontService.serverCertificateReferences().stream()
+                .filter(reference -> reference.referrer().contains(id))
+                .toList());
+
+        cloudFrontService.removeDistribution(id);
+    }
+
+    /**
+     * The path a certificate was uploaded under does not decide whether a distribution can serve it
+     * here, the id does. AWS documents {@code /cloudfront} for a certificate meant for CloudFront,
+     * on IAM's upload and in CloudFront's own upload procedure, so what this pins is a deliberate
+     * divergence rather than a recorded AWS answer: nothing published says the distribution write
+     * refuses one stored elsewhere. Why it is left this way is under Server Certificates in
+     * {@code docs/services/iam.md}.
+     */
+    @Test
+    void aCertificateOutsideTheCloudFrontPathStillServesADistribution() {
+        String name = "cf-cert-root-path-" + suffix();
+        ServerCertificate certificate = uploadCertificate(name, "/");
+
+        Distribution created = cloudFrontService.createDistribution(
+                distributionWithCertificate(certificate.getServerCertificateId()), Map.of());
+
+        deleteServerCertificate(name)
+                .statusCode(409)
+                .body("ErrorResponse.Error.Code", equalTo("DeleteConflict"))
+                .body("ErrorResponse.Error.Message", containsString(created.getId()));
+
+        cloudFrontService.removeDistribution(created.getId());
+
+        deleteServerCertificate(name).statusCode(200);
     }
 }
