@@ -101,6 +101,23 @@ class TagOnCreateTest {
     }
 
     /**
+     * An object read as a list of tags and as a map gives two sets, so a member named as its structure's key does not
+     * replace the tag a handler iterating the object applies.
+     */
+    @Test
+    void anObjectReadAsTagsAndAsAMapGivesASetForEach() {
+        Tagging collision = TagOnCreate.of("kms:CreateKey", json(
+                "{\"Tags\":{\"team\":{\"TagKey\":\"team\",\"TagValue\":\"red\"}}}")).orElseThrow();
+        assertEquals(List.of(), collision.sets());
+        assertEquals(List.of(set(Map.of("team", "red")), set(Map.of("team", ""))), collision.otherSpellings());
+        assertEquals(List.of(List.of(), List.of("red"), List.of("")), TagOnCreate.requestTagContexts(collision).stream()
+                .map(context -> context.getOrDefault("aws:RequestTag/team", List.of())).toList());
+        // A map holding only strings is read as a map alone.
+        assertEquals(List.of(set(Map.of("team", "red"))), TagOnCreate.of("kms:CreateKey", json(
+                "{\"Tags\":{\"team\":\"red\"}}")).orElseThrow().otherSpellings());
+    }
+
+    /**
      * CodeDeploy's handler reads a tag's key and value as text whatever they hold, a missing key as an empty one,
      * and so does the check; other handlers' keys are read as text when they are a number or a flag too.
      */
