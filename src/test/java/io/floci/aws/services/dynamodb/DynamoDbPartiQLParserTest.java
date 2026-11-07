@@ -608,9 +608,12 @@ class DynamoDbPartiQLParserTest {
     }
 
     private String refusal(String condition, int parameters) {
+        return statementRefusal("SELECT * FROM \"t\" WHERE " + condition, parameters);
+    }
+
+    private String statementRefusal(String statement, int parameters) {
         List<JsonNode> values = IntStream.range(0, parameters).mapToObj(i -> json("{\"S\":\"x\"}")).toList();
-        AwsException e = assertThrows(AwsException.class,
-                () -> DynamoDbPartiQLParser.parse("SELECT * FROM \"t\" WHERE " + condition, values));
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, values));
         return e.getMessage();
     }
 
@@ -864,6 +867,72 @@ class DynamoDbPartiQLParserTest {
                 assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(append, string)).getMessage());
         assertEquals("The second argument to SET_ADD must be a value with type SET at 1:28:1",
                 assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(add, string)).getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SELECT * FROM "t" WHERE pk = ?                           | 0 | COUNT
+            SELECT * FROM "t" WHERE pk = ? AND x = ?                 | 1 | COUNT
+            DELETE FROM "t" WHERE pk = ?                             | 0 | COUNT
+            INSERT INTO "t" VALUE {'pk': ?}                          | 0 | COUNT
+            UPDATE "t" SET a = ? WHERE pk = 1                        | 0 | COUNT
+            UPDATE "t" SET a = 1 WHERE pk = ?                        | 0 | COUNT
+            SELECT * FROM "t" WHERE pk = ? AND foo(1)                | 0 | COUNT
+            SELECT * FROM "t" WHERE foo(1) AND pk = ?                | 0 | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE pk = ? AND foo(1) AND x = ?      | 1 | Unrecognized function: foo at 1:36:3
+            SELECT * FROM "t" WHERE pk = ? AND x = ? AND foo(1)      | 1 | COUNT
+            SELECT * FROM "t" WHERE foo(?)                           | 0 | COUNT
+            SELECT * FROM "t" WHERE pk = ? AND x = <<>>              | 0 | COUNT
+            SELECT * FROM "t" WHERE x = <<>> AND pk = ?              | 0 | Empty bags are not supported
+            SELECT * FROM "t" WHERE attribute_exists('a') AND pk = ? | 0 | COUNT
+            SELECT * FROM "t" WHERE pk = ? AND                       | 0 | NWF Missing right-hand side expression of infix operator
+            SELECT * FROM "" WHERE pk = ?                            | 0 | Path component cannot be an empty string
+            SELECT * FROM "t" WHERE x = [?]                          | 0 | Unsupported data type: Parameter under key root[0] at 1:30:1
+            SELECT * FROM "t" WHERE x = <<?>>                        | 0 | BAG at 1:31:1
+            SELECT * FROM "t" WHERE x = <<?>>                        | 1 | BAG at 1:31:1
+            SELECT * FROM "t" WHERE x = <<1, ?>>                     | 0 | Unsupported data type: Parameter under key root at 1:34:1
+            SELECT * FROM "t" WHERE foo(?).a = 1                     | 0 | Unexpected path component at 1:25:3
+            SELECT * FROM "t" WHERE foo(?) IS NULL                   | 0 | IS_LEFT
+            SELECT * FROM "t" WHERE size(?)                          | 0 | COUNT
+            UPDATE "t" SET a = ? WHERE foo(1)                        | 0 | Unrecognized function: foo at 1:28:3
+            UPDATE "t" SET a = ? WHERE attribute_exists('a')         | 0 | DOCUMENT_PATH
+            UPDATE "t" SET a = foo(1) WHERE pk = ?                   | 0 | COUNT
+            UPDATE "t" SET a = ?, b = foo(1) WHERE pk = ?            | 1 | COUNT
+            UPDATE "t" SET a = foo(1), b = ? WHERE pk = 1            | 0 | Unrecognized function: foo at 1:20:3
+            UPDATE "t" SET a = ? REMOVE l[99999999999] WHERE pk = 1  | 0 | COUNT
+            UPDATE "t" REMOVE l[99999999999] SET a = ? WHERE pk = 1  | 0 | LIST_INDEX at 1:21:11
+            FROM "t" WHERE foo(1) SET a = ?                          | 0 | Unrecognized function: foo at 1:16:3
+            FROM "t" WHERE pk = ? SET a = foo(1)                     | 0 | COUNT
+            FROM "t" WHERE pk = ? SET a = foo(1), b = ?              | 1 | Unrecognized function: foo at 1:31:3
+            UPDATE "t" SET ss = set_add(?) WHERE pk = 1              | 0 | SET_ADD must have exactly two arguments at 1:21:7
+            UPDATE "t" SET ss = set_add(ss, ?) WHERE pk = 1          | 0 | COUNT
+            UPDATE "t" SET ss = set_add(ss, ?).a WHERE pk = 1        | 0 | Unexpected path component at 1:21:7
+            UPDATE "t" SET ss = set_add(ss, ?) + 1 WHERE pk = 1      | 0 | COUNT
+            UPDATE "t" SET l = list_append(?) WHERE pk = 1           | 0 | COUNT
+            INSERT INTO "t" ?                                        | 0 | MULTIPLE_ITEMS
+            INSERT INTO "t" VALUE {'pk': 1, 'x': <<>>, 'y': ?}       | 0 | Empty bags are not supported
+            INSERT INTO "t" VALUE {'pk': 1, 'y': ?, 'x': <<>>}       | 0 | COUNT
+            """)
+    void reportsAMissingParameterInStatementOrder(String statement, int parameters, String message) {
+        String expected = message
+                .replace("COUNT", "Number of parameters in request and statement don't match.")
+                .replace("NWF ", "Statement wasn't well formed, can't be processed: ")
+                .replace("BAG", "Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags")
+                .replace("IS_LEFT", "The left hand side argument to IS must be a Variable Reference, Literal, or Path")
+                .replace("DOCUMENT_PATH", "Operator or function requires a document path; operator or function: "
+                        + "attribute_exists")
+                .replace("LIST_INDEX", "List index is not within the allowable range; index: [99999999999]")
+                .replace("MULTIPLE_ITEMS", "Unsupported operation: Inserting multiple items in a single statement "
+                        + "is not supported, use \"INSERT INTO tableName VALUE item\" instead");
+
+        assertEquals(expected, statementRefusal(statement, parameters));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SELECT * FROM \"t\" WHERE pk = 'a'", "SELECT * FROM \"t\" WHERE pk = ?"})
+    void ignoresAParameterTheStatementDoesNotUse(String statement) {
+        assertDoesNotThrow(() -> DynamoDbPartiQLParser.parse(statement,
+                List.of(json("{\"S\":\"x\"}"), json("{\"S\":\"y\"}"))));
     }
 
     @Test
