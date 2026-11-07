@@ -645,7 +645,6 @@ AWS::SecretsManager::Secret	Type	accepted and ignored
 AWS::ServiceDiscovery::PrivateDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::PublicDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::Service	ServiceAttributes	accepted and ignored
-AWS::Signer::SigningProfile	Tags	accepted and ignored: Floci has no Signer API to tag
 AWS::Transfer::Server	Certificate	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	CreateWithHostKey	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	IpAddressType	rejected with a ValidationError, not supported by Floci
