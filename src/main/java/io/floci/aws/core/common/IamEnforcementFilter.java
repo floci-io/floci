@@ -1241,7 +1241,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                   String action, String operationAction, String credentialScope,
                                   List<String> resources, List<Map<String, List<String>>> targetContexts,
                                   String region, String accountId, String akid) {
-        for (String resource : resources) {
+        for (int resourceIndex = 0; resourceIndex < resources.size(); resourceIndex++) {
+            String resource = resources.get(resourceIndex);
             List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies =
                     resolveResourcePolicies(credentialScope, operationAction, resource);
             String resourceOwnerAccountId = resourcePolicies.isEmpty() ? null : resourcePolicies.getFirst().ownerAccountId();
@@ -1259,6 +1260,14 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             List<Map<String, List<String>>> batchContexts = "dynamodb".equals(credentialScope)
                     ? conditionContextResolver.dynamoDbBatchConditionContexts(action, ctx, resource) : null;
             List<Map<String, List<String>>> resourceContexts = targetContexts;
+            if ("ec2".equals(credentialScope)
+                    && ("ec2:CreateTags".equals(operationAction) || "ec2:DeleteTags".equals(operationAction))
+                    && resources.size() == targetContexts.size()
+                    && AwsArnUtils.resourceIfArnFor(resource, "ec2").filter(id -> id.startsWith("instance/")).isPresent()) {
+                // Both readers retain ResourceId.N order, duplicates and unmodelled targets.
+                // Only instance ARNs use their own tags; wildcard targets retain every context.
+                resourceContexts = targetContexts.subList(resourceIndex, resourceIndex + 1);
+            }
             if (batchContexts != null && !batchContexts.isEmpty()) {
                 resourceContexts = new ArrayList<>();
                 for (Map<String, List<String>> targetContext : targetContexts) {

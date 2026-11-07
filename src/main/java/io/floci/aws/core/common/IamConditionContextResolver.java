@@ -866,7 +866,7 @@ public class IamConditionContextResolver {
      * resource this context describes is the resource the handler acts on.
      */
     @SuppressWarnings("unchecked")
-    static Map<String, String> formParameters(ContainerRequestContext ctx) {
+    public static Map<String, String> formParameters(ContainerRequestContext ctx) {
         if ("GET".equalsIgnoreCase(ctx.getMethod()) && IamActionRegistry.isQueryRequest(ctx)) {
             Map<String, String> parameters = new LinkedHashMap<>();
             ctx.getUriInfo().getQueryParameters().forEach((key, values) -> {
