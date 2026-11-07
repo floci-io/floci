@@ -90,11 +90,11 @@ With IAM enforcement enabled, the existing task authorizer checks the execution 
 permission to assume the task role, its trust policy, and the task role's permission to
 start the child. Account routing also works with enforcement disabled. The `.sync`
 polling and cancellation paths retain the task account; their additional IAM permissions
-are not evaluated. Lambda, API Gateway, SQS, SNS, EventBridge, DynamoDB, S3 `putObject`, RDS Data and
-Redshift Data tasks evaluate `Credentials` themselves
+are not evaluated. Lambda, API Gateway, SQS, SNS, EventBridge, DynamoDB, S3 `putObject`, RDS Data,
+Redshift Data, ECS, EMR and EMR Serverless tasks evaluate `Credentials` themselves
 ([Lambda](#lambda-tasks-under-iam-enforcement), [messaging](#messaging-tasks-under-iam-enforcement),
-[data](#data-tasks-under-iam-enforcement)); other integrations retain their existing credential
-handling.
+[data](#data-tasks-under-iam-enforcement), [jobs](#job-tasks-under-iam-enforcement)); other
+integrations retain their existing credential handling.
 A foreign state-machine ARN without task credentials grants no account access.
 
 A missing or mismatched task role fails with `States.TaskFailed`. A target account
@@ -708,8 +708,63 @@ AWS. Apart from `dynamodb:EnclosingOperation`, only global condition keys are av
 policies: `dynamodb:LeadingKeys`, `dynamodb:Attributes` and the like are absent. Global tables are not
 treated apart. With enforcement off nothing here is evaluated.
 
-Integrations other than these, the messaging tasks, Lambda, API Gateway and nested executions are not
-evaluated yet: they run in the state machine's account whatever the execution role's policies say.
+## Job tasks under IAM enforcement
+
+These tasks are evaluated with [IAM enforcement](iam.md#resource-based-policies) on, in the same steps
+and with the same role errors as [messaging tasks](#messaging-tasks-under-iam-enforcement). Each action
+and resource type comes from the Service Authorization Reference:
+
+| Resource | Action | Resource evaluated | Refused with |
+|---|---|---|---|
+| `arn:aws:states:::ecs:runTask`, with `.sync` or `.waitForTaskToken` | `ecs:RunTask` | The task definition revision the task would run | `ECS.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:ecs:updateService` | `ecs:UpdateService` | The service it acts on | `Ecs.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:ecs:describeServices` | `ecs:DescribeServices` | Each service it answers for | `Ecs.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:ecs:listServices` | `ecs:ListServices` | `*` | `Ecs.AccessDeniedException` |
+| `arn:aws:states:::elasticmapreduce:createCluster`, `.sync` | `elasticmapreduce:RunJobFlow` | `*` | `EMR.AccessDeniedException` |
+| `arn:aws:states:::elasticmapreduce:setClusterTerminationProtection` | `elasticmapreduce:SetTerminationProtection` | `cluster/<ClusterId>` | `EMR.AccessDeniedException` |
+| `arn:aws:states:::elasticmapreduce:terminateCluster`, `.sync` | `elasticmapreduce:TerminateJobFlows` | `cluster/<ClusterId>` | `EMR.AccessDeniedException` |
+| `arn:aws:states:::elasticmapreduce:addStep`, `.sync` | `elasticmapreduce:AddJobFlowSteps` | `cluster/<ClusterId>` | `EMR.AccessDeniedException` |
+| `arn:aws:states:::elasticmapreduce:cancelStep` | `elasticmapreduce:CancelSteps` | `cluster/<ClusterId>` | `EMR.AccessDeniedException` |
+| `arn:aws:states:::elasticmapreduce:modifyInstanceFleetByName` | `elasticmapreduce:ListInstanceFleets`, `ModifyInstanceFleet` | `cluster/<ClusterId>` | `EMR.AccessDeniedException` |
+| `arn:aws:states:::elasticmapreduce:modifyInstanceGroupByName` | `elasticmapreduce:ListInstanceGroups`, `ModifyInstanceGroups` | `cluster/<ClusterId>` | `EMR.AccessDeniedException` |
+| `arn:aws:states:::emr-serverless:createApplication`, `.sync` | `emr-serverless:CreateApplication` | `*` | `EmrServerless.AccessDeniedException` |
+| `arn:aws:states:::emr-serverless:startApplication`, `stopApplication`, `deleteApplication`, `.sync` | `emr-serverless:StartApplication` and so on | `/applications/<ApplicationId>` | `EmrServerless.AccessDeniedException` |
+| `arn:aws:states:::emr-serverless:startJobRun`, `.sync` | `emr-serverless:StartJobRun` | `/applications/<ApplicationId>` | `EmrServerless.AccessDeniedException` |
+| `arn:aws:states:::emr-serverless:cancelJobRun`, `.sync` | `emr-serverless:CancelJobRun` | `/applications/<ApplicationId>/jobruns/<JobRunId>` | `EmrServerless.AccessDeniedException` |
+
+A task definition is evaluated as the revision it resolves to, so a bare family, `family:revision` and
+the ARN give the same resource: `task-definition/<family>:<revision>`. A role allowed only an older
+revision is refused a bare family whose latest revision is newer.
+
+The ECS services are resolved as ECS resolves them. `updateService` acts on the service of that name in
+the request's `Cluster`, or in `default` with none, whatever cluster a service ARN in the request
+names, and that is the service evaluated.
+
+A ByName API needs its `List` action as well as its `Modify` one, since it reads the cluster's fleets or
+groups to find the id. Nothing documents this for a task: it is inferred from what the integration
+calls, and it is what the CDK's policies for these two tasks grant.
+
+`.sync` authorizes the starting call only: a job cannot fail midway through its wait for lack of a
+Describe permission, and the best-effort cancel of an abandoned job is not evaluated either. What the
+CDK grants a `.sync` task beyond that, such as `elasticmapreduce:DescribeStep` or `ecs:DescribeTasks`,
+is accepted but not needed here. `iam:PassRole` is not evaluated for the roles `runTask`, `createCluster` or
+`startJobRun` pass, nor a tagging action such as `elasticmapreduce:AddTags` for what they tag.
+
+A request naming nothing it can reach has only the role checks, and its service answers it: no
+`TaskDefinition` or one ECS does not have, a service or cluster ECS does not have, no `ClusterId`, no
+`ApplicationId`, or a `cancelJobRun` without `JobRunId`. A form an integration does not serve keeps
+its answer: `.waitForTaskToken` on EMR and EMR Serverless and `.sync` on an EMR API with no wait are
+"Unsupported" whether or not enforcement is on, and so is any API Floci does not have.
+
+`<prefix>.AccessDeniedException` is Floci's reading for these too and has not been verified against
+AWS; the prefix is the one each integration's other errors carry. EMR's own errors reach a task as
+`EMR.AmazonElasticMapReduceException` unless EMR models them, so AWS may word this one that way. Only
+global condition keys are available to the policies: `ecs:cluster` and the like are absent, so an Allow
+conditioned on them does not apply. With enforcement off nothing here is evaluated.
+
+Integrations other than these, the data and messaging tasks, Lambda, API Gateway and nested executions
+are not evaluated yet: they run in the state machine's account whatever the execution role's policies
+say.
 
 ## Task credentials in history
 
@@ -773,10 +828,11 @@ their `UUID` spelling.
 ECS `listServices` supports the same `MaxResults` and opaque `NextToken` as the
 direct ECS API. Lambda mapping tasks currently return an unpaginated list;
 `Marker` and `MaxItems` are rejected with `Lambda.InvalidParameterValueException`
-instead of being silently ignored. These six integrations do not evaluate the
-state-machine execution role's per-action IAM policies; among the task integrations, Lambda, API
+instead of being silently ignored. The three Lambda mapping and Secrets Manager integrations do not
+evaluate the state-machine execution role's per-action IAM policies; the three ECS ones
+[do](#job-tasks-under-iam-enforcement), and among the task integrations so do Lambda, API
 Gateway, nested executions, the [messaging tasks](#messaging-tasks-under-iam-enforcement) and the
-[data tasks](#data-tasks-under-iam-enforcement) do. Name-based lookups use the
+[data tasks](#data-tasks-under-iam-enforcement). Name-based lookups use the
 execution scope; explicit ARNs retain the underlying service's cross-account lookup
 behavior. The underlying services' validation still applies. They implement
 request-response calls, without job-completion polling.

@@ -6161,6 +6161,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return td;
     }
 
+    /** The ARN of the definition {@code ref} names, the revision a task started from it runs. Reads only. */
+    public Optional<String> taskDefinitionArn(String ref, String region) {
+        return Optional.ofNullable(findTaskDefinition(ref, region)).map(TaskDefinition::getTaskDefinitionArn);
+    }
+
     /** The roles a task started from the definition runs with, for the {@code iam:PassRole} check of RunTask and the rest. */
     @Override
     public List<String> taskDefinitionRoles(String reference, String region) {
@@ -6245,6 +6250,31 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return services.values().stream()
                 .filter(s -> s.getServiceArn().equals(serviceId) || s.getServiceName().equals(serviceId))
                 .findFirst().orElse(null);
+    }
+
+    /**
+     * The ARN of the service {@code updateService} would act on, found the way it finds it: by the last segment of
+     * the reference within the cluster the request names. Reads only, so it creates no default cluster.
+     */
+    public Optional<String> updatedServiceArn(String clusterRef, String serviceRef, String region) {
+        return existingClusterName(clusterRef, region)
+                .map(cluster -> services.get(serviceKey(region, cluster, extractServiceName(serviceRef))))
+                .map(EcsServiceModel::getServiceArn);
+    }
+
+    /** The ARN of the service {@code describeServices} would answer for the reference. Reads only. */
+    public Optional<String> describedServiceArn(String clusterRef, String serviceRef, String region) {
+        return existingClusterName(clusterRef, region)
+                .map(cluster -> resolveService(cluster, serviceRef, region))
+                .map(EcsServiceModel::getServiceArn);
+    }
+
+    /** The name of the cluster {@code resolveClusterOrDefault} would answer with, without creating the default. */
+    private Optional<String> existingClusterName(String clusterRef, String region) {
+        if (clusterRef == null || clusterRef.isBlank() || DEFAULT_CLUSTER.equals(clusterRef)) {
+            return Optional.of(DEFAULT_CLUSTER);
+        }
+        return Optional.ofNullable(resolveCluster(clusterRef, region)).map(EcsCluster::getClusterName);
     }
 
     private EcsServiceModel resolveServiceOrThrow(String clusterName, String serviceId, String region) {
