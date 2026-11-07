@@ -61,6 +61,7 @@ import io.floci.aws.services.scheduler.model.Schedule;
 import io.floci.aws.services.scheduler.model.ScheduleRequest;
 import io.floci.aws.services.sns.SnsJsonHandler;
 import io.floci.aws.services.sqs.SqsJsonHandler;
+import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.StepFunctionsService.TokenTimeout;
 import io.floci.aws.services.stepfunctions.StepFunctionsService.TokenWait;
 import io.floci.aws.services.stepfunctions.model.Execution;
@@ -1276,6 +1277,17 @@ public class AslExecutor {
         }
         lambdaTaskAuthorizer.authorize(sm, credentials == null ? null : credentials.path("RoleArn").asText(),
                 required.get().deniedError(), required.get().permissions(), required.get().checksExecutionRole());
+    }
+
+    /**
+     * A Distributed Map's reads and writes are evaluated as its execution role, before the S3 call that needs them.
+     * An execution with a mock test case is evaluated too: a test case cannot mock a Map state, so its S3 calls stay
+     * real, as an unmocked task's call in that execution does and is evaluated.
+     */
+    private void authorizeMapS3(StateMachine sm, String refusedError, List<Permission> permissions) {
+        if (iamEnforcementEnabled()) {
+            lambdaTaskAuthorizer.authorizeMapS3(sm, refusedError, permissions);
+        }
     }
 
     private boolean iamEnforcementEnabled() {
@@ -3330,7 +3342,7 @@ public class AslExecutor {
         // Map input-processing fields, including ItemsPath and MaxConcurrencyPath, resolve against
         // the effective state input after InputPath has been applied.
         JsonNode mapInput = applyInputPath(stateDef, input, context);
-        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables);
+        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, mapInput, jsonata, context, variables, sm);
         JsonNode items = resolvedItems.items();
 
         if (!items.isArray()) {
@@ -3904,6 +3916,9 @@ public class AslExecutor {
                         "ResultWriter " + (jsonata ? "Arguments" : "Parameters")
                                 + " must resolve to an object", "ResultWriter/Arguments");
             }
+            // Every object is evaluated before the first is written, so a refusal leaves no partial export.
+            authorizeMapS3(sm, "States.ResultWriterFailed",
+                    TaskPermissions.resultWriterExport(loc, mapRun.id(), !failedChildren.isEmpty(), sm));
             JsonNode bucketNode = loc.get("Bucket");
             if (bucketNode == null) {
                 throw new FailStateException("States.ResultWriterFailed",
@@ -3939,12 +3954,10 @@ public class AslExecutor {
             // The run id alone keys the exported result set under the user-supplied S3 prefix.
             String mapRunId = mapRun.id();
             String mapRunArn = mapRun.arn();
-            String base = prefix.isEmpty()
-                    ? mapRunId + "/"
-                    : prefix + (prefix.endsWith("/") ? "" : "/") + mapRunId + "/";
+            String base = TaskPermissions.resultWriterBase(prefix, mapRunId);
 
-            String succeededKey = base + "SUCCEEDED_0.json";
-            String manifestKey = base + "manifest.json";
+            String succeededKey = base + TaskPermissions.RESULT_WRITER_SUCCEEDED;
+            String manifestKey = base + TaskPermissions.RESULT_WRITER_MANIFEST;
 
             byte[] succeededBytes = serializeResultFile(formatted, outputType);
             s3Service.putObject(bucket, succeededKey, succeededBytes, "application/json", new HashMap<>());
@@ -3955,7 +3968,7 @@ public class AslExecutor {
             ObjectNode resultFiles = manifest.putObject("ResultFiles");
             ArrayNode failedFiles = resultFiles.putArray("FAILED");
             if (!failedChildren.isEmpty()) {
-                String failedKey = base + "FAILED_0.json";
+                String failedKey = base + TaskPermissions.RESULT_WRITER_FAILED;
                 byte[] failedBytes = serializeResultFile(
                         formatFailedChildren(failedChildren, region, account, smName, mapRun.label()),
                         outputType);
@@ -4083,8 +4096,8 @@ public class AslExecutor {
         return objectMapper.writeValueAsBytes(formatted);
     }
 
-    private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input,
-                                             boolean jsonata, JsonNode context, ObjectNode variables) throws Exception {
+    private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
+                                             ObjectNode variables, StateMachine sm) throws Exception {
         if (jsonata && stateDef.has("Items")) {
             JsonNode itemsNode = stateDef.get("Items");
             if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
@@ -4097,7 +4110,7 @@ public class AslExecutor {
         }
 
         if (stateDef.has("ItemReader")) {
-            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context, jsonata, variables);
+            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context, jsonata, variables, sm);
         }
 
         JsonNode itemsPath = stateDef.path("ItemsPath");
@@ -4108,7 +4121,7 @@ public class AslExecutor {
 
     private ResolvedMapItems resolveItemReaderItems(JsonNode itemReader, JsonNode input,
                                                     JsonNode context, boolean jsonata,
-                                                    ObjectNode variables) throws Exception {
+                                                    ObjectNode variables, StateMachine sm) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
         boolean listObjects = integration != null && integration.is("s3", "listObjectsV2");
@@ -4119,7 +4132,7 @@ public class AslExecutor {
 
         int maxItems = resolveItemReaderMaxItems(itemReader, input, jsonata, context, variables);
         if (listObjects) {
-            return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems);
+            return resolveListObjectsItems(itemReader, input, context, jsonata, variables, maxItems, sm);
         }
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
@@ -4131,6 +4144,7 @@ public class AslExecutor {
         JsonNode resolvedParameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = resolvedParameters.path("Bucket").asText(null);
         String key = resolvedParameters.path("Key").asText(null);
+        authorizeMapS3(sm, "States.ItemReaderFailed", TaskPermissions.itemReaderGetObject(bucket, key, sm));
         if (bucket == null || key == null) {
             throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket and Key");
         }
@@ -4290,13 +4304,14 @@ public class AslExecutor {
 
     private ResolvedMapItems resolveListObjectsItems(JsonNode itemReader, JsonNode input, JsonNode context,
                                                      boolean jsonata, ObjectNode variables,
-                                                     int maxItems) throws Exception {
+                                                     int maxItems, StateMachine sm) throws Exception {
         JsonNode parameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = parameters.path("Bucket").asText(null);
+        String prefix = parameters.path("Prefix").asText(null);
+        authorizeMapS3(sm, "States.ItemReaderFailed", TaskPermissions.itemReaderListObjects(bucket, prefix, sm));
         if (bucket == null) {
             throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket");
         }
-        String prefix = parameters.path("Prefix").asText(null);
 
         ArrayNode items = objectMapper.createArrayNode();
         try {

@@ -15,6 +15,7 @@ import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.iam.IamAuthorizedActions;
 import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.redshiftdata.RedshiftDataTargetSubmitter;
+import io.floci.aws.services.s3.S3ConditionKeys;
 import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
@@ -44,6 +45,9 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
 
     private static final Logger LOG = Logger.getLogger(TaskPermissions.class);
     private static final String ANY_RESOURCE = "*";
+    static final String RESULT_WRITER_SUCCEEDED = "SUCCEEDED_0.json";
+    static final String RESULT_WRITER_FAILED = "FAILED_0.json";
+    static final String RESULT_WRITER_MANIFEST = "manifest.json";
     private static final String DYNAMODB_OPTIMIZED_PREFIX = "DynamoDB.";
     private static final String DYNAMODB_SDK_PREFIX = "DynamoDb.";
     private static final String REDSHIFT_DATA_PREFIX = "RedshiftData.";
@@ -361,9 +365,69 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
         if (bucket.isBlank() || key == null) {
             return accessDenied("S3.", List.of());
         }
-        String partition = AwsArnUtils.parse(machine.getStateMachineArn()).partition();
-        return accessDenied("S3.",
-                List.of(new Permission("s3:PutObject", S3ResourceArns.object(partition, bucket, key))));
+        return accessDenied("S3.", List.of(new Permission("s3:PutObject", s3ObjectArn(machine, bucket, key))));
+    }
+
+    /**
+     * What a Distributed Map's {@code ItemReader} needs to read one object: {@code s3:GetObject} on it. A request
+     * naming no bucket or key needs nothing, and is answered by the reader or by S3.
+     */
+    static List<Permission> itemReaderGetObject(String bucket, String key, StateMachine machine) {
+        if (bucket == null || bucket.isBlank() || key == null) {
+            return List.of();
+        }
+        return List.of(new Permission("s3:GetObject", s3ObjectArn(machine, bucket, key)));
+    }
+
+    /**
+     * What a Distributed Map's {@code ItemReader} needs to list a bucket: {@code s3:ListBucket} on it, offering
+     * {@code s3:prefix} when the request has a prefix, as a direct listing offers it. A request naming no bucket
+     * needs nothing, and is answered by the reader or by S3.
+     */
+    static List<Permission> itemReaderListObjects(String bucket, String prefix, StateMachine machine) {
+        if (bucket == null || bucket.isBlank()) {
+            return List.of();
+        }
+        return List.of(new Permission("s3:ListBucket", s3BucketArn(machine, bucket),
+                prefix == null ? Map.of() : Map.of(S3ConditionKeys.PREFIX, List.of(prefix))));
+    }
+
+    /**
+     * What a Distributed Map's {@code ResultWriter} needs to export: {@code s3:PutObject} on each object it writes,
+     * all known before the first is. The failed file is written only when a child failed. A location naming no
+     * bucket, or a prefix that is not a string, needs nothing, and is answered by the writer.
+     *
+     * @param location the resolved {@code Parameters} or {@code Arguments} of the writer
+     */
+    static List<Permission> resultWriterExport(JsonNode location, String mapRunId, boolean failedChildren,
+                                               StateMachine machine) {
+        String bucket = text(location.path("Bucket"));
+        JsonNode prefix = location.path("Prefix");
+        if (bucket == null || !(prefix.isMissingNode() || prefix.isTextual())) {
+            return List.of();
+        }
+        String base = resultWriterBase(prefix.asText(""), mapRunId);
+        List<String> files = failedChildren
+                ? List.of(RESULT_WRITER_SUCCEEDED, RESULT_WRITER_FAILED, RESULT_WRITER_MANIFEST)
+                : List.of(RESULT_WRITER_SUCCEEDED, RESULT_WRITER_MANIFEST);
+        return files.stream()
+                .map(file -> new Permission("s3:PutObject", s3ObjectArn(machine, bucket, base + file)))
+                .toList();
+    }
+
+    /** The key every object of a Map run's export starts with: the run id keys it under the prefix given. */
+    static String resultWriterBase(String prefix, String mapRunId) {
+        return prefix.isEmpty() ? mapRunId + "/" : prefix + (prefix.endsWith("/") ? "" : "/") + mapRunId + "/";
+    }
+
+    /** A bucket's ARN in the state machine's partition: the authorizer moves it to the bucket's own. */
+    private static String s3BucketArn(StateMachine machine, String bucket) {
+        return S3ResourceArns.bucket(AwsArnUtils.parse(machine.getStateMachineArn()).partition(), bucket);
+    }
+
+    /** An object's ARN in the state machine's partition: the authorizer moves it to the bucket's own. */
+    private static String s3ObjectArn(StateMachine machine, String bucket, String key) {
+        return S3ResourceArns.object(AwsArnUtils.parse(machine.getStateMachineArn()).partition(), bucket, key);
     }
 
     /**

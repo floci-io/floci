@@ -882,6 +882,62 @@ class TaskPermissionsTest {
                 control("aws-sdk:sfn:describeMapRun", "{\"MapRunArn\":\"" + mapRun + "\"}").permissions());
     }
 
+    @Test
+    void itemReaderReadsTheObjectInTheStateMachinesPartition() {
+        assertEquals(List.of(new Permission("s3:GetObject", "arn:aws:s3:::b/k/x.json")),
+                TaskPermissions.itemReaderGetObject("b", "k/x.json", machine("aws")));
+        assertEquals(List.of(new Permission("s3:GetObject", "arn:aws-cn:s3:::b/k")),
+                TaskPermissions.itemReaderGetObject("b", "k", machine("aws-cn")));
+    }
+
+    @Test
+    void itemReaderNamingNoObjectNeedsNoPermission() {
+        assertEquals(List.of(), TaskPermissions.itemReaderGetObject(null, "k", machine("aws")));
+        assertEquals(List.of(), TaskPermissions.itemReaderGetObject(" ", "k", machine("aws")));
+        assertEquals(List.of(), TaskPermissions.itemReaderGetObject("b", null, machine("aws")));
+    }
+
+    @Test
+    void itemReaderListsTheBucketOfferingThePrefixItHas() {
+        assertEquals(List.of(new Permission("s3:ListBucket", "arn:aws:s3:::b")),
+                TaskPermissions.itemReaderListObjects("b", null, machine("aws")));
+        assertEquals(List.of(new Permission("s3:ListBucket", "arn:aws-us-gov:s3:::b",
+                        Map.of("s3:prefix", List.of("data/")))),
+                TaskPermissions.itemReaderListObjects("b", "data/", machine("aws-us-gov")));
+    }
+
+    @Test
+    void itemReaderListingNoBucketNeedsNoPermission() {
+        assertEquals(List.of(), TaskPermissions.itemReaderListObjects(null, "p", machine("aws")));
+        assertEquals(List.of(), TaskPermissions.itemReaderListObjects("", "p", machine("aws")));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"out,out/run/", "out/,out/run/", "'',run/", "/a//,/a//run/"})
+    void resultWriterExportIsEachObjectItWrites(String prefix, String base) throws Exception {
+        JsonNode location = MAPPER.valueToTree(Map.of("Bucket", "b", "Prefix", prefix));
+
+        assertEquals(List.of(new Permission("s3:PutObject", "arn:aws:s3:::b/" + base + "SUCCEEDED_0.json"),
+                        new Permission("s3:PutObject", "arn:aws:s3:::b/" + base + "manifest.json")),
+                TaskPermissions.resultWriterExport(location, "run", false, machine("aws")));
+        assertEquals(List.of(new Permission("s3:PutObject", "arn:aws-cn:s3:::b/" + base + "SUCCEEDED_0.json"),
+                        new Permission("s3:PutObject", "arn:aws-cn:s3:::b/" + base + "FAILED_0.json"),
+                        new Permission("s3:PutObject", "arn:aws-cn:s3:::b/" + base + "manifest.json")),
+                TaskPermissions.resultWriterExport(location, "run", true, machine("aws-cn")));
+    }
+
+    @Test
+    void resultWriterExportWithNoPrefixIsUnderTheRun() throws Exception {
+        assertEquals("arn:aws:s3:::b/run/manifest.json", TaskPermissions.resultWriterExport(
+                json("{\"Bucket\":\"b\"}"), "run", false, machine("aws")).getLast().resourceArn());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"Bucket\":\"\"}", "{\"Bucket\":1}", "{\"Bucket\":\"b\",\"Prefix\":1}"})
+    void resultWriterNamingNoLocationNeedsNoPermission(String location) throws Exception {
+        assertEquals(List.of(), TaskPermissions.resultWriterExport(json(location), "run", true, machine("aws")));
+    }
+
     /** {@code executeTaskState} strips the suffix, so each of these arrives bare, with a token, and is mapped as itself. */
     @ParameterizedTest
     @ValueSource(strings = {"aws-sdk:scheduler:createSchedule", "aws-sdk:cloudformation:listStacks", "http:invoke",
