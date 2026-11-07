@@ -19,8 +19,9 @@ import static org.hamcrest.Matchers.equalTo;
 
 /**
  * Usage plan metering on the execute-api data plane, measured on a REST API in eu-west-1: a call made
- * with a key of the stage's usage plan counts toward the key's quota on every method, a refused call
- * does not, and the plan's quota and throttle answer 429 with the AWS default gateway responses.
+ * with a key of the stage's usage plan counts toward the key's quota on every method, even when it then
+ * fails request validation, a refused call does not, and the plan's quota and throttle answer 429 with
+ * the AWS default gateway responses.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -33,6 +34,9 @@ class ApiGatewayUsageMeteringIntegrationTest {
     private static String throttlePlanId;
     private static String throttleKeyId;
     private static String throttleKeyValue;
+    private static String validatedPlanId;
+    private static String validatedKeyId;
+    private static String validatedKeyValue;
 
     @Inject
     Clock clock;
@@ -47,15 +51,22 @@ class ApiGatewayUsageMeteringIntegrationTest {
         String rootId = given().when().get("/restapis/" + apiId + "/resources")
                 .then().statusCode(200)
                 .extract().path("item[0].id");
-        mockMethod(rootId, "secret", true);
-        mockMethod(rootId, "open", false);
+        mockMethod(rootId, "secret", "\"apiKeyRequired\":true");
+        mockMethod(rootId, "open", "\"apiKeyRequired\":false");
+        String validatorId = given().contentType(ContentType.JSON)
+                .body("{\"name\":\"params\",\"validateRequestParameters\":true}")
+                .when().post("/restapis/" + apiId + "/requestvalidators")
+                .then().statusCode(201)
+                .extract().path("id");
+        mockMethod(rootId, "checked", "\"requestValidatorId\":\"" + validatorId
+                + "\",\"requestParameters\":{\"method.request.querystring.q\":true}");
 
         String deploymentId = given().contentType(ContentType.JSON)
                 .body("{}")
                 .when().post("/restapis/" + apiId + "/deployments")
                 .then().statusCode(201)
                 .extract().path("id");
-        for (String stage : List.of("prod", "throttled")) {
+        for (String stage : List.of("prod", "throttled", "validated")) {
             given().contentType(ContentType.JSON)
                     .body("{\"stageName\":\"" + stage + "\",\"deploymentId\":\"" + deploymentId + "\"}")
                     .when().post("/restapis/" + apiId + "/stages")
@@ -68,6 +79,9 @@ class ApiGatewayUsageMeteringIntegrationTest {
         throttlePlanId = plan("throttled", "\"throttle\":{\"burstLimit\":1,\"rateLimit\":0}");
         throttleKeyId = keyOn(throttlePlanId);
         throttleKeyValue = keyValue(throttleKeyId);
+        validatedPlanId = plan("validated", "\"quota\":{\"limit\":1,\"period\":\"DAY\"}");
+        validatedKeyId = keyOn(validatedPlanId);
+        validatedKeyValue = keyValue(validatedKeyId);
     }
 
     // Measured: a key of the stage's plan is metered on a method that does not require one, too.
@@ -99,7 +113,19 @@ class ApiGatewayUsageMeteringIntegrationTest {
         assertUsage(throttlePlanId, throttleKeyId, 0, 0);
     }
 
-    private void mockMethod(String parentId, String pathPart, boolean apiKeyRequired) {
+    // Measured: the key is metered before request validation, so a call that fails it counts and an
+    // exhausted key is refused with 429 rather than 400.
+    @Test @Order(5)
+    void callThatFailsValidationCountsAndAnExhaustedKeyIsRefusedBeforeValidation() {
+        call("validated", "checked", validatedKeyValue).then().statusCode(400);
+        assertUsage(validatedPlanId, validatedKeyId, 1, 0);
+
+        call("validated", "checked", validatedKeyValue).then().statusCode(429)
+                .body("message", equalTo("Limit Exceeded"));
+        assertUsage(validatedPlanId, validatedKeyId, 1, 0);
+    }
+
+    private void mockMethod(String parentId, String pathPart, String methodFields) {
         String resourceId = given().contentType(ContentType.JSON)
                 .body("{\"pathPart\":\"" + pathPart + "\"}")
                 .when().post("/restapis/" + apiId + "/resources/" + parentId)
@@ -107,7 +133,7 @@ class ApiGatewayUsageMeteringIntegrationTest {
                 .extract().path("id");
         String method = "/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET";
         given().contentType(ContentType.JSON)
-                .body("{\"authorizationType\":\"NONE\",\"apiKeyRequired\":" + apiKeyRequired + "}")
+                .body("{\"authorizationType\":\"NONE\"," + methodFields + "}")
                 .when().put(method)
                 .then().statusCode(201);
         given().contentType(ContentType.JSON)
