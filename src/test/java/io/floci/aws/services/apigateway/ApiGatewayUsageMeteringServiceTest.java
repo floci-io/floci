@@ -202,6 +202,19 @@ class ApiGatewayUsageMeteringServiceTest {
     }
 
     @Test
+    void clockSteppingBackDoesNotRefillTheThrottle() {
+        String planId = plan(Map.of("throttle", Map.of("burstLimit", 1, "rateLimit", 1.0)));
+        String keyId = keyOn(planId);
+        assertNull(service.meterApiKeyCall(REGION, planId, keyId));
+
+        clock.advance(Duration.ofSeconds(-1));
+        assertEquals(GatewayResponseType.THROTTLED, service.meterApiKeyCall(REGION, planId, keyId));
+        clock.advance(Duration.ofSeconds(1));
+
+        assertEquals(GatewayResponseType.THROTTLED, service.meterApiKeyCall(REGION, planId, keyId));
+    }
+
+    @Test
     void planRecreatedWithTheIdOfADeletedOneStartsWithNoUse() {
         Map<String, Object> request = Map.of("name", "pinned", "quota", Map.of("limit", 1, "period", "DAY"),
                 "tags", Map.of("floci:override-id", "pinned-plan"));
@@ -212,7 +225,10 @@ class ApiGatewayUsageMeteringServiceTest {
         service.deleteUsagePlan(REGION, planId);
         service.createUsagePlan(REGION, request);
 
+        assertEquals(List.of(), service.getUsagePlanKeys(REGION, planId));
         assertNull(service.meterApiKeyCall(REGION, planId, keyId));
+        service.createUsagePlanKey(REGION, planId, Map.of("keyId", keyId, "keyType", "API_KEY"));
+        assertEquals(List.of(List.of(0L, 1L)), usage(planId, keyId, "2026-11-06", "2026-11-06"));
     }
 
     @Test

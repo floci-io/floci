@@ -1672,11 +1672,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                 .toList();
     }
 
+    /** Its key associations go with it, or a plan recreated with its id would inherit the old keys. */
     public void deleteUsagePlan(String region, String usagePlanId) {
         synchronized (usagePlanLock) {
             getUsagePlan(region, usagePlanId);
             usagePlanStore.delete(usagePlanKey(region, usagePlanId));
-            forgetUsage(meterKey -> meterKey.startsWith(region + "::" + usagePlanId + "::"));
+            String prefix = region + "::" + usagePlanId + "::";
+            usagePlanKeyStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(usagePlanKeyStore::delete);
+            forgetUsage(meterKey -> meterKey.startsWith(prefix));
         }
     }
 
@@ -1932,7 +1935,9 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         double tokens = bucket == null ? throttle.burstLimit() : Math.min(throttle.burstLimit(), bucket.tokens()
                 + throttle.rateLimit() * Math.max(0L, Duration.between(bucket.refilledAt(), now).toNanos()) / 1e9);
         boolean admitted = tokens >= 1;
-        throttleBuckets.put(bucketKey, new TokenBucket(admitted ? tokens - 1 : tokens, now));
+        // Never rewound, so a clock stepping back and forth cannot refill the bucket twice.
+        Instant refilledAt = bucket == null || now.isAfter(bucket.refilledAt()) ? now : bucket.refilledAt();
+        throttleBuckets.put(bucketKey, new TokenBucket(admitted ? tokens - 1 : tokens, refilledAt));
         return admitted;
     }
 

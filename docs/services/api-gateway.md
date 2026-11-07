@@ -172,7 +172,8 @@ explicitly request values.
 
 `DeleteApiKey` detaches the key from every usage plan before removing it, matching AWS. A usage plan key
 stores its own copy of the key value, so without that sweep a deleted key would stay listed by
-`GetUsagePlanKeys` and keep being recognised on the data plane.
+`GetUsagePlanKeys` and keep being recognised on the data plane. `DeleteUsagePlan` drops the plan's keys
+the same way, so a plan recreated with the same pinned id starts with none.
 
 `requestContext.identity.apiKey` is only populated when the `x-api-key` header matches a key that still
 exists and has `enabled` set to `true`, so disabling a key through `UpdateApiKey` takes effect
