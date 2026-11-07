@@ -19,9 +19,27 @@ class SdkManagementTaskInvokerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final EcsJsonHandler ecs = mock(EcsJsonHandler.class);
+    private final LambdaController lambda = mock(LambdaController.class);
     private final ServiceRegistry registry = mock(ServiceRegistry.class);
     private final SdkManagementTaskInvoker invoker = new SdkManagementTaskInvoker(ecs,
-            mock(LambdaController.class), mock(SecretsManagerJsonHandler.class), registry, mapper);
+            lambda, mock(SecretsManagerJsonHandler.class), registry, mapper);
+
+    @Test
+    void usesSdkUuidWithoutChangingTheLambdaRequestBodyOrInput() throws Exception {
+        when(registry.isServiceEnabled("lambda")).thenReturn(true);
+        when(lambda.updateEventSourceMapping(eq("mapping-id"), anyString()))
+                .thenReturn(Response.ok(mapper.readTree("{\"UUID\":\"mapping-id\",\"State\":\"Disabled\"}")).build());
+        JsonNode input = mapper.readTree("{\"Uuid\":\"mapping-id\",\"Enabled\":false,\"BatchSize\":3}");
+
+        JsonNode result = invoker.invoke(StatesIntegration.parse(
+                "arn:aws:states:::aws-sdk:lambda:updateEventSourceMapping").orElseThrow(), input, "eu-west-2");
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(lambda).updateEventSourceMapping(eq("mapping-id"), body.capture());
+        assertEquals(mapper.readTree("{\"Enabled\":false,\"BatchSize\":3}"), mapper.readTree(body.getValue()));
+        assertEquals("mapping-id", input.path("Uuid").asText());
+        assertEquals("mapping-id", result.path("UUID").asText());
+    }
 
     @Test
     void recasesModeledEcsMembersWithoutChangingLogOptionKeysOrValues() throws Exception {

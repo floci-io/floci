@@ -699,6 +699,9 @@ timestamps. Opaque dictionary keys, including secret version IDs and ECS log
 options, retain their original spelling. `describeSecret` returns metadata without
 the secret value. Disabled services fail with a catchable service exception.
 
+The Lambda `updateEventSourceMapping` SDK task takes `Uuid` in JSONPath
+`Parameters` or JSONata `Arguments`. The direct Lambda REST API still uses `UUID`.
+
 ECS `listServices` supports the same `MaxResults` and opaque `NextToken` as the
 direct ECS API. Lambda mapping tasks currently return an unpaginated list;
 `Marker` and `MaxItems` are rejected with `Lambda.InvalidParameterValueException`
