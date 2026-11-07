@@ -22,6 +22,8 @@ import software.amazon.awssdk.services.sfn.model.MapRunItemCounts;
 import software.amazon.awssdk.services.sfn.model.MapRunStatus;
 import software.amazon.awssdk.services.sfn.model.ResourceNotFoundException;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -94,7 +96,8 @@ class StepFunctionsDescribeMapRunTest {
                 .stateMachineArn(stateMachineArn)
                 .input("{}")).executionArn();
 
-        DescribeExecutionResponse execution = pollUntilDone(executionArn);
+        DescribeExecutionResponse execution =
+                TestFixtures.awaitExecutionTerminal(sfn, executionArn, Duration.ofSeconds(15));
         assertThat(execution.status())
                 .as("cause: %s", execution.cause())
                 .isEqualTo(ExecutionStatus.SUCCEEDED);
@@ -184,16 +187,5 @@ class StepFunctionsDescribeMapRunTest {
         assertThat(counts.resultsWritten()).isEqualTo(3);
         assertThat(counts.failuresNotRedrivable()).isEqualTo(0);
         assertThat(counts.pendingRedrive()).isEqualTo(0);
-    }
-
-    private static DescribeExecutionResponse pollUntilDone(String execArn) throws InterruptedException {
-        for (int i = 0; i < 150; i++) {
-            DescribeExecutionResponse resp = sfn.describeExecution(b -> b.executionArn(execArn));
-            if (resp.status() != ExecutionStatus.RUNNING) {
-                return resp;
-            }
-            Thread.sleep(100);
-        }
-        throw new AssertionError("Execution did not complete within timeout: " + execArn);
     }
 }

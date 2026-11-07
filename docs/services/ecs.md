@@ -348,6 +348,14 @@ stops, and the ENI is released. Security-group enforcement
 (`FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED`) adds packet filtering on top of the ENI; it is
 not needed for the ENI itself.
 
+With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true` and
+`FLOCI_SERVICES_EC2_MOCK=false`), a Docker-mode task also joins its VPC's Docker network at the ENI
+address, so an EC2 instance, a `VpcConfig` Lambda function or any other container on that network
+reaches the task at the `privateIPv4Address` that `DescribeTasks` reports. AWS gives the whole task
+that one address; Floci gives it to one container, the first in the task definition that maps a
+port, else the first, and the task's other containers do not answer at it. A task in a
+security-group protected namespace keeps that namespace and does not join the VPC network.
+
 #### Capacity providers
 
 `capacityProviderStrategy` is honoured on `RunTask` and `CreateService`, including the built-in
@@ -496,8 +504,11 @@ Known differences from AWS:
 
 - There is never a second `ACTIVE` deployment draining alongside the `PRIMARY` one.
   The running tasks *are* rolled onto a changed task definition (replacements on the new
-  revision start first, then the stale tasks are drained, one reconciler tick apart), but
+  revision normally start first, then the stale tasks are drained, one reconciler tick apart), but
   the deployments list reports only the single `PRIMARY` throughout.
+  A Docker-backed `REPLICA` service with an explicit `minimumHealthyPercent: 0` stops
+  stale tasks first when their fixed published ports conflict with the replacement's ports.
+  See [stable-port replacement](#stable-port-replacement) below.
 - `deployments` is reported for every service. AWS omits it for services that use the
   `CODE_DEPLOY` or `EXTERNAL` deployment controller; Floci records and echoes
   `deploymentController` (along with `schedulingStrategy` and
@@ -508,7 +519,7 @@ Known differences from AWS:
   `CODE_DEPLOY` / `EXTERNAL` controllers, as on AWS. Placement constraints are not evaluated.
 - `pendingCount` is always `0`, matching the top-level service field.
 - `forceNewDeployment` (with an unchanged task definition) mints a new deployment `id`
-  and rolls the running tasks: a replacement on the new deployment starts first, then
+  and rolls the running tasks: a replacement on the new deployment normally starts first, then
   the task from the previous deployment is drained one reconciler tick later. The
   `deployments` list still reports a single `PRIMARY` throughout.
 - `updatedAt` starts at `createdAt` and advances when the deployment status changes.
@@ -583,7 +594,7 @@ carries `AWS_INSTANCE_IPV4` and `AWS_INSTANCE_PORT`, chosen by network mode:
 
 | Network mode | `AWS_INSTANCE_IPV4` | `AWS_INSTANCE_PORT` |
 |---|---|---|
-| `awsvpc` | the address the task's container holds on its Docker network | the entry's `containerPort` |
+| `awsvpc` | the address the task's container holds on the Docker network it was created on | the entry's `containerPort` |
 | `bridge` or `host` | the address Floci reaches the container at: `127.0.0.1` when Floci runs natively, the container's Docker network address when Floci runs in Docker | the host port the entry's `containerPort` was published on, or the `containerPort` when it has no binding |
 
 An explicit `port` on the registry entry is registered as-is in every mode, as on AWS. The
@@ -604,8 +615,9 @@ Known differences from AWS:
   only A records, so such a task registers its address and its published host port and
   resolves by address; the port is readable through `DiscoverInstances` rather than DNS.
 - An awsvpc task registers its container's Docker network address, not its ENI address. On
-  AWS the two are the same interface. In Floci a task's containers never join the subnet's
-  network, so the ENI address `DescribeTasks` reports is not one a peer can connect to. The
+  AWS the two are the same interface. In Floci the ENI address is held only on the VPC's
+  Docker network, when VPC networks are enabled, so it is not one a peer outside that network
+  can connect to. The
   registrar falls back to the ENI address only when it cannot read an address from a running
   container. Because the address is the container's own, the port is its `containerPort`, not
   any host port Floci also published it on.
@@ -1115,6 +1127,33 @@ With dynamic allocation enabled, host-side clients must use each task's reported
 port. Load balancers inside Docker use the container's Docker-network address and
 container port; native load balancers use the published host port. Bridge/host-mode
 explicit bindings retain their existing fixed-port behavior.
+
+### Stable-port replacement
+
+A Docker-backed `REPLICA` service can reuse a stable published host port across
+deployments by explicitly setting `deploymentConfiguration.minimumHealthyPercent`
+to `0`. When a stale task holds a fixed port needed by the replacement, the scheduler
+stops that task before placing the replacement. This applies both to forced deployments
+of the same task definition and to task-definition changes that reuse the port.
+
+The task stays `STOPPING` until Docker confirms removal of every container and any
+security-group namespace helper that owns its published ports. Incomplete removal is
+retried on later ticks. Stops run in the background so a slow graceful stop
+does not hold up unrelated services. Task protection still applies: a protected stale
+task keeps its port and delays replacement until its protection expires or is disabled.
+
+For `awsvpc`, stable ports require `FLOCI_SERVICES_ECS_PUBLISH_AWSVPC_PORTS_TO_HOST=true`
+and `FLOCI_SERVICES_ECS_DYNAMIC_AWSVPC_HOST_PORTS=false`. An explicit non-zero
+`hostPort` is stable, and an omitted or zero `hostPort` uses `containerPort`. Explicit
+fixed bindings in bridge/host modes can also be reused this way. Dynamic ports and
+nonconflicting port changes keep the replacement-first behavior, as do services with
+positive or omitted minima. `DAEMON` scheduling is unchanged.
+Collision detection follows the actual Docker publisher, which currently publishes
+every mapping as TCP: changing a declared protocol alone does not free the host port.
+
+This permits an outage at the stable endpoint. Zero is a minimum healthy percentage,
+not a general requirement for AWS to stop tasks first. Floci does not implement the
+full percentage-based deployment scheduler.
 
 ## Examples
 

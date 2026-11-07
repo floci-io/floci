@@ -47,6 +47,20 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 
 HTTPS listeners require a default certificate. Supply one when creating a listener or changing an HTTP listener to HTTPS; an omitted certificate list on an existing HTTPS listener keeps its default.
 
+Listener responses omit `Certificates` when the listener has none. Configured certificates
+remain present in create, describe and modify responses.
+
+Creating an HTTPS or TLS listener without `SslPolicy` selects `ELBSecurityPolicy-2016-08`,
+matching AWS's default for API, CLI and CloudFormation creation. An explicit policy
+is preserved, and omitting the policy on subsequent modifications retains its current
+value. These policies remain present in create, describe and modify responses;
+listeners with no policy, such as HTTP listeners, omit `SslPolicy`.
+
+Changing HTTPS to HTTP or TLS to TCP removes the SSL policy and certificate configuration.
+Changing HTTP to HTTPS or TCP to TLS requires an explicit SSL policy and default certificate;
+missing either rejects the modification without changing the listener. Changing other
+properties without changing protocol retains the existing security settings.
+
 Gateway Load Balancer listeners require omitted `Port` and `Protocol` fields on both create and modify requests. Their portless control-plane configuration does not provide GENEVE packet forwarding.
 
 | Action | Description |
@@ -88,6 +102,10 @@ Gateway Load Balancer listeners require omitted `Port` and `Protocol` fields on 
 
 ## Behavior Notes
 
+- `DescribeLoadBalancers`, `DescribeTargetGroups`, `DescribeListeners`, `DescribeRules`,
+  `DescribeAccountLimits` and `DescribeListenerCertificates` return their complete matching
+  results without a `NextMarker`. These handlers do not yet split results using `PageSize`
+  or resume from `Marker`.
 - HTTP and HTTPS target groups use their configured protocol for both application requests
   and WebSocket upgrades. An HTTPS target requires a TLS handshake; a failed handshake
   never falls back to plaintext. Backend certificates may be self-signed or expired, as on
@@ -291,6 +309,35 @@ aws elbv2 delete-target-group \
 | Environment variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ELBV2_ENABLED` | `true` | Enable or disable the ELBv2 service |
+| `FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE` | `true` | Reuse backend connections for ordinary HTTP forwarding. Set to `false` to open a fresh connection per request. |
+| `FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE_TIMEOUT_SECONDS` | `60` | Default timeout for unused backend HTTP/1.x connections in the pool, in seconds. Non-negative; `0` disables expiry. A target's `Keep-Alive: timeout=...` overrides this value. |
+
+### Backend connection reuse
+
+Ordinary HTTP forwarding reuses backend HTTP/1.x connections by default. For local
+targets that cannot reliably serve multiple requests on one connection, set
+`FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE=false` before starting Floci. This applies
+to ordinary requests to HTTP and HTTPS targets, independently of client-to-listener
+keep-alive. WebSocket upgrades keep their dedicated connection, and TCP forwarding
+is unaffected.
+
+To expire unused pooled connections sooner, set
+`FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE_TIMEOUT_SECONDS` below the target's idle
+deadline. The default remains 60 seconds, matching the existing Vert.x client
+default. This is the [Vert.x HTTP/1.x keep-alive timeout](https://vertx.io/docs/4.5.35/apidocs/io/vertx/core/http/HttpClientOptions.html#setKeepAliveTimeout-int-),
+not a request timeout or a maximum connection age: it does not interrupt an active
+response. Vert.x honors a target's advertised `Keep-Alive` timeout in preference to
+this default. Choose consistent target settings, or disable reuse if a fresh
+connection is required for every request. The pool's periodic cleanup can delay
+physical closure of an unused connection. This setting is unused when reuse is off
+and is separate from the ALB `idle_timeout.timeout_seconds` attribute.
+
+These are local transport controls, not AWS load-balancer attributes. Disabling
+reuse is a mitigation, not evidence of an AWS compatibility defect. A target that
+closes its connection while a request is outstanding can still produce a 502,
+as described in [AWS's ALB troubleshooting guide](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-troubleshooting.html#http-502-issues).
+Floci does not retry forwarded requests when the target's outcome is uncertain,
+including a POST whose body the target consumed before closing.
 
 ## Listener Ports
 

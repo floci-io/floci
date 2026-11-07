@@ -761,3 +761,99 @@ def test_measured_callback_correction_retains_action_metadata_and_rejects_unlist
     assert r._resource_problems("states:SendTaskSuccess", {**resource, "find": ["otherToken"]}, [], formats)
     assert r._resource_problems("states:OtherOperation", resource, [], formats)
     assert r._resource_problems("states:SendTaskSuccess", resource, [], {})
+
+
+# --------------------------------------------------------------------------- #
+# REST requests: members in the path and the query, and the REST models' operations
+# --------------------------------------------------------------------------- #
+def rest_model(operations: dict[str, dict[str, str]], located: dict[str, dict[str, str]]) -> dict:
+    """A rest-json model whose operations take the members given, `located` giving a member's `location` and
+    `locationName` as `uri:Name` or `querystring:name`."""
+    built = model(operations, protocol="rest-json")
+    for operation, members in located.items():
+        for member, where in members.items():
+            location, name = where.split(":", 1)
+            built["shapes"][operation + "In"]["members"][member].update(location=location, locationName=name)
+    return built
+
+
+def test_a_rest_request_reads_its_path_and_query_members_and_records_where_the_ones_it_reads_are(corrections, tmp_path):
+    svc = rest_model({"GetThing": {"ThingName": "String", "Marker": "String"}, "ListThings": {"Marker": "String"}},
+                     {"GetThing": {"ThingName": "uri:Name", "Marker": "querystring:marker"},
+                      "ListThings": {"Marker": "querystring:marker"}})
+    write_models(tmp_path, {"svc": svc})
+    document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    assert document["operations"]["svc:GetThing"] == {
+        "action": "svc:GetThing", "types": ["thing"], "resources": [{"type": "thing", "fill": {"ThingName": "ThingName"}}],
+        "located": {"ThingName": "{Name}"}}
+    assert "located" not in document["operations"]["svc:ListThings"]
+    assert r.validate(document) == []
+    assert r.derive(document, tmp_path) == []
+
+
+def test_a_member_two_clients_locate_apart_is_an_error():
+    one = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "uri:ThingName"}})
+    two = rest_model({"GetThing": {"ThingName": "String"}}, {"GetThing": {"ThingName": "querystring:thing"}})
+    with pytest.raises(ValueError, match="GetThing's ThingName is"):
+        r.located_members({"one": one, "two": two}, "GetThing")
+
+
+def test_a_located_member_must_be_a_path_label_or_a_query_parameter(corrections, tmp_path):
+    write_models(tmp_path, {"svc": rest_model({"GetThing": {"ThingName": "String"}, "ListThings": {}},
+                                              {"GetThing": {"ThingName": "uri:ThingName"}})})
+    document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+    document["operations"]["svc:GetThing"]["located"] = {"ThingName": "header:x"}
+    assert any("does not give each member it locates" in problem for problem in r.validate(document))
+
+
+SPLIT = [reference("svc", {"GetThing": ["thing"], "ListThings": []}, {"thing": FORMATS["thing"]}),
+         reference("other", {"Op": ["x"]}, {"x": "arn:${Partition}:other:::x"}),
+         reference("later", {"Op": ["y"]}, {"y": "arn:${Partition}:later:::y"})]
+# The reference lists svc's operations for its first client alone: DescribeThing is an action with no operation.
+SPLIT[0]["Actions"].append({"Name": "DescribeThing", "Resources": [{"Name": "thing"}]})
+
+
+def test_a_rest_models_operations_the_reference_lists_for_no_client_take_their_own_actions(corrections):
+    corrections.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
+    found = r.with_rest_operations(r.checked_actions(SPLIT), SPLIT, {"svc-v2": {"GetThing", "DescribeThing", "Gone"}})
+    assert found["svc:GetThing"]["clients"] == ["svc", "svc-v2"]
+    assert found["svc:DescribeThing"] == {"action": "svc:DescribeThing", "types": ["thing"], "clients": ["svc-v2"]}
+    # An operation whose action the reference does not have is left out, not given no types.
+    assert "svc:Gone" not in found
+
+
+def test_a_namespace_reads_the_operations_of_the_rest_models_floci_routes_under_it(corrections, tmp_path):
+    corrections.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
+                            "svc-v2": rest_model({"DescribeThing": {"ThingName": "String"}},
+                                                 {"DescribeThing": {"ThingName": "uri:ThingName"}})})
+    sources = tmp_path / "reference"
+    sources.mkdir()
+    for document in SPLIT:
+        (sources / f"{document['Name']}.json").write_text(json.dumps(document), encoding="utf-8")
+    output = tmp_path / "table.json"
+    assert r.main(["--source-dir", str(sources), "--botocore-data", str(tmp_path), "--output", str(output)]) == 0
+    document = json.loads(output.read_text())
+    assert document["namespaces"]["svc"] == ["svc", "svc-v2"]
+    assert document["operations"]["svc:DescribeThing"] == {
+        "action": "svc:DescribeThing", "types": ["thing"],
+        "resources": [{"type": "thing", "fill": {"ThingName": "ThingName"}}], "located": {"ThingName": "{ThingName}"}}
+    assert r.main(["--check", "--botocore-data", str(tmp_path), "--output", str(output)]) == 0
+    assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output)]) == 0
+
+
+def test_verify_reports_a_rest_models_operation_whose_action_aws_no_longer_has(corrections, tmp_path):
+    corrections.setattr(r, "REST_MODELS", {"svc-v2": "svc"})
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}}),
+                            "svc-v2": rest_model({"DescribeThing": {"ThingName": "String"}},
+                                                 {"DescribeThing": {"ThingName": "uri:ThingName"}})})
+    sources = tmp_path / "reference"
+    sources.mkdir()
+    for document in SPLIT:
+        (sources / f"{document['Name']}.json").write_text(json.dumps(document), encoding="utf-8")
+    output = tmp_path / "table.json"
+    assert r.main(["--source-dir", str(sources), "--botocore-data", str(tmp_path), "--output", str(output)]) == 0
+    gone = json.loads(json.dumps(SPLIT[0]))
+    gone["Actions"] = [action for action in gone["Actions"] if action["Name"] != "DescribeThing"]
+    (sources / "svc.json").write_text(json.dumps(gone), encoding="utf-8")
+    assert r.main(["--verify", "--source-dir", str(sources), "--output", str(output)]) == 1

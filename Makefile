@@ -28,6 +28,9 @@
 # src/main/resources/aws/payment-cryptography-request-shapes.json, the Payment Cryptography
 # request constraints, is generated from botocore's model by
 # tools/aws/regen_payment_cryptography_shapes.py.
+# src/main/resources/aws/payment-cryptography-data-request-shapes.json, the Payment Cryptography
+# data plane request constraints, is generated from botocore's data plane model by
+# tools/aws/regen_payment_cryptography_data_shapes.py.
 # src/main/resources/aws/rds-ca-certificates.json, each Region's RDS certificate authorities, is
 # generated from the certificate bundles AWS publishes by tools/aws/regen_rds_ca_certificates.py.
 # src/main/resources/aws/iam-request-shapes.json, the IAM request constraints of the operations
@@ -37,8 +40,10 @@
 # src/main/resources/aws/emr-serverless-shapes.json, the shapes the Step Functions emr-serverless
 # integrations recase against, is generated from botocore's EMR Serverless model by
 # tools/aws/regen_emr_serverless_shapes.py.
-# src/main/resources/aws/rest-routes.json, the routes read by runtime IAM authorization and
-# IamRestRouteCoverageTest, is generated from botocore's models by tools/aws/regen_rest_routes.py.
+# src/main/resources/aws/rest-routes.json, the REST routes IamActionRegistry checks a request no rule
+# maps by, and IamRestRouteCoverageTest checks the rules against, is generated from botocore's models
+# by tools/aws/regen_rest_routes.py. A model it adds also needs make iam-authorized-actions-sync, whose
+# check fails until the actions of no resource type list the model's scope.
 # src/main/resources/aws/iam-paginators.json, what each paged IAM list pages by, is generated
 # from botocore's IAM model and paginators by tools/aws/regen_iam_paginators.py.
 
@@ -71,7 +76,7 @@ PREFIX ?= $(HOME)/.local
 .DEFAULT_GOAL := help
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
         docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test rename-test \
-        slr-check slr-table slr-audit slr-test \
+        slr-check slr-table slr-audit slr-test snapshot-mine snapshot-mine-test \
         aws-data-sync aws-data-sync-botocore aws-data-check aws-data-check-botocore aws-data-test botocore-bump eks-addons-sync \
         iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
         iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
@@ -237,6 +242,17 @@ slr-audit: ## Print the service-linked role table, marking names that are not de
 slr-test: ## Run the service-linked role tooling's unit tests
 	$(PYTHON) -m pytest tools/slr -q
 
+snapshot-mine: ## Print the answers a LocalStack checkout's AWS-validated snapshots carry (LOCALSTACK=<checkout>)
+	@test -n "$(LOCALSTACK)" || { \
+		echo "error: set LOCALSTACK to a LocalStack checkout, which this repository does not vendor"; \
+		echo "       git clone --depth 1 https://github.com/localstack/localstack ../localstack"; \
+		exit 1; \
+	}
+	$(PYTHON) tools/aws-capture/localstack/mine_snapshot_messages.py --localstack "$(LOCALSTACK)" $(MINE_ARGS)
+
+snapshot-mine-test: ## Run the snapshot miner's unit tests
+	$(PYTHON) -m pytest tools/aws-capture/localstack -q
+
 botocore-bump: ## Bump the botocore pin to VERSION, move local/aws/botocore to that tag and regenerate the botocore-derived AWS data
 	@test -n "$(VERSION)" || { echo "usage: make botocore-bump VERSION=<botocore release, e.g. 1.43.118>"; exit 2; }
 	@test -d local/aws/botocore/.git || { echo "error: local/aws/botocore is not checked out"; exit 1; }
@@ -264,6 +280,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_logs_delivery_shapes.py
 	$(PYTHON) tools/aws/regen_ecr_shapes.py
 	$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py
+	$(PYTHON) tools/aws/regen_payment_cryptography_data_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
 	$(PYTHON) tools/aws/regen_sts_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
@@ -355,6 +372,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	@$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/payment-cryptography-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_payment_cryptography_data_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/payment-cryptography-data-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
@@ -478,7 +501,8 @@ IAM_NAMESPACES_PATHS := src/main/resources/aws/iam-service-namespaces.json \
 IAM_ACTION_RESOURCES_PATHS := src/main/resources/aws/iam-action-resources.json \
 	tools/aws/regen_iam_action_resources.py tools/aws/test_regen_iam_action_resources.py
 IAM_AUTHORIZED_ACTIONS_PATHS := src/main/resources/aws/iam-authorized-actions.json \
-	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py
+	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py \
+	src/main/resources/aws/rest-routes.json
 IAM_PASSED_ROLES_PATHS := src/main/resources/aws/iam-passed-roles.json $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_passed_roles.py
 IAM_PASSED_NETWORK_CONNECTORS_PATHS := src/main/resources/aws/iam-passed-network-connectors.json \
@@ -495,8 +519,8 @@ IAM_CONDITION_KEYS_PATHS := src/main/resources/aws/iam-condition-keys.json \
 S3CONTROL_TAG_CONDITION_KEYS_PATHS := src/main/resources/aws/s3control-tag-condition-keys.json \
 	tools/aws/regen_s3control_tag_condition_keys.py tools/aws/test_regen_s3control_tag_condition_keys.py \
 	tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
-LAMBDA_WEB_CONDITION_KEYS_PATHS := src/main/resources/aws/lambda-web-condition-keys.json \
-	tools/aws/regen_lambda_web_condition_keys.py tools/aws/test_regen_lambda_web_condition_keys.py \
+REQUEST_CONDITION_KEYS_PATHS := src/main/resources/aws/request-condition-keys.json \
+	tools/aws/regen_request_condition_keys.py tools/aws/test_regen_request_condition_keys.py \
 	tools/aws/regen_dynamodb_condition_keys.py tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
@@ -506,7 +530,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; conditionkeys=0; s3control=0; lambdaweb=0; \
+	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; conditionkeys=0; s3control=0; requestkeys=0; \
 	covers() { \
 		[ -z "$(strip $(CHANGED))" ] && return 0; \
 		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
@@ -543,12 +567,12 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	if covers "$(S3CONTROL_TAG_CONDITION_KEYS_PATHS)" "the S3 Control tag condition key table"; then \
 		$(MAKE) --no-print-directory s3control-tag-condition-keys-verify || s3control=$$?; \
 	fi; \
-	if covers "$(LAMBDA_WEB_CONDITION_KEYS_PATHS)" "the Lambda Web condition key table"; then \
-		$(MAKE) --no-print-directory lambda-web-condition-keys-verify || lambdaweb=$$?; \
+	if covers "$(REQUEST_CONDITION_KEYS_PATHS)" "the request condition key table"; then \
+		$(MAKE) --no-print-directory request-condition-keys-verify || requestkeys=$$?; \
 	fi; \
 	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
 			|| [ $$connectors -ne 0 ] || [ $$tagged -ne 0 ] || [ $$requested -ne 0 ] || [ $$dynamodb -ne 0 ] \
-			|| [ $$conditionkeys -ne 0 ] || [ $$s3control -ne 0 ] || [ $$lambdaweb -ne 0 ]; then \
+			|| [ $$conditionkeys -ne 0 ] || [ $$s3control -ne 0 ] || [ $$requestkeys -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -575,7 +599,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		if [ $$dynamodb -ne 0 ]; then echo "       the DynamoDB condition key table"; fi; \
 		if [ $$conditionkeys -ne 0 ]; then echo "       the IAM condition key table"; fi; \
 		if [ $$s3control -ne 0 ]; then echo "       the S3 Control tag condition key table"; fi; \
-		if [ $$lambdaweb -ne 0 ]; then echo "       the Lambda Web condition key table"; fi; \
+		if [ $$requestkeys -ne 0 ]; then echo "       the request condition key table"; fi; \
 		exit 1; \
 	fi
 
@@ -789,10 +813,10 @@ s3control-tag-condition-keys-check: ## Check the S3 Control tag condition reques
 s3control-tag-condition-keys-verify: ## Check the S3 Control tag condition action keys against AWS
 	$(PYTHON) tools/aws/regen_s3control_tag_condition_keys.py --verify
 
-.PHONY: lambda-web-condition-keys-sync lambda-web-condition-keys-check lambda-web-condition-keys-verify
-lambda-web-condition-keys-sync: ## Regenerate the Lambda Web condition keys from AWS and botocore
-	$(PYTHON) tools/aws/regen_lambda_web_condition_keys.py
-lambda-web-condition-keys-check: ## Check the Lambda Web condition request members against pinned botocore
-	$(PYTHON) tools/aws/regen_lambda_web_condition_keys.py --check
-lambda-web-condition-keys-verify: ## Check the Lambda Web condition action keys against AWS
-	$(PYTHON) tools/aws/regen_lambda_web_condition_keys.py --verify
+.PHONY: request-condition-keys-sync request-condition-keys-check request-condition-keys-verify
+request-condition-keys-sync: ## Regenerate the Lambda Web and Redshift request condition keys from AWS and botocore
+	$(PYTHON) tools/aws/regen_request_condition_keys.py
+request-condition-keys-check: ## Check the request condition key members against pinned botocore
+	$(PYTHON) tools/aws/regen_request_condition_keys.py --check
+request-condition-keys-verify: ## Check the request condition action keys against AWS
+	$(PYTHON) tools/aws/regen_request_condition_keys.py --verify

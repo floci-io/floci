@@ -1,0 +1,28 @@
+package io.floci.aws.services.apigateway.model;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+@RegisterForReflection
+public class ThrottleSettings {
+
+    private Integer burstLimit = 5000;
+    private Double rateLimit = 10000.0;
+
+    public Integer getBurstLimit() {
+        return burstLimit;
+    }
+
+    public void setBurstLimit(Integer burstLimit) {
+        this.burstLimit = burstLimit;
+    }
+
+    public Double getRateLimit() {
+        return rateLimit;
+    }
+
+    public void setRateLimit(Double rateLimit) {
+        this.rateLimit = rateLimit;
+    }
+}

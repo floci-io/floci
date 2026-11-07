@@ -67,3 +67,61 @@ def test_check_passes_on_a_fresh_generation_and_fails_on_a_stale_one(tmp_path):
     assert r.main(data + ["--check"]) == 0
     output.write_text(output.read_text(encoding="utf-8").replace("/ping", "/pong"), encoding="utf-8")
     assert r.main(data + ["--check"]) == 1
+
+
+def test_a_route_naming_two_operations_of_a_scope_the_rules_do_not_route_alone_is_refused():
+    with pytest.raises(SystemExit):
+        r.build({"lambda": model("rest-json", "2015-03-31", GetByName=("GET", "/things/{Name}"),
+                                 GetById=("GET", "/things/{Id}/"))}, "botocore test")
+    # One operation in two models of a scope, two routes a query tells apart, and two operations on one route of a
+    # scope the rules route alone, all pass.
+    doc = r.build({
+        "lambda": model("rest-json", "2015-03-31", ListTags=("GET", "/tags/{ARN}"), GetThing=("GET", "/things/{Name}"),
+                        ListThingTags=("GET", "/things/{Name}?tagging")),
+        "lambda-microvms": model("rest-json", "2025-01-01", ListTags=("GET", "/tags/{Resource}")),
+        "s3": model("rest-xml", "2006-03-01", PutObject=("PUT", "/{Bucket}/{Key+}"),
+                    UploadPart=("PUT", "/{Bucket}/{Key+}")),
+    }, "botocore test")
+    assert doc["handRouted"] == dict(sorted(r.HAND_ROUTED.items()))
+    assert set(doc["handRouted"]) == {"apigateway", "s3"}
+
+
+def test_the_hand_routed_scopes_are_rendered_with_their_reasons():
+    text = r.render(r.build({"s3": model("rest-xml", "2006-03-01", HeadBucket=("HEAD", "/{Bucket}"))},
+                            "botocore test"))
+
+    assert json.loads(text)["handRouted"] == dict(sorted(r.HAND_ROUTED.items()))
+    assert text.splitlines()[2] == '  "handRouted": {'
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403])
+def test_denial_status_comes_from_the_declared_error_shape(status):
+    service = model("rest-json", "2020-01-01", GetThing=("GET", "/things/{Name}"))
+    service["operations"]["GetThing"]["errors"] = [{"shape": "Denied"}]
+    service["shapes"] = {
+        "Denied": {"type": "structure", "exception": True,
+                   "error": {"code": "AccessDeniedException", "httpStatusCode": status}},
+        "Unused": {"type": "structure", "exception": True,
+                   "error": {"code": "AccessDeniedException", "httpStatusCode": 499}},
+    }
+    doc = r.build({"quicksight": service}, "botocore test")
+    assert doc["models"]["quicksight"]["accessDeniedStatus"] == status
+    assert json.loads(r.render(doc))["models"]["quicksight"]["accessDeniedStatus"] == status
+
+
+def test_a_non_denial_error_does_not_supply_the_denial_status():
+    service = model("rest-json", "2020-01-01", GetThing=("GET", "/things/{Name}"))
+    service["operations"]["GetThing"]["errors"] = [{"shape": "ValidationException"}]
+    service["shapes"] = {"ValidationException": {"error": {"httpStatusCode": 400}}}
+    doc = r.build({"quicksight": service}, "botocore test")
+    assert "accessDeniedStatus" not in doc["models"]["quicksight"]
+
+
+def test_models_sharing_a_scope_must_agree_on_the_denial_status():
+    first = model("rest-json", "2020-01-01", GetThing=("GET", "/things/{Name}"))
+    second = model("rest-json", "2020-01-01", GetThing=("GET", "/things/{Name}"))
+    for service, status in ((first, 401), (second, 403)):
+        service["operations"]["GetThing"]["errors"] = [{"shape": "AccessDeniedException"}]
+        service["shapes"] = {"AccessDeniedException": {"error": {"httpStatusCode": status}}}
+    with pytest.raises(SystemExit, match="conflicting access-denied HTTP statuses"):
+        r.build({"lambda": first, "lambda-microvms": second}, "botocore test")

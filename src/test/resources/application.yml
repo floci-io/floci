@@ -9,11 +9,6 @@ quarkus:
       max-body-size: ${floci.protocols.max-request-size}M
       max-header-size: 256K
       max-initial-line-length: 262144
-  # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
-  # Loaded parent-first they live in the shared system classloader, so they cannot pin a
-  # per-profile application classloader across the many app restarts of a test run.
-  class-loading:
-    parent-first-artifacts: org.apache.groovy:groovy
 
 floci:
   base-url: "http://localhost:4566"
@@ -405,6 +400,8 @@ floci:
     elbv2:
       enabled: true
       mock: true
+      backend-keep-alive: true
+      backend-keep-alive-timeout-seconds: 60
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -596,6 +593,9 @@ floci:
       enabled: true
     codeartifact:
       enabled: true
+    quicksight:
+      enabled: true
+      embed-base-url: ${floci.base-url}
     marketplace:
       enabled: true
     dms:

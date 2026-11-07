@@ -124,7 +124,8 @@ a colon in that setting. Existing stored namespaces are not migrated or deleted 
   ids are the same literal in every partition, as the Sign-In model spells them.
 - **Hosted zones and console URLs**: load balancer and S3 website hosted zone ids come from a
   per-region table (`aws/region-facts.json`, generated from the Terraform provider and the CDK,
-  which transcribe the AWS General Reference, and from the China and GovCloud user guides); Network
+  which transcribe the AWS General Reference, and from the General Reference itself and the China
+  and GovCloud user guides); Network
   load balancers have their own zone, distinct from the Application/Classic one. The CloudFront
   hosted zone is published for `aws` and `aws-cn`; the SAML sign-on URL for five partitions. The console link in a CodePipeline
   approval notification uses the console host of the pipeline's partition (`console.amazonaws.cn`
@@ -132,10 +133,12 @@ a colon in that setting. Existing stored namespaces are not migrated or deleted 
   state it; the path after the host is the commercial console's. A generated CloudFront
   distribution domain name ends in `cloudfront.cn` in China, as the China guide names the default
   CloudFront domain, unless `floci.services.cloudfront.domain-suffix` is set. A regional API Gateway
-  custom domain reports the regional hosted zone the GovCloud guide states for `us-gov-west-1` and
-  `us-gov-east-1`. The ISO and EUSC regions have no load
+  custom domain reports the regional hosted zone the AWS General Reference publishes for its region.
+  The ISO and EUSC regions have no load
   balancer hosted zones, and only the two ISO-F regions have an S3 website zone; where a table has
-  no row the field is omitted rather than guessed. An `EDGE` API Gateway REST API or custom domain is
+  no row the field is omitted rather than guessed. The one exception is API Gateway, whose response
+  always carries a zone: a region with no row reports a placeholder, listed under the open questions
+  below. An `EDGE` API Gateway REST API or custom domain is
   refused outside the commercial partition (`BadRequestException`): GovCloud, EUSC and ISO have no
   CloudFront, and China has no edge-optimized API Gateway
   ([China API Gateway](https://docs.amazonaws.cn/en_us/aws/latest/userguide/api-gateway.html)).
@@ -263,8 +266,9 @@ the commercial value or Floci's own base host until sourced:
 - the Lambda function-URL host in the ISO and EUSC partitions (function URLs are refused in GovCloud
   and China, where the partition guides list them as not available);
 - whether AWS managed policy documents differ in content in China or GovCloud;
-- the API Gateway regional hosted zone per region outside GovCloud: only the two GovCloud zones
-  are sourced, and every other region reports one placeholder zone id;
+- the API Gateway regional hosted zone in the regions the General Reference does not list (China,
+  ISO, EUSC and `ap-southeast-6`): a custom domain there reports `Z2FDTNDATAQYL2`, a placeholder
+  that is no AWS zone, so a Route 53 alias built from it resolves to nothing on AWS;
 - the availability-zone id prefix of the ISO and EUSC regions: zone ids there keep the whole region
   (`us-iso-east-1-az1`), where the other partitions get AWS's short prefix (`use1-az1`, `usgw1-az1`,
   `cnn1-az1`);

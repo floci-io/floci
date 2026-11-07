@@ -188,7 +188,6 @@ AWS::EC2::FlowLog	DeliverCrossAccountRole	accepted and ignored
 AWS::EC2::FlowLog	DestinationOptions	accepted and ignored
 AWS::EC2::FlowLog	LogGroupName	accepted and ignored
 AWS::EC2::FlowLog	TagFieldSpecifications	accepted and ignored
-AWS::EC2::FlowLog	Tags	accepted and ignored
 AWS::EC2::Instance	AdditionalInfo	accepted and ignored
 AWS::EC2::Instance	Affinity	accepted and ignored
 AWS::EC2::Instance	BlockDeviceMappings	accepted and ignored
@@ -371,8 +370,6 @@ AWS::KMS::Key	BypassPolicyLockoutSafetyCheck	accepted and ignored
 AWS::KMS::Key	EnableKeyRotation	accepted and ignored
 AWS::KMS::Key	Enabled	accepted and ignored
 AWS::KMS::Key	KeyPolicy	accepted and ignored
-AWS::KMS::Key	KeySpec	accepted and ignored
-AWS::KMS::Key	KeyUsage	accepted and ignored
 AWS::KMS::Key	MultiRegion	accepted and ignored
 AWS::KMS::Key	Origin	accepted and ignored
 AWS::KMS::Key	PendingWindowInDays	accepted and ignored
@@ -397,6 +394,7 @@ AWS::KinesisFirehose::DeliveryStream	RedshiftDestinationConfiguration	documented
 AWS::KinesisFirehose::DeliveryStream	SnowflakeDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
 AWS::KinesisFirehose::DeliveryStream	SplunkDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
 AWS::Lambda::Alias	ProvisionedConcurrencyConfig	accepted and ignored
+AWS::Lambda::CodeSigningConfig	Tags	accepted and ignored
 AWS::Lambda::EventSourceMapping	AmazonManagedKafkaEventSourceConfig	accepted and ignored
 AWS::Lambda::EventSourceMapping	DocumentDBEventSourceConfig	accepted and ignored
 AWS::Lambda::EventSourceMapping	KmsKeyArn	accepted and ignored
@@ -409,7 +407,6 @@ AWS::Lambda::EventSourceMapping	SelfManagedKafkaEventSourceConfig	accepted and i
 AWS::Lambda::EventSourceMapping	Tags	accepted and ignored
 AWS::Lambda::EventSourceMapping	TumblingWindowInSeconds	documented as ignored (docs/services/cloudformation.md, Lambda)
 AWS::Lambda::Function	CapacityProviderConfig	accepted and ignored
-AWS::Lambda::Function	CodeSigningConfigArn	accepted and ignored
 AWS::Lambda::Function	FunctionScalingConfig	accepted and ignored
 AWS::Lambda::Function	KmsKeyArn	accepted and ignored
 AWS::Lambda::Function	PublishToLatestPublished	accepted and ignored
@@ -628,7 +625,6 @@ AWS::S3::Bucket	WebsiteConfiguration	silently dropped, as the S3CfnProvisioner j
 AWS::SNS::Subscription	DeliveryPolicy	accepted and ignored
 AWS::SNS::Subscription	Region	accepted and ignored
 AWS::SNS::Subscription	ReplayPolicy	accepted and ignored
-AWS::SNS::Subscription	SubscriptionRoleArn	accepted and ignored
 AWS::SNS::Topic	ArchivePolicy	accepted and ignored
 AWS::SNS::Topic	DataProtectionPolicy	accepted and ignored
 AWS::SNS::Topic	DeliveryStatusLogging	accepted and ignored
@@ -649,6 +645,7 @@ AWS::SecretsManager::Secret	Type	accepted and ignored
 AWS::ServiceDiscovery::PrivateDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::PublicDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::Service	ServiceAttributes	accepted and ignored
+AWS::Signer::SigningProfile	Tags	accepted and ignored: Floci has no Signer API to tag
 AWS::Transfer::Server	Certificate	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	CreateWithHostKey	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	IpAddressType	rejected with a ValidationError, not supported by Floci

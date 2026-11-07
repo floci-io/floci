@@ -4,6 +4,8 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.sfn.SfnClient;
 import software.amazon.awssdk.services.sfn.model.*;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.*;
 
 /**
@@ -90,7 +92,8 @@ class StepFunctionsNestedSmTest {
                     .stateMachineArn(parentSmArn)
                     .input("{}")).executionArn();
 
-            DescribeExecutionResponse result = pollUntilDone(execArn);
+            DescribeExecutionResponse result =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(30));
 
             assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
             // Output must be the PascalCase envelope, with the child's output as a JSON value
@@ -136,7 +139,8 @@ class StepFunctionsNestedSmTest {
                     .stateMachineArn(parentSmArn)
                     .input("{}")).executionArn();
 
-            DescribeExecutionResponse result = pollUntilDone(execArn);
+            DescribeExecutionResponse result =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(30));
 
             assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
             // Output must be the PascalCase envelope, with the child's output as a JSON string
@@ -182,7 +186,8 @@ class StepFunctionsNestedSmTest {
                     .stateMachineArn(parentSmArn)
                     .input("{}")).executionArn();
 
-            DescribeExecutionResponse result = pollUntilDone(execArn);
+            DescribeExecutionResponse result =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(30));
 
             assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
             // Output must be { ExecutionArn, StartDate } with no child output
@@ -193,18 +198,5 @@ class StepFunctionsNestedSmTest {
         } finally {
             try { sfn.deleteStateMachine(b -> b.stateMachineArn(parentSmArn)); } catch (Exception ignored) {}
         }
-    }
-
-    // ──────────────────────────── helper ────────────────────────────
-
-    private DescribeExecutionResponse pollUntilDone(String execArn) throws InterruptedException {
-        for (int i = 0; i < 60; i++) {
-            DescribeExecutionResponse resp = sfn.describeExecution(b -> b.executionArn(execArn));
-            if (resp.status() != ExecutionStatus.RUNNING) {
-                return resp;
-            }
-            Thread.sleep(500);
-        }
-        throw new AssertionError("Execution did not complete within 30s: " + execArn);
     }
 }
