@@ -104,12 +104,12 @@ public class SdkManagementTaskInvoker {
                             input.path("EventSourceArn").asText(null));
                 }
                 case "updateEventSourceMapping" -> {
-                    String uuid = input.path("UUID").asText(null);
+                    String uuid = input.path("Uuid").asText(null);
                     if (uuid == null || uuid.isBlank()) {
-                        throw new AwsException("InvalidParameterValueException", "UUID is required.", 400);
+                        throw new AwsException("InvalidParameterValueException", "Uuid is required.", 400);
                     }
                     ObjectNode request = input.deepCopy();
-                    request.remove("UUID");
+                    request.remove("Uuid");
                     yield lambda.updateEventSourceMapping(uuid, request.toString());
                 }
                 default -> throw new IllegalStateException("Unsupported Lambda management action");
