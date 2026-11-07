@@ -215,7 +215,7 @@ public class EcrRegistryManager {
             String os = lifecycleManager.getDockerClient().infoCmd().exec().getOperatingSystem();
             cached = os != null && os.toLowerCase(Locale.ROOT).contains("docker desktop");
         } catch (RuntimeException e) {
-            LOG.debugv("Could not read the operating system of the Docker daemon ({0}); pulling ECR images from localhost",
+            LOG.warnv("Could not read the operating system of the Docker daemon ({0}); pulling ECR images from localhost",
                     e.getMessage());
             return false;
         }
