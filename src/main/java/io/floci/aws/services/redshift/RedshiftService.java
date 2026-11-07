@@ -136,7 +136,7 @@ public class RedshiftService implements ManagedSecretRotator {
         return withResourceLock(clusters.accountId(), kind, identifier, work);
     }
 
-    private <T> T withResourceLock(String accountId, String kind, String identifier, Supplier<T> work) {
+    <T> T withResourceLock(String accountId, String kind, String identifier, Supplier<T> work) {
         ResourceKey key = new ResourceKey(accountId, kind, identifier);
         ResourceLock scoped = resourceLocks.compute(key, (ignored, existing) -> {
             ResourceLock selected = existing == null ? new ResourceLock() : existing;

@@ -8,6 +8,7 @@ import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -22,6 +23,10 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.GZIPInputStream;
@@ -37,6 +42,7 @@ import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -196,13 +202,18 @@ class RedshiftAuditLogPublisherTest {
 
     private static final Instant S3_TEST_TIME = Instant.parse("2026-11-06T15:30:00Z");
 
+    private final S3Service s3 = mock(S3Service.class);
+    private final ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
+    private final RegionResolver regionResolver = new RegionResolver("us-east-1", "111111111111");
+
+    @BeforeEach
+    void setUpAuthorizer() {
+        when(authorizer.authorize(anyString(), anyString(), anyString(), any(), any(), any())).thenReturn(Decision.ALLOW);
+    }
+
     @Test
     void publishesConnectionLogToS3GzipWithPipeDelimiter() throws Exception {
-        S3Service s3 = mock(S3Service.class);
-        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
-        when(authorizer.authorize(anyString(), anyString(), anyString(), any(), any(), any())).thenReturn(Decision.ALLOW);
-        RedshiftAuditLogPublisher publisher = s3Publisher(s3, authorizer, Clock.fixed(S3_TEST_TIME, ZoneOffset.UTC));
-
+        RedshiftAuditLogPublisher publisher = s3Publisher();
         Cluster cluster = s3ClusterWithPrefix("cluster-logs", "connectionlog");
         publisher.register("111111111111", "us-east-1", cluster);
 
@@ -247,8 +258,7 @@ class RedshiftAuditLogPublisherTest {
 
     @Test
     void publishesUserLogToS3GzipWithPipeDelimiter() throws Exception {
-        S3Service s3 = mock(S3Service.class);
-        RedshiftAuditLogPublisher publisher = s3Publisher(s3, S3_TEST_TIME);
+        RedshiftAuditLogPublisher publisher = s3Publisher();
         Cluster cluster = s3Cluster("userlog");
 
         publisher.publish(cluster, "111111111111", "us-east-1", "userlog", Map.of(
@@ -289,8 +299,7 @@ class RedshiftAuditLogPublisherTest {
 
     @Test
     void publishesUserActivityLogToS3GzipWithStandardFormatAndSanitizesSql() throws Exception {
-        S3Service s3 = mock(S3Service.class);
-        RedshiftAuditLogPublisher publisher = s3Publisher(s3, S3_TEST_TIME);
+        RedshiftAuditLogPublisher publisher = s3Publisher();
         Cluster cluster = s3Cluster("useractivitylog");
         cluster.setUserActivityLoggingEnabled(true);
 
@@ -308,8 +317,7 @@ class RedshiftAuditLogPublisherTest {
 
     @Test
     void appendsToExistingS3GzipObject() throws Exception {
-        S3Service s3 = mock(S3Service.class);
-        RedshiftAuditLogPublisher publisher = s3Publisher(s3, S3_TEST_TIME);
+        RedshiftAuditLogPublisher publisher = s3Publisher();
 
         String key = "AWSLogs/111111111111/redshift/us-east-1/2026/11/06/"
                 + "111111111111_redshift_us-east-1_analytics_useractivitylog_2026-11-06T15:30.gz";
@@ -332,11 +340,56 @@ class RedshiftAuditLogPublisherTest {
     }
 
     @Test
+    void concurrentAuditDeliveriesDoNotCorruptGzipOutput() throws Exception {
+        RedshiftAuditLogPublisher publisher = s3Publisher();
+        Cluster cluster = s3Cluster("useractivitylog");
+        cluster.setUserActivityLoggingEnabled(true);
+        publisher.register("111111111111", "us-east-1", cluster);
+
+        int threadCount = 10;
+        int recordsPerThread = 5;
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threadCount);
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(threadCount)) {
+            for (int t = 0; t < threadCount; t++) {
+                int threadId = t;
+                executor.submit(() -> {
+                    try {
+                        startLatch.await();
+                        for (int i = 0; i < recordsPerThread; i++) {
+                            publisher.publishActivity(cluster, "111111111111", "us-east-1", "dev", "admin",
+                                    "SELECT " + threadId + "_" + i);
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        doneLatch.countDown();
+                    }
+                });
+            }
+            startLatch.countDown();
+            assertTrue(doneLatch.await(5, TimeUnit.SECONDS));
+        }
+
+        ArgumentCaptor<byte[]> dataCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(s3, atLeastOnce()).putObject(eq("audit-bucket"), anyString(),
+                dataCaptor.capture(), eq("application/x-gzip"), eq(Map.of()));
+
+        byte[] finalBytes = dataCaptor.getValue();
+        String decompressed = decompressGzip(finalBytes);
+        for (int t = 0; t < threadCount; t++) {
+            for (int i = 0; i < recordsPerThread; i++) {
+                assertTrue(decompressed.contains("SELECT " + t + "_" + i),
+                        "Missing record SELECT " + t + "_" + i);
+            }
+        }
+    }
+
+    @Test
     void s3AuthorizationDenialRecordsFailureAndDoesNotThrow() {
-        S3Service s3 = mock(S3Service.class);
-        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
         when(authorizer.authorize(anyString(), anyString(), anyString(), any(), any(), any())).thenReturn(Decision.DENY);
-        RedshiftAuditLogPublisher publisher = s3Publisher(s3, authorizer, Clock.systemUTC());
+        RedshiftAuditLogPublisher publisher = s3Publisher(Clock.systemUTC());
         publisher.register("111111111111", "us-east-1", s3Cluster("connectionlog"));
 
         AtomicReference<String> failureMsg = new AtomicReference<>();
@@ -356,12 +409,11 @@ class RedshiftAuditLogPublisherTest {
 
     @Test
     void s3PutObjectFailureRecordsFailureAndDoesNotThrow() {
-        S3Service s3 = mock(S3Service.class);
         doThrow(new AwsException("InternalError", "S3 connection timeout", 500)).when(s3)
                 .putObject(anyString(), anyString(), any(), anyString(), anyMap());
         Cluster cluster = s3Cluster("connectionlog");
         cluster.setLoggingGeneration(5L);
-        RedshiftAuditLogPublisher publisher = registeredS3Publisher(s3, cluster);
+        RedshiftAuditLogPublisher publisher = registeredS3Publisher(cluster);
 
         AtomicReference<String> failureMsg = new AtomicReference<>();
         AtomicBoolean deliverySuccess = new AtomicBoolean(true);
@@ -382,10 +434,9 @@ class RedshiftAuditLogPublisherTest {
 
     @Test
     void publishS3DoesNotThrowOnUnexpectedRuntimeException() {
-        S3Service s3 = mock(S3Service.class);
         doThrow(new IllegalStateException("Unexpected crash")).when(s3)
                 .putObject(anyString(), anyString(), any(), anyString(), anyMap());
-        RedshiftAuditLogPublisher publisher = registeredConnectionLogPublisher(s3);
+        RedshiftAuditLogPublisher publisher = registeredConnectionLogPublisher();
 
         AtomicBoolean listenerCalled = new AtomicBoolean(false);
         publisher.setDeliveryStatusListener((acc, clId, gen, ts, success, msg) -> listenerCalled.set(true));
@@ -398,12 +449,9 @@ class RedshiftAuditLogPublisherTest {
 
     @Test
     void publishS3DoesNotThrowWhenAuthorizerThrows() {
-        S3Service s3 = mock(S3Service.class);
-        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
         when(authorizer.authorize(anyString(), anyString(), anyString(), any(), any(), any()))
                 .thenThrow(new RuntimeException("Authorizer boom"));
-        RedshiftAuditLogPublisher publisher = s3Publisher(s3, authorizer, Clock.systemUTC());
-        publisher.register("111111111111", "us-east-1", s3Cluster("connectionlog"));
+        RedshiftAuditLogPublisher publisher = registeredConnectionLogPublisher();
 
         assertDoesNotThrow(() -> publisher.publishRegisteredConnection("111111111111", "analytics", "dev", "admin",
                 "authenticated", "192.0.2.1", 54321));
@@ -411,8 +459,7 @@ class RedshiftAuditLogPublisherTest {
 
     @Test
     void publishS3DoesNotThrowWhenStatusListenerThrows() {
-        S3Service s3 = mock(S3Service.class);
-        RedshiftAuditLogPublisher publisher = registeredConnectionLogPublisher(s3);
+        RedshiftAuditLogPublisher publisher = registeredConnectionLogPublisher();
         publisher.setDeliveryStatusListener((acc, clId, gen, ts, success, msg) -> {
             throw new RuntimeException("Listener boom");
         });
@@ -421,34 +468,23 @@ class RedshiftAuditLogPublisherTest {
                 "authenticated", "192.0.2.1", 54321));
     }
 
-    private static RedshiftAuditLogPublisher s3Publisher(S3Service s3, Instant fixedTime) {
-        return s3Publisher(s3, Clock.fixed(fixedTime, ZoneOffset.UTC));
-    }
-
-    private static RedshiftAuditLogPublisher registeredS3Publisher(S3Service s3, Cluster cluster) {
-        RedshiftAuditLogPublisher publisher = s3Publisher(s3);
+    private RedshiftAuditLogPublisher registeredS3Publisher(Cluster cluster) {
+        RedshiftAuditLogPublisher publisher = s3Publisher();
         publisher.register("111111111111", "us-east-1", cluster);
         return publisher;
     }
 
-    private static RedshiftAuditLogPublisher registeredConnectionLogPublisher(S3Service s3) {
-        return registeredS3Publisher(s3, s3Cluster("connectionlog"));
+    private RedshiftAuditLogPublisher registeredConnectionLogPublisher() {
+        return registeredS3Publisher(s3Cluster("connectionlog"));
     }
 
-    private static RedshiftAuditLogPublisher s3Publisher(S3Service s3, Clock clock) {
-        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
-        when(authorizer.authorize(anyString(), anyString(), anyString(), any(), any(), any())).thenReturn(Decision.ALLOW);
-        return s3Publisher(s3, authorizer, clock);
-    }
-
-    private static RedshiftAuditLogPublisher s3Publisher(S3Service s3) {
-        return s3Publisher(s3, Clock.systemUTC());
-    }
-
-    private static RedshiftAuditLogPublisher s3Publisher(S3Service s3, ServiceCallAuthorizer authorizer, Clock clock) {
+    private RedshiftAuditLogPublisher s3Publisher(Clock clock) {
         CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "111111111111");
         return new RedshiftAuditLogPublisher(logs, s3, authorizer, regionResolver, clock);
+    }
+
+    private RedshiftAuditLogPublisher s3Publisher() {
+        return s3Publisher(Clock.fixed(S3_TEST_TIME, ZoneOffset.UTC));
     }
 
     private static Cluster s3Cluster(String... exports) {

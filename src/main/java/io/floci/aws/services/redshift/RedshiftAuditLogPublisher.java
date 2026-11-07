@@ -52,12 +52,14 @@ public class RedshiftAuditLogPublisher {
     }
 
     private static final int STRIPE_COUNT = 64;
+    private static final int MAX_ACTIVE_BUFFERS = 128;
     private final CloudWatchLogsService logs;
     private final S3Service s3;
     private final ServiceCallAuthorizer authorizer;
     private final RegionResolver regionResolver;
     private final Clock clock;
     private final Map<String, Registration> registrations = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, byte[]> activeDeliveryBuffers = new ConcurrentHashMap<>();
     private final Object[] deliveryStripes = new Object[STRIPE_COUNT];
     private volatile DeliveryStatusListener statusListener;
 
@@ -348,11 +350,13 @@ public class RedshiftAuditLogPublisher {
                     s3.putObject(bucket, key, gzipped, "application/x-gzip", Map.of());
                     safeRecordOutcome(accountId, cluster.getClusterIdentifier(), cluster.getLoggingGeneration(), now, true, null);
                 } catch (AwsException | IOException exception) {
+                    activeDeliveryBuffers.remove(bucket + "/" + key);
                     LOG.warnv(exception, "Failed to deliver Redshift {0} audit event to s3://{1}/{2} for cluster {3}",
                             logType, bucket, key, cluster.getClusterIdentifier());
                     String message = exception.getMessage() != null ? exception.getMessage() : "Failed to deliver log to S3";
                     safeRecordOutcome(accountId, cluster.getClusterIdentifier(), cluster.getLoggingGeneration(), now, false, message);
                 } catch (RuntimeException unexpected) {
+                    activeDeliveryBuffers.remove(bucket + "/" + key);
                     LOG.errorv(unexpected, "Unexpected runtime error delivering Redshift {0} audit event to s3://{1}/{2} for cluster {3}",
                             logType, bucket, key, cluster.getClusterIdentifier());
                 }
@@ -385,25 +389,34 @@ public class RedshiftAuditLogPublisher {
     }
 
     private byte[] appendGzipMember(String bucket, String key, byte[] newMember) throws IOException {
-        byte[] existingBytes = null;
-        try {
-            S3Object existingObj = s3.getObject(bucket, key);
-            if (existingObj != null && existingObj.getData() != null && existingObj.getData().length > 0) {
-                existingBytes = existingObj.getData();
-            }
-        } catch (AwsException e) {
-            if (!"NoSuchKey".equals(e.getErrorCode())) {
-                throw e;
+        String cacheKey = bucket + "/" + key;
+        byte[] existingBytes = activeDeliveryBuffers.get(cacheKey);
+        if (existingBytes == null) {
+            try {
+                S3Object existingObj = s3.getObject(bucket, key);
+                if (existingObj != null && existingObj.getData() != null && existingObj.getData().length > 0) {
+                    existingBytes = existingObj.getData();
+                }
+            } catch (AwsException e) {
+                if (!"NoSuchKey".equals(e.getErrorCode())) {
+                    throw e;
+                }
             }
         }
 
+        byte[] combined;
         if (existingBytes == null || existingBytes.length == 0) {
-            return newMember;
+            combined = newMember;
+        } else {
+            combined = new byte[existingBytes.length + newMember.length];
+            System.arraycopy(existingBytes, 0, combined, 0, existingBytes.length);
+            System.arraycopy(newMember, 0, combined, existingBytes.length, newMember.length);
         }
 
-        byte[] combined = new byte[existingBytes.length + newMember.length];
-        System.arraycopy(existingBytes, 0, combined, 0, existingBytes.length);
-        System.arraycopy(newMember, 0, combined, existingBytes.length, newMember.length);
+        if (activeDeliveryBuffers.size() >= MAX_ACTIVE_BUFFERS) {
+            activeDeliveryBuffers.clear();
+        }
+        activeDeliveryBuffers.put(cacheKey, combined);
         return combined;
     }
 

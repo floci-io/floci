@@ -2695,6 +2695,54 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void recordAuditDeliveryOutcomeSerializesUnderAccountClusterLockWithoutDerivingAccountFromRequestContext() throws Exception {
+        String accountId = "999999999999";
+        String clusterId = "locked-cluster";
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier(clusterId);
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(1L);
+
+        when(clusterBackend.getForAccount(accountId, clusterId)).thenReturn(Optional.of(cluster));
+
+        CountDownLatch inLock = new CountDownLatch(1);
+        CountDownLatch releaseLock = new CountDownLatch(1);
+        CountDownLatch outcomeStarted = new CountDownLatch(1);
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<?> holdingLock = executor.submit(() -> {
+                service.withResourceLock(accountId, "cluster", clusterId, () -> {
+                    inLock.countDown();
+                    try {
+                        assertTrue(releaseLock.await(5, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return null;
+                });
+            });
+
+            assertTrue(inLock.await(2, TimeUnit.SECONDS));
+
+            Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+            Future<?> outcome = executor.submit(() -> {
+                outcomeStarted.countDown();
+                service.recordAuditDeliveryOutcome(accountId, clusterId, 1L, ts, true, null);
+            });
+
+            assertTrue(outcomeStarted.await(2, TimeUnit.SECONDS));
+            assertThrows(TimeoutException.class, () -> outcome.get(150, TimeUnit.MILLISECONDS));
+
+            releaseLock.countDown();
+            holdingLock.get(2, TimeUnit.SECONDS);
+            outcome.get(2, TimeUnit.SECONDS);
+
+            assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+            verify(clusterBackend).putForAccount(accountId, clusterId, cluster);
+        }
+    }
+
+    @Test
     void modifyClusterIamRolesRejectsMalformedRoleArnWithoutChangingTheCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("c1");
