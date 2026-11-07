@@ -59,9 +59,6 @@ public class PaymentCryptographyPinOperations {
     private static final List<String> DERIVATION_USAGES = List.of(
             "TR31_B0_BASE_DERIVATION_KEY");
 
-    /** The index of the verification key: the Visa PVV names one of seven keys. */
-    private static final int MAX_VERIFICATION_KEY_INDEX = 6;
-
     /** The source of the random fill of the format 3 blocks and the format 4 pads. */
     private final SecureRandom random;
 
@@ -107,17 +104,11 @@ public class PaymentCryptographyPinOperations {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("VerifyPinData", request);
         String encryptionKeyIdentifier = text(request, "EncryptionKeyIdentifier");
-        if (encryptionKeyIdentifier.isEmpty()) {
-            throw validation("EncryptionKeyIdentifier is required");
-        }
         String verificationKeyIdentifier = text(request, "VerificationKeyIdentifier");
-        if (verificationKeyIdentifier.isEmpty()) {
-            throw validation("VerificationKeyIdentifier is required");
-        }
         refuseWrappedKey(request, "EncryptionWrappedKey");
         PinBlockFormat format = format(text(request, "PinBlockFormat"));
         String pan = requirePan(text(request, "PrimaryAccountNumber"),
-                "PrimaryAccountNumber (12-19 digits) is required for Visa PVV verification");
+                "PrimaryAccountNumber is required for Visa PVV verification");
         requireVisaPinLength(request);
         requireHex(text(request, "EncryptedPinBlock"), format.blockHexLength(),
                 "EncryptedPinBlock must be " + format.blockHexLength()
@@ -133,11 +124,8 @@ public class PaymentCryptographyPinOperations {
                     + " not supported by this service (only VisaPin)");
         }
         JsonNode visa = verificationAttributes.get("VisaPin");
-        int pvki = requirePvki(visa, "VisaPin.PinVerificationKeyIndex");
-        String pvv = visa == null ? "" : text(visa, "VerificationValue");
-        if (pvv.isEmpty()) {
-            throw validation("VisaPin.VerificationValue is required");
-        }
+        int pvki = pvki(visa);
+        String pvv = text(visa, "VerificationValue");
 
         PinLeg pek = resolvePinLeg(encryptionKeyIdentifier, request.get("DukptAttributes"), region,
                 "Decrypt", "decrypting a PIN block");
@@ -191,17 +179,11 @@ public class PaymentCryptographyPinOperations {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("GeneratePinData", request);
         String encryptionKeyIdentifier = text(request, "EncryptionKeyIdentifier");
-        if (encryptionKeyIdentifier.isEmpty()) {
-            throw validation("EncryptionKeyIdentifier is required");
-        }
         String generationKeyIdentifier = text(request, "GenerationKeyIdentifier");
-        if (generationKeyIdentifier.isEmpty()) {
-            throw validation("GenerationKeyIdentifier is required");
-        }
         refuseWrappedKey(request, "EncryptionWrappedKey");
         PinBlockFormat format = format(text(request, "PinBlockFormat"));
         String pan = requirePan(text(request, "PrimaryAccountNumber"),
-                "PrimaryAccountNumber (12-19 digits) is required");
+                "PrimaryAccountNumber is required");
 
         JsonNode generationAttributes = request.get("GenerationAttributes");
         String variant = soleVariant(generationAttributes);
@@ -210,16 +192,13 @@ public class PaymentCryptographyPinOperations {
                     + " not supported (VisaPin, VisaPinVerificationValue)");
         }
         JsonNode visa = generationAttributes == null ? null : generationAttributes.get(variant);
-        int pvki = requirePvki(visa, variant + ".PinVerificationKeyIndex");
+        int pvki = pvki(visa);
 
         // VisaPinVerificationValue carries the block to verify, so the verification value is
         // computed for a PIN the caller already has rather than a new one.
         String givenBlock = "VisaPinVerificationValue".equals(variant) && visa != null
                 ? text(visa, "EncryptedPinBlock")
                 : "";
-        if ("VisaPinVerificationValue".equals(variant) && givenBlock.isEmpty()) {
-            throw validation("VisaPinVerificationValue.EncryptedPinBlock is required");
-        }
         requireVisaPinLength(request);
 
         PinLeg pek = resolvePinLeg(encryptionKeyIdentifier, null, region,
@@ -280,6 +259,25 @@ public class PaymentCryptographyPinOperations {
         out.put("GenerationKeyArn", pvk.getArn());
         out.put("GenerationKeyCheckValue", pvk.getKeyCheckValue());
         return out;
+    }
+
+    // ---- GenerateMacEmvPinChange ---------------------------------------------
+
+    /**
+     * The EMV PIN change MAC.
+     *
+     * <p>The MAC of an EMV PIN change is taken over the command message with a session key
+     * that the EMV secure messaging rules define, and this service does not make that
+     * session key. The request is refused with the error that says so, rather than answered
+     * with a MAC of another kind.
+     *
+     * <p>The route answers, so a client that calls the operation learns why it is refused,
+     * but the action is not one the service lists as supported.
+     */
+    Map<String, Object> generateMacEmvPinChange(JsonNode request, String region) {
+        // The request is checked against the constraints the model states for it.
+        PaymentCryptographyDataRequestShapes.check("GenerateMacEmvPinChange", request);
+        throw validation("the EMV PIN change MAC is not supported by this service");
     }
 
     // ---- TranslatePinData -----------------------------------------------------
@@ -343,9 +341,9 @@ public class PaymentCryptographyPinOperations {
             throw validation("OutgoingTranslationAttributes." + outVariant
                     + ".PrimaryAccountNumber is required");
         }
-        requireTranslationPan(inPan, inFormat,
+        requireTranslationPan(inPan,
                 "IncomingTranslationAttributes." + inVariant + ".PrimaryAccountNumber");
-        requireTranslationPan(outPan, outFormat,
+        requireTranslationPan(outPan,
                 "OutgoingTranslationAttributes." + outVariant + ".PrimaryAccountNumber");
         // For PCI compliance the incoming and the outgoing account number are the same one,
         // and a PIN is not translated from one account number to another.
@@ -383,22 +381,6 @@ public class PaymentCryptographyPinOperations {
         out2.put("KeyArn", out.record.getArn());
         out2.put("KeyCheckValue", out.record.getKeyCheckValue());
         return out2;
-    }
-
-    // ---- GenerateMacEmvPinChange ---------------------------------------------
-
-    /**
-     * The EMV PIN change MAC.
-     *
-     * <p>The MAC of an EMV PIN change is taken over the command message with a session key
-     * that the EMV secure messaging rules define, and this service does not make that
-     * session key. The request is refused with the error that says so, rather than answered
-     * with a MAC of another kind.
-     */
-    Map<String, Object> generateMacEmvPinChange(JsonNode request, String region) {
-        // The request is checked against the constraints the model states for it.
-        PaymentCryptographyDataRequestShapes.check("GenerateMacEmvPinChange", request);
-        throw validation("the EMV PIN change MAC is not supported by this service");
     }
 
     // ---- the legs ------------------------------------------------------------
@@ -510,8 +492,15 @@ public class PaymentCryptographyPinOperations {
     /**
      * The PIN length the request declares, which the Visa path fixes at four digits.
      *
-     * <p>The Visa verification value is computed over four PIN digits, so a request that
-     * declares another length names something this path cannot verify.
+     * <p>The Visa verification value is a four digit number, and the algorithm's transformed
+     * security parameter is sixteen digits: eleven of account number, one of verification key
+     * index and four of PIN. A longer PIN has no place in it, so there is no verification
+     * value for one, and a request that declares another length names something this path
+     * cannot answer.
+     *
+     * <p>The model lets the length be between four and twelve, which is the range of the PIN
+     * a block holds and the range the IBM 3624 variants need; the Visa verification value is
+     * the four digit one.
      *
      * @param request the request, whose PinDataLength member may be absent
      */
@@ -548,35 +537,51 @@ public class PaymentCryptographyPinOperations {
         return format;
     }
 
-    private static int requirePvki(JsonNode attributes, String label) {
-        JsonNode declared = attributes == null ? null : attributes.get("PinVerificationKeyIndex");
-        if (declared == null || !declared.isNumber()) {
-            throw validation(label + " is required");
-        }
-        int pvki = declared.asInt();
-        if (pvki < 0 || pvki > MAX_VERIFICATION_KEY_INDEX) {
-            throw validation(label + " must be between 0 and " + MAX_VERIFICATION_KEY_INDEX);
-        }
-        return pvki;
+    /**
+     * The verification key index the attributes name.
+     *
+     * <p>The model states that the attributes carry the index and the range it holds, and the
+     * request has been checked against it, so it is read and not checked again.
+     *
+     * @param visa the VisaPin attributes of the request
+     * @return the index of the verification key
+     */
+    private static int pvki(JsonNode visa) {
+        return visa.path("PinVerificationKeyIndex").asInt();
     }
 
+    /**
+     * The account number the request names.
+     *
+     * <p>The member is optional in the model, so a request that leaves it out is refused
+     * here. Its length and its digits are the model's to settle.
+     *
+     * @param pan the account number of the request
+     * @param message what to say when the request leaves it out
+     * @return the account number
+     */
     private static String requirePan(String pan, String message) {
-        String digits = PinCrypto.digits(pan);
-        if (digits.length() < 12 || digits.length() > 19) {
+        if (pan.isEmpty()) {
             throw validation(message);
         }
-        return digits;
+        return pan;
     }
 
-    private static void requireTranslationPan(String pan, PinBlockFormat format, String label) {
-        String digits = PinCrypto.digits(pan);
-        if (format.isAes()) {
-            if (digits.isEmpty() || digits.length() > 19) {
-                throw validation(label + " must be 1..19 digits");
-            }
-        } else if (digits.length() < 12 || digits.length() > 19) {
-            throw validation(label + " (12-19 digits) is required");
+    /**
+     * The account number a translation attribute names.
+     *
+     * <p>The member is optional in the model, so a request that leaves it out is refused
+     * here. Its length and its digits are the model's to settle.
+     *
+     * @param pan the account number of the attribute
+     * @param label what to say when the request leaves it out
+     * @return the account number
+     */
+    private static String requireTranslationPan(String pan, String label) {
+        if (pan.isEmpty()) {
+            throw validation(label + " is required");
         }
+        return pan;
     }
 
     private static void requireHex(String value, int length, String message) {
@@ -589,7 +594,7 @@ public class PaymentCryptographyPinOperations {
      * Whether a recovered PIN is one the service can work with.
      *
      * <p>A block that was enciphered under another key deciphers to something that is not a
-     * PIN, and that is a failed verification rather than a bad request.
+     * PIN, and what it carries is then not a PIN block the service can read.
      */
     private static boolean isRecoveredPin(String pin) {
         if (pin == null || pin.length() < 4 || pin.length() > 12) {

@@ -371,20 +371,6 @@ public final class PinCrypto {
                 .substring(pan.length() - 1 - 11);
     }
 
-    /**
-     * Whether a computed PVV is the one the caller holds.
-     *
-     * @param pan the account number the PIN belongs to
-     * @param pvki the index of the verification key
-     * @param pin the clear PIN
-     * @param pvkHex the verification key, as hexadecimal
-     * @param pvv the verification value the caller holds
-     * @return whether the two agree
-     */
-    public static boolean verifyPvv(String pan, int pvki, String pin, String pvkHex, String pvv) {
-        return computePvv(pan, pvki, pin, pvkHex).equals(pvv);
-    }
-
     /** Strip everything that is not a decimal digit. */
     public static String digits(String s) {
         if (s == null) {
