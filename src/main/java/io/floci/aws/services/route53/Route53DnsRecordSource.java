@@ -47,20 +47,23 @@ public class Route53DnsRecordSource implements DnsRecordSource {
 
     private final Route53Service route53Service;
     private final DnsLookupHelper dnsLookupHelper;
+    private final EmbeddedDnsServer embeddedDnsServer;
     private final Set<String> flociSuffixes = new LinkedHashSet<>();
 
     public Route53DnsRecordSource(Route53Service route53Service) {
-        this(route53Service, null, new DnsLookupHelper());
+        this(route53Service, null, new DnsLookupHelper(), null);
     }
 
     public Route53DnsRecordSource(Route53Service route53Service, EmulatorConfig config) {
-        this(route53Service, config, new DnsLookupHelper(config));
+        this(route53Service, config, new DnsLookupHelper(config), null);
     }
 
     @Inject
-    public Route53DnsRecordSource(Route53Service route53Service, EmulatorConfig config, DnsLookupHelper dnsLookupHelper) {
+    public Route53DnsRecordSource(Route53Service route53Service, EmulatorConfig config, DnsLookupHelper dnsLookupHelper,
+                                  EmbeddedDnsServer embeddedDnsServer) {
         this.route53Service = route53Service;
         this.dnsLookupHelper = dnsLookupHelper != null ? dnsLookupHelper : new DnsLookupHelper(config);
+        this.embeddedDnsServer = embeddedDnsServer;
         this.flociSuffixes.addAll(BUILTIN_SUFFIXES);
         if (config != null) {
             config.hostname().ifPresent(this.flociSuffixes::add);
@@ -333,7 +336,16 @@ public class Route53DnsRecordSource implements DnsRecordSource {
         return false;
     }
 
+    /**
+     * The address the embedded DNS server answers Floci's own names with, so a record pointing at one resolves as the
+     * name itself does. The host's own lookup takes the first of this container's networks by name, which after a crash
+     * can be one Floci made and is still on; it answers only where that server has no address.
+     */
     private Optional<String> getLocalFlociAddress() {
+        Optional<String> serverIp = embeddedDnsServer != null ? embeddedDnsServer.getServerIp() : Optional.empty();
+        if (serverIp.isPresent()) {
+            return serverIp;
+        }
         try {
             return Optional.of(InetAddress.getLocalHost().getHostAddress());
         } catch (Exception e) {
