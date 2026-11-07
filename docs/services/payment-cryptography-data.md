@@ -63,7 +63,9 @@ client that talks to the control plane does not reach it by accident.
 - **A DUKPT key serial number is the one the Triple DES derivation takes.** The model lets a
   key serial number be eight, ten or twelve bytes, and the twelve byte one belongs to the AES
   derivation, which this service does not make; a key serial number of more than ten bytes is
-  refused.
+  refused. The model's DUKPT attributes carry the key serial number and the derivation type and
+  nothing else, so the derivation this path makes is the Triple DES one and a request that asks
+  for another of the five the model allows is refused.
 - **The PIN operations are not the IBM 3624 ones, and the AS2805 translation is not made.** A
   request that asks for one of them is refused with the error that says so, rather than
   answered with something of another kind. The EMV PIN change MAC is refused as well: it needs
