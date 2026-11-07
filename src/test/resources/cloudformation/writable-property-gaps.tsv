@@ -625,7 +625,6 @@ AWS::S3::Bucket	WebsiteConfiguration	silently dropped, as the S3CfnProvisioner j
 AWS::SNS::Subscription	DeliveryPolicy	accepted and ignored
 AWS::SNS::Subscription	Region	accepted and ignored
 AWS::SNS::Subscription	ReplayPolicy	accepted and ignored
-AWS::SNS::Subscription	SubscriptionRoleArn	accepted and ignored
 AWS::SNS::Topic	ArchivePolicy	accepted and ignored
 AWS::SNS::Topic	DataProtectionPolicy	accepted and ignored
 AWS::SNS::Topic	DeliveryStatusLogging	accepted and ignored

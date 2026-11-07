@@ -198,13 +198,50 @@ public class SnsCfnProvisioner implements CfnResourceProvisioner {
         if (props.has("RawMessageDelivery")) {
             attributes.put("RawMessageDelivery", ctx.engine().resolve(props.path("RawMessageDelivery")));
         }
+        if (props.hasNonNull("SubscriptionRoleArn")) {
+            attributes.put("SubscriptionRoleArn", ctx.engine().resolve(props.path("SubscriptionRoleArn")));
+        }
         if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
             attributes.put("RedrivePolicy", ctx.engine().resolveJsonAttribute(props.path("RedrivePolicy")));
         }
 
-        Subscription sub = snsService.subscribe(topicArn, protocol, endpoint, ctx.region(), attributes);
-        r.setPhysicalId(sub.getSubscriptionArn());
-        r.getAttributes().put("Arn", sub.getSubscriptionArn());
+        String subscriptionArn;
+        if (ctx.isUpdate() && matchesPriorSubscription(topicArn, protocol, endpoint, ctx)) {
+            subscriptionArn = ctx.priorPhysicalId();
+            // Validate the firehose role before changing other attributes, including a removed role.
+            if (attributes.containsKey("SubscriptionRoleArn") || ctx.previouslyDeclared("SubscriptionRoleArn")) {
+                snsService.setSubscriptionAttribute(subscriptionArn, "SubscriptionRoleArn",
+                        attributes.getOrDefault("SubscriptionRoleArn", ""), ctx.region());
+            }
+            Map<String, String> desired = new HashMap<>(attributes);
+            desired.remove("SubscriptionRoleArn");
+            for (String policy : List.of("FilterPolicy", "RedrivePolicy")) {
+                if (!desired.containsKey(policy) && ctx.previouslyDeclared(policy)) {
+                    desired.put(policy, "");
+                }
+            }
+            if (!desired.containsKey("RawMessageDelivery") && ctx.previouslyDeclared("RawMessageDelivery")) {
+                desired.put("RawMessageDelivery", "false");
+            }
+            if (!desired.containsKey("FilterPolicyScope") && ctx.previouslyDeclared("FilterPolicyScope")) {
+                desired.put("FilterPolicyScope", "MessageAttributes");
+            }
+            desired.forEach((name, value) ->
+                    snsService.setSubscriptionAttribute(subscriptionArn, name, value, ctx.region()));
+        } else {
+            Subscription sub = snsService.subscribe(topicArn, protocol, endpoint, ctx.region(), attributes);
+            subscriptionArn = sub.getSubscriptionArn();
+        }
+        r.setPhysicalId(subscriptionArn);
+        r.getAttributes().put("Arn", subscriptionArn);
+    }
+
+    private boolean matchesPriorSubscription(String topicArn, String protocol, String endpoint,
+                                             ProvisionContext ctx) {
+        Map<String, String> prior = snsService.getSubscriptionAttributes(ctx.priorPhysicalId(), ctx.region());
+        return Objects.equals(topicArn, prior.get("TopicArn"))
+                && Objects.equals(protocol, prior.get("Protocol"))
+                && Objects.equals(endpoint, prior.get("Endpoint"));
     }
 
     /**

@@ -960,6 +960,7 @@ public class SnsService implements Resettable, ResourceProvider {
             for (Subscription existing : subscriptionsByTopic(topicArn, region)) {
                 if (protocol.equals(existing.getProtocol())
                         && Objects.equals(endpoint, existing.getEndpoint())) {
+                    requireMatchingSubscriptionAttributes(existing, attributes);
                     return new SubscriptionCreation(existing, false);
                 }
             }
@@ -1484,6 +1485,28 @@ public class SnsService implements Resettable, ResourceProvider {
 
     private static String endpointKey(String region, String arn) {
         return "endpoint::" + region + "::" + arn;
+    }
+
+    private static void requireMatchingSubscriptionAttributes(Subscription existing, Map<String, String> requested) {
+        if (requested == null) {
+            return;
+        }
+        for (String attribute : List.of("RawMessageDelivery", "FilterPolicy")) {
+            if (!requested.containsKey(attribute)) {
+                continue;
+            }
+            String defaultValue = "RawMessageDelivery".equals(attribute) ? "false" : "{}";
+            String current = existing.getAttributes().getOrDefault(attribute, defaultValue);
+            String desired = requested.get(attribute);
+            if ("FilterPolicy".equals(attribute)) {
+                current = current == null || current.isEmpty() ? defaultValue : current;
+                desired = desired != null && desired.isEmpty() ? defaultValue : desired;
+            }
+            if (!Objects.equals(current, desired)) {
+                throw new AwsException("InvalidParameter",
+                        "Invalid parameter: Attributes Reason: Subscription already exists with different attributes", 400);
+            }
+        }
     }
 
     public Map<String, String> getSubscriptionAttributes(String subscriptionArn, String region) {
