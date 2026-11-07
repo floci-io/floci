@@ -1763,13 +1763,23 @@ public class RdsQueryHandler {
             MultivaluedMap<String, String> params, String region) {
         String filterName = params.getFirst("DBClusterParameterGroupName");
         try {
-            Collection<DbClusterParameterGroup> result =
-                    service.listDbClusterParameterGroups(filterName, region);
+            Integer maxRecords = parseOptionalInt(params.getFirst("MaxRecords"));
+            if (maxRecords != null && (maxRecords < 20 || maxRecords > 100)) {
+                throw new AwsException("InvalidParameterValue", "MaxRecords must be between 20 and 100.", 400);
+            }
+            int offset = parseMarker(params.getFirst("Marker"));
+            List<DbClusterParameterGroup> all = new ArrayList<>(
+                    service.listDbClusterParameterGroups(filterName, region));
+            int from = Math.min(offset, all.size());
+            int to = Math.min(from + (maxRecords != null ? maxRecords : 100), all.size());
             XmlBuilder xml = new XmlBuilder().start("DBClusterParameterGroups");
-            for (DbClusterParameterGroup g : result) {
+            for (DbClusterParameterGroup g : all.subList(from, to)) {
                 xml.start("DBClusterParameterGroup").raw(clusterParamGroupInnerXml(g)).end("DBClusterParameterGroup");
             }
-            xml.end("DBClusterParameterGroups").start("Marker").end("Marker");
+            xml.end("DBClusterParameterGroups");
+            if (to < all.size()) {
+                xml.elem("Marker", String.valueOf(to));
+            }
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameterGroups", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
