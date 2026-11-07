@@ -85,3 +85,9 @@ AWS::EC2::Subnet	CidrBlock	create-only	a drop never matches the stored block, so
 AWS::EC2::Subnet	MapPublicIpOnLaunch	default:false
 AWS::EC2::Subnet	Tags	clear
 AWS::EC2::Subnet	VpcId	create-only	a drop is refused
+AWS::Events::Connection	AuthParameters	keep:refused with a ValidationError, EventBridge keeps the value it has
+AWS::Events::Connection	AuthorizationType	keep:a required property, a template cannot drop it
+AWS::Events::Connection	Description	keep:refused with a ValidationError, EventBridge keeps the value it has
+AWS::Events::Connection	InvocationConnectivityParameters	keep:refused with a ValidationError, EventBridge keeps the value it has
+AWS::Events::Connection	KmsKeyIdentifier	keep:refused with a ValidationError, EventBridge keeps the value it has
+AWS::Events::Connection	Name	keep:refused with a ValidationError, a different name is a replacement

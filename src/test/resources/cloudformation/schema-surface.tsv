@@ -113,6 +113,7 @@ AWS::ElasticLoadBalancingV2::LoadBalancer	CanonicalHostedZoneID,DNSName,LoadBala
 AWS::ElasticLoadBalancingV2::TargetGroup	LoadBalancerArns,TargetGroupArn,TargetGroupFullName,TargetGroupName	HealthCheckEnabled,HealthCheckIntervalSeconds,HealthCheckPath,HealthCheckPort,HealthCheckProtocol,HealthCheckTimeoutSeconds,HealthyThresholdCount,IpAddressType,Matcher,Name,Port,Protocol,ProtocolVersion,Tags,TargetControlPort,TargetGroupAttributes,TargetType,Targets,UnhealthyThresholdCount,VpcId
 AWS::Events::ApiDestination	Arn,ArnForPolicy	ConnectionArn,Description,HttpMethod,InvocationEndpoint,InvocationRateLimitPerSecond,Name
 AWS::Events::Archive	Arn	ArchiveName,Description,EventPattern,KmsKeyIdentifier,RetentionDays,SourceArn
+AWS::Events::Connection	Arn,ArnForPolicy,SecretArn	AuthParameters,AuthorizationType,Description,InvocationConnectivityParameters,KmsKeyIdentifier,Name
 AWS::Events::EventBus	Arn	DeadLetterConfig,Description,EventSourceName,KmsKeyIdentifier,LogConfig,Name,Policy,Tags
 AWS::Events::EventBusPolicy		EventBusName,Statement,StatementId
 AWS::Events::Rule	Arn,RuleName	Description,EventBusName,EventPattern,Name,RoleArn,ScheduleExpression,State,Tags,Targets
