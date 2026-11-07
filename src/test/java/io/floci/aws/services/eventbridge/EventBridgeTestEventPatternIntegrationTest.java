@@ -20,6 +20,60 @@ class EventBridgeTestEventPatternIntegrationTest {
     }
 
     @Test
+    void detailScalarArrayMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"EventCategories\\":[\\"notification\\"]}}",
+                    "Event": "{\\"source\\":\\"aws.rds\\",\\"detail-type\\":\\"X\\",\\"detail\\":{\\"EventCategories\\":[\\"other\\",\\"notification\\"]}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailScalarArrayNoMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"EventCategories\\":[\\"notification\\"]}}",
+                    "Event": "{\\"source\\":\\"aws.rds\\",\\"detail-type\\":\\"X\\",\\"detail\\":{\\"EventCategories\\":[\\"other\\"]}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailEmptyArrayNoMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"EventCategories\\":[\\"notification\\"]}}",
+                    "Event": "{\\"source\\":\\"aws.rds\\",\\"detail-type\\":\\"X\\",\\"detail\\":{\\"EventCategories\\":[]}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
     void sourceMatch() {
         given()
             .contentType(EVENT_BRIDGE_CONTENT_TYPE)

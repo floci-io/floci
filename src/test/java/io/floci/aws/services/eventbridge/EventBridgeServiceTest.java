@@ -979,6 +979,24 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void matchesPatternDetailScalarArrayMatchesOnAnySharedValue() {
+        String pattern = "{\"detail\":{\"EventCategories\":[\"notification\"]}}";
+        assertTrue(service.matchesPattern(
+                Map.of("Detail", "{\"EventCategories\":[\"notification\"]}"), pattern));
+        assertTrue(service.matchesPattern(
+                Map.of("Detail", "{\"EventCategories\":[\"other\",\"notification\"]}"), pattern));
+        assertTrue(service.matchesPattern(
+                Map.of("Detail", "{\"EventCategories\":\"notification\"}"), pattern));
+        assertFalse(service.matchesPattern(
+                Map.of("Detail", "{\"EventCategories\":[\"other\"]}"), pattern));
+        assertFalse(service.matchesPattern(
+                Map.of("Detail", "{\"EventCategories\":[]}"), pattern));
+        assertTrue(service.matchesPattern(
+                Map.of("Detail", "{\"EventCategories\":[\"notification-x\"]}"),
+                "{\"detail\":{\"EventCategories\":[{\"prefix\":\"notification\"}]}}"));
+    }
+
+    @Test
     void matchesPatternByDetail() {
         Map<String, Object> event = Map.of(
                 "Source", "my.app",
