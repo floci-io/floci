@@ -6,15 +6,13 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.apigateway.model.DocumentationPart;
-import io.quarkus.test.common.http.TestHTTPResource;
+import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockMakers;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.apache5.Apache5HttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
@@ -28,7 +26,6 @@ import software.amazon.awssdk.services.apigateway.model.LocationStatusType;
 import software.amazon.awssdk.services.apigateway.model.NotFoundException;
 import software.amazon.awssdk.services.apigateway.model.PatchOperation;
 
-import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -53,9 +50,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 class ApiGatewayDocumentationPartIntegrationTest {
 
-    @TestHTTPResource("/")
-    URI endpoint;
-
     @Inject
     StorageFactory storageFactory;
 
@@ -67,10 +61,7 @@ class ApiGatewayDocumentationPartIntegrationTest {
     }
 
     private ApiGatewayClient client(Region region) {
-        return ApiGatewayClient.builder().endpointOverride(endpoint).region(region)
-                .httpClientBuilder(Apache5HttpClient.builder())
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
+        return AwsTestClients.create(ApiGatewayClient.builder(), "test", region, Apache5HttpClient.builder());
     }
 
     @Test
@@ -84,11 +75,67 @@ class ApiGatewayDocumentationPartIntegrationTest {
                 CreateDocumentationPartResponse created = client.createDocumentationPart(request -> request
                         .restApiId(apiId).location(location).properties(properties));
                 assertNotNull(created.id());
+                assertEquals(6, created.id().length());
                 assertEquals(location, created.location());
                 assertEquals(properties, created.properties());
             } finally {
                 client.deleteRestApi(request -> request.restApiId(apiId));
             }
+        }
+    }
+
+    @Test
+    void duplicateApiLocationReportsAwsConflictMessage() {
+        try (ApiGatewayClient client = client()) {
+            String apiId = client.createRestApi(request -> request.name("documentation-part-conflict")).id();
+            try {
+                DocumentationPartLocation location = DocumentationPartLocation.builder()
+                        .type(DocumentationPartType.API).build();
+                client.createDocumentationPart(request -> request.restApiId(apiId)
+                        .location(location).properties("{}"));
+                ConflictException conflict = assertThrows(ConflictException.class,
+                        () -> client.createDocumentationPart(request -> request.restApiId(apiId)
+                                .location(location).properties("{}")));
+                assertEquals("Documentation part already exists for the specified location: type 'API'.",
+                        conflict.awsErrorDetails().errorMessage());
+            } finally {
+                client.deleteRestApi(request -> request.restApiId(apiId));
+            }
+        }
+    }
+
+    @Test
+    void modeledDocumentationConstraintsRejectInvalidFields() {
+        String region = "us-east-1";
+        String apiId = service.createRestApi(region, Map.of("name", "documentation-part-model-constraints")).getId();
+        try {
+            AwsException missing = assertThrows(AwsException.class,
+                    () -> service.createDocumentationPart(region, apiId,
+                            Map.of("location", Map.of("type", "API"))));
+            assertEquals("CreateDocumentationPart.properties is required.", missing.getMessage());
+
+            AwsException type = assertThrows(AwsException.class,
+                    () -> service.createDocumentationPart(region, apiId,
+                            Map.of("location", Map.of("type", "UNKNOWN"), "properties", "{}")));
+            assertEquals("CreateDocumentationPart.location.type is not a modeled value.", type.getMessage());
+
+            AwsException statusCode = assertThrows(AwsException.class,
+                    () -> service.createDocumentationPart(region, apiId,
+                            Map.of("location", Map.of("type", "RESPONSE", "statusCode", "600"),
+                                    "properties", "{}")));
+            assertEquals("CreateDocumentationPart.location.statusCode does not match the modeled pattern.",
+                    statusCode.getMessage());
+
+            AwsException listType = assertThrows(AwsException.class,
+                    () -> service.getDocumentationParts(region, apiId, "UNKNOWN", null, null, null, null, null));
+            assertEquals("GetDocumentationParts.type is not a modeled value.", listType.getMessage());
+
+            AwsException locationStatus = assertThrows(AwsException.class,
+                    () -> service.getDocumentationParts(region, apiId, null, null, null, "UNKNOWN", null, null));
+            assertEquals("GetDocumentationParts.locationStatus is not a modeled value.",
+                    locationStatus.getMessage());
+        } finally {
+            service.deleteRestApi(region, apiId);
         }
     }
 

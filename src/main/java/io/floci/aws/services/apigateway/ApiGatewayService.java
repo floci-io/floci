@@ -83,6 +83,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -2241,9 +2242,6 @@ public class ApiGatewayService implements ResourceProvider {
 
     // ──────────────────────────── Documentation Parts ────────────────────────────
 
-    private static final Set<String> DOCUMENTATION_PART_TYPES = Set.of("API", "AUTHORIZER", "MODEL", "RESOURCE",
-            "METHOD", "PATH_PARAMETER", "QUERY_PARAMETER", "REQUEST_HEADER", "REQUEST_BODY", "RESPONSE",
-            "RESPONSE_HEADER", "RESPONSE_BODY");
     private static final Set<String> DOCUMENTATION_PART_NAMED_TYPES = Set.of("AUTHORIZER", "MODEL",
             "PATH_PARAMETER", "QUERY_PARAMETER", "REQUEST_HEADER", "REQUEST_BODY", "RESPONSE_HEADER");
     private static final Set<String> DOCUMENTATION_PART_PATH_TYPES = Set.of("RESOURCE", "METHOD", "PATH_PARAMETER",
@@ -2259,18 +2257,24 @@ public class ApiGatewayService implements ResourceProvider {
         if (request == null) {
             throw new AwsException("BadRequestException", "Documentation part request is required", 400);
         }
+        ObjectNode modeledRequest = JSON.valueToTree(request);
+        modeledRequest.put("restApiId", apiId);
+        ApiGatewayDocumentationRequestShapes.check("CreateDocumentationPart", modeledRequest);
         Map<String, String> location = documentationPartLocation(request.get("location"));
         String properties = documentationPartProperties(request.get("properties"));
         String prefix = region + "::" + apiId + "::";
         if (documentationPartStore.scan(key -> key.startsWith(prefix)).stream()
                 .anyMatch(part -> part.getLocation().equals(location))) {
-            throw new AwsException("ConflictException", "Documentation part already exists at this location", 409);
+            StringJoiner fields = new StringJoiner(", ");
+            location.forEach((field, value) -> fields.add(field + " '" + value + "'"));
+            throw new AwsException("ConflictException",
+                    "Documentation part already exists for the specified location: " + fields + ".", 409);
         }
 
         DocumentationPart part = new DocumentationPart();
         String id;
         do {
-            id = shortId(12);
+            id = shortId(6);
         } while (documentationPartStore.get(documentationPartKey(region, apiId, id)).isPresent());
         part.setId(id);
         part.setLocation(location);
@@ -2291,13 +2295,26 @@ public class ApiGatewayService implements ResourceProvider {
                                                         String path, String locationStatus, Integer limit,
                                                         String position) {
         getRestApi(region, apiId);
-        if (type != null && !DOCUMENTATION_PART_TYPES.contains(type)) {
-            throw new AwsException("BadRequestException", "Invalid documentation part type", 400);
+        ObjectNode modeledRequest = JSON.createObjectNode().put("restApiId", apiId);
+        if (type != null) {
+            modeledRequest.put("type", type);
         }
-        if (locationStatus != null && !"DOCUMENTED".equals(locationStatus)
-                && !"UNDOCUMENTED".equals(locationStatus)) {
-            throw new AwsException("BadRequestException", "Invalid locationStatus parameter", 400);
+        if (name != null) {
+            modeledRequest.put("nameQuery", name);
         }
+        if (path != null) {
+            modeledRequest.put("path", path);
+        }
+        if (locationStatus != null) {
+            modeledRequest.put("locationStatus", locationStatus);
+        }
+        if (limit != null) {
+            modeledRequest.put("limit", limit);
+        }
+        if (position != null) {
+            modeledRequest.put("position", position);
+        }
+        ApiGatewayDocumentationRequestShapes.check("GetDocumentationParts", modeledRequest);
         if (limit != null && limit < 1) {
             throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
         }
@@ -2352,10 +2369,8 @@ public class ApiGatewayService implements ResourceProvider {
     }
 
     private static Map<String, String> documentationPartLocation(Object value) {
-        if (!(value instanceof Map<?, ?> input) || !(input.get("type") instanceof String type)
-                || !DOCUMENTATION_PART_TYPES.contains(type)) {
-            throw new AwsException("BadRequestException", "A valid documentation part location type is required", 400);
-        }
+        Map<?, ?> input = (Map<?, ?>) value;
+        String type = (String) input.get("type");
         Map<String, String> location = new LinkedHashMap<>();
         for (Map.Entry<?, ?> entry : input.entrySet()) {
             if (!(entry.getKey() instanceof String key) || !(entry.getValue() instanceof String fieldValue)
@@ -2372,9 +2387,7 @@ public class ApiGatewayService implements ResourceProvider {
         if (location.containsKey("name") && !DOCUMENTATION_PART_NAMED_TYPES.contains(type)
                 || location.containsKey("path") && !DOCUMENTATION_PART_PATH_TYPES.contains(type)
                 || location.containsKey("method") && !DOCUMENTATION_PART_METHOD_TYPES.contains(type)
-                || location.containsKey("statusCode") && !DOCUMENTATION_PART_STATUS_TYPES.contains(type)
-                || location.containsKey("statusCode")
-                        && !location.get("statusCode").matches("([1-5]\\d\\d|\\*|\\s*)")) {
+                || location.containsKey("statusCode") && !DOCUMENTATION_PART_STATUS_TYPES.contains(type)) {
             throw new AwsException("BadRequestException", "Invalid documentation part location field", 400);
         }
         if (DOCUMENTATION_PART_PATH_TYPES.contains(type)) {
