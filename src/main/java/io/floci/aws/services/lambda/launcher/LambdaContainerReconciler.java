@@ -45,7 +45,7 @@ final class LambdaContainerReconciler {
                             .withShowAll(true).withLabelFilter(filter).exec(), "Missing Docker container inventory"),
                     Container::getId);
         } catch (RuntimeException failure) {
-            LOG.warnv("Could not list leftover Lambda containers: {0}", failure.getMessage());
+            LOG.warnv(failure, "Could not list leftover Lambda containers for owner {0}", owner);
             return;
         }
         boolean complete = true;
@@ -63,8 +63,7 @@ final class LambdaContainerReconciler {
                 LOG.infov("Removed Lambda container {0} left by a previous run", container.getId());
             } catch (RuntimeException failure) {
                 complete = false;
-                LOG.warnv("Could not remove leftover Lambda container {0}: {1}",
-                        container.getId(), failure.getMessage());
+                LOG.warnv(failure, "Could not remove leftover Lambda container {0}", container.getId());
             }
         }
         reconciled = complete;
