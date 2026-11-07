@@ -20,7 +20,7 @@
 | `DescribeRepositoryCreationTemplates` | List templates, or those for given prefixes, with pagination |
 | `UpdateRepositoryCreationTemplate` | Replace the fields a request sets on a template |
 | `DeleteRepositoryCreationTemplate` | Delete a template by prefix |
-| `DescribeRepositories` | List repositories or fetch by name |
+| `DescribeRepositories` | Page repositories or fetch by name |
 | `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
 | `GetAuthorizationToken` | Returns a docker-login token + proxy endpoint |
 | `ListImages` | Enumerate paginated tags and digests in a repository |
