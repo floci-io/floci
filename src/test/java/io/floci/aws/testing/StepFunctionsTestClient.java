@@ -40,14 +40,26 @@ public final class StepFunctionsTestClient {
     }
 
     public Response request(String account, String action, Map<String, ?> input) {
-        return given().port(port).header("Authorization", auth(account, "states"))
-                .header("X-Amz-Target", "AWSStepFunctions." + action)
-                .contentType("application/x-amz-json-1.0").body(MAPPER.valueToTree(input).toString()).post("/");
+        return json(account, "states", "AWSStepFunctions." + action, "application/x-amz-json-1.0", input);
+    }
+
+    /**
+     * A JSON-protocol request to the service a task calls, signed as {@code account} for {@code signingName}, so a
+     * test reads and sets up the resources a task reaches in the account its execution runs in.
+     */
+    public Response json(String account, String signingName, String target, String contentType, Map<String, ?> body) {
+        return given().port(port).header("Authorization", auth(account, signingName))
+                .header("X-Amz-Target", target)
+                .contentType(contentType).body(MAPPER.valueToTree(body).toString()).post("/");
     }
 
     /** Creates a state machine in us-east-1, which the end of the test stops and deletes. */
     public String createMachine(String account, String namePrefix, String definition, String type, String role) {
-        String name = namePrefix + UUID.randomUUID();
+        return createMachineNamed(account, namePrefix + UUID.randomUUID(), definition, type, role);
+    }
+
+    /** {@link #createMachine} under the exact {@code name}, for a test that needs the machine's ARN up front. */
+    public String createMachineNamed(String account, String name, String definition, String type, String role) {
         String arn = "arn:aws:states:us-east-1:" + account + ":stateMachine:" + name;
         cleanup.register(() -> removeMachine(account, arn));
         Response created = request(account, "CreateStateMachine", Map.of(

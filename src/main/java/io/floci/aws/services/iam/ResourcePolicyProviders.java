@@ -24,6 +24,19 @@ public final class ResourcePolicyProviders {
         return policiesFor(providers, credentialScope, null, resourceArn);
     }
 
+    /** The ARN policies are evaluated on for {@code resourceArn}, as each provider resolves it. */
+    public static String resolveResourceArn(Instance<ResourcePolicyProvider> providers, String credentialScope,
+                                            String resourceArn) {
+        if (providers == null || providers.isUnsatisfied()) {
+            return resourceArn;
+        }
+        String resolved = resourceArn;
+        for (ResourcePolicyProvider provider : providers) {
+            resolved = provider.resolveResourceArn(credentialScope, resolved);
+        }
+        return resolved;
+    }
+
     /** The policies applying to an action, as determined by each resource-owning service. */
     public static List<ResourcePolicyProvider.ResourcePolicy> policiesFor(
             Instance<ResourcePolicyProvider> providers, String credentialScope, String action, String resourceArn) {

@@ -1259,7 +1259,8 @@ public class AslExecutor {
 
     /** Integrations {@link TaskPermissions} does not map stay unchecked, Lambda and API Gateway check their own. */
     private void authorizeTask(StatesIntegration integration, JsonNode input, StateMachine sm, JsonNode credentials) {
-        Optional<TaskPermissions> required = TaskPermissions.of(integration, input, sm);
+        Optional<TaskPermissions> required = TaskPermissions.of(integration, input, sm,
+                redshiftDataHandler == null ? null : redshiftDataHandler.storedResourceArns());
         if (required.isEmpty()) {
             return;
         }
