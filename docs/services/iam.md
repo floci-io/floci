@@ -411,8 +411,22 @@ model. A comma is therefore still admitted, and an empty principal is still refu
 same split the enum order above takes, the captured rendering over the model's, and one object
 decides which text any violation quotes, so no other member moves with it.
 
-What a second capture would settle is the comma: `CreateServiceLinkedRole` with one in the
-principal, which AWS either refuses as a pattern violation or takes.
+The comma was the half left open, and what settles it is what AWS publishes rather than a second
+capture. The API Reference entry for `CreateServiceLinkedRole`, read on 2026-11-03, gives
+`AWSServiceName` a minimum length of 1 and the pattern `[\w+=,.@-]+`, the comma included, which is
+the pattern botocore declares for the shape it aliases the member to as well. The comma is
+therefore what AWS documents for this member rather than an artifact of that aliasing, and the
+captured message is the only source that drops it: a message is evidence of the text a violation
+carries, not of what a value is held to. The minimum is published there too, so the empty principal
+the message's `*` would admit stays refused for a reason of AWS's own rather than the model's alone.
+A principal carrying a comma clears the shape here and reaches
+the lookup, where a service no recording covers has its role name derived from the principal's
+labels rather than refused, which is this emulator's own decision and the answer any unrecorded
+principal gets. This paragraph is where that reasoning lives: the generator and the test that pins
+the comma point here rather than repeating it. A capture of AWS refusing a comma as a pattern
+violation moves the quoted-pattern entry in `tools/aws/regen_iam_shapes.py`, the
+`src/main/resources/aws/iam-request-shapes.json` a regeneration writes from it, which that
+generator's own test holds the entry to, the test that pins the comma, and this paragraph.
 
 ### Permission Boundaries
 
