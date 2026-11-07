@@ -3,15 +3,20 @@ package io.floci.aws.services.rds;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.DBClusterParameterGroup;
+import software.amazon.awssdk.services.rds.model.DescribeDbClusterParameterGroupsResponse;
+import software.amazon.awssdk.services.rds.model.RdsException;
 
 import java.util.List;
 
 import static io.floci.aws.testing.RdsRequests.rdsClient;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -49,6 +54,33 @@ class RdsDefaultClusterParameterArnIntegrationTest {
             for (DBClusterParameterGroup group : groups) {
                 assertEquals(arn(partition, region, account, group.dbClusterParameterGroupName()),
                         group.dbClusterParameterGroupArn());
+            }
+        }
+    }
+
+    @Test
+    void describeDbClusterParameterGroupsPagesWithMaxRecordsAndMarkerAndValidatesBounds() {
+        try (RdsClient client = rdsClient("us-east-1", "111111111111")) {
+            DescribeDbClusterParameterGroupsResponse unpaged = client.describeDBClusterParameterGroups();
+            List<DBClusterParameterGroup> all = unpaged.dbClusterParameterGroups();
+            assertTrue(all.size() > 20);
+            assertNull(unpaged.marker());
+
+            DescribeDbClusterParameterGroupsResponse firstPage = client.describeDBClusterParameterGroups(
+                    request -> request.maxRecords(20));
+            assertEquals(all.subList(0, 20), firstPage.dbClusterParameterGroups());
+            assertEquals("20", firstPage.marker());
+
+            DescribeDbClusterParameterGroupsResponse secondPage = client.describeDBClusterParameterGroups(
+                    request -> request.maxRecords(20).marker(firstPage.marker()));
+            assertEquals(all.subList(20, all.size()), secondPage.dbClusterParameterGroups());
+            assertNull(secondPage.marker());
+
+            for (int invalid : List.of(19, 101)) {
+                RdsException exception = assertThrows(RdsException.class, () ->
+                        client.describeDBClusterParameterGroups(request -> request.maxRecords(invalid)));
+                assertEquals(400, exception.statusCode());
+                assertEquals("InvalidParameterValue", exception.awsErrorDetails().errorCode());
             }
         }
     }
