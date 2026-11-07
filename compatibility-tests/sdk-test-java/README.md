@@ -2,7 +2,7 @@
 
 Compatibility tests for [Floci](https://github.com/hectorvent/floci) using the **AWS SDK for Java v2 (2.31.8)**.
 
-Runs 352 tests across 17 test classes against a live Floci instance — no mocks.
+Runs 2981 tests across 436 test classes against a live Floci instance — no mocks.
 
 ## Services Covered
 

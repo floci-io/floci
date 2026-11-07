@@ -65,46 +65,41 @@ class PaymentCryptographyDataPlaneIamEnforcementTest {
 
     private final PartitionCleanup cleanup = new PartitionCleanup();
 
+    /**
+     * The ARN of a key the control plane makes from the given CreateKey body.
+     *
+     * <p>Every key this test needs is made the same way, so the request is written once
+     * and each key only differs in the body it carries.
+     *
+     * @param body the CreateKey request body
+     * @return the ARN of the key that was made
+     */
+    private static String createKeyArn(String body) {
+        return given().contentType("application/x-amz-json-1.0")
+                .header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
+                .header("Authorization", auth(ADMIN, "payment-cryptography"))
+                .body(body)
+                .when().post("/")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+    }
+
     @BeforeEach
     void createTheKeyAndTheCaller() {
         RestAssuredJsonUtils.configureAwsContentTypes();
-        keyArn = given().contentType("application/x-amz-json-1.0")
-                .header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
-                .header("Authorization", auth(ADMIN, "payment-cryptography"))
-                .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
-                        + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
-                        + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}")
-                .when().post("/")
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        keyArn = createKeyArn("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}");
         keyId = keyArn.substring(keyArn.lastIndexOf('/') + 1);
-        macKeyArn = given().contentType("application/x-amz-json-1.0")
-                .header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
-                .header("Authorization", auth(ADMIN, "payment-cryptography"))
-                .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
-                        + "\"KeyUsage\":\"TR31_M6_ISO_9797_5_CMAC_KEY\","
-                        + "\"KeyModesOfUse\":{\"Generate\":true,\"Verify\":true}},\"Exportable\":true}")
-                .when().post("/")
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
-        pinEncryptionKeyArn = given().contentType("application/x-amz-json-1.0")
-                .header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
-                .header("Authorization", auth(ADMIN, "payment-cryptography"))
-                .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\",\"KeyClass\":\"SYMMETRIC_KEY\","
-                        + "\"KeyUsage\":\"TR31_P0_PIN_ENCRYPTION_KEY\","
-                        + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}")
-                .when().post("/")
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
-        visaVerificationKeyArn = given().contentType("application/x-amz-json-1.0")
-                .header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
-                .header("Authorization", auth(ADMIN, "payment-cryptography"))
-                .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\",\"KeyClass\":\"SYMMETRIC_KEY\","
-                        + "\"KeyUsage\":\"TR31_V2_VISA_PIN_VERIFICATION_KEY\","
-                        + "\"KeyModesOfUse\":{\"Generate\":true,\"Verify\":true}},\"Exportable\":true}")
-                .when().post("/")
-                .then().statusCode(200)
-                    .extract().path("Key.KeyArn");
+        macKeyArn = createKeyArn("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_M6_ISO_9797_5_CMAC_KEY\","
+                + "\"KeyModesOfUse\":{\"Generate\":true,\"Verify\":true}},\"Exportable\":true}");
+        pinEncryptionKeyArn = createKeyArn("{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_P0_PIN_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}");
+        visaVerificationKeyArn = createKeyArn("{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_V2_VISA_PIN_VERIFICATION_KEY\","
+                + "\"KeyModesOfUse\":{\"Generate\":true,\"Verify\":true}},\"Exportable\":true}");
         callerName = "payment-cryptography-data-" + Long.toString(System.nanoTime(), 36);
         caller = EnforcementFixtures.createUser(cleanup, port(), auth(ADMIN, "iam"), callerName);
     }

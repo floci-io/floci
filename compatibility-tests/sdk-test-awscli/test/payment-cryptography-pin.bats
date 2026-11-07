@@ -9,10 +9,11 @@ setup() {
     load 'test_helper/common-setup'
     PEK_ARN=""
     PVK_ARN=""
+    AES_PEK_ARN=""
 }
 
 teardown() {
-    for key in "$PEK_ARN" "$PVK_ARN"; do
+    for key in "$PEK_ARN" "$PVK_ARN" "$AES_PEK_ARN"; do
         if [ -n "$key" ]; then
             aws_cmd payment-cryptography delete-key --key-identifier "$key" \
                 --delete-key-in-days 7 >/dev/null 2>&1 || true
@@ -88,6 +89,8 @@ create_pvk() {
         --encrypted-pin-block "$BLOCK" \
         --verification-attributes 'VisaPin={PinVerificationKeyIndex=1,VerificationValue=9999}'
     assert_failure
+    # A PIN that does not verify is a verification that failed, not a malformed request.
+    [[ "$output" == *"VerificationFailedException"* ]]
 }
 
 @test "Payment Cryptography PIN: a PIN block translates from one format to another" {
