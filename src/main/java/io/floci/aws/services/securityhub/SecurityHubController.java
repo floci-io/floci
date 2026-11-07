@@ -34,13 +34,15 @@ import java.util.Map;
 @Consumes(MediaType.APPLICATION_JSON)
 public class SecurityHubController {
     private final SecurityHubService securityHubService;
+    private final SecurityHubFindingsService findingsService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public SecurityHubController(SecurityHubService securityHubService,
+    public SecurityHubController(SecurityHubService securityHubService, SecurityHubFindingsService findingsService,
                                  RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.securityHubService = securityHubService;
+        this.findingsService = findingsService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -143,6 +145,35 @@ public class SecurityHubController {
     @Path("/standards/get")
     public Response getEnabledStandards(@Context HttpHeaders headers, String body) {
         return subscriptions(securityHubService.enabledStandards(region(headers), readTree(body)), "READY");
+    }
+
+    @POST
+    @Path("/findings/import")
+    public Response batchImportFindings(@Context HttpHeaders headers, String body) {
+        SecurityHubFindingsService.ImportResult imported = findingsService.batchImportFindings(
+                region(headers), readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("SuccessCount", imported.successCount());
+        response.put("FailedCount", imported.failedFindings().size());
+        ArrayNode failed = response.putArray("FailedFindings");
+        for (SecurityHubFindingsService.ImportFailure failure : imported.failedFindings()) {
+            failed.addObject().put("Id", failure.id()).put("ErrorCode", failure.errorCode())
+                    .put("ErrorMessage", failure.errorMessage());
+        }
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/findings")
+    public Response getFindings(@Context HttpHeaders headers, String body) {
+        PaginatedResult<ObjectNode> page = findingsService.getFindings(region(headers), readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("Findings");
+        page.items().forEach(items::add);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
     }
 
     private Response subscriptions(Map<String, String> subscriptions, String status) {

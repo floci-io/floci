@@ -1,0 +1,223 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_securityhub_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "BatchImportFindings": "BatchImportFindingsRequest",
+    "GetFindings": "GetFindingsRequest"
+  },
+  "shapes": {
+    "AwsSecurityFinding": {
+      "type": "structure",
+      "required": [
+        "SchemaVersion",
+        "Id",
+        "ProductArn",
+        "GeneratorId",
+        "AwsAccountId",
+        "CreatedAt",
+        "UpdatedAt",
+        "Title",
+        "Description",
+        "Resources"
+      ],
+      "members": {
+        "SchemaVersion": "NonEmptyString",
+        "Id": "NonEmptyString",
+        "ProductArn": "NonEmptyString",
+        "ProductName": "NonEmptyString",
+        "CompanyName": "NonEmptyString",
+        "GeneratorId": "NonEmptyString",
+        "AwsAccountId": "NonEmptyString",
+        "Types": "TypeList",
+        "CreatedAt": "NonEmptyString",
+        "UpdatedAt": "NonEmptyString",
+        "Title": "NonEmptyString",
+        "Description": "NonEmptyString",
+        "Resources": "ResourceList",
+        "VerificationState": "VerificationState",
+        "RecordState": "RecordState",
+        "Compliance": "Compliance",
+        "Severity": "Severity",
+        "FindingProviderFields": "FindingProviderFields",
+        "ProductFields": "FieldMap",
+        "RelatedFindings": "RelatedFindingList"
+      }
+    },
+    "AwsSecurityFindingFilters": {
+      "type": "structure",
+      "members": {
+        "ComplianceAssociatedStandardsId": "StringFilterList",
+        "RecordState": "StringFilterList",
+        "WorkflowStatus": "StringFilterList",
+        "ComplianceStatus": "StringFilterList",
+        "ComplianceSecurityControlId": "StringFilterList",
+        "ProductArn": "StringFilterList",
+        "AwsAccountId": "StringFilterList",
+        "Region": "StringFilterList"
+      }
+    },
+    "BatchImportFindingsRequest": {
+      "type": "structure",
+      "required": [
+        "Findings"
+      ],
+      "members": {
+        "Findings": "BatchImportFindingsRequestFindingList"
+      }
+    },
+    "BatchImportFindingsRequestFindingList": {
+      "type": "list",
+      "min": 1,
+      "max": 100,
+      "member": "AwsSecurityFinding"
+    },
+    "Compliance": {
+      "type": "structure",
+      "members": {
+        "Status": "ComplianceStatus"
+      }
+    },
+    "ComplianceStatus": {
+      "type": "string",
+      "enum": [
+        "PASSED",
+        "WARNING",
+        "FAILED",
+        "NOT_AVAILABLE"
+      ]
+    },
+    "FieldMap": {
+      "type": "map",
+      "key": "NonEmptyString",
+      "value": "NonEmptyString"
+    },
+    "FindingProviderFields": {
+      "type": "structure",
+      "members": {
+        "Confidence": "RatioScale",
+        "Criticality": "RatioScale",
+        "Severity": "FindingProviderSeverity",
+        "RelatedFindings": "RelatedFindingList",
+        "Types": "TypeList"
+      }
+    },
+    "FindingProviderSeverity": {
+      "type": "structure",
+      "members": {
+        "Label": "SeverityLabel"
+      }
+    },
+    "GetFindingsRequest": {
+      "type": "structure",
+      "members": {
+        "Filters": "AwsSecurityFindingFilters",
+        "MaxResults": "MaxResults"
+      }
+    },
+    "MaxResults": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "NonEmptyString": {
+      "type": "string",
+      "pattern": ".*\\S.*"
+    },
+    "RatioScale": {
+      "type": "integer",
+      "min": 0,
+      "max": 100
+    },
+    "RecordState": {
+      "type": "string",
+      "enum": [
+        "ACTIVE",
+        "ARCHIVED"
+      ]
+    },
+    "RelatedFinding": {
+      "type": "structure",
+      "required": [
+        "ProductArn",
+        "Id"
+      ],
+      "members": {
+        "ProductArn": "NonEmptyString",
+        "Id": "NonEmptyString"
+      }
+    },
+    "RelatedFindingList": {
+      "type": "list",
+      "member": "RelatedFinding"
+    },
+    "Resource": {
+      "type": "structure",
+      "required": [
+        "Type",
+        "Id"
+      ],
+      "members": {
+        "Type": "NonEmptyString",
+        "Id": "NonEmptyString"
+      }
+    },
+    "ResourceList": {
+      "type": "list",
+      "member": "Resource"
+    },
+    "Severity": {
+      "type": "structure",
+      "members": {
+        "Label": "SeverityLabel"
+      }
+    },
+    "SeverityLabel": {
+      "type": "string",
+      "enum": [
+        "INFORMATIONAL",
+        "LOW",
+        "MEDIUM",
+        "HIGH",
+        "CRITICAL"
+      ]
+    },
+    "StringFilter": {
+      "type": "structure",
+      "members": {
+        "Value": "NonEmptyString",
+        "Comparison": "StringFilterComparison"
+      }
+    },
+    "StringFilterComparison": {
+      "type": "string",
+      "enum": [
+        "EQUALS",
+        "PREFIX",
+        "NOT_EQUALS",
+        "PREFIX_NOT_EQUALS",
+        "CONTAINS",
+        "NOT_CONTAINS",
+        "CONTAINS_WORD"
+      ]
+    },
+    "StringFilterList": {
+      "type": "list",
+      "member": "StringFilter"
+    },
+    "TypeList": {
+      "type": "list",
+      "member": "NonEmptyString"
+    },
+    "VerificationState": {
+      "type": "string",
+      "enum": [
+        "UNKNOWN",
+        "TRUE_POSITIVE",
+        "FALSE_POSITIVE",
+        "BENIGN_POSITIVE"
+      ]
+    }
+  }
+}
