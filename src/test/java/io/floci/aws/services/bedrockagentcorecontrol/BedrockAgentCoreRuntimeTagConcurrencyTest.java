@@ -2,7 +2,6 @@ package io.floci.aws.services.bedrockagentcorecontrol;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.bedrockagentcorecontrol.model.AgentRuntime;
-import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -16,9 +15,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreConcurrencyFixture.REGION;
+import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreConcurrencyFixture.assertBlocked;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -146,14 +144,6 @@ class BedrockAgentCoreRuntimeTagConcurrencyTest {
         tags.clear();
         assertEquals(Map.of("key", "new", "other", "retained"),
                 fixture.service.getTagsByArn(REGION, fixture.arn));
-    }
-
-    private static void assertBlocked(AtomicReference<Thread> worker, Future<?> task) throws InterruptedException {
-        ThreadStates.awaitBlockedOrDone(worker, task);
-        assertNotNull(worker.get(), "the competing worker must start");
-        assertEquals(Thread.State.BLOCKED, worker.get().getState(),
-                "the competing worker must overlap the parked storage operation");
-        assertFalse(task.isDone());
     }
 
     private static BedrockAgentCoreConcurrencyFixture taggedRuntime() {

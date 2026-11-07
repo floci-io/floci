@@ -3,7 +3,6 @@ package io.floci.aws.services.bedrockagentcorecontrol;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.bedrockagentcorecontrol.model.AgentRuntime;
 import io.floci.aws.services.bedrockagentcorecontrol.model.AgentRuntimeEndpoint;
-import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.ExecutorService;
@@ -13,9 +12,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreConcurrencyFixture.REGION;
+import static io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreConcurrencyFixture.assertBlocked;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -35,11 +33,7 @@ class BedrockAgentCoreEndpointConcurrencyTest {
                     secondThread.set(Thread.currentThread());
                     return createEndpoint(fixture, "token");
                 });
-                ThreadStates.awaitBlockedOrDone(secondThread, second);
-                assertNotNull(secondThread.get(), "the competing worker must start");
-                assertEquals(Thread.State.BLOCKED, secondThread.get().getState(),
-                        "the competing worker must overlap the parked publication");
-                assertFalse(second.isDone(), "replay must await the original publication");
+                assertBlocked(secondThread, second);
                 fixture.storage.release();
                 assertSame(first.get(5, TimeUnit.SECONDS), second.get(5, TimeUnit.SECONDS));
                 assertEquals(1, namedEndpointCount(fixture));
@@ -62,11 +56,7 @@ class BedrockAgentCoreEndpointConcurrencyTest {
                     secondThread.set(Thread.currentThread());
                     return assertThrows(AwsException.class, () -> createEndpoint(fixture, null));
                 });
-                ThreadStates.awaitBlockedOrDone(secondThread, second);
-                assertNotNull(secondThread.get(), "the competing worker must start");
-                assertEquals(Thread.State.BLOCKED, secondThread.get().getState(),
-                        "the competing worker must overlap the parked publication");
-                assertFalse(second.isDone(), "the uniqueness decision must await publication");
+                assertBlocked(secondThread, second);
                 fixture.storage.release();
                 first.get(5, TimeUnit.SECONDS);
                 assertEquals("ConflictException", second.get(5, TimeUnit.SECONDS).getErrorCode());
@@ -90,11 +80,7 @@ class BedrockAgentCoreEndpointConcurrencyTest {
                     deleteThread.set(Thread.currentThread());
                     return fixture.delete();
                 });
-                ThreadStates.awaitBlockedOrDone(deleteThread, deletion);
-                assertNotNull(deleteThread.get(), "the competing worker must start");
-                assertEquals(Thread.State.BLOCKED, deleteThread.get().getState(),
-                        "the competing worker must overlap the parked publication");
-                assertFalse(deletion.isDone(), "deletion must wait for the in-flight publication");
+                assertBlocked(deleteThread, deletion);
                 fixture.storage.release();
                 first.get(5, TimeUnit.SECONDS);
                 deletion.get(5, TimeUnit.SECONDS);
