@@ -1,0 +1,703 @@
+package io.floci.aws.core.common.docker;
+
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.LogContainerCmd;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.Deque;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+
+/**
+ * Streams Docker container logs to CloudWatch Logs and, by default, the Floci console logger.
+ * Consolidates the log streaming pattern used across container managers.
+ */
+@ApplicationScoped
+public class ContainerLogStreamer {
+
+    private static final Logger LOG = Logger.getLogger(ContainerLogStreamer.class);
+    private static final DateTimeFormatter LOG_STREAM_DATE_FMT = DateTimeFormatter.ofPattern("yyyy/MM/dd");
+
+    private final DockerClient dockerClient;
+    private final CloudWatchLogsService cloudWatchLogsService;
+
+    // Log-follow attaches hold their connection open for the whole container lifetime, so
+    // this class is the primary consumer of the streaming pool: sharing the control-plane
+    // pool is what starved short create/start/stop calls during an LZA Logging fan-out
+    // (see DockerClientProducer / StreamingDocker).
+    @Inject
+    public ContainerLogStreamer(@StreamingDocker DockerClient dockerClient, CloudWatchLogsService cloudWatchLogsService) {
+        this.dockerClient = dockerClient;
+        this.cloudWatchLogsService = cloudWatchLogsService;
+    }
+
+    /**
+     * Attaches a log stream to a container and forwards logs to CloudWatch Logs.
+     * Returns a lifecycle handle that should be closed after the container stops. Closing the handle
+     * allows Docker's reader a bounded drain period before a non-blocking fallback flushes the tail.
+     *
+     * @param containerId Docker container ID
+     * @param logGroup CloudWatch log group name (e.g., "/aws/lambda/myFunction")
+     * @param logStream CloudWatch log stream name (e.g., "2024/01/15/[$LATEST]abc123")
+     * @param region AWS region for CloudWatch Logs
+     * @param logPrefix prefix for console logging (e.g., "lambda:myFunction")
+     * @return Closeable lifecycle handle for the log stream
+     */
+    public Closeable attach(String containerId, String logGroup, String logStream,
+                            String region, String logPrefix) {
+        return attachForAccount(
+                null, containerId, logGroup, logStream, region, logPrefix);
+    }
+
+    /**
+     * Like {@link #attach}, but only forwards lines the container emits from now on. Use it for a
+     * container that already existed before this process started: following from the beginning
+     * replays its whole history (hours of registry access logs after a busy day) into the console
+     * and CloudWatch Logs, where it evicts the current Lambda logs.
+     */
+    public Closeable attachFromNow(String containerId, String logGroup, String logStream,
+                                   String region, String logPrefix) {
+        return attachFromNowForAccount(null, containerId, logGroup, logStream, region, logPrefix);
+    }
+
+    public Closeable attachForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix) {
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, null);
+    }
+
+    /**
+     * Like {@link #attachForAccount}, but only forwards lines the container emits from now on.
+     */
+    public Closeable attachFromNowForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix) {
+        return attachForAccount(accountId, containerId, logGroup, logStream, region, logPrefix, Instant.now());
+    }
+
+    /** {@code since} of null follows the container's complete log history. */
+    Closeable attachForAccount(
+            String accountId, String containerId, String logGroup, String logStream,
+            String region, String logPrefix, Instant since) {
+        ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
+
+        // Fan each reassembled line that is not blank out to the console logger and CloudWatch Logs.
+        Consumer<String> emitter = line -> {
+            String logged = logToConsole(logPrefix, line);
+            if (logged != null) {
+                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
+            }
+        };
+        return follow(containerId, since, emitter);
+    }
+
+    /**
+     * Like {@link #attachForAccount}, but forwards the container's standard output and standard error to
+     * log streams of their own in {@code logGroup}, {@code stdoutStream} and {@code stderrStream}, either
+     * of which may be null to forward that output nowhere. A container with a terminal has no standard
+     * error of its own: all of its output is standard output. Every line still goes to the console logger.
+     */
+    public Closeable attachByStreamForAccount(
+            String accountId, String containerId, String logGroup, String stdoutStream, String stderrStream,
+            String region, String logPrefix) {
+        for (String logStream : new String[] {stdoutStream, stderrStream}) {
+            if (logStream != null) {
+                ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
+            }
+        }
+        BiConsumer<StreamType, String> emitter = (stream, line) -> {
+            String logged = logToConsole(logPrefix, line);
+            String logStream = stream == StreamType.STDERR ? stderrStream : stdoutStream;
+            if (logged != null && logStream != null) {
+                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
+            }
+        };
+        return follow(containerId, null,
+                new LogReassemblyCallback(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS, emitter));
+    }
+
+    /**
+     * Like {@link #attach}, but sends the output only to the console logger, not to CloudWatch Logs.
+     * Use it for a container whose output must stay visible locally but has no CloudWatch
+     * destination, such as an ECS container without an {@code awslogs} log configuration.
+     */
+    public Closeable attachConsoleOnly(String containerId, String logPrefix) {
+        return follow(containerId, null, line -> logToConsole(logPrefix, line));
+    }
+
+    /**
+     * A stream that logs each line written to it to the console logger as it arrives, as the attach methods
+     * log a container's: for the output of a command run in a container. A line is held only until its
+     * newline, or split at {@link LogLineBuffer}'s cap, so output without a newline holds no more than that.
+     * Closing it logs a last line that has no newline.
+     */
+    public static OutputStream consoleLines(String logPrefix) {
+        LogLineBuffer buffer = new LogLineBuffer();
+        return new OutputStream() {
+            @Override
+            public synchronized void write(int b) {
+                write(new byte[] {(byte) b}, 0, 1);
+            }
+
+            @Override
+            public synchronized void write(byte[] bytes, int offset, int length) {
+                byte[] payload = offset == 0 && length == bytes.length
+                        ? bytes : Arrays.copyOfRange(bytes, offset, offset + length);
+                buffer.append(payload).forEach(line -> logToConsole(logPrefix, line));
+            }
+
+            @Override
+            public synchronized void close() {
+                buffer.flush().ifPresent(line -> logToConsole(logPrefix, line));
+            }
+        };
+    }
+
+    // Logs a line of a container's output, prefixed, without its trailing whitespace; returns what it logged,
+    // or null for a blank line, which it drops.
+    private static String logToConsole(String logPrefix, String line) {
+        String trimmed = line.stripTrailing();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        LOG.infov("[{0}] {1}", logPrefix, trimmed);
+        return trimmed;
+    }
+
+    private Closeable follow(String containerId, Instant since, Consumer<String> emitter) {
+        return follow(containerId, since, new LogReassemblyCallback(emitter));
+    }
+
+    private Closeable follow(String containerId, Instant since, LogReassemblyCallback callback) {
+        try {
+            LogContainerCmd command = dockerClient.logContainerCmd(containerId)
+                    .withStdOut(true)
+                    .withStdErr(true)
+                    .withFollowStream(true)
+                    .withTimestamps(false);
+            if (since != null) {
+                command = command.withSince((int) since.getEpochSecond());
+            }
+            command.exec(callback);
+            return new ContainerLogHandle(callback);
+        } catch (Exception e) {
+            LOG.warnv("Could not attach log stream for container {0}: {1}", containerId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Streams the output of a {@code docker exec} to the same destinations as {@link #attach}.
+     *
+     * <p>Needed because {@code docker logs} (and therefore {@link #attach}, which uses
+     * {@code logContainerCmd}) only covers the container's PID 1 stdout/stderr. An exec runs on a
+     * separate Docker stream that never reaches that log, so a Lambda extension started via exec
+     * would otherwise produce no CloudWatch output at all — the opposite of what an observability
+     * extension is for.
+     *
+     * <p>The returned callback must be handed to {@code execStartCmd(...).exec(...)} by the caller,
+     * which owns the exec's lifecycle. Draining it is required regardless of logging: an undrained
+     * exec output pipe fills up and stalls the process on the other end.
+     *
+     * @param logPrefix console-only prefix (e.g. {@code "lambda:myFn:my-extension"}); the message
+     *                  forwarded to CloudWatch is left unprefixed so the log stream matches real
+     *                  AWS, which interleaves extension output with the function's own.
+     */
+    public ResultCallback.Adapter<Frame> execLogCallback(String logGroup, String logStream,
+                                                        String region, String logPrefix) {
+        return execLogCallbackForAccount(null, logGroup, logStream, region, logPrefix);
+    }
+
+    public ResultCallback.Adapter<Frame> execLogCallbackForAccount(
+            String accountId, String logGroup, String logStream, String region, String logPrefix) {
+        return execLogCallbackForAccount(accountId, logGroup, logStream, region, logPrefix, true);
+    }
+
+    /**
+     * Returns an exec callback that always forwards to CloudWatch Logs.
+     *
+     * @param logToConsole whether to also write each frame to the Floci console at INFO level
+     */
+    public ResultCallback.Adapter<Frame> execLogCallbackForAccount(
+            String accountId, String logGroup, String logStream, String region, String logPrefix,
+            boolean logToConsole) {
+        return frameCallback(accountId, logGroup, logStream, region, logPrefix, logToConsole);
+    }
+
+    /**
+     * Handles frames from Docker exec streams.
+     *
+     * @param accountId account that owns the destination log stream, or {@code null} for the
+     *                  default account
+     */
+    private ResultCallback.Adapter<Frame> frameCallback(String accountId, String logGroup, String logStream,
+                                                        String region, String logPrefix, boolean logToConsole) {
+        return new ResultCallback.Adapter<>() {
+            @Override
+            public void onNext(Frame frame) {
+                if (frame == null || frame.getPayload() == null) {
+                    return;
+                }
+                String line = new String(frame.getPayload(), StandardCharsets.UTF_8).stripTrailing();
+                if (!line.isEmpty()) {
+                    if (logToConsole) {
+                        LOG.infov("[{0}] {1}", logPrefix, line);
+                    }
+                    forwardToCloudWatchLogs(accountId, logGroup, logStream, region, line);
+                }
+            }
+        };
+    }
+
+    /**
+     * Creates a CloudWatch log group and stream if they don't already exist.
+     */
+    public void ensureLogGroupAndStream(String logGroup, String logStream, String region) {
+        ensureLogGroupAndStreamForAccount(null, logGroup, logStream, region);
+    }
+
+    public void ensureLogGroupAndStreamForAccount(
+            String accountId, String logGroup, String logStream, String region) {
+        try {
+            cloudWatchLogsService.createLogGroupForAccount(
+                    accountId, logGroup, null, null, region);
+        } catch (AwsException ignored) {
+            // Already exists
+        } catch (Exception e) {
+            LOG.warnv("Could not create CloudWatch log group {0}: {1}", logGroup, e.getMessage());
+        }
+
+        try {
+            cloudWatchLogsService.createLogStreamForAccount(
+                    accountId, logGroup, logStream, region);
+        } catch (AwsException ignored) {
+            // Already exists
+        } catch (Exception e) {
+            LOG.warnv("Could not create CloudWatch log stream {0}/{1}: {2}", logGroup, logStream, e.getMessage());
+        }
+    }
+
+    /**
+     * Generates a date-prefixed log stream name in the standard AWS format.
+     *
+     * @param suffix the suffix to append (e.g., "[$LATEST]abc123" or "containerId")
+     * @return log stream name like "2024/01/15/suffix"
+     */
+    public String generateLogStreamName(String suffix) {
+        return LOG_STREAM_DATE_FMT.format(LocalDate.now()) + "/" + suffix;
+    }
+
+    public void streamToCloudWatchLogs(String logGroup, String logStream, String region, String line) {
+        forwardToCloudWatchLogs(null, logGroup, logStream, region, line);
+    }
+
+    public void streamToCloudWatchLogsForAccount(
+            String accountId, String logGroup, String logStream, String region, String line) {
+        forwardToCloudWatchLogs(accountId, logGroup, logStream, region, line);
+    }
+
+    private void forwardToCloudWatchLogs(
+            String accountId, String logGroup, String logStream, String region, String line) {
+        try {
+            Map<String, Object> event = new HashMap<>();
+            event.put("timestamp", System.currentTimeMillis());
+            event.put("message", line);
+            cloudWatchLogsService.putLogEventsForAccount(
+                    accountId, logGroup, logStream, List.of(event), region);
+        } catch (Exception e) {
+            LOG.debugv("Could not forward log line to CloudWatch Logs: {0}", e.getMessage());
+        }
+    }
+
+    /**
+     * Docker frame callback that reassembles multiplexed stdout/stderr frames into newline-delimited
+     * lines and forwards each, with the stream it came from, to {@code lineConsumer}. One logical line can
+     * span several frames and one frame can carry several lines, so bytes are buffered per stream and
+     * emitted one line at a time (matching real AWS Lambda).
+     */
+    static final class LogReassemblyCallback extends ResultCallback.Adapter<Frame> {
+
+        // The idle core thread must time out. A permanent thread would keep executing-class
+        // references alive and pin the whole application classloader after shutdown, which
+        // accumulates across the many app restarts of a profile-switching test run.
+        private static final ScheduledExecutorService CLOSE_DRAIN_SCHEDULER = closeDrainScheduler();
+
+        private static ScheduledExecutorService closeDrainScheduler() {
+            ScheduledThreadPoolExecutor scheduler = new ScheduledThreadPoolExecutor(1, runnable -> {
+                Thread thread = new Thread(runnable, "floci-container-log-close");
+                thread.setDaemon(true);
+                return thread;
+            });
+            scheduler.setKeepAliveTime(5, TimeUnit.SECONDS);
+            scheduler.allowCoreThreadTimeOut(true);
+            return scheduler;
+        }
+        private static final long DEFAULT_CLOSE_GRACE_MILLIS = 2_000;
+
+        private final Map<StreamType, LogLineBuffer> buffers = new EnumMap<>(StreamType.class);
+        private final Map<StreamType, Long> tailSequences = new EnumMap<>(StreamType.class);
+        private final Deque<PendingLine> pendingLines = new ArrayDeque<>();
+        private final Object emissionLock = new Object();
+        // A fair write lock makes fallback finalization wait for callbacks already in progress, then blocks
+        // any later callback until the transport has been closed and the final tail has been flushed.
+        private final ReentrantReadWriteLock callbackGate = new ReentrantReadWriteLock(true);
+        private final BiConsumer<StreamType, String> lineConsumer;
+        private final long closeGraceMillis;
+        // Guarded by 'buffers'. Set only by the Docker transport terminal callback; afterwards onNext
+        // refuses to append, so nothing is ever buffered past the final flush.
+        private boolean terminated;
+        // Guarded by 'buffers'. The most recent callback with an unfinished tail gets the largest value.
+        private long nextTailSequence;
+        // Guarded by 'buffers'. Cancels when Docker supplies its terminal callback before the fallback.
+        private ScheduledFuture<?> fallbackFinalization;
+        // Guarded by 'emissionLock'. Exactly one caller drains pendingLines at a time, preserving Docker
+        // callback order even when a terminal callback and onNext run on different threads.
+        private boolean emitting;
+
+        LogReassemblyCallback(Consumer<String> lineConsumer) {
+            this(lineConsumer, DEFAULT_CLOSE_GRACE_MILLIS);
+        }
+
+        LogReassemblyCallback(Consumer<String> lineConsumer, long closeGraceMillis) {
+            this(closeGraceMillis, (stream, line) -> lineConsumer.accept(line));
+        }
+
+        LogReassemblyCallback(long closeGraceMillis, BiConsumer<StreamType, String> lineConsumer) {
+            this.lineConsumer = lineConsumer;
+            this.closeGraceMillis = closeGraceMillis;
+        }
+
+        @Override
+        public void onNext(Frame frame) {
+            callbackGate.readLock().lock();
+            try {
+                boolean emit;
+                synchronized (emissionLock) {
+                    synchronized (buffers) {
+                        if (terminated) {
+                            return; // the final drain has run; never append into a buffer that won't be flushed
+                        }
+                        LogLineBuffer buffer = buffers.computeIfAbsent(frame.getStreamType(), t -> new LogLineBuffer());
+                        for (String line : buffer.append(frame.getPayload())) {
+                            pendingLines.addLast(new PendingLine(frame.getStreamType(), line));
+                        }
+                        if (buffer.hasPendingBytes()) {
+                            tailSequences.put(frame.getStreamType(), nextTailSequence++);
+                        } else {
+                            tailSequences.remove(frame.getStreamType());
+                        }
+                    }
+                    emit = startEmissionIfNeeded();
+                }
+                if (emit) {
+                    emitPendingLines();
+                }
+            } finally {
+                callbackGate.readLock().unlock();
+            }
+        }
+
+        @Override
+        public void onComplete() {
+            callbackGate.readLock().lock();
+            try {
+                flush();
+                super.onComplete();
+            } finally {
+                callbackGate.readLock().unlock();
+            }
+        }
+
+        @Override
+        public void onError(Throwable throwable) {
+            callbackGate.readLock().lock();
+            try {
+                flush();
+                super.onError(throwable);
+            } finally {
+                callbackGate.readLock().unlock();
+            }
+        }
+
+        // Called only once ContainerLifecycleManager has stopped (or confirmed the absence of) the Docker
+        // container. Give its follow-log reader a bounded chance to deliver any queued frames and terminal
+        // callback without blocking lifecycle teardown. If no terminal arrives, close that reader before
+        // flushing so frames cannot continue after the fallback finalization boundary.
+        void closeAfterContainerStopped() {
+            synchronized (emissionLock) {
+                synchronized (buffers) {
+                    if (terminated || fallbackFinalization != null) {
+                        return;
+                    }
+                    fallbackFinalization = CLOSE_DRAIN_SCHEDULER.schedule(
+                            this::closeTransportAndFlush, closeGraceMillis, TimeUnit.MILLISECONDS);
+                }
+            }
+        }
+
+        // Flush trailing content never terminated by a newline once Docker has signalled the definitive
+        // end of its transport input.
+        private void flush() {
+            boolean emit;
+            synchronized (emissionLock) {
+                synchronized (buffers) {
+                    if (terminated) {
+                        return;
+                    }
+                    terminated = true;
+                    cancelFallbackFinalization();
+                    buffers.entrySet().stream()
+                            .sorted(Comparator.comparingLong(entry -> tailSequences.getOrDefault(
+                                    entry.getKey(), Long.MAX_VALUE)))
+                            .forEach(entry -> entry.getValue().flush()
+                                    .ifPresent(line -> pendingLines.addLast(new PendingLine(entry.getKey(), line))));
+                    tailSequences.clear();
+                }
+                emit = startEmissionIfNeeded();
+            }
+            if (emit) {
+                emitPendingLines();
+            }
+        }
+
+        private void closeTransportAndFlush() {
+            callbackGate.writeLock().lock();
+            try {
+                try {
+                    super.close();
+                } catch (IOException e) {
+                    LOG.debugv("Could not close container log transport: {0}", e.getMessage());
+                } finally {
+                    flush();
+                }
+            } finally {
+                callbackGate.writeLock().unlock();
+            }
+        }
+
+        private void cancelFallbackFinalization() {
+            if (fallbackFinalization != null) {
+                fallbackFinalization.cancel(false);
+                fallbackFinalization = null;
+            }
+        }
+
+        private boolean startEmissionIfNeeded() {
+            if (emitting) {
+                return false;
+            }
+            synchronized (buffers) {
+                if (pendingLines.isEmpty()) {
+                    return false;
+                }
+            }
+            emitting = true;
+            return true;
+        }
+
+        private void emitPendingLines() {
+            while (true) {
+                PendingLine pending;
+                synchronized (emissionLock) {
+                    synchronized (buffers) {
+                        pending = pendingLines.pollFirst();
+                        if (pending == null) {
+                            emitting = false;
+                            return;
+                        }
+                    }
+                }
+                lineConsumer.accept(pending.stream(), pending.line());
+            }
+        }
+
+        /** A reassembled line waiting to be emitted, and the stream it came from. */
+        private record PendingLine(StreamType stream, String line) {
+        }
+    }
+
+    /**
+     * The lifecycle-facing log handle. Closing it is valid only after the owning container has stopped;
+     * it gives Docker a bounded chance to deliver its terminal callback before a non-blocking fallback
+     * closes the reader and finalizes any tail.
+     */
+    static final class ContainerLogHandle implements Closeable {
+
+        private final LogReassemblyCallback callback;
+
+        ContainerLogHandle(LogReassemblyCallback callback) {
+            this.callback = callback;
+        }
+
+        @Override
+        public void close() throws IOException {
+            callback.closeAfterContainerStopped();
+        }
+    }
+
+    /**
+     * Reassembles newline-delimited log lines from Docker multiplexed frame payloads.
+     * A single logical line can be split across several frames (Docker chunks large
+     * writes) and a single frame can carry several lines, so buffering bytes and
+     * emitting exactly one line per {@code '\n'} avoids both splitting long lines and
+     * merging short ones. Bytes are buffered and each complete line decoded as UTF-8,
+     * so a multibyte character straddling a frame boundary is not corrupted.
+     */
+    static final class LogLineBuffer {
+
+        /**
+         * Cap on a single reconstructed line, matching CloudWatch Logs' maximum event size
+         * (256 KB). A longer run with no newline is force-split at the cap, so a container
+         * emitting unbounded output without a newline cannot grow the buffer until the heap
+         * is exhausted. A valid UTF-8 event is split at the limit without cutting a character.
+         */
+        private static final int MAX_LINE_BYTES = 256 * 1024;
+
+        private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+
+        /** Continuation bytes still needed to complete the character at the buffer's tail; 0 means the
+         *  buffer currently ends on a UTF-8 character boundary. */
+        private int pendingContinuation;
+
+        /** Appends a frame payload and returns the complete lines it produced (possibly none). */
+        List<String> append(byte[] payload) {
+            int size = buffer.size();
+            boolean fitsWithinLimit = payload.length <= MAX_LINE_BYTES - 3 - size;
+            // A complete frame safely below the cap needs no byte-level reassembly or UTF-8 tracking.
+            // Keep empty lines, including the one before a final newline, for the emitter to handle.
+            if (size == 0 && payload.length > 0 && fitsWithinLimit && payload[payload.length - 1] == '\n') {
+                return Arrays.asList(new String(payload, 0, payload.length - 1, StandardCharsets.UTF_8)
+                        .split("\n", -1));
+            }
+            List<String> lines = new ArrayList<>();
+            int start = 0;
+            for (int i = 0; i < payload.length; i++) {
+                byte b = payload[i];
+                if (b == '\n') {
+                    lines.add(takeLine(payload, start, i));
+                    start = i + 1;
+                    size = 0;
+                    continue;
+                }
+                // Away from the cap, only the final four bytes can affect the next frame's UTF-8 state.
+                if (fitsWithinLimit) {
+                    if (i >= payload.length - 4) {
+                        trackUtf8(b);
+                    }
+                    continue;
+                }
+                // Force-split BEFORE a character that would push the buffer past the cap, so the emitted
+                // event never exceeds MAX_LINE_BYTES and a multibyte character straddling the limit starts
+                // the next event whole instead of inflating this one. Only at a character boundary, and
+                // only for a real character start (not a continuation byte).
+                if (pendingContinuation == 0 && (b & 0xC0) != 0x80
+                        && size > 0
+                        && size + utf8CharLength(b) > MAX_LINE_BYTES) {
+                    lines.add(takeLine(payload, start, i));
+                    start = i;
+                    size = 0;
+                }
+                size++;
+                trackUtf8(b);
+                if ((size >= MAX_LINE_BYTES && pendingContinuation == 0)
+                        || size >= MAX_LINE_BYTES + 3) {
+                    // Do not split a valid character whose continuation bytes arrive in a later frame.
+                    // Malformed input may never reach a boundary, so allow at most the three continuation
+                    // bytes a valid UTF-8 character could need before forcing the buffer to drain.
+                    lines.add(takeLine(payload, start, i + 1));
+                    start = i + 1;
+                    size = 0;
+                }
+            }
+            if (start < payload.length) {
+                buffer.write(payload, start, payload.length - start);
+            }
+            return lines;
+        }
+
+        /** Byte length of the UTF-8 character starting with {@code b} (1 for ASCII or an invalid lead byte). */
+        private static int utf8CharLength(byte b) {
+            int v = b & 0xFF;
+            if ((v & 0x80) == 0x00) return 1;   // 0xxxxxxx — ASCII
+            if ((v & 0xE0) == 0xC0) return 2;   // 110xxxxx
+            if ((v & 0xF0) == 0xE0) return 3;   // 1110xxxx
+            if ((v & 0xF8) == 0xF0) return 4;   // 11110xxx
+            return 1;                            // invalid lead byte
+        }
+
+        /** Returns any buffered content not yet terminated by a newline, clearing the buffer. */
+        Optional<String> flush() {
+            return buffer.size() == 0 ? Optional.empty() : Optional.of(takeLine());
+        }
+
+        boolean hasPendingBytes() {
+            return buffer.size() > 0;
+        }
+
+        /** Updates how many UTF-8 continuation bytes are still expected after appending byte {@code b}. */
+        private void trackUtf8(byte b) {
+            int v = b & 0xFF;
+            if ((v & 0x80) == 0x00) {          // 0xxxxxxx — ASCII, self-contained
+                pendingContinuation = 0;
+            } else if ((v & 0xC0) == 0x80) {   // 10xxxxxx — continuation byte
+                if (pendingContinuation > 0) {
+                    pendingContinuation--;
+                }
+                // a stray continuation (no preceding lead) leaves the tail on a boundary
+            } else if ((v & 0xE0) == 0xC0) {   // 110xxxxx — 2-byte lead
+                pendingContinuation = 1;
+            } else if ((v & 0xF0) == 0xE0) {   // 1110xxxx — 3-byte lead
+                pendingContinuation = 2;
+            } else if ((v & 0xF8) == 0xF0) {   // 11110xxx — 4-byte lead
+                pendingContinuation = 3;
+            } else {                            // 0xF8-0xFF — invalid lead byte
+                pendingContinuation = 0;
+            }
+        }
+
+        private String takeLine(byte[] payload, int start, int end) {
+            if (!hasPendingBytes()) {
+                pendingContinuation = 0;
+                return new String(payload, start, end - start, StandardCharsets.UTF_8);
+            }
+            buffer.write(payload, start, end - start);
+            return takeLine();
+        }
+
+        private String takeLine() {
+            String line = buffer.toString(StandardCharsets.UTF_8);
+            buffer.reset();
+            pendingContinuation = 0;
+            return line;
+        }
+    }
+}

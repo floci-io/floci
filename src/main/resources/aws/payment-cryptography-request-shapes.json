@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_payment_cryptography_shapes.py",
-    "botocore": "botocore 1.43.113 (installed package)"
+    "botocore": "botocore 1.43.118 (installed package)"
   },
   "operations": {
     "CreateKey": "CreateKeyInput",
@@ -143,13 +143,13 @@
       "type": "string",
       "min": 70,
       "max": 150,
-      "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2}-[a-z]{1,16}-[0-9]+:[0-9]{12}:key/[0-9a-zA-Z]{16,64}"
+      "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2,4}(-[a-z]{1,16})+-[0-9]+:[0-9]{12}:key/[0-9a-zA-Z]{16,64}"
     },
     "KeyArnOrKeyAliasType": {
       "type": "string",
       "min": 7,
       "max": 322,
-      "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2}-[a-z]{1,16}-[0-9]+:[0-9]{12}:(key/[0-9a-zA-Z]{16,64}|alias/[a-zA-Z0-9/_-]+)$|^alias/[a-zA-Z0-9/_-]+"
+      "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2,4}(-[a-z]{1,16})+-[0-9]+:[0-9]{12}:(key/[0-9a-zA-Z]{16,64}|alias/[a-zA-Z0-9/_-]+)$|^alias/[a-zA-Z0-9/_-]+"
     },
     "KeyAttributes": {
       "type": "structure",
@@ -278,7 +278,7 @@
     },
     "Region": {
       "type": "string",
-      "pattern": "[a-z]{2}-[a-z]{1,16}-[0-9]+"
+      "pattern": "[a-z]{2,4}(-[a-z]{1,16})+-[0-9]+"
     },
     "Regions": {
       "type": "list",
@@ -288,7 +288,7 @@
       "type": "string",
       "min": 70,
       "max": 150,
-      "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2}-[a-z]{1,16}-[0-9]+:[0-9]{12}:key/[0-9a-zA-Z]{16,64}"
+      "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2,4}(-[a-z]{1,16})+-[0-9]+:[0-9]{12}:key/[0-9a-zA-Z]{16,64}"
     },
     "Tag": {
       "type": "structure",

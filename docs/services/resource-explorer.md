@@ -115,6 +115,11 @@ map as empty.
 | SSM | `ssm:parameter` |
 | Step Functions | `states:statemachine` |
 
+Lambda MicroVM images (`lambda:microvm-image`) and network connectors
+(`lambda:network-connector`) are discoverable through `Search`, `ListResources` and the Resource
+Groups Tagging API, but `ListSupportedResourceTypes` does not list them, because AWS does not
+advertise them.
+
 API Gateway ARNs carry no account; its resources report the calling account as their owner.
 Route 53 is not discoverable yet: `Route53Service` resolves no account id, and a hosted zone's ARN
 has neither a Region nor an account. It is waiting on a field, not on new query support.

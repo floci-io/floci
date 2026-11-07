@@ -1,0 +1,208 @@
+package io.floci.aws.services.ecs.container;
+
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.docker.ContainerBuilder;
+import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.floci.aws.core.common.docker.ContainerLogStreamer;
+import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.services.ecr.registry.EcrRegistryManager;
+import io.floci.aws.services.ecs.model.ContainerDefinition;
+import io.floci.aws.services.ecs.model.ContainerOverride;
+import io.floci.aws.services.ecs.model.EcsTask;
+import io.floci.aws.services.ecs.model.KeyValuePair;
+import io.floci.aws.services.ecs.model.TaskDefinition;
+import io.floci.aws.services.lambda.launcher.ImageCacheService.LaunchImage;
+import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.secretsmanager.SecretsManagerService;
+import io.floci.aws.services.ssm.SsmService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+
+import java.util.List;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+/**
+ * Unit tests for the AWS SDK baseline environment injected into ECS task containers by
+ * {@link EcsContainerManager#startTask}. The baseline (region, credentials and the Floci
+ * endpoint) is added as an <em>overridable default</em>: it is present unless the task
+ * definition or a RunTask {@code containerOverride} sets the same key, in which case the
+ * explicit value wins so a task's own configuration is never clobbered.
+ *
+ * <p>The container builder, lifecycle manager and {@link LaunchedContainerAwsEnv} are mocked,
+ * so the test asserts the env that <em>would</em> be handed to Docker without launching a
+ * container — runnable under {@code mvn test} (CI) with no Docker daemon.
+ */
+class EcsContainerManagerAwsBaselineTest {
+
+    private ContainerBuilder containerBuilder;
+    private ContainerBuilder.Builder builder;
+    private LaunchedContainerAwsEnv awsEnv;
+    private EcsContainerManager manager;
+
+    @BeforeEach
+    void setUp() {
+        builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        containerBuilder = mock(ContainerBuilder.class);
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
+
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
+                .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
+        when(lifecycleManager.createAndStartEphemeral(any(), any()))
+                .thenReturn(new ContainerInfo("docker-id", Map.of()));
+
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        RegionResolver regionResolver = mock(RegionResolver.class);
+
+        awsEnv = mock(LaunchedContainerAwsEnv.class);
+        when(awsEnv.sdkBaselineEnv(anyString(), any())).thenReturn(List.of(
+                "AWS_DEFAULT_REGION=us-east-1",
+                "AWS_REGION=us-east-1",
+                "AWS_ACCESS_KEY_ID=test",
+                "AWS_ENDPOINT_URL=http://localhost:4566"));
+
+        EcrRegistryManager ecrRegistryManager = mock(EcrRegistryManager.class);
+        when(ecrRegistryManager.rewriteImageUri(anyString())).thenAnswer(inv -> inv.getArgument(0));
+
+        manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
+                containerDetector, config, regionResolver, awsEnv, mock(SsmService.class),
+                mock(SecretsManagerService.class), mock(S3Service.class), ecrRegistryManager, mock(HostVolumePolicy.class));
+    }
+
+    @Test
+    void injectsAwsBaselineAsOverridableDefaults() {
+        ContainerDefinition app = containerDef("app", "app:latest",
+                // Task def overrides one baseline key (AWS_REGION) and adds its own key.
+                List.of(new KeyValuePair("AWS_REGION", "eu-west-1"),
+                        new KeyValuePair("APP_ONLY", "1")));
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(app));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        manager.startTask(task, taskDef, null, "us-east-1");
+
+        // The baseline is resolved for the task's region.
+        verify(awsEnv).sdkBaselineEnv(eq("us-east-1"), any());
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withEnv(envCaptor.capture());
+        List<String> env = envCaptor.getValue();
+
+        // Baseline entries are injected...
+        assertTrue(env.contains("AWS_ENDPOINT_URL=http://localhost:4566"),
+                "AWS endpoint baseline should be injected into the task container");
+        assertTrue(env.contains("AWS_ACCESS_KEY_ID=test"),
+                "credential baseline should be injected when not overridden");
+        // ...but the task def wins on a key conflict (baseline is overridable).
+        assertTrue(env.contains("AWS_REGION=eu-west-1"),
+                "task-def value should override the baseline on key conflict");
+        assertFalse(env.contains("AWS_REGION=us-east-1"),
+                "overridden baseline value should not remain");
+        // Task-def-only entries are preserved.
+        assertTrue(env.contains("APP_ONLY=1"));
+    }
+
+    @Test
+    void aTaskContainersJvmsTrustFlocisCa() {
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(containerDef("app", "app:latest", List.of())));
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        manager.startTask(task, taskDef, null, "us-east-1");
+
+        verify(builder).withJavaTrustStore();
+    }
+
+    @Test
+    void runTaskOverrideWinsOverBaseline() {
+        ContainerDefinition app = containerDef("app", "app:latest", List.of());
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(app));
+
+        ContainerOverride override = new ContainerOverride();
+        override.setName("app");
+        override.setEnvironment(List.of(new KeyValuePair("AWS_ENDPOINT_URL", "http://override:9999")));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        manager.startTask(task, taskDef, List.of(override), "us-east-1");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withEnv(envCaptor.capture());
+        List<String> env = envCaptor.getValue();
+
+        assertTrue(env.contains("AWS_ENDPOINT_URL=http://override:9999"),
+                "RunTask containerOverride should win over the baseline");
+        assertFalse(env.contains("AWS_ENDPOINT_URL=http://localhost:4566"),
+                "overridden baseline endpoint should not remain");
+    }
+
+    @Test
+    void injectsTheTaskMetadataEndpointEachContainerCanReach() {
+        when(awsEnv.flociEndpoint()).thenReturn("http://host.docker.internal:4566");
+
+        ContainerDefinition app = containerDef("app", "app:latest", List.of());
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(app));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        manager.startTask(task, taskDef, null, "us-east-1");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> envCaptor = ArgumentCaptor.forClass(List.class);
+        verify(builder).withEnv(envCaptor.capture());
+        String metadataUri = envCaptor.getValue().stream()
+                .filter(entry -> entry.startsWith("ECS_CONTAINER_METADATA_URI_V4="))
+                .findFirst()
+                .orElse(null);
+
+        assertNotNull(metadataUri, "every launched container is told where its metadata lives");
+        assertTrue(metadataUri.startsWith("ECS_CONTAINER_METADATA_URI_V4=http://host.docker.internal:4566/v4/"),
+                "the metadata URI must point at Floci's own v4 path: " + metadataUri);
+        // The id in the URI is the one the container is then found by.
+        String id = metadataUri.substring(metadataUri.lastIndexOf('/') + 1);
+        assertEquals(id, task.getContainers().getFirst().getMetadataId());
+    }
+
+    private static ContainerDefinition containerDef(String name, String image, List<KeyValuePair> env) {
+        ContainerDefinition def = new ContainerDefinition();
+        def.setName(name);
+        def.setImage(image);
+        def.setEnvironment(env);
+        return def;
+    }
+}

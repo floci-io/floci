@@ -48,10 +48,11 @@ jobs:
     name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     # A runaway-job kill switch, not a budget: Actions bills the minutes a job actually uses, so a
-    # higher ceiling costs nothing until something hangs. It did stop being a kill switch once the
+    # higher ceiling adds cost only when a job runs longer. It stopped being a kill switch once the
     # suite grew into it: on 2026-11-02 one shard was cut here twice at 25m15s and 25m26s with no
-    # test having failed, which is why the suite runs in five shards rather than four.
-    timeout-minutes: 25
+    # test having failed, which is why the suite runs in five shards rather than four. A later
+    # shard's Run tests step was canceled at the 25-minute job limit; leave room for normal variance.
+    timeout-minutes: 35
     # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
     # Written on the job rather than as a gate job so it costs no runner. Pushes to main
     # always run; `closed` and `edited` are excluded so widening the trigger types cannot
@@ -127,16 +128,15 @@ jobs:
           cmp -s all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" \
             || { echo "::error::test class list from src/test/java differs from target/test-classes:"; diff all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" | head -50; exit 1; }
 
-      # surefire.timeout kills a fork whose test ignores JUnit's interrupt (deadlock, blocking
-      # I/O). It caps the whole shard (one fork runs all its tests), so 20 min leaves room above
-      # the slowest shard, about 12.5 min of tests across five, and still lets surefire report
-      # before the 25-minute job limit.
+      # surefire.timeout bounds the reused test fork for 25 minutes from its first test set,
+      # including deadlocks or blocking I/O that ignore JUnit's interrupt. The 35-minute job
+      # ceiling also covers compilation, test startup, and report upload.
       - name: Run tests
         run: >
           ./mvnw surefire:test -B
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
           -Dsurefire.failIfNoTests=true
-          -Dsurefire.timeout=1200
+          -Dsurefire.timeout=1500
 
       # The prefetch runs in the background past its own step, so its per-image
       # results are only complete once the tests are done. A pull still running

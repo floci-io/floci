@@ -1,0 +1,474 @@
+package io.floci.aws.services.codeartifact;
+
+import io.floci.aws.core.common.Digests;
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import java.nio.charset.StandardCharsets;
+import java.util.Map;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.emptyIterable;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+
+@QuarkusTest
+class CodeArtifactIntegrationTest {
+    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=AKID/20260904/us-east-1/codeartifact/aws4_request";
+
+    @BeforeAll
+    static void configureRestAssured() { RestAssuredJsonUtils.configureAwsContentTypes(); }
+
+    @Test
+    void domainAndRepositoryLifecycle() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"tags\":[{\"key\":\"owner\",\"value\":\"platform\"}]}")
+                .post("/v1/domain?domain=lifecycle-domain")
+                .then().statusCode(200)
+                .body("domain.name", equalTo("lifecycle-domain"))
+                .body("domain.repositoryCount", equalTo(0))
+                .body("domain.arn", notNullValue());
+
+        given().header("Authorization", AUTH).get("/v1/domain?domain=lifecycle-domain")
+                .then().statusCode(200).body("domain.status", equalTo("Active"));
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"description\":\"a repo\"}")
+                .post("/v1/repository?domain=lifecycle-domain&repository=lifecycle-repo")
+                .then().statusCode(200)
+                .body("repository.name", equalTo("lifecycle-repo"))
+                .body("repository.domainName", equalTo("lifecycle-domain"))
+                .body("repository.upstreams", emptyIterable());
+
+        given().header("Authorization", AUTH)
+                .get("/v1/repository/endpoint?domain=lifecycle-domain&repository=lifecycle-repo&format=npm")
+                .then().statusCode(200)
+                .body("repositoryEndpoint", equalTo("http://localhost:4566/codeartifact/npm/lifecycle-domain/lifecycle-repo/"));
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/domain?domain=lifecycle-domain")
+                .then().statusCode(409).body("__type", equalTo("ConflictException"));
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/repository?domain=lifecycle-domain&repository=lifecycle-repo")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/domain?domain=lifecycle-domain")
+                .then().statusCode(200).body("domain.name", equalTo("lifecycle-domain"));
+
+        // AWS returns ResourceNotFoundException here although the API reference does not list it on DeleteDomain.
+        given().header("Authorization", AUTH)
+                .delete("/v1/domain?domain=lifecycle-domain")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void tagResourceListTagsAndUntagResourceRoundTrip() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=tag-domain").then().statusCode(200);
+
+        String arn = "arn:aws:codeartifact:us-east-1:000000000000:domain/tag-domain";
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"tags\":[{\"key\":\"team\",\"value\":\"data\"}]}")
+                .post("/v1/tag?resourceArn=" + arn)
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .post("/v1/tags?resourceArn=" + arn)
+                .then().statusCode(200)
+                .body("tags", hasSize(1))
+                .body("tags[0].key", equalTo("team"))
+                .body("tags[0].value", equalTo("data"));
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"tagKeys\":[\"team\"]}")
+                .post("/v1/untag?resourceArn=" + arn)
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .post("/v1/tags?resourceArn=" + arn)
+                .then().statusCode(200).body("tags", hasSize(0));
+    }
+
+    @Test
+    void listDomainsReturnsSummaryShapeNotFullDescription() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=summary-domain").then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+                .post("/v1/domains")
+                .then().statusCode(200)
+                .body("domains.find { it.name == 'summary-domain' }.owner", notNullValue())
+                .body("domains.find { it.name == 'summary-domain' }.repositoryCount", equalTo(null));
+    }
+
+    @Test
+    void deleteRepositoryPermissionsPolicyUsesPluralPath() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=policy-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=policy-domain&repository=policy-repo")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"policyDocument\":\"{}\"}")
+                .put("/v1/repository/permissions/policy?domain=policy-domain&repository=policy-repo")
+                .then().statusCode(200).body("policy.document", equalTo("{}"));
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/repository/permissions/policies?domain=policy-domain&repository=policy-repo")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void createRepositoryUnderMissingDomainReturnsNotFound() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=no-such-domain&repository=valid-repo")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void invalidDomainNameReturnsValidationError() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=NOT-VALID")
+                .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void publishDescribeAndGetPackageVersionAssetRoundTripExactBytes() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=pkg-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=pkg-domain&repository=pkg-repo").then().statusCode(200);
+
+        byte[] content = "hello codeartifact".getBytes(StandardCharsets.UTF_8);
+        String sha256 = Digests.sha256Hex(content);
+
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256)
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=pkg-domain&repository=pkg-repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0&asset=asset.txt")
+                .then().statusCode(200)
+                .body("status", equalTo("Published"))
+                .body("versionRevision", notNullValue())
+                .body("asset.name", equalTo("asset.txt"))
+                .body("asset.size", equalTo(content.length))
+                .body("asset.hashes.'SHA-256'", equalTo(sha256));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=pkg-domain&repository=pkg-repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0")
+                .then().statusCode(200)
+                .body("packageVersion.status", equalTo("Published"))
+                .body("packageVersion.origin.originType", equalTo("INTERNAL"));
+
+        byte[] downloaded = given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=pkg-domain&repository=pkg-repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0&asset=asset.txt")
+                .then().statusCode(200)
+                .header("X-AssetName", equalTo("asset.txt"))
+                .extract().asByteArray();
+        assertArrayEquals(content, downloaded);
+
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256)
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=pkg-domain&repository=pkg-repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0&asset=another.txt")
+                .then().statusCode(409).body("__type", equalTo("ConflictException"));
+    }
+
+    @Test
+    void describePackageReturnsTheDirectPublishOriginControlsAndReportsUnknownPackages() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=describe-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=describe-domain&repository=repo").then().statusCode(200);
+        byte[] content = "describe".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", Digests.sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=describe-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=describe-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg")
+                .then().statusCode(200)
+                .body("package.format", equalTo("generic"))
+                .body("package.namespace", equalTo("ns"))
+                .body("package.name", equalTo("my-pkg"))
+                .body("package.originConfiguration.restrictions.publish", equalTo("ALLOW"))
+                .body("package.originConfiguration.restrictions.upstream", equalTo("BLOCK"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=describe-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=no-such-package")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void deletePackageUsesThePackageFieldNameAndRemovesEveryVersion() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=delete-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=delete-domain&repository=repo").then().statusCode(200);
+        byte[] content = "delete-me".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", Digests.sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=delete-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=delete-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg")
+                .then().statusCode(200)
+                .body("deletedPackage.format", equalTo("generic"))
+                .body("deletedPackage.namespace", equalTo("ns"))
+                .body("deletedPackage.package", equalTo("my-pkg"))
+                .body("deletedPackage.originConfiguration.restrictions.publish", equalTo("ALLOW"))
+                .body("deletedPackage.originConfiguration.restrictions.upstream", equalTo("BLOCK"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=delete-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=delete-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(404);
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=delete-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=my-pkg")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void deletePackageVersionsRouteRemovesAVersionAndDescribeReturnsNotFound() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=delete-versions-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=delete-versions-domain&repository=repo")
+                .then().statusCode(200);
+        byte[] content = "delete-version-me".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", Digests.sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=delete-versions-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/delete?domain=delete-versions-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg")
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Deleted"))
+                .body("failedVersions", equalTo(Map.of()));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=delete-versions-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/delete?domain=delete-versions-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg")
+                .then().statusCode(200)
+                .body("successfulVersions", equalTo(Map.of()))
+                .body("failedVersions.'1.0.0'.errorCode", equalTo("NOT_FOUND"));
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/repository?domain=delete-versions-domain&repository=repo")
+                .then().statusCode(200);
+        given().header("Authorization", AUTH)
+                .delete("/v1/domain?domain=delete-versions-domain")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void putPackageOriginConfigurationCreatesAPackageAndItsRestrictionsSurviveDescribeAndDelete() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=origin-config-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=origin-config-domain&repository=repo")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"restrictions\":{\"publish\":\"BLOCK\",\"upstream\":\"ALLOW\"}}")
+                .post("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(200)
+                .body("originConfiguration.restrictions.publish", equalTo("BLOCK"))
+                .body("originConfiguration.restrictions.upstream", equalTo("ALLOW"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(200)
+                .body("package.originConfiguration.restrictions.publish", equalTo("BLOCK"))
+                .body("package.originConfiguration.restrictions.upstream", equalTo("ALLOW"));
+
+        byte[] content = "blocked".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", Digests.sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=origin-config-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=never-published&version=1.0.0&asset=a.txt")
+                .then().statusCode(409).body("__type", equalTo("ConflictException"));
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(200)
+                .body("deletedPackage.originConfiguration.restrictions.publish", equalTo("BLOCK"))
+                .body("deletedPackage.originConfiguration.restrictions.upstream", equalTo("ALLOW"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package?domain=origin-config-domain&repository=repo&format=generic&namespace=ns"
+                        + "&package=never-published")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void copyPackageVersionsCopiesOneVersionAndSkipsASiblingWhenAnotherVersionIsNotFound() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=copy-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=copy-domain&repository=src-repo").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=copy-domain&repository=dst-repo").then().statusCode(200);
+
+        byte[] content = "copy-me".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", Digests.sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=copy-domain&repository=src-repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/copy?domain=copy-domain&source-repository=src-repo"
+                        + "&destination-repository=dst-repo&format=generic&namespace=ns&package=my-pkg")
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Published"))
+                .body("successfulVersions.'1.0.0'.revision", notNullValue())
+                .body("failedVersions", equalTo(Map.of()));
+
+        byte[] copied = given().header("Authorization", AUTH)
+                .get("/v1/package/version/asset?domain=copy-domain&repository=dst-repo&format=generic&namespace=ns"
+                        + "&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertArrayEquals(content, copied);
+
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", Digests.sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=copy-domain&repository=src-repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=2.0.0&asset=a.txt")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"2.0.0\",\"9.9.9\"]}")
+                .post("/v1/package/versions/copy?domain=copy-domain&source-repository=src-repo"
+                        + "&destination-repository=dst-repo&format=generic&namespace=ns&package=my-pkg")
+                .then().statusCode(200)
+                .body("successfulVersions", equalTo(Map.of()))
+                .body("failedVersions.'9.9.9'.errorCode", equalTo("NOT_FOUND"))
+                .body("failedVersions.'2.0.0'.errorCode", equalTo("SKIPPED"));
+    }
+
+    /**
+     * Found by Qodo review: a non-string element in the versions array (e.g. a bare number) used
+     * to become a null list entry that reached List.copyOf before any validation ran, throwing an
+     * unhandled NullPointerException instead of a clean ValidationException. This shape error is
+     * caught while parsing the request body, before any domain or repository lookup, so (unlike
+     * every other test in this class) it needs no domain/repository of its own to demonstrate.
+     */
+    @Test
+    void copyPackageVersionsRejectsANonStringVersionsElementAsAValidationErrorNotAServerError() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\",123]}")
+                .post("/v1/package/versions/copy?domain=no-such-domain&source-repository=no-such-repo"
+                        + "&destination-repository=no-such-repo&format=generic&namespace=ns&package=my-pkg")
+                .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void unfinishedPublishKeepsVersionOpenForMoreAssets() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=unfinished-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=unfinished-domain&repository=repo").then().statusCode(200);
+
+        byte[] content = "partial".getBytes(StandardCharsets.UTF_8);
+        String sha256 = Digests.sha256Hex(content);
+
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", sha256)
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=unfinished-domain&repository=repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0&asset=a.txt&unfinished=true")
+                .then().statusCode(200).body("status", equalTo("Unfinished"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=unfinished-domain&repository=repo&format=generic"
+                        + "&package=my-pkg&version=1.0.0")
+                .then().statusCode(200).body("packageVersion.status", equalTo("Unfinished"));
+    }
+
+    @Test
+    void missingRequiredQueryParamsReturnValidationExceptionNotServerError() {
+        given().header("Authorization", AUTH).get("/v1/domain")
+                .then().statusCode(400).body("__type", equalTo("ValidationException"));
+
+        given().header("Authorization", AUTH).get("/v1/repository")
+                .then().statusCode(400).body("__type", equalTo("ValidationException"));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/repository/endpoint?repository=r&format=npm")
+                .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void getAuthorizationTokenReturnsATokenAndExpiration() {
+        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+                .post("/v1/domain?domain=token-domain")
+                .then().statusCode(200);
+
+        given().header("Authorization", AUTH)
+                .post("/v1/authorization-token?domain=token-domain")
+                .then().statusCode(200)
+                .body("authorizationToken", notNullValue())
+                .body("expiration", notNullValue());
+
+        given().header("Authorization", AUTH)
+                .post("/v1/authorization-token?domain=does-not-exist")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().header("Authorization", AUTH)
+                .post("/v1/authorization-token?domain=token-domain&duration=899")
+                .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    /**
+     * Proves the npm route is genuinely wired into the running instance ({@code @Observes
+     * Router} registration, the {@code ServiceConfigAccess} enablement check, and the token
+     * check), the one thing {@code CodeArtifactNpmDataPlaneTest} cannot: it builds the class by
+     * hand rather than through CDI, so it proves nothing about whether the observer actually
+     * registers. A missing token is rejected before the named domain or repository is looked up,
+     * so this needs neither to exist, and needs no Docker.
+     */
+    @Test
+    void npmEndpointRejectsAMissingTokenWithoutADomainOrRepositoryExisting() {
+        given().get("/codeartifact/npm/no-such-domain/no-such-repo/lodash")
+                .then().statusCode(401)
+                .header("WWW-Authenticate", equalTo("Bearer"));
+    }
+}

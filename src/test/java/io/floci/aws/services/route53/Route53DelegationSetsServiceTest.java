@@ -1,0 +1,412 @@
+package io.floci.aws.services.route53;
+
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.route53.model.DelegationSet;
+import io.floci.aws.services.route53.model.HostedZone;
+import io.floci.aws.services.route53.model.ResourceRecord;
+import io.floci.aws.services.route53.model.ResourceRecordSet;
+import io.floci.aws.services.route53.model.VpcAssociation;
+import io.floci.aws.testing.StorageFactories;
+import jakarta.enterprise.inject.Instance;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+class Route53DelegationSetsServiceTest {
+    private static final String ACCOUNT = "741686000020";
+
+    @TempDir
+    Path directory;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void setsAndZoneLinksSurviveStorageReloadAndConfigurationChanges(String mode) {
+        DelegationSet set;
+        String zoneId;
+        try (Fixture fixture = fixture(mode, "original")) {
+            HostedZone zone = fixture.service().createHostedZone("saved.example.", "source", null, null).zone();
+            zoneId = zone.getId();
+            set = fixture.service().createReusableDelegationSet("saved", "/hostedzone/" + zoneId);
+        }
+        try (Fixture reloaded = fixture(mode, "changed")) {
+            Route53Service service = reloaded.service();
+            assertEquals(set, service.getReusableDelegationSet("/delegationset/" + set.id()));
+            assertEquals(set, service.getDelegationSet(service.getHostedZone(zoneId)));
+            assertError("DelegationSetInUse", () -> service.deleteReusableDelegationSet(set.id()));
+            assertError("DelegationSetAlreadyCreated", () -> service.createReusableDelegationSet("saved", null));
+            HostedZone next = service.createHostedZone("next.example.", "next", null, null, set.id()).zone();
+            assertEquals(set, service.getDelegationSet(next));
+            assertTrue(service.listResourceRecordSets(next.getId(), null, null, 100).stream()
+                    .filter(record -> "SOA".equals(record.getType())).findFirst().orElseThrow()
+                    .getRecords().getFirst().getValue().startsWith(set.nameServers().getFirst() + ". "));
+            service.deleteHostedZone(next.getId());
+            service.deleteHostedZone(zoneId);
+            service.deleteReusableDelegationSet(set.id());
+        }
+        try (Fixture reloaded = fixture(mode, "changed")) {
+            assertEquals(0, reloaded.service().getReusableDelegationSetCount());
+            assertEquals(0, reloaded.service().getHostedZoneCount());
+        }
+    }
+
+    @Test
+    void aForeignReadCannotClaimAnOwnerlessLegacyZoneBeforePromotion() {
+        RequestContext context = new RequestContext();
+        context.setAccountId("741686000099");
+        @SuppressWarnings("unchecked")
+        Instance<RequestContext> instance = mock(Instance.class);
+        when(instance.get()).thenReturn(context);
+        InMemoryStorage<String, HostedZone> legacy = new InMemoryStorage<>();
+        legacy.put("ZLEGACY", new HostedZone("ZLEGACY", "legacy.example.", "legacy", null, false));
+        AccountAwareStorageBackend<HostedZone> zones = new AccountAwareStorageBackend<>(legacy, instance, ACCOUNT);
+        StorageFactory factory = mock(StorageFactory.class);
+        when(factory.create(anyString(), anyString(), any())).thenAnswer(invocation ->
+                "route53-zones.json".equals(invocation.getArgument(1)) ? zones : AccountAwareStorageBackend.inMemory(ACCOUNT));
+        RegionResolver resolver = mock(RegionResolver.class);
+        when(resolver.getAccountId()).thenAnswer(ignored -> context.getAccountId());
+        Route53Service service = new Route53Service(factory, config("original"), resolver, mock(Ec2Service.class));
+        AwsException read = assertThrows(AwsException.class, () -> service.getHostedZone("ZLEGACY"));
+        assertEquals("NoSuchHostedZone", read.getErrorCode());
+        assertEquals(404, read.getHttpStatus());
+        assertError("HostedZoneNotFound", () -> service.createReusableDelegationSet("foreign", "ZLEGACY"));
+        context.setAccountId(ACCOUNT);
+        service.createReusableDelegationSet("owner", "ZLEGACY");
+        assertEquals(1, service.getReusableDelegationSetCount());
+    }
+
+    @Test
+    void aForeignCallerCannotPromoteAnUnscopedLegacyZone() throws Exception {
+        seedLegacyZone();
+        try (Fixture fixture = fixture("persistent", "original", "741686000099")) {
+            assertError("HostedZoneNotFound", () -> fixture.service().createReusableDelegationSet("foreign", "ZLEGACY"));
+            assertEquals(0, fixture.service().getReusableDelegationSetCount());
+        }
+    }
+
+    @Test
+    void legacyPublicZonesUsePersistedNameServersForConflictChecks() throws Exception {
+        seedLegacyZone();
+        try (Fixture fixture = fixture("persistent", "original")) {
+            DelegationSet set = fixture.service().createReusableDelegationSet("set", "ZLEGACY");
+            assertError("ConflictingDomainExists", () -> fixture.service()
+                    .createHostedZone("child.legacy.example.", "child", null, null, set.id()));
+        }
+    }
+
+    @Test
+    void independentZonesAndReusableSetsHaveDistinctNameServers() {
+        try (Fixture fixture = fixture("memory", null)) {
+            Route53Service service = fixture.service();
+            HostedZone firstZone = service.createHostedZone("first.example.", "first-zone", null, null).zone();
+            HostedZone secondZone = service.createHostedZone("second.example.", "second-zone", null, null).zone();
+            DelegationSet firstSet = service.createReusableDelegationSet("first-set", null);
+            DelegationSet secondSet = service.createReusableDelegationSet("second-set", null);
+            List<List<String>> assignments = List.of(service.getDelegationSet(firstZone).nameServers(),
+                    service.getDelegationSet(secondZone).nameServers(), firstSet.nameServers(), secondSet.nameServers());
+            for (int i = 0; i < assignments.size(); i++) {
+                assertEquals(4, assignments.get(i).size());
+                for (int j = i + 1; j < assignments.size(); j++) {
+                    assertNotEquals(assignments.get(i), assignments.get(j));
+                }
+            }
+        }
+    }
+
+    @Test
+    void explicitlyConfiguredNameServersRemainUnchangedForZonesAndSets() {
+        try (Fixture fixture = fixture("memory", "configured")) {
+            Route53Service service = fixture.service();
+            String zoneId = service.createHostedZone("configured.example.", "configured-zone", null, null)
+                    .zone().getId();
+            DelegationSet set = service.createReusableDelegationSet("configured-set", null);
+            List<String> configured = List.of("configured-1.test", "configured-2.test",
+                    "configured-3.test", "configured-4.test");
+            assertEquals(configured, service.getAssignedNameServers(zoneId));
+            assertEquals(configured, set.nameServers());
+        }
+    }
+
+    @Test
+    void explicitlyConfiguredLiteralDefaultsRemainUnchanged() {
+        try (Fixture fixture = fixture("memory", "literal-defaults")) {
+            Route53Service service = fixture.service();
+            String zoneId = service.createHostedZone("literal.example.", "literal-zone", null, null)
+                    .zone().getId();
+            DelegationSet set = service.createReusableDelegationSet("literal-set", null);
+            List<String> configured = List.of("ns-1.awsdns-01.org", "ns-2.awsdns-02.net",
+                    "ns-3.awsdns-03.com", "ns-4.awsdns-04.co.uk");
+            assertEquals(configured, service.getAssignedNameServers(zoneId));
+            assertEquals(configured, set.nameServers());
+        }
+    }
+
+    @Test
+    void mixedConfigurationOverridesOnlyItsExplicitSlot() {
+        try (Fixture fixture = fixture("memory", "mixed")) {
+            Route53Service service = fixture.service();
+            String publicId = service.createHostedZone("mixed.example.", "mixed-public", null, null)
+                    .zone().getId();
+            String privateId = service.createHostedZone("private.mixed.example.", "mixed-private", null,
+                    new VpcAssociation("vpc-mixed", "us-east-1")).zone().getId();
+            DelegationSet set = service.createReusableDelegationSet("mixed-set", null);
+            List<String> publicNames = service.getAssignedNameServers(publicId);
+            assertEquals("configured-1.test", publicNames.getFirst());
+            assertEquals("configured-1.test", set.nameServers().getFirst());
+            for (int i = 1; i < 4; i++) {
+                assertTrue(publicNames.get(i).matches("ns-[1-9][0-9]{0,3}\\.awsdns-[0-9]{2}\\..+"));
+                assertTrue(set.nameServers().get(i).matches("ns-[1-9][0-9]{0,3}\\.awsdns-[0-9]{2}\\..+"));
+            }
+            assertEquals(List.of("configured-1.test", "ns-2.awsdns-02.net", "ns-3.awsdns-03.com",
+                    "ns-4.awsdns-04.co.uk"), service.getAssignedNameServers(privateId));
+        }
+    }
+
+    @Test
+    void ordinaryZoneAssignmentSurvivesStorageReloadAndConfigurationChange() {
+        String zoneId;
+        List<String> original;
+        try (Fixture fixture = fixture("persistent", "original")) {
+            zoneId = fixture.service().createHostedZone("stable.example.", "stable", null, null).zone().getId();
+            original = fixture.service().getAssignedNameServers(zoneId);
+        }
+        try (Fixture reloaded = fixture("persistent", "changed")) {
+            Route53Service service = reloaded.service();
+            assertEquals(original, service.getAssignedNameServers(zoneId));
+            List<ResourceRecordSet> records = service.listResourceRecordSets(zoneId, null, null, 100);
+            assertEquals(original.stream().map(name -> name + ".").toList(), records.stream()
+                    .filter(record -> "NS".equals(record.getType())).findFirst().orElseThrow().getRecords().stream()
+                    .map(ResourceRecord::getValue).toList());
+            assertTrue(records.stream().filter(record -> "SOA".equals(record.getType())).findFirst().orElseThrow()
+                    .getRecords().getFirst().getValue().startsWith(original.getFirst() + ". "));
+            String next = service.createHostedZone("new.example.", "new", null, null).zone().getId();
+            assertTrue(service.getAssignedNameServers(next).stream().noneMatch(original::contains));
+        }
+    }
+
+    @Test
+    void promotionAfterConfigurationChangePreservesTheOriginalZoneAssignment() {
+        String zoneId;
+        List<String> original;
+        try (Fixture fixture = fixture("persistent", "original")) {
+            zoneId = fixture.service().createHostedZone("original.example.", "original", null, null).zone().getId();
+            original = fixture.service().getAssignedNameServers(zoneId);
+            ResourceRecordSet ns = fixture.service().listResourceRecordSets(zoneId, null, null, 100).stream()
+                    .filter(record -> "NS".equals(record.getType())).findFirst().orElseThrow();
+            ns.setRecords(List.of(new ResourceRecord("custom.nameserver.test.")));
+            fixture.service().changeResourceRecordSets(zoneId, List.of(Map.of("action", "UPSERT", "rrs", ns)), null);
+        }
+        try (Fixture fixture = fixture("persistent", "changed")) {
+            DelegationSet set = fixture.service().createReusableDelegationSet("promoted", zoneId);
+            assertEquals(original, set.nameServers());
+        }
+    }
+
+    @Test
+    void promotionRecoversAnOlderZonesNameserversFromItsPersistedApexRecords() throws Exception {
+        seedLegacyZone();
+        try (Fixture fixture = fixture("persistent", "changed")) {
+            DelegationSet set = fixture.service().createReusableDelegationSet("promoted", "ZLEGACY");
+            assertEquals(List.of("original-1.test", "original-2.test", "original-3.test", "original-4.test"),
+                    set.nameServers());
+        }
+    }
+
+    @Test
+    void setQuotaAndMaximumPageSizeAreEnforcedAndDeletionFreesCapacity() {
+        try (Fixture fixture = fixture("memory", "quota")) {
+            Route53Service service = fixture.service();
+            List<String> ids = new ArrayList<>();
+            for (int i = 0; i < 100; i++) {
+                ids.add(service.createReusableDelegationSet("ref-" + i, null).id());
+            }
+            assertError("LimitsExceeded", () -> service.createReusableDelegationSet("overflow", null));
+            assertEquals(100, service.getReusableDelegationSetCount());
+            assertEquals(100, service.pageReusableDelegationSets(null, "2147483648").items().size());
+            String first = ids.stream().sorted().findFirst().orElseThrow();
+            service.deleteReusableDelegationSet(first);
+            assertEquals(99, service.pageReusableDelegationSets(first, "100").items().size());
+            service.createReusableDelegationSet("replacement", null);
+            assertEquals(100, service.getReusableDelegationSetCount());
+        }
+    }
+
+    @Test
+    void hostedZoneQuotaCountsOnlyZonesAssociatedWithThatSet() {
+        try (Fixture fixture = fixture("memory", "quota")) {
+            Route53Service service = fixture.service();
+            DelegationSet set = service.createReusableDelegationSet("set", null);
+            String first = null;
+            for (int i = 0; i < 100; i++) {
+                HostedZone zone = service.createHostedZone("zone-" + i + ".example.", "zone-" + i,
+                        null, null, set.id()).zone();
+                if (first == null) {
+                    first = zone.getId();
+                }
+            }
+            assertError("TooManyHostedZones", () ->
+                    service.createHostedZone("overflow.example.", "overflow", null, null, set.id()));
+            DelegationSet other = service.createReusableDelegationSet("other", null);
+            service.createHostedZone("other.example.", "other", null, null, other.id());
+            service.deleteHostedZone(first);
+            service.createHostedZone("replacement.example.", "replacement", null, null, set.id());
+            assertEquals(101, service.getHostedZoneCount());
+        }
+    }
+
+    @Test
+    void concurrentDuplicateReferencesCreateExactlyOneSet() throws Exception {
+        try (Fixture fixture = fixture("memory", "concurrent");
+             ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Route53Service service = fixture.service();
+            CountDownLatch start = new CountDownLatch(1);
+            List<Callable<String>> calls = new ArrayList<>();
+            for (int i = 0; i < 16; i++) {
+                calls.add(() -> {
+                    start.await();
+                    return outcome(() -> service.createReusableDelegationSet("shared", null));
+                });
+            }
+            List<Future<String>> futures = calls.stream().map(executor::submit).toList();
+            start.countDown();
+            List<String> results = new ArrayList<>();
+            for (Future<String> future : futures) {
+                results.add(future.get(10, TimeUnit.SECONDS));
+            }
+            assertEquals(1, results.stream().filter("success"::equals).count());
+            assertEquals(15, results.stream().filter("DelegationSetAlreadyCreated"::equals).count());
+            assertEquals(1, service.getReusableDelegationSetCount());
+        }
+    }
+
+    @Test
+    void racingDeleteAndZoneCreationCannotLeaveADanglingSetReference() throws Exception {
+        try (Fixture fixture = fixture("memory", "concurrent");
+             ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Route53Service service = fixture.service();
+            DelegationSet set = service.createReusableDelegationSet("racing", null);
+            CountDownLatch start = new CountDownLatch(1);
+            Future<String> create = executor.submit(() -> {
+                start.await();
+                return outcome(() -> service.createHostedZone("racing.example.", "racing", null, null, set.id()));
+            });
+            Future<String> delete = executor.submit(() -> {
+                start.await();
+                return outcome(() -> service.deleteReusableDelegationSet(set.id()));
+            });
+            start.countDown();
+            String createResult = create.get(10, TimeUnit.SECONDS);
+            String deleteResult = delete.get(10, TimeUnit.SECONDS);
+            if ("success".equals(createResult)) {
+                assertEquals("DelegationSetInUse", deleteResult);
+                assertEquals(set, service.getReusableDelegationSet(set.id()));
+                assertEquals(1, service.getHostedZoneCount());
+            } else {
+                assertEquals("NoSuchDelegationSet", createResult);
+                assertEquals("success", deleteResult);
+                assertEquals(0, service.getHostedZoneCount());
+                assertEquals(0, service.getReusableDelegationSetCount());
+            }
+        }
+    }
+
+    private String outcome(Runnable action) {
+        try {
+            action.run();
+            return "success";
+        } catch (AwsException e) {
+            return e.getErrorCode();
+        }
+    }
+
+    private void assertError(String code, Runnable action) {
+        AwsException error = assertThrows(AwsException.class, action::run);
+        assertEquals(code, error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    private void seedLegacyZone() throws Exception {
+        Files.writeString(directory.resolve("route53-zones.json"), """
+                {"ZLEGACY":{"id":"ZLEGACY","name":"legacy.example.","callerReference":"legacy",
+                "ownerAccountId":"741686000020","privateZone":false}}
+                """);
+        Files.writeString(directory.resolve("route53-records.json"), """
+                {"ZLEGACY":[{"name":"legacy.example.","type":"NS","ttl":172800,"records":[
+                {"value":"original-1.test."},{"value":"original-2.test."},
+                {"value":"original-3.test."},{"value":"original-4.test."}]}]}
+                """);
+    }
+
+    private Fixture fixture(String mode, String prefix) {
+        return fixture(mode, prefix, ACCOUNT);
+    }
+
+    private Fixture fixture(String mode, String prefix, String callerAccount) {
+        EmulatorConfig config = config(prefix);
+        StorageFactory factory = StorageFactories.open(config, mode);
+        return new Fixture(factory, new Route53Service(factory, config, new RegionResolver("us-east-1", callerAccount),
+                mock(Ec2Service.class)));
+    }
+
+    private EmulatorConfig config(String prefix) {
+        EmulatorConfig config = StorageFactories.config(directory, ACCOUNT);
+        if (prefix == null) {
+            when(config.services().route53().defaultNameserver1()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver2()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver3()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver4()).thenReturn(Optional.empty());
+        } else if ("mixed".equals(prefix)) {
+            when(config.services().route53().defaultNameserver1()).thenReturn(Optional.of("configured-1.test."));
+            when(config.services().route53().defaultNameserver2()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver3()).thenReturn(Optional.empty());
+            when(config.services().route53().defaultNameserver4()).thenReturn(Optional.empty());
+        } else if ("literal-defaults".equals(prefix)) {
+            when(config.services().route53().defaultNameserver1()).thenReturn(Optional.of("ns-1.awsdns-01.org"));
+            when(config.services().route53().defaultNameserver2()).thenReturn(Optional.of("ns-2.awsdns-02.net"));
+            when(config.services().route53().defaultNameserver3()).thenReturn(Optional.of("ns-3.awsdns-03.com"));
+            when(config.services().route53().defaultNameserver4()).thenReturn(Optional.of("ns-4.awsdns-04.co.uk"));
+        } else {
+            when(config.services().route53().defaultNameserver1()).thenReturn(Optional.of(prefix + "-1.test."));
+            when(config.services().route53().defaultNameserver2()).thenReturn(Optional.of(prefix + "-2.test."));
+            when(config.services().route53().defaultNameserver3()).thenReturn(Optional.of(prefix + "-3.test."));
+            when(config.services().route53().defaultNameserver4()).thenReturn(Optional.of(prefix + "-4.test."));
+        }
+        return config;
+    }
+
+    private record Fixture(StorageFactory factory, Route53Service service) implements AutoCloseable {
+        @Override
+        public void close() {
+            factory.shutdownAll();
+        }
+    }
+}

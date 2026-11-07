@@ -1,0 +1,402 @@
+package io.floci.aws.services.cloudformation;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.RdsMockProfile;
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/** End-to-end coverage for attaching and detaching an external secret from an RDS target. */
+@QuarkusTest
+@TestProfile(RdsMockProfile.class)
+class CloudFormationSecretTargetAttachmentIntegrationTest {
+
+    private static final String CFN_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
+    private static final String SM_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void attachmentAddsConnectionDataAndDetachPreservesTheSecret() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String secretName = "sta-secret-" + suffix;
+        String databaseId = "sta-database-" + suffix;
+        String stackName = "sta-stack-" + suffix;
+        String secretArn = createSecret(secretName);
+        boolean stackCreated = false;
+
+        try {
+            String template = """
+                    {
+                      "Resources": {
+                        "Database": {
+                          "Type": "AWS::RDS::DBInstance",
+                          "Properties": {
+                            "DBInstanceIdentifier": "%s",
+                            "Engine": "postgres",
+                            "MasterUsername": "dbadmin",
+                            "MasterUserPassword": "database-password",
+                            "DBName": "appdb",
+                            "DBInstanceClass": "db.t3.micro",
+                            "AllocatedStorage": 20
+                          }
+                        },
+                        "Attachment": {
+                          "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                          "Properties": {
+                            "SecretId": "%s",
+                            "TargetType": "AWS::RDS::DBInstance",
+                            "TargetId": {"Ref": "Database"}
+                          }
+                        }
+                      },
+                      "Outputs": {
+                        "AttachmentRef": {"Value": {"Ref": "Attachment"}},
+                        "AttachmentId": {
+                          "Value": {"Fn::GetAtt": ["Attachment", "Id"]}
+                        }
+                      }
+                    }
+                    """.formatted(databaseId, secretName);
+
+            createStack(stackName, template);
+            stackCreated = true;
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
+            String describeXml = describeStack(stackName);
+            assertTrue(describeXml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
+                    "stack should be CREATE_COMPLETE: " + describeXml);
+            assertEquals(secretArn, outputValue(describeXml, "AttachmentRef"));
+            assertEquals(secretArn, outputValue(describeXml, "AttachmentId"));
+
+            JsonNode attached = getSecretJson(secretName);
+            assertEquals("admin", attached.path("username").asText());
+            assertEquals("initial-password", attached.path("password").asText());
+            assertEquals("keep", attached.path("custom").asText());
+            assertEquals("postgres", attached.path("engine").asText());
+            assertEquals("localhost", attached.path("host").asText());
+            assertTrue(attached.path("port").asInt() > 0);
+            assertEquals("appdb", attached.path("dbname").asText());
+            assertEquals(databaseId, attached.path("dbInstanceIdentifier").asText());
+
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+            stackCreated = false;
+
+            given()
+                .header("X-Amz-Target", "secretsmanager.DescribeSecret")
+                .contentType(SM_CONTENT_TYPE)
+                .body("{\"SecretId\":\"" + secretName + "\"}")
+            .when().post("/").then().statusCode(200);
+
+            JsonNode detached = getSecretJson(secretName);
+            assertEquals("admin", detached.path("username").asText());
+            assertEquals("initial-password", detached.path("password").asText());
+            assertEquals("keep", detached.path("custom").asText());
+            assertFalse(detached.has("engine"));
+            assertFalse(detached.has("host"));
+            assertFalse(detached.has("port"));
+            assertFalse(detached.has("dbname"));
+            assertFalse(detached.has("dbInstanceIdentifier"));
+        } finally {
+            if (stackCreated) {
+                deleteStack(stackName);
+                CfnStackWaits.awaitStackDeleted(stackName);
+            }
+            forceDeleteSecret(secretName);
+        }
+    }
+
+    @Test
+    void deletionTreatsBinaryOverwriteAsAlreadyDetached() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String secretName = "sta-binary-secret-" + suffix;
+        String databaseId = "sta-binary-database-" + suffix;
+        String stackName = "sta-binary-stack-" + suffix;
+        createSecret(secretName);
+        boolean stackCreated = false;
+
+        try {
+            String template = """
+                    {
+                      "Resources": {
+                        "Database": {
+                          "Type": "AWS::RDS::DBInstance",
+                          "Properties": {
+                            "DBInstanceIdentifier": "%s",
+                            "Engine": "postgres",
+                            "MasterUsername": "dbadmin",
+                            "MasterUserPassword": "database-password"
+                          }
+                        },
+                        "Attachment": {
+                          "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                          "Properties": {
+                            "SecretId": "%s",
+                            "TargetType": "AWS::RDS::DBInstance",
+                            "TargetId": {"Ref": "Database"}
+                          }
+                        }
+                      }
+                    }
+                    """.formatted(databaseId, secretName);
+
+            createStack(stackName, template);
+            stackCreated = true;
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
+            String describeXml = describeStack(stackName);
+            assertTrue(describeXml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
+                    "stack should be CREATE_COMPLETE: " + describeXml);
+
+            putBinarySecret(secretName, "AQID");
+
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+            stackCreated = false;
+
+            JsonNode value = getSecretValue(secretName);
+            assertEquals("AQID", value.path("SecretBinary").asText());
+            assertFalse(value.has("SecretString"));
+        } finally {
+            if (stackCreated) {
+                deleteStack(stackName);
+                CfnStackWaits.awaitStackDeleted(stackName);
+            }
+            forceDeleteSecret(secretName);
+        }
+    }
+
+    @Test
+    void createRollbackDetachesConnectionDataFromAnExternalSecret() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String secretName = "sta-rollback-secret-" + suffix;
+        String databaseId = "sta-rollback-database-" + suffix;
+        String stackName = "sta-rollback-stack-" + suffix;
+        createSecret(secretName);
+        boolean stackCreated = false;
+
+        try {
+            String template = """
+                    {
+                      "Resources": {
+                        "Database": {
+                          "Type": "AWS::RDS::DBInstance",
+                          "Properties": {
+                            "DBInstanceIdentifier": "%s",
+                            "Engine": "postgres",
+                            "MasterUsername": "dbadmin",
+                            "MasterUserPassword": "database-password",
+                            "DBName": "appdb",
+                            "DBInstanceClass": "db.t3.micro",
+                            "AllocatedStorage": 20
+                          }
+                        },
+                        "Attachment": {
+                          "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                          "Properties": {
+                            "SecretId": "%s",
+                            "TargetType": "AWS::RDS::DBInstance",
+                            "TargetId": {"Ref": "Database"}
+                          }
+                        },
+                        "BrokenAttachment": {
+                          "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                          "DependsOn": "Attachment",
+                          "Properties": {
+                            "SecretId": "missing-secret-%s",
+                            "TargetType": "AWS::RDS::DBInstance",
+                            "TargetId": {"Ref": "Database"}
+                          }
+                        }
+                      }
+                    }
+                    """.formatted(databaseId, secretName, suffix);
+
+            createStack(stackName, template);
+            stackCreated = true;
+            CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
+            String describeXml = describeStack(stackName);
+            assertTrue(describeXml.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"),
+                    "stack should be ROLLBACK_COMPLETE: " + describeXml);
+
+            JsonNode rolledBack = getSecretJson(secretName);
+            assertEquals("admin", rolledBack.path("username").asText());
+            assertEquals("initial-password", rolledBack.path("password").asText());
+            assertEquals("keep", rolledBack.path("custom").asText());
+            assertFalse(rolledBack.has("engine"));
+            assertFalse(rolledBack.has("host"));
+            assertFalse(rolledBack.has("port"));
+            assertFalse(rolledBack.has("dbname"));
+            assertFalse(rolledBack.has("dbInstanceIdentifier"));
+        } finally {
+            if (stackCreated) {
+                deleteStack(stackName);
+                CfnStackWaits.awaitStackDeleted(stackName);
+            }
+            forceDeleteSecret(secretName);
+        }
+    }
+
+    @Test
+    void duplicateAttachmentToTheSameSecretFailsAndRollsBackTheFirstAttachment() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String secretName = "sta-duplicate-secret-" + suffix;
+        String databaseId = "sta-duplicate-database-" + suffix;
+        String stackName = "sta-duplicate-stack-" + suffix;
+        createSecret(secretName);
+        boolean stackCreated = false;
+
+        try {
+            String template = """
+                    {
+                      "Resources": {
+                        "Database": {
+                          "Type": "AWS::RDS::DBInstance",
+                          "Properties": {
+                            "DBInstanceIdentifier": "%s",
+                            "Engine": "postgres",
+                            "MasterUsername": "dbadmin",
+                            "MasterUserPassword": "database-password"
+                          }
+                        },
+                        "FirstAttachment": {
+                          "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                          "Properties": {
+                            "SecretId": "%s",
+                            "TargetType": "AWS::RDS::DBInstance",
+                            "TargetId": {"Ref": "Database"}
+                          }
+                        },
+                        "DuplicateAttachment": {
+                          "Type": "AWS::SecretsManager::SecretTargetAttachment",
+                          "DependsOn": "FirstAttachment",
+                          "Properties": {
+                            "SecretId": "%s",
+                            "TargetType": "AWS::RDS::DBInstance",
+                            "TargetId": {"Ref": "Database"}
+                          }
+                        }
+                      }
+                    }
+                    """.formatted(databaseId, secretName, secretName);
+
+            createStack(stackName, template);
+            stackCreated = true;
+            CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
+            String describeXml = describeStack(stackName);
+            assertTrue(describeXml.contains("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"),
+                    "stack should be ROLLBACK_COMPLETE: " + describeXml);
+            String failure = CfnStackWaits.failedResourceReason(stackName, CFN_AUTH);
+            assertTrue(failure.contains("already attached"),
+                    "the attachment should report the duplicate: " + failure);
+
+            JsonNode rolledBack = getSecretJson(secretName);
+            assertEquals("admin", rolledBack.path("username").asText());
+            assertEquals("initial-password", rolledBack.path("password").asText());
+            assertEquals("keep", rolledBack.path("custom").asText());
+            assertFalse(rolledBack.has("engine"));
+            assertFalse(rolledBack.has("host"));
+            assertFalse(rolledBack.has("port"));
+            assertFalse(rolledBack.has("dbInstanceIdentifier"));
+        } finally {
+            if (stackCreated) {
+                deleteStack(stackName);
+                CfnStackWaits.awaitStackDeleted(stackName);
+            }
+            forceDeleteSecret(secretName);
+        }
+    }
+
+    private static String createSecret(String secretName) throws Exception {
+        String request = MAPPER.createObjectNode()
+                .put("Name", secretName)
+                .put("SecretString",
+                        "{\"username\":\"admin\",\"password\":\"initial-password\",\"custom\":\"keep\"}")
+                .toString();
+        String response = given()
+            .header("X-Amz-Target", "secretsmanager.CreateSecret")
+            .contentType(SM_CONTENT_TYPE)
+            .body(request)
+        .when().post("/").then().statusCode(200).extract().asString();
+        return MAPPER.readTree(response).path("ARN").asText();
+    }
+
+    private static JsonNode getSecretJson(String secretName) throws Exception {
+        return MAPPER.readTree(getSecretValue(secretName).path("SecretString").asText());
+    }
+
+    private static JsonNode getSecretValue(String secretName) throws Exception {
+        String response = given()
+            .header("X-Amz-Target", "secretsmanager.GetSecretValue")
+            .contentType(SM_CONTENT_TYPE)
+            .body("{\"SecretId\":\"" + secretName + "\"}")
+        .when().post("/").then().statusCode(200).extract().asString();
+        return MAPPER.readTree(response);
+    }
+
+    private static void putBinarySecret(String secretName, String value) {
+        String request = MAPPER.createObjectNode()
+                .put("SecretId", secretName)
+                .put("SecretBinary", value)
+                .toString();
+        given()
+            .header("X-Amz-Target", "secretsmanager.PutSecretValue")
+            .contentType(SM_CONTENT_TYPE)
+            .body(request)
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static void forceDeleteSecret(String secretName) {
+        given()
+            .header("X-Amz-Target", "secretsmanager.DeleteSecret")
+            .contentType(SM_CONTENT_TYPE)
+            .body("{\"SecretId\":\"" + secretName + "\",\"ForceDeleteWithoutRecovery\":true}")
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static void createStack(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when().post("/").then().statusCode(200);
+    }
+
+    private static String describeStack(String stackName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200).extract().asString();
+    }
+
+    private static String outputValue(String xml, String key) {
+        return XmlParser.extractPairs(xml, "Outputs", "OutputKey", "OutputValue").get(key);
+    }
+
+    private static void deleteStack(String stackName) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when().post("/").then().statusCode(200);
+    }
+}

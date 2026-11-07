@@ -20,7 +20,7 @@
 | `DescribeRepositoryCreationTemplates` | List templates, or those for given prefixes, with pagination |
 | `UpdateRepositoryCreationTemplate` | Replace the fields a request sets on a template |
 | `DeleteRepositoryCreationTemplate` | Delete a template by prefix |
-| `DescribeRepositories` | List repositories or fetch by name |
+| `DescribeRepositories` | Page repositories or fetch by name |
 | `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
 | `GetAuthorizationToken` | Returns a docker-login token + proxy endpoint |
 | `ListImages` | Enumerate paginated tags and digests in a repository |
@@ -43,6 +43,11 @@
 | `PutReplicationConfiguration` / `DescribeRegistry` | Store the registry's replication rules and return them with the registry ID (stored, not acted on) |
 | `PutRegistryScanningConfiguration` / `GetRegistryScanningConfiguration` | Store the registry's scan type and scanning rules (stored, not acted on) |
 | `GetAccountSetting` / `PutAccountSetting` | Read and store account settings for the registry (stored, not acted on) |
+
+`PutLifecyclePolicy` checks that the document is one JSON object with a nonempty
+`rules` array and unique positive integer priorities. Rejected documents return
+`InvalidParameterException` without replacing the prior policy. Selection and
+action validation, expiration, and registry garbage collection remain unimplemented.
 
 `GetAccountSetting` and `PutAccountSetting` keep values per account and Region.
 Supported names are `BASIC_SCAN_TYPE_VERSION` (`AWS_NATIVE`), `REGISTRY_POLICY_SCOPE`

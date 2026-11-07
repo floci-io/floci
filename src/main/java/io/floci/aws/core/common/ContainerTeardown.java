@@ -1,0 +1,36 @@
+package io.floci.aws.core.common;
+
+/**
+ * Implemented by services that launch Docker containers whose lifetime is bound to the
+ * emulator process (Lambda warm pool, ECS tasks, EC2 instances, in-flight build/job
+ * containers). {@link ContainerTeardowns#stopAll} runs every implementation, tolerating
+ * individual failures, and is invoked from two call sites: {@code EmulatorLifecycle.onStop}
+ * during the ShutdownEvent phase, before {@code StorageFactory.shutdownAll()}, so teardown
+ * runs at a deterministic point and state changes made while stopping are still captured
+ * by the final flush; and {@code EmulatorInfoController} on {@code /state/reset} and
+ * {@code /state/nuke}, since those wipe the same tracking state these containers were
+ * started against, and without this a reset would leave them running with nothing left
+ * to reconcile them against. A {@code @PreDestroy} alone is not sufficient for the
+ * shutdown case: bean destruction runs after the ShutdownEvent observers, when the
+ * storage flush schedulers are already stopped.
+ *
+ * <p>Implementations must be idempotent; they may also be invoked from {@code @PreDestroy}
+ * as a fallback. An implementation that shuts down its own executor here must also implement
+ * {@link Resettable} and replace that executor in {@code afterReset()}: a reset runs this hook
+ * too, and {@code afterReset()} runs at the end of a reset, even one whose storage wipe or
+ * {@code clear()} failed, but never on shutdown. {@code clear()} is not enough, since the
+ * controller skips it once an earlier step threw and the pool would stay terminated for good.
+ */
+public interface ContainerTeardown {
+
+    void stopManagedContainers();
+
+    /**
+     * Where this teardown runs among the others: {@link ContainerTeardowns#stopAll} runs them in ascending order,
+     * those of one order as CDI lists them. One whose containers others' containers use, as an EMR cluster's HDFS its
+     * steps' drivers, runs after them, so theirs are stopped first and do not fail against it.
+     */
+    default int teardownOrder() {
+        return 0;
+    }
+}

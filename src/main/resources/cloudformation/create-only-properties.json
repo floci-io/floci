@@ -483,6 +483,17 @@
   "AWS::Events::Rule": [
     "Name"
   ],
+  "AWS::EventsV2::EventBus": [
+    "Name"
+  ],
+  "AWS::EventsV2::Subscriber": [
+    "Name",
+    "EventBusArn",
+    "InvokeConfiguration/TargetArn",
+    "Type",
+    "StartingPosition",
+    "PointInTimeConfiguration"
+  ],
   "AWS::GuardDuty::MalwareProtectionPlan": [],
   "AWS::IAM::AccessKey": [
     "UserName",
@@ -773,6 +784,11 @@
   ],
   "AWS::SecretsManager::SecretTargetAttachment": [
     "SecretId"
+  ],
+  "AWS::Signer::SigningProfile": [
+    "ProfileName",
+    "PlatformId",
+    "SignatureValidityPeriod"
   ],
   "AWS::SNS::Subscription": [
     "Endpoint",

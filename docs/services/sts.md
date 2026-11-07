@@ -152,12 +152,13 @@ A long-term `AKIA` key resolves through the account that holds it and a temporar
 the session that minted it. The ID is read against its own shape first, the 16 to 128 characters of
 `[\w]` the model declares, which answers `ValidationError` before any lookup.
 
-One answer is Floci's own. The operation models no errors at all, and the reference says only that
-"providing a deleted access key might return an error that the key doesn't exist", so a well-formed
-ID that this emulator never issued answers `InvalidParameterValue`, the published common error
-closest to that sentence. Nothing in the reference says what AWS answers for an ID it never issued,
-and real access key IDs are not random the way Floci's are, so treat that one as a deviation rather
-than a recorded behaviour.
+An ID the account never issued answers `ValidationError` with status 400 and "Access key ID is not
+valid.", a sentence carrying neither the ID nor a validation-error count. The operation models no
+errors at all and the reference says only that "providing a deleted access key might return an
+error that the key doesn't exist", so this answer comes from a capture from a real account on
+2026-10-31, which answered an `AKIA` and an `ASIA` ID alike that way. It settles a question this
+emulator had left open: AWS refuses an ID it never issued rather than reading the account out of
+it, so minting IDs that carry their account would buy nothing here.
 
 ## Delegated Access Token
 
@@ -298,6 +299,10 @@ request context holds `sts:RoleSessionName`, `sts:ExternalId` when the caller pa
 `aws:PrincipalIsAWSService`. A trust policy that requires `sts:ExternalId`, the confused-deputy
 guard, refuses a call that omits it or passes another value, and a conditional `Deny` applies only
 when its condition matches.
+
+`aws:PrincipalTag/<key>` contains the stored tags of the calling IAM user or assumed role.
+The target role's tags do not supply the caller's principal tags. A chained request reads the
+current caller role's tags; tags on the user that originally assumed it are not inherited.
 
 ### Known limitations
 

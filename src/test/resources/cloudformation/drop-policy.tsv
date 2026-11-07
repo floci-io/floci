@@ -1,0 +1,87 @@
+AWS::AppSync::ApiKey	ApiId	create-only
+AWS::AppSync::ApiKey	Description	clear
+AWS::AppSync::ApiKey	Expires	keep:the update parses a date, null is refused
+AWS::AppSync::DataSource	ApiId	create-only
+AWS::AppSync::DataSource	Description	clear
+AWS::AppSync::DataSource	DynamoDBConfig	clear
+AWS::AppSync::DataSource	EventBridgeConfig	clear
+AWS::AppSync::DataSource	HttpConfig	clear
+AWS::AppSync::DataSource	LambdaConfig	clear
+AWS::AppSync::DataSource	MetricsConfig	clear	not stored by the service
+AWS::AppSync::DataSource	Name	keep:prior name is reused
+AWS::AppSync::DataSource	OpenSearchServiceConfig	clear
+AWS::AppSync::DataSource	RelationalDatabaseConfig	clear
+AWS::AppSync::DataSource	ServiceRoleArn	clear
+AWS::AppSync::DataSource	Type	keep:required
+AWS::AppSync::FunctionConfiguration	ApiId	create-only
+AWS::AppSync::FunctionConfiguration	Code	clear
+AWS::AppSync::FunctionConfiguration	CodeS3Location	clear	not stored by the service; the provisioner refuses a value
+AWS::AppSync::FunctionConfiguration	DataSourceName	keep:required
+AWS::AppSync::FunctionConfiguration	Description	clear
+AWS::AppSync::FunctionConfiguration	FunctionVersion	default:2018-05-29
+AWS::AppSync::FunctionConfiguration	MaxBatchSize	clear
+AWS::AppSync::FunctionConfiguration	Name	keep:prior name is reused
+AWS::AppSync::FunctionConfiguration	RequestMappingTemplate	clear
+AWS::AppSync::FunctionConfiguration	RequestMappingTemplateS3Location	clear	not stored by the service
+AWS::AppSync::FunctionConfiguration	ResponseMappingTemplate	clear
+AWS::AppSync::FunctionConfiguration	ResponseMappingTemplateS3Location	clear	not stored by the service
+AWS::AppSync::FunctionConfiguration	Runtime	clear
+AWS::AppSync::FunctionConfiguration	SyncConfig	clear	not stored by the service
+AWS::AppSync::GraphQLApi	AdditionalAuthenticationProviders	default:[]
+AWS::AppSync::GraphQLApi	ApiType	keep:the provisioner leaves it out of the update, so the stored value stays
+AWS::AppSync::GraphQLApi	AuthenticationType	keep:required
+AWS::AppSync::GraphQLApi	EnhancedMetricsConfig	clear
+AWS::AppSync::GraphQLApi	EnvironmentVariables	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
+AWS::AppSync::GraphQLApi	IntrospectionConfig	clear
+AWS::AppSync::GraphQLApi	LambdaAuthorizerConfig	clear
+AWS::AppSync::GraphQLApi	LogConfig	clear
+AWS::AppSync::GraphQLApi	MergedApiExecutionRoleArn	clear
+AWS::AppSync::GraphQLApi	Name	default:generated name
+AWS::AppSync::GraphQLApi	OpenIDConnectConfig	clear
+AWS::AppSync::GraphQLApi	OwnerContact	clear
+AWS::AppSync::GraphQLApi	QueryDepthLimit	clear
+AWS::AppSync::GraphQLApi	ResolverCountLimit	clear
+AWS::AppSync::GraphQLApi	Tags	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
+AWS::AppSync::GraphQLApi	UserPoolConfig	clear
+AWS::AppSync::GraphQLApi	Visibility	keep:the provisioner leaves it out of the update, so the stored value stays
+AWS::AppSync::GraphQLApi	XrayEnabled	default:false
+AWS::AppSync::Resolver	ApiId	create-only
+AWS::AppSync::Resolver	CachingConfig	clear
+AWS::AppSync::Resolver	Code	clear
+AWS::AppSync::Resolver	CodeS3Location	clear	not stored by the service; the provisioner refuses a value
+AWS::AppSync::Resolver	DataSourceName	keep:required for a UNIT resolver, cleared only for a PIPELINE resolver
+AWS::AppSync::Resolver	FieldName	create-only
+AWS::AppSync::Resolver	Kind	default:UNIT
+AWS::AppSync::Resolver	MaxBatchSize	clear
+AWS::AppSync::Resolver	MetricsConfig	clear
+AWS::AppSync::Resolver	PipelineConfig	clear
+AWS::AppSync::Resolver	RequestMappingTemplate	clear
+AWS::AppSync::Resolver	RequestMappingTemplateS3Location	clear	not stored by the service
+AWS::AppSync::Resolver	ResponseMappingTemplate	clear
+AWS::AppSync::Resolver	ResponseMappingTemplateS3Location	clear	not stored by the service
+AWS::AppSync::Resolver	Runtime	clear
+AWS::AppSync::Resolver	SyncConfig	clear
+AWS::AppSync::Resolver	TypeName	create-only
+AWS::EC2::EIP	Tags	clear
+AWS::EC2::InternetGateway	Tags	clear
+AWS::EC2::NatGateway	AllocationId	create-only	a drop is refused for a public gateway
+AWS::EC2::NatGateway	AvailabilityMode	create-only	a drop is accepted and skipped
+AWS::EC2::NatGateway	ConnectivityType	create-only	a drop reads as public, so a private gateway is replaced
+AWS::EC2::NatGateway	PrivateIpAddress	keep:a drop keeps the address the gateway holds
+AWS::EC2::NatGateway	SecondaryAllocationIds	clear	one address set with the other two Secondary* properties
+AWS::EC2::NatGateway	SecondaryPrivateIpAddressCount	clear	one address set with the other two Secondary* properties
+AWS::EC2::NatGateway	SecondaryPrivateIpAddresses	clear	one address set with the other two Secondary* properties
+AWS::EC2::NatGateway	SubnetId	create-only	a drop is refused
+AWS::EC2::NatGateway	Tags	clear
+AWS::EC2::PrefixList	AddressFamily	keep:required, a drop is refused
+AWS::EC2::PrefixList	Entries	clear
+AWS::EC2::PrefixList	MaxEntries	keep:an update that leaves it out keeps the list capacity
+AWS::EC2::PrefixList	PrefixListName	keep:required, a drop is refused
+AWS::EC2::PrefixList	Tags	clear
+AWS::EC2::RouteTable	Tags	clear
+AWS::EC2::RouteTable	VpcId	create-only	a drop is refused
+AWS::EC2::Subnet	AvailabilityZone	create-only	a drop is read as no preference and the subnet is kept
+AWS::EC2::Subnet	CidrBlock	create-only	a drop never matches the stored block, so the subnet is replaced
+AWS::EC2::Subnet	MapPublicIpOnLaunch	default:false
+AWS::EC2::Subnet	Tags	clear
+AWS::EC2::Subnet	VpcId	create-only	a drop is refused

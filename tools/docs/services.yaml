@@ -13,6 +13,10 @@
 # tools/java_sources.py, so they do not change when the package moves.
 
 services:
+  - service: quicksight
+    doc: docs/services/quicksight.md
+    sources:
+      - { path: services/quicksight/QuickSightController.java, mode: rest }
   - service: account
     doc: docs/services/account.md
     sources:
@@ -29,6 +33,10 @@ services:
     doc: docs/services/payment-cryptography.md
     sources:
       - { path: services/paymentcryptography/PaymentCryptographyJsonHandler.java, mode: switch }
+  - service: paymentcryptographydata
+    doc: docs/services/payment-cryptography-data.md
+    sources:
+      - { path: services/paymentcryptography/PaymentCryptographyCryptoController.java, mode: rest }
   - service: applicationautoscaling
     doc: docs/services/applicationautoscaling.md
     sources:
@@ -51,6 +59,7 @@ services:
       - { path: services/bedrockagentcorecontrol/BedrockAgentCoreToolsController.java, mode: rest }
       - { path: services/bedrockagentcorecontrol/BedrockAgentCoreGatewayRuleController.java, mode: rest }
       - { path: services/bedrockagentcorecontrol/BedrockAgentCoreResourcePolicyController.java, mode: rest }
+      - { path: services/bedrockagentcorecontrol/BedrockAgentCoreHarnessController.java, mode: rest }
     rename_actions:
       CreateEndpoint: CreateAgentRuntimeEndpoint
       GetEndpoint: GetAgentRuntimeEndpoint
@@ -451,6 +460,7 @@ deferred_handlers:
   - { path: services/cloudmap/CloudMapHandler.java }  # non-tabular doc (grouped/inline)
   - { path: services/cloudwatch/logs/CloudWatchLogsHandler.java }  # multi-table doc (nested handler)
   - { path: services/cloudwatch/logs/CloudWatchLogsMetricFilterHandler.java }  # multi-table doc (nested handler, reached through CloudWatchLogsHandler)
+  - { path: services/cloudwatch/logs/CloudWatchLogsDeliveryHandler.java }  # multi-table doc (nested handler, reached through CloudWatchLogsHandler)
   - { path: services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java }  # multi-table doc (nested handler)
   - { path: services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java }  # multi-table doc (nested handler)
   - { path: services/codebuild/CodeBuildJsonHandler.java }  # non-tabular doc (grouped/inline)

@@ -9,9 +9,10 @@ EMR Serverless is an AWS service that provides serverless data analytics environ
 | `floci.emrserverless.enabled` | Whether the EMR Serverless API is enabled | `true` |
 | `floci.emrserverless.port` | The port the service is exposed on | `4566` |
 | `floci.services.emrserverless.job-run-duration-seconds` | How long a `BATCH` job run stays `RUNNING` before it succeeds; `0` makes it `SUCCESS` as soon as it starts | `0` |
-| `floci.services.emrserverless.runner-mode` | `immediate` moves job runs through their states without running anything; `docker` runs each Spark job run in a container (see [Running Spark job runs](#running-spark-job-runs)) | `immediate` |
+| `floci.services.emrserverless.runner-mode` | `immediate` moves job runs through their states without running anything; `docker` runs each job run in a container (see [Running Spark job runs](#running-spark-job-runs) and [Running Hive job runs](#running-hive-job-runs)) | `immediate` |
 | `floci.services.emrserverless.docker-network` | Docker network for job run containers | the global default |
 | `floci.services.emrserverless.image-template` | Image for a `docker` job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release |
+| `floci.services.emrserverless.hive-image-template` | Image for a `docker` Hive job run whose application names no custom image, `%s` standing for the release label | `public.ecr.aws/emr-serverless/hive/%s:latest` |
 | `floci.services.emrserverless.reconcile-containers-on-startup` | Remove the drivers a previous run of this Floci left on the Docker daemon before the first job run starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace | `true` |
 
 ## Endpoints
@@ -198,9 +199,43 @@ AWS runtime for Apache Spark releases, `emr-spark-8.0.0` on), and runs
   `image-template` names another image than the release's, such as a mirror or a dated tag of it:
   `registry.internal/emr-serverless/spark/%s:20250425`.
 
+## Running Hive job runs
+
+With `runner-mode` set to `docker`, a Hive application's job run executes too. Floci starts one container per
+run from the application's custom image, if it names one, or else from the release's Hive image, the base image
+AWS publishes for customizing EMR Serverless Hive images (`public.ecr.aws/emr-serverless/hive/<release>`), and
+runs `hive` in it, with Tez in local mode, in Hive's JVM: the container holds the Hive driver and its Tez tasks.
+The custom image is the `HiveDriver` worker type's `imageConfiguration` in `workerTypeSpecifications`, or else the
+application's `imageConfiguration`; a `TezTask` image is not used, as Tez's tasks run in the driver's container.
+
+* **States, credentials, HTTPS and the image**: as for a Spark run, above, the driver being `hive`. The first run
+  of a release pulls its Hive image, 2.7 GB unpacked. Without a custom image, `hive-image-template` names another
+  image than the release's: `registry.internal/emr-serverless/hive/%s:20250425`.
+* **What `hive` gets**: the properties of the `core-site`, `tez-site` and `hive-site` classifications, each a
+  `--hiveconf`, from the application's `runtimeConfiguration` or the run's own
+  `configurationOverrides.applicationConfiguration`, which replaces the application's whole classification; then
+  the run's `initQueryFile` and `query`, which Hive reads from Floci's S3 and runs in that order; then its
+  `parameters`, split as a shell would split them, so a `--hiveconf` there takes priority over the classifications,
+  as the user guide ranks them. Before them all come Floci's own settings, which any of them replaces: S3A on
+  Floci's S3 for `s3://`, the Glue Data Catalog client, the image's metastore, on Floci's Glue with the run's
+  account as its `hive.metastore.glue.catalogid` (a `hive-site` one names another account's catalog), and Tez in
+  local mode. `emrfs-site` is not applied, as `s3://` goes through S3A rather than EMRFS.
+* **Scratch and warehouse folders**: `hive.exec.scratchdir` and `hive.metastore.warehouse.dir`, which the user
+  guide makes mandatory, are used as the run sets them, in Floci's S3. Hive runs as the image's `hadoop` user, in
+  its home folder; Tez in local mode copies its session's staging folder, which Hive puts under the scratch
+  folder, to the same path in the container, so Floci makes that path `hadoop`'s before Hive starts.
+* **Output**: the driver's standard output, where Hive prints a query's results, and its standard error, where the
+  Hive CLI prints its progress and errors, go to Floci's log, prefixed `emr-serverless:<jobRunId>`. With an S3 log
+  destination they also go to `stdout.gz` and `stderr.gz` under
+  `<logUri>/applications/<applicationId>/jobs/<jobRunId>/HIVE_DRIVER/` once the run ends, and with CloudWatch
+  logging to the log streams `.../HIVE_DRIVER/stdout` and `.../HIVE_DRIVER/stderr` while it runs, as a Spark run's
+  go under `SPARK_DRIVER`; a `logTypes` takes the driver's types from its `HIVE_DRIVER` entry.
+
 ## Limitations and Differences from AWS
 
-* **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in local mode in one container, so worker counts and sizes, initial and maximum capacity are not applied; a Hive run is `FAILED` without running, in Floci's own wording, as is a driver's failure. Of the monitoring configuration, the S3 log destination gets the driver's `stdout.gz` and `stderr.gz` once a run ends (no event logs, rotated files or uploads while it runs), and CloudWatch Logs the driver's output while it runs (there are no executor logs, local mode having no executors, and `encryptionKeyArn` is ignored).
+* **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in local mode in one container, and a Hive run with Tez in local mode, so worker counts and sizes, initial and maximum capacity are not applied. A driver's failure is `FAILED` in Floci's own wording. Of the monitoring configuration, the S3 log destination gets the driver's `stdout.gz` and `stderr.gz` once a run ends (no event logs, rotated files or uploads while it runs), and CloudWatch Logs the driver's output while it runs (there are no executor logs, local mode having no executors, no `HIVE_LOG`, `TEZ_AM` or `TEZ_TASK` logs of a Hive run, whose own log stays in its container, and `encryptionKeyArn` is ignored).
+* **A driver that is not its application's type**: AWS documents no answer for a `hive` run on a Spark application, or a `sparkSubmit` run on a Hive application. In the `docker` mode Floci records such a run, then fails it without running, in Floci's own wording, as its application's image could not run it.
+* **Mandatory Hive properties**: Floci does not refuse a Hive run without `hive.exec.scratchdir` or `hive.metastore.warehouse.dir`. Hive then keeps its scratch files and its managed tables' data in the container, which go with it.
 * **Unsourced errors**: AWS documents neither the error for a run submitted to an application whose auto-start is off nor the one for a run on a terminated application; Floci answers both with `ValidationException`. The same holds for a `BATCH` timeout outside 1 to 10080 minutes on `emr-7.11.0` or later (`ValidationException`) and for `GetJobRun` naming an attempt a run never made (`ResourceNotFoundException`), both in Floci's own wording. A run needs a `jobDriver`, as every `JobRun` carries one, and `jobDriver` is a union, so a run without a driver, or with one that sets both `sparkSubmit` and `hive` or neither, is refused with `ValidationException` too, in Floci's own wording.
 * **Archives**: only the archives of `spark.archives` that are in S3 are unpacked into the driver's working
   directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,

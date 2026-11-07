@@ -52,6 +52,12 @@ for create, and `eu-west-1` for update, using zero desired capacity.
 Rejected updates preserve the group's existing configuration. This does not
 enable preview support for multiple reservation targets.
 
+When `AvailabilityZones` is omitted, group creation and subnet updates derive the
+distinct zones from `VPCZoneIdentifier`. Updates without placement fields retain
+the group's current subnet and zone selection. Zone derivation rejects missing
+subnet IDs with `ValidationError` before changing an existing group or storing a
+new one.
+
 Scale-out follows the [AWS placement rules](https://docs.aws.amazon.com/autoscaling/ec2/userguide/auto-scaling-benefits.html):
 choose the zone with the fewest active instances, then its subnet with the most
 free IPv4 addresses. Declared subnets and actual EC2 placement take precedence
@@ -103,6 +109,12 @@ EC2 instance can use a default subnet in a different zone.
 | `ExitStandby` | Moves `Standby` instances to `Pending`, raises desired capacity by the number of instances (refused with `ValidationError` above `MaxSize`) and returns one `PreInService` activity (progress 30) per instance; the reconciler registers them with the group's load balancers and sets `InService` within 10 s |
 | `SuspendProcesses` | Records suspended scaling processes (empty list suspends all); reported back by `DescribeAutoScalingGroups` |
 | `ResumeProcesses` | Clears suspended processes (empty list resumes all) |
+
+`CreateAutoScalingGroup` defaults an omitted tag `PropagateAtLaunch` to `true`;
+an explicit `false` keeps that tag on the group. `CreateOrUpdateTags` requires the
+flag on every tag, including existing tags. If any flag is omitted, the request
+returns `ValidationError` before changing any tags in that batch. `DeleteTags`
+allows the flag to be omitted.
 
 Member instances carry the tags the
 [EC2 instance tagging lifecycle](https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-tagging.html#tag-lifecycle)
