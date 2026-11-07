@@ -2519,7 +2519,7 @@ class RedshiftServiceTest {
         when(mockS3.bucketExists("audit-bucket")).thenReturn(true);
         when(mockS3.bucketPartition("audit-bucket")).thenReturn("aws"); // partition-literal: mock test partition
         ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
-        when(authorizer.authorize(eq("redshift"), eq("s3:GetBucketAcl"), anyString(), anyString(), anyString()))
+        when(authorizer.authorize(eq("redshift"), eq("s3:GetBucketAcl"), anyString(), anyString(), anyString(), anyMap()))
                 .thenReturn(Decision.DENY);
 
         RedshiftService s3AwareService = new RedshiftService(sf, cm, config, regionResolver, proxyManager,
@@ -2536,9 +2536,65 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void enableLoggingRejectsUnknownLogDestinationType() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.enableLogging("my-cluster", "my-bucket", "logs", "unsupported-dest", null));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("LogDestinationType must be one of"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void enableLoggingAuthorizesPutObjectWithRealDeliveryPathAndRequestedRegion() {
+        S3Service mockS3 = mock(S3Service.class);
+        when(mockS3.bucketExists("audit-bucket")).thenReturn(true);
+        when(mockS3.bucketPartition("audit-bucket")).thenReturn("aws"); // partition-literal: mock test partition
+        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
+        when(authorizer.authorize(anyString(), anyString(), anyString(), anyString(), anyString(), anyMap()))
+                .thenReturn(Decision.ALLOW);
+
+        RedshiftService s3AwareService = new RedshiftService(sf, cm, config, regionResolver, proxyManager,
+                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
+                null, null, events, integrationEvents, null, null, mockS3, authorizer);
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        s3AwareService.enableLogging("my-cluster", "audit-bucket", "cluster-logs", "s3", null);
+
+        ArgumentCaptor<String> objectArnCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Map<String, List<String>>> keysCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(authorizer).authorize(eq("redshift"), eq("s3:PutObject"), objectArnCaptor.capture(),
+                anyString(), anyString(), keysCaptor.capture());
+
+        assertTrue(objectArnCaptor.getValue().contains("audit-bucket/cluster-logs/AWSLogs/111111111111/redshift/"));
+        assertEquals(List.of("us-east-1"), keysCaptor.getValue().get("aws:RequestedRegion"));
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeDoesNotUpdateDisabledCluster() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(false);
+        when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", ts, true, null);
+        assertNull(cluster.getLastSuccessfulDeliveryTime());
+        assertNull(cluster.getLastFailureTime());
+        verify(clusterBackend, never()).putForAccount(anyString(), anyString(), any());
+    }
+
+    @Test
     void recordAuditDeliveryOutcomeUpdatesClusterStatus() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
         when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
 
         Instant ts = Instant.parse("2026-11-06T15:30:00Z");
@@ -2552,6 +2608,26 @@ class RedshiftServiceTest {
         assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
         assertEquals(failTs, cluster.getLastFailureTime());
         assertEquals("timeout", cluster.getLastFailureMessage());
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeSucceedsDuringPasswordRotation() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setClusterStatus("available");
+        cluster.setLoggingEnabled(true);
+        cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-pass");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "my-cluster", cluster)));
+        when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        service.reserve("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-pass", "us-east-1");
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", ts, true, null);
+        assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+
+        service.release("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-pass", "us-east-1");
     }
 
     @Test

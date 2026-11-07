@@ -278,58 +278,75 @@ public class RedshiftAuditLogPublisher {
         String partition = regionResolver != null ? regionResolver.partitionForRegion(region) : AwsRegions.partitionFor(region);
         String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucket + "/" + key).toString();
         String clusterArn = AwsArnUtils.Arn.of("redshift", region, accountId, "cluster:" + cluster.getClusterIdentifier()).toString();
+        Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(region));
 
-        if (authorizer != null && authorizer.authorize("redshift", "s3:PutObject", objectArn, clusterArn, accountId) != Decision.ALLOW) {
-            String errorMsg = "Access Denied: The bucket policy does not allow Amazon Redshift to put objects.";
-            LOG.warnv("Access Denied delivering Redshift audit log to s3://{0}/{1}", bucket, key);
-            if (statusListener != null) {
-                statusListener.recordDeliveryOutcome(accountId, cluster.getClusterIdentifier(), now, false, errorMsg);
+        try {
+            if (authorizer != null && authorizer.authorize("redshift", "s3:PutObject", objectArn, clusterArn, accountId, requestKeys) != Decision.ALLOW) {
+                String errorMsg = "Access Denied: The bucket policy does not allow Amazon Redshift to put objects.";
+                LOG.warnv("Access Denied delivering Redshift audit log to s3://{0}/{1}", bucket, key);
+                safeRecordOutcome(accountId, cluster.getClusterIdentifier(), now, false, errorMsg);
+                return;
             }
-            return;
-        }
 
-        String line = formatS3Line(logType, record);
-        Object lock = deliveryLocks.computeIfAbsent(cluster.getClusterIdentifier(), k -> new Object());
-        synchronized (lock) {
-            try {
-                byte[] gzipped = appendAndGzip(bucket, key, line);
-                s3.putObject(bucket, key, gzipped, "application/x-gzip", Map.of());
-                if (statusListener != null) {
-                    statusListener.recordDeliveryOutcome(accountId, cluster.getClusterIdentifier(), now, true, null);
-                }
-            } catch (Exception exception) {
-                LOG.warnv(exception, "Failed to deliver Redshift {0} audit event to s3://{1}/{2} for cluster {3}",
-                        logType, bucket, key, cluster.getClusterIdentifier());
-                if (statusListener != null) {
+            String line = formatS3Line(logType, record);
+            Object lock = deliveryLocks.computeIfAbsent(cluster.getClusterIdentifier(), k -> new Object());
+            synchronized (lock) {
+                try {
+                    byte[] gzipped = appendGzipMember(bucket, key, line);
+                    s3.putObject(bucket, key, gzipped, "application/x-gzip", Map.of());
+                    safeRecordOutcome(accountId, cluster.getClusterIdentifier(), now, true, null);
+                } catch (Exception exception) {
+                    LOG.warnv(exception, "Failed to deliver Redshift {0} audit event to s3://{1}/{2} for cluster {3}",
+                            logType, bucket, key, cluster.getClusterIdentifier());
                     String message = exception.getMessage() != null ? exception.getMessage() : "Failed to deliver log to S3";
-                    statusListener.recordDeliveryOutcome(accountId, cluster.getClusterIdentifier(), now, false, message);
+                    safeRecordOutcome(accountId, cluster.getClusterIdentifier(), now, false, message);
                 }
+            }
+        } catch (Exception unexpected) {
+            LOG.warnv(unexpected, "Unexpected error delivering Redshift {0} audit event to s3://{1}/{2} for cluster {3}",
+                    logType, bucket, key, cluster.getClusterIdentifier());
+        }
+    }
+
+    private void safeRecordOutcome(String accountId, String clusterIdentifier, Instant timestamp,
+                                   boolean success, String message) {
+        if (statusListener != null) {
+            try {
+                statusListener.recordDeliveryOutcome(accountId, clusterIdentifier, timestamp, success, message);
+            } catch (Exception ex) {
+                LOG.warnv(ex, "Delivery status listener threw an exception for cluster {0}", clusterIdentifier);
             }
         }
     }
 
-    private byte[] appendAndGzip(String bucket, String key, String newLine) throws IOException {
-        ByteArrayOutputStream existingText = new ByteArrayOutputStream();
+    private byte[] appendGzipMember(String bucket, String key, String newLine) throws IOException {
+        ByteArrayOutputStream lineGz = new ByteArrayOutputStream();
+        try (GZIPOutputStream gos = new GZIPOutputStream(lineGz)) {
+            gos.write(newLine.getBytes(StandardCharsets.UTF_8));
+            gos.write('\n');
+        }
+        byte[] newMember = lineGz.toByteArray();
+
+        byte[] existingBytes = null;
         try {
             S3Object existingObj = s3.getObject(bucket, key);
             if (existingObj != null && existingObj.getData() != null && existingObj.getData().length > 0) {
-                try (GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(existingObj.getData()))) {
-                    gis.transferTo(existingText);
-                }
+                existingBytes = existingObj.getData();
             }
         } catch (AwsException e) {
             if (!"NoSuchKey".equals(e.getErrorCode())) {
                 throw e;
             }
         }
-        existingText.write(newLine.getBytes(StandardCharsets.UTF_8));
-        existingText.write('\n');
 
-        ByteArrayOutputStream compressed = new ByteArrayOutputStream();
-        try (GZIPOutputStream gos = new GZIPOutputStream(compressed)) {
-            gos.write(existingText.toByteArray());
+        if (existingBytes == null || existingBytes.length == 0) {
+            return newMember;
         }
-        return compressed.toByteArray();
+
+        byte[] combined = new byte[existingBytes.length + newMember.length];
+        System.arraycopy(existingBytes, 0, combined, 0, existingBytes.length);
+        System.arraycopy(newMember, 0, combined, existingBytes.length, newMember.length);
+        return combined;
     }
 
     private static String formatS3Line(String logType, Map<String, Object> record) {
