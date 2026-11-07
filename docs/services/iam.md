@@ -1238,6 +1238,40 @@ them, would buy nothing. The delete reads a snapshot of each load balancer's lis
 the live list, so an unguarded write cannot end its walk in `ConcurrentModificationException`
 either, which no mapper covers and which would surface as an unmapped 500.
 
+What a distribution's `IAMCertificateId` is held to is the id and nothing else, and two questions
+sat open on that member. The first is the path the certificate was uploaded under, and AWS
+publishes a rule for it in two places. `UploadServerCertificate`'s `Path` carries the note that "If
+you are uploading a server certificate specifically for use with Amazon CloudFront distributions,
+you must specify a path using the path parameter. The path must begin with /cloudfront and must
+include a trailing slash (for example, /cloudfront/test/)", and CloudFront's Developer Guide states
+it flatly in the procedure for uploading a third-party certificate to IAM: the `--path` value "must
+start with /cloudfront/" and "The path must end with a /". So the obligation on a caller is
+documented, and this emulator does not hold callers to it. A certificate uploaded anywhere is
+resolved by id and serves a distribution.
+
+That is a deliberate divergence, not a conclusion that AWS accepts any path, and nothing in hand
+says how AWS answers a distribution naming a certificate stored elsewhere. What is published is the
+obligation on the upload rather than a refusal on the write, and the one source that enumerates the
+write's checks does not reach the path: the Developer Guide's `InvalidViewerCertificate` page lists
+what CloudFront verifies when an alternate domain name is added, in the order it verifies them, and
+names a distribution with no certificate attached, a chain longer than five, chain dates that are
+not current, a certificate no trusted authority signed, a malformed certificate, an internal error
+and a name the certificate does not cover. The certificate's path is none of them. Holding a
+distribution to the path would therefore refuse a write on a rule published for the upload, which
+is why the id alone decides here until something records otherwise. A capture of a write refused
+for a certificate outside `/cloudfront` moves the reader, this paragraph and the test that pins it,
+and the code would be `InvalidViewerCertificate`, 400 and sender fault, the one this service
+already answers for an id nothing matches.
+
+The second question is a blank value, and AWS settles that one outright. `IAMCertificateId` is
+declared with a minimum length of 0, so an empty string breaks no bound the member carries, and the
+`ViewerCertificate` type's own entry tells a caller on the CloudFront domain name to set
+`CloudFrontDefaultCertificate` to true and leave "all other fields empty". An element left empty is
+what that instruction produces on this REST XML protocol, so a blank names no certificate: it is
+not resolved, it is not reported to IAM as a reference, and it does not make the write wait on the
+certificate lock. Reading it as an id instead would refuse with `InvalidViewerCertificate` the very
+request the reference asks for.
+
 ### SSH Public Keys
 
 | Action | Description |
