@@ -30,6 +30,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +38,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -145,6 +147,11 @@ class EcsImagePullDockerIntegrationTest {
         EcsTask task = ecsService.runTask(clusterName, taskDef.getTaskDefinitionArn(), 1,
                 null, null, null, null, null, REGION).getFirst();
         taskArns.add(task.getTaskArn());
+        // The launch lands the task RUNNING on the task launcher, and the pull it waits on
+        // is a real one against the registry, so allow it the time it takes.
+        await().atMost(Duration.ofSeconds(120)).until(() -> "RUNNING".equals(
+                ecsService.describeTasks(clusterName, List.of(task.getTaskArn()), REGION)
+                        .getFirst().getLastStatus()));
         EcsTask described = ecsService.describeTasks(clusterName, List.of(task.getTaskArn()), REGION).getFirst();
         assertEquals("RUNNING", described.getLastStatus(), "the container must be up: " + described.getStoppedReason());
         return described;

@@ -12,8 +12,10 @@ import io.floci.aws.services.ecs.model.Secret;
 import io.floci.aws.services.ecs.model.TaskStatus;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -54,11 +56,18 @@ class EcsServiceContainerSecretsTest {
 
         assertEquals(1, tasks.size());
         EcsTask task = tasks.getFirst();
-        assertEquals(TaskStatus.STOPPED.name(), task.getLastStatus());
-        assertEquals(TaskStatus.STOPPED.name(), task.getDesiredStatus());
+        // The answer is the task as it stood at launch time; the failed pull lands it STOPPED
+        // on the task launcher, so the stopped state is read back through DescribeTasks.
+        assertEquals(TaskStatus.PENDING.name(), task.getLastStatus());
+        await().atMost(Duration.ofSeconds(5)).until(() -> TaskStatus.STOPPED.name().equals(
+                service.describeTasks("test-cluster", List.of(task.getTaskArn()), "us-east-1")
+                        .getFirst().getLastStatus()));
+        EcsTask stopped = service.describeTasks("test-cluster", List.of(task.getTaskArn()), "us-east-1")
+                .getFirst();
+        assertEquals(TaskStatus.STOPPED.name(), stopped.getDesiredStatus());
         // A ResourceInitializationError is AWS's exact stopped-reason wording, so it must be
         // passed through verbatim rather than wrapped in the generic "Failed to start:" prefix.
-        assertTrue(task.getStoppedReason().startsWith("ResourceInitializationError"));
-        assertTrue(task.getStoppedReason().contains("/missing"));
+        assertTrue(stopped.getStoppedReason().startsWith("ResourceInitializationError"));
+        assertTrue(stopped.getStoppedReason().contains("/missing"));
     }
 }

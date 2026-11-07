@@ -125,7 +125,9 @@ default) keeps both. It pages with `maxResults` and `nextToken` the same way.
 At launch, a container's `dependsOn` decides the start order, and a `COMPLETE`, `SUCCESS` or
 `HEALTHY` condition holds the dependent container until the dependency gets there. The wait is
 bounded by the dependent container's `startTimeout`, defaulting to 60 seconds rather than AWS's
-longer agent default, because `RunTask` here answers synchronously. A container's `cpu` becomes its
+longer agent default, which keeps a stuck dependency from holding a launch indefinitely.
+`RunTask` answers with the task still `PENDING` and the launch continues in the background, so
+the wait never holds the caller. A container's `cpu` becomes its
 CPU shares, its `memory` its hard limit, and a container without a `memory` of its own is capped at
 the task's; the task's `cpu` becomes a CPU quota. `stopTimeout` is the grace period the container gets
 on teardown; a container that does not ask for one gets 5 seconds rather than AWS's 30, because
@@ -246,6 +248,12 @@ cycles involving both volume inheritance and log routing are rejected before con
 | `UpdateTaskProtection` | Set scale-in protection for tasks |
 | `GetTaskProtection` | Get current task protection state |
 | `ExecuteCommand` | Open an ECS Exec session into a container (see [ECS Exec](#ecs-exec)) |
+
+`RunTask` and `StartTask` answer with the task `PROVISIONING` (an `awsvpc` task) or `PENDING`
+and move the launch to the background, the way AWS answers before any image is pulled. A
+`DescribeTasks` read after the call reports the task once its containers are up; a `StopTask`
+that arrives while the launch is still running records the stop and the launch lands it once
+its containers exist.
 
 ### Fargate
 

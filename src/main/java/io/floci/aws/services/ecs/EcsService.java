@@ -152,6 +152,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     // Runs the service scheduler's Docker stops (see stopInBackground). A container teardown drains
     // and shuts it down, and afterReset() replaces it, as with the reconciler.
     private volatile ExecutorService taskStopper = newTaskStopper();
+    /**
+     * Docker pulls and container starts the task launcher runs at once. Each holds its thread for
+     * the whole pull, so this bounds that work without making unrelated launches take turns
+     * behind one slow registry.
+     */
+    private static final int TASK_LAUNCH_CONCURRENCY = 8;
+    // Runs caller-driven task launches (see launchTaskInBackground). A container teardown drains
+    // and shuts it down, and afterReset() replaces it, as with the reconciler and the task stopper.
+    private volatile ExecutorService taskLauncher = newTaskLauncher();
     private final Object reconcilerLock = new Object();
     private final Object reconciliationPassLock = new Object();
     // False until a previous run's task containers are confirmed gone; no task starts before.
@@ -377,6 +386,23 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return stopper;
     }
 
+    /**
+     * Its threads exist only while there is something to launch. The queue is unbounded, but a
+     * caller-driven RunTask/StartTask places at most ten tasks, so it never holds more launches
+     * than there are tasks being placed.
+     */
+    private static ExecutorService newTaskLauncher() {
+        AtomicInteger threads = new AtomicInteger();
+        ThreadPoolExecutor launcher = new ThreadPoolExecutor(TASK_LAUNCH_CONCURRENCY, TASK_LAUNCH_CONCURRENCY,
+                30, TimeUnit.SECONDS, new LinkedBlockingQueue<>(), r -> {
+                    Thread t = new Thread(r, "ecs-task-launcher-" + threads.incrementAndGet());
+                    t.setDaemon(true);
+                    return t;
+                });
+        launcher.allowCoreThreadTimeOut(true);
+        return launcher;
+    }
+
     void initializeStorage() {
         if (storageFactory == null) {
             return; // keeps non-CDI unit tests working
@@ -451,6 +477,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             Thread.currentThread().interrupt();
         }
         drainTaskStopper();
+        drainTaskLauncher();
         for (String taskArn : new ArrayList<>(taskHandles.keySet())) {
             if (taskStops.containsKey(taskArn)) {
                 // Only after an interrupted drain: stopping its containers beside that stop would race it.
@@ -504,6 +531,24 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    /**
+     * Lets every launch handed to the task launcher finish, queued ones included, and land its
+     * task as usual, so the handle loop below stops it instead of missing a task whose launch
+     * had not landed a handle yet. The launcher takes no new launch until {@link #afterReset()}
+     * replaces it. The wait is no longer than launching those tasks here would have taken:
+     * each launch is bounded by its image pull and Docker's API timeout, and they run side
+     * by side.
+     */
+    private void drainTaskLauncher() {
+        ExecutorService current = taskLauncher;
+        current.shutdown();
+        try {
+            current.awaitTermination(Long.MAX_VALUE, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     @Override
     public void clear() {
         // The stores hold the ECS state and afterReset() restarts the reconciler. The reset also
@@ -514,15 +559,19 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Runs at the end of every state reset, never on shutdown. The reset's teardown stopped the
-     * reconciler and the task stopper, so without new ones no service would be reconciled again,
-     * nor any of its tasks stopped, until the emulator restarted. This hook rather than
-     * {@code clear()} because the controller runs it even when the storage wipe or another
-     * service's {@code clear()} threw, and a failed reset must not leave ECS without a reconciler
-     * for good. The stopper comes back first, so the new reconciler's first tick has one.
+     * reconciler, the task stopper and the task launcher, so without new ones no service would
+     * be reconciled again, nor any of its tasks stopped or launched, until the emulator
+     * restarted. This hook rather than {@code clear()} because the controller runs it even when
+     * the storage wipe or another service's {@code clear()} threw, and a failed reset must not
+     * leave ECS without a reconciler for good. The stopper comes back first, so the new
+     * reconciler's first tick has one.
      */
     @Override
     public void afterReset() {
         synchronized (reconcilerLock) {
+            if (taskLauncher.isShutdown()) {
+                taskLauncher = newTaskLauncher();
+            }
             if (taskStopper.isShutdown()) {
                 taskStopper = newTaskStopper();
             }
@@ -552,6 +601,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     boolean isReconcilerShutdown() {
         return reconciler.isShutdown();
+    }
+
+    boolean isTaskLauncherShutdown() {
+        return taskLauncher.isShutdown();
     }
 
     // ── Steady state ─────────────────────────────────────────────────────────
@@ -1521,7 +1574,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
         TaskDefinition taskDef = resolveLaunchableTaskDefinition(request.getTaskDefinition(), region);
-        return launchTasks(cluster, taskDef, request, null, null, region);
+        return launchTasks(cluster, taskDef, request, null, null, region, true);
     }
 
     public List<EcsTask> startTask(String clusterRef, List<String> containerInstanceRefs,
@@ -1558,7 +1611,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         for (String instanceRef : instanceRefs) {
             ContainerInstance instance = resolveContainerInstanceOrThrow(cluster.getClusterArn(), instanceRef);
             result.addAll(launchTasks(cluster, taskDef, request,
-                    instance.getContainerInstanceArn(), null, region));
+                    instance.getContainerInstanceArn(), null, region, true));
         }
         return result;
     }
@@ -1569,10 +1622,15 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      *                         service reconciler supplies it; it is what later identifies the
      *                         task as service-owned, since the caller-supplied {@code group}
      *                         cannot be trusted for that.
+     * @param async whether the launch runs on the task launcher, so the caller gets its answer
+     *              with the tasks still PROVISIONING or PENDING. Caller-driven launches are
+     *              async, the way AWS answers RunTask/StartTask before any image is pulled.
+     *              Service launches are not: the reconciler drives them, and its tests and its
+     *              deployment bookkeeping expect the task RUNNING when the call returns.
      */
     private List<EcsTask> launchTasks(EcsCluster cluster, TaskDefinition taskDef, RunTaskRequest request,
                                        String containerInstanceArn,
-                                       String owningServiceArn, String region) {
+                                       String owningServiceArn, String region, boolean async) {
         // Fail loudly instead of silently launching zero containers and leaving
         // a task that looks RUNNING with nothing behind it.
         if (taskDef.getContainerDefinitions() == null || taskDef.getContainerDefinitions().isEmpty()) {
@@ -1602,8 +1660,14 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             task.setGroup(request.getGroup() != null ? request.getGroup() : "family:" + taskDef.getFamily());
             task.setStartedBy(request.getStartedBy());
             task.setOwningServiceArn(owningServiceArn);
-            task.setLastStatus(TaskStatus.PENDING.name());
+            task.setLastStatus(initialStatus(taskDef).name());
             task.setDesiredStatus(TaskStatus.RUNNING.name());
+            // Connected once placed, and healthy as far as ECS can tell: no health check has
+            // reported yet. AWS reports both on a task still PENDING, so they belong to the
+            // placement, not to the containers coming up.
+            task.setConnectivity(CONNECTIVITY_CONNECTED);
+            task.setConnectivityAt(Instant.now());
+            task.setHealthStatus(HEALTH_STATUS_UNKNOWN);
             task.setCpu(effectiveCpu(taskDef, request));
             task.setMemory(effectiveMemory(taskDef, request));
             task.setCreatedAt(Instant.now());
@@ -1623,74 +1687,182 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             // Before the task is visible: an awsvpc task that cannot get its ENI (an unknown
             // subnet, say) never existed, the way AWS rejects the request rather than placing it.
             containerManager.attachTaskNetwork(task, taskDef, region);
+            // After the network is attached, so an awsvpc task's pending containers report the
+            // interface, the way the running ones do.
+            task.setContainers(pendingContainers(task, taskDef, region));
 
             tasks.put(taskArn, task);
 
-            if (dockerMode) {
-                try {
-                    if (!leftoverContainersCleared()) {
-                        throw new IllegalStateException(
-                                "the containers a previous run of Floci left on the Docker daemon could not be removed yet");
-                    }
-                    task.setPullStartedAt(Instant.now());
-                    EcsTaskHandle handle = containerManager.startTask(task, taskDef, containerOverrides, region);
-                    task.setPullStoppedAt(Instant.now());
-                    boolean stopRequested;
-                    synchronized (task) {
-                        taskHandles.put(taskArn, handle);
+            // A launch the containers of a previous run are blocking fails fast, before any
+            // background work is handed off: the caller gets the stopped task, not a PENDING
+            // one that will never start.
+            if (dockerMode && !leftoverContainersCleared()) {
+                landLaunchFailed(task, new IllegalStateException(
+                        "the containers a previous run of Floci left on the Docker daemon could not be removed yet"),
+                        region);
+                launched.add(async ? snapshotTask(task) : task);
+                continue;
+            }
+            if (async) {
+                // The caller gets the task as AWS reports it at launch time. The background
+                // launch keeps moving the live task, so the response is built from a snapshot
+                // taken here, not from the live task.
+                launched.add(snapshotTask(task));
+                launchTaskInBackground(task, taskDef, containerOverrides, cluster, region);
+            } else {
+                launchTask(task, taskDef, containerOverrides, cluster, region);
+                launched.add(task);
+            }
+        }
+        persistCluster(region, cluster);
+        return launched;
+    }
+
+    /**
+     * The status a task answers with at launch time: PROVISIONING while AWS finds capacity for
+     * an awsvpc task, PENDING otherwise.
+     */
+    private static TaskStatus initialStatus(TaskDefinition taskDef) {
+        return taskDef.getNetworkMode() == NetworkMode.awsvpc ? TaskStatus.PROVISIONING : TaskStatus.PENDING;
+    }
+
+    /** Runs one task's launch, on the calling thread or on the task launcher. */
+    private void launchTask(EcsTask task, TaskDefinition taskDef, List<ContainerOverride> containerOverrides,
+                            EcsCluster cluster, String region) {
+        String taskArn = task.getTaskArn();
+        if (dockerMode) {
+            try {
+                task.setPullStartedAt(Instant.now());
+                EcsTaskHandle handle = containerManager.startTask(task, taskDef, containerOverrides, region);
+                task.setPullStoppedAt(Instant.now());
+                boolean stopRequested;
+                synchronized (task) {
+                    taskHandles.put(taskArn, handle);
+                    stopRequested = TaskStatus.STOPPED.name().equals(task.getDesiredStatus());
+                    if (!stopRequested) {
                         markTaskRunning(task);
                         adjustRunningTasksCount(cluster, 1);
+                        persistCluster(region, cluster);
                         LOG.infov("Started ECS task (docker): {0}", taskArn);
-                        stopRequested = TaskStatus.STOPPED.name().equals(task.getDesiredStatus());
-                        if (!stopRequested) {
-                            registerTaskWithLoadBalancers(task, cluster, region);
-                            registerTaskForServiceDiscovery(task, cluster, region);
-                            evictStaleRegistrationsAt(task, region);
-                        }
+                        registerTaskWithLoadBalancers(task, cluster, region);
+                        registerTaskForServiceDiscovery(task, cluster, region);
+                        evictStaleRegistrationsAt(task, region);
                         if (eventPublisher != null) {
                             eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
                         }
                     }
-                    if (stopRequested) {
-                        stopTask(cluster.getClusterName(), taskArn, task.getStoppedReason(), task.getStopCode(), region);
-                    }
-                } catch (Exception e) {
-                    if (e instanceof EcsTaskLaunchException failedLaunch) {
-                        retainPendingCleanupHandle(taskArn, failedLaunch.getHandle());
-                    }
-                    LOG.errorv("Failed to start ECS task {0}: {1}", taskArn, e.getMessage());
-                    task.setLastStatus(TaskStatus.STOPPED.name());
-                    task.setDesiredStatus(TaskStatus.STOPPED.name());
-                    // A ResourceInitializationError is already AWS's exact stopped-reason wording
-                    // (e.g. a secret that could not be resolved), so pass it through verbatim.
-                    // Other start failures keep the generic prefix.
-                    boolean resourceInitError = e instanceof AwsException ae
-                            && "ResourceInitializationError".equals(ae.getErrorCode());
-                    task.setStoppedReason(resourceInitError
-                            ? e.getMessage()
-                            : "Failed to start: " + e.getMessage());
-                    task.setStopCode(STOP_CODE_TASK_FAILED_TO_START);
-                    task.setStoppedAt(Instant.now());
-                    task.bumpVersion();
-                    containerManager.releaseTaskNetwork(task, region);
-                    if (eventPublisher != null) {
-                        eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.STOPPED, region);
-                    }
                 }
-            } else {
-                task.setContainers(mockContainers(task, taskDef, region));
-                markTaskRunning(task);
-                adjustRunningTasksCount(cluster, 1);
-                LOG.infov("Started ECS task (mock): {0}", taskArn);
-                if (eventPublisher != null) {
-                    eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
+                if (stopRequested) {
+                    stopTask(cluster.getClusterName(), taskArn, task.getStoppedReason(), task.getStopCode(), region);
+                }
+            } catch (Exception e) {
+                if (e instanceof EcsTaskLaunchException failedLaunch) {
+                    retainPendingCleanupHandle(taskArn, failedLaunch.getHandle());
+                }
+                synchronized (task) {
+                    if (TaskStatus.STOPPED.name().equals(task.getDesiredStatus())) {
+                        // A stop that arrived while the pull ran wins over the launch failure.
+                        // The pull failure is incidental to the stop, so it is only logged.
+                        LOG.debugv("ECS task {0} failed to start after a stop was requested: {1}",
+                                taskArn, e.getMessage());
+                        markTaskStopped(task, Map.of(), Map.of(), region);
+                    } else {
+                        landLaunchFailed(task, e, region);
+                    }
                 }
             }
-
-            launched.add(task);
+        } else {
+            synchronized (task) {
+                if (TaskStatus.STOPPED.name().equals(task.getDesiredStatus())) {
+                    markTaskStopped(task, Map.of(), Map.of(), region);
+                } else {
+                    task.setContainers(mockContainers(task, taskDef, region));
+                    markTaskRunning(task);
+                    adjustRunningTasksCount(cluster, 1);
+                    persistCluster(region, cluster);
+                    LOG.infov("Started ECS task (mock): {0}", taskArn);
+                    if (eventPublisher != null) {
+                        eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.RUNNING, region);
+                    }
+                }
+            }
         }
-        persistCluster(region, cluster);
-        return launched;
+    }
+
+    /**
+     * Runs a task's launch off the calling thread, so RunTask/StartTask answer with the task
+     * still PROVISIONING or PENDING, the way AWS answers before any image is pulled. The launch
+     * lands the task RUNNING or STOPPED on this thread, and a stop that arrives meanwhile is
+     * honored there. Account context is preserved the way the task stopper does it: a launcher
+     * thread has no request context, and account-aware storage reads the account from it.
+     */
+    private void launchTaskInBackground(EcsTask task, TaskDefinition taskDef,
+                                        List<ContainerOverride> containerOverrides, EcsCluster cluster,
+                                        String region) {
+        String taskArn = task.getTaskArn();
+        String accountId = taskAccountId(taskArn);
+        try {
+            taskLauncher.execute(() -> {
+                try {
+                    RequestScopes.runAs(accountId, () ->
+                            launchTask(task, taskDef, containerOverrides, cluster, region));
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Could not launch ECS task {0}: {1}", taskArn, e.getMessage());
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            // Only while a reset or shutdown teardown has the launcher shut down. The task never
+            // starts, so mark it stopped rather than leave it PROVISIONING with nothing behind it.
+            LOG.debugv("ECS task launcher is shut down, not starting task {0}: {1}", taskArn, e.getMessage());
+            synchronized (task) {
+                landLaunchFailed(task, new IllegalStateException("the emulator is shutting down"), region);
+            }
+        }
+    }
+
+    /**
+     * Lands a task whose launch failed (an image that would not pull, a container that would
+     * not start) as STOPPED. The containers report STOPPED too, the way AWS reports them after
+     * a failed pull, rather than staying PENDING with nothing behind them.
+     */
+    private void landLaunchFailed(EcsTask task, Exception e, String region) {
+        LOG.errorv("Failed to start ECS task {0}: {1}", task.getTaskArn(), e.getMessage());
+        task.setLastStatus(TaskStatus.STOPPED.name());
+        task.setDesiredStatus(TaskStatus.STOPPED.name());
+        // A ResourceInitializationError is already AWS's exact stopped-reason wording
+        // (e.g. a secret that could not be resolved), so pass it through verbatim.
+        // Other start failures keep the generic prefix.
+        boolean resourceInitError = e instanceof AwsException ae
+                && "ResourceInitializationError".equals(ae.getErrorCode());
+        task.setStoppedReason(resourceInitError
+                ? e.getMessage()
+                : "Failed to start: " + e.getMessage());
+        task.setStopCode(STOP_CODE_TASK_FAILED_TO_START);
+        task.setStoppedAt(Instant.now());
+        task.bumpVersion();
+        containerManager.releaseTaskNetwork(task, region);
+        if (task.getContainers() != null) {
+            task.getContainers().forEach(container -> container.setLastStatus(TaskStatus.STOPPED.name()));
+        }
+        if (eventPublisher != null) {
+            eventPublisher.emitTaskLadder(task, TaskStatus.PENDING, TaskStatus.STOPPED, region);
+        }
+    }
+
+    /**
+     * A copy of a task as it stands for the RunTask/StartTask response. The background launch
+     * keeps moving the live task, so the response is built from a snapshot taken before the
+     * launch is handed off, not from the live task the caller would otherwise watch change
+     * under it.
+     */
+    private static EcsTask snapshotTask(EcsTask task) {
+        EcsTask snapshot = new EcsTask(task);
+        List<Container> containers = new ArrayList<>();
+        for (Container container : task.getContainers()) {
+            containers.add(new Container(container));
+        }
+        snapshot.setContainers(containers);
+        return snapshot;
     }
 
     /**
@@ -1729,16 +1901,44 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * The state a task reaches once its containers are up: RUNNING, connected, and healthy as far
-     * as ECS can tell. {@code healthStatus} stays UNKNOWN unless a container declares a health
-     * check, which is what AWS reports for a task nothing is probing.
+     * The container models a task reports while it is still launching, mirrored on
+     * {@link #mockContainers} but PENDING: nothing is running behind them yet, so they carry
+     * no runtime id and no ExecuteCommand agent, which reports only once a container runs.
+     */
+    private List<Container> pendingContainers(EcsTask task, TaskDefinition taskDef, String region) {
+        String taskId = task.getTaskArn().substring(task.getTaskArn().lastIndexOf('/') + 1);
+        List<Container> containers = new ArrayList<>();
+        for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
+            Container container = new Container();
+            container.setTaskArn(task.getTaskArn());
+            container.setName(def.getName());
+            container.setImage(def.getImage());
+            container.setLastStatus(TaskStatus.PENDING.name());
+            container.setContainerArn(regionResolver.buildArn("ecs", region,
+                    "container/" + taskId + "/" + def.getName()));
+            container.setNetworkBindings(List.of());
+            if (def.getCpu() != null) {
+                container.setCpu(String.valueOf(def.getCpu()));
+            }
+            if (def.getMemory() != null) {
+                container.setMemory(String.valueOf(def.getMemory()));
+            }
+            if (task.getNetworkInterfaceId() != null) {
+                container.setNetworkInterfaces(List.of(new TaskNetworkInterface(
+                        task.getAttachmentId(), task.getPrivateIpAddress(), null)));
+            }
+            containers.add(container);
+        }
+        return containers;
+    }
+
+    /**
+     * The state a task reaches once its containers are up: RUNNING. Connectivity and health are
+     * set at placement, so a task still PENDING already reports them.
      */
     private static void markTaskRunning(EcsTask task) {
         task.setLastStatus(TaskStatus.RUNNING.name());
         task.setStartedAt(Instant.now());
-        task.setConnectivity(CONNECTIVITY_CONNECTED);
-        task.setConnectivityAt(Instant.now());
-        task.setHealthStatus(HEALTH_STATUS_UNKNOWN);
         task.bumpVersion();
     }
 
@@ -1787,7 +1987,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             request.setPropagateTags(PROPAGATE_TAGS_TASK_DEFINITION);
         }
         EcsTask task = launchTasks(cluster, taskDef, request, containerInstanceArn,
-                svc.getServiceArn(), region).getFirst();
+                svc.getServiceArn(), region, false).getFirst();
         task.setDeploymentId(deploymentId);
         return task;
     }
@@ -2100,6 +2300,21 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (TaskStatus.STOPPED.name().equals(task.getLastStatus())) {
             return task;
         }
+        if (isLaunching(task)) {
+            // A StopTask that arrives while the task is still launching answers the way AWS does:
+            // desiredStatus STOPPED with lastStatus unchanged, the stop recorded for the launch to
+            // land once its containers exist. There is nothing to stop yet, so no Docker call
+            // here; the launch landing on the task launcher stops the task instead of marking it
+            // RUNNING.
+            task.setDesiredStatus(TaskStatus.STOPPED.name());
+            task.setStoppedReason(reason != null ? reason : "Stopped by user");
+            task.setStopCode(stopCode);
+            task.setStoppingAt(Instant.now());
+            task.bumpVersion();
+            deregisterTaskFromLoadBalancers(task, region);
+            deregisterTaskFromServiceDiscovery(task, region);
+            return task;
+        }
         if (!TaskStatus.STOPPING.name().equals(task.getLastStatus())) {
             task.setDesiredStatus(TaskStatus.STOPPED.name());
             task.setLastStatus(TaskStatus.STOPPING.name());
@@ -2140,6 +2355,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         }
         landDockerStop(task, handle, exitCodes, region);
         return task;
+    }
+
+    /**
+     * A task whose launch is still running on the task launcher: placed but not yet RUNNING,
+     * with no handle for a stop to work on. A service task is never in this state, since the
+     * reconciler launches its tasks on its own thread.
+     */
+    private boolean isLaunching(EcsTask task) {
+        String lastStatus = task.getLastStatus();
+        return (TaskStatus.PENDING.name().equals(lastStatus)
+                || TaskStatus.PROVISIONING.name().equals(lastStatus))
+                && !taskHandles.containsKey(task.getTaskArn());
     }
 
     /**

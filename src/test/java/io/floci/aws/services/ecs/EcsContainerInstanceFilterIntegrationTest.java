@@ -12,10 +12,12 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.ListContainerInstancesRequest;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -88,8 +90,12 @@ class EcsContainerInstanceFilterIntegrationTest {
         Response started = call("StartTask", "{\"cluster\":\"" + cluster + "\","
                 + "\"containerInstances\":[\"" + excluded + "\"],"
                 + "\"taskDefinition\":\"query-filter-task\"}");
-        started.then().body("tasks[0].lastStatus", equalTo("RUNNING"));
+        started.then().body("tasks[0].lastStatus", equalTo("PENDING"));
         String task = started.jsonPath().getString("tasks[0].taskArn");
+        // The launch lands the task RUNNING on the task launcher; the runningTasksCount
+        // assertions below read it back, so wait for the launch first.
+        await().atMost(Duration.ofSeconds(10)).until(() -> "RUNNING".equals(
+                service.describeTasks(cluster, List.of(task), "us-east-1").getFirst().getLastStatus()));
         call("DescribeContainerInstances", "{\"cluster\":\"" + cluster
                 + "\",\"containerInstances\":[\"" + excluded + "\"]}")
                 .then().body("containerInstances[0].runningTasksCount", equalTo(1));

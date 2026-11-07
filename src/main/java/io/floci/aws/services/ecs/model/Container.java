@@ -42,6 +42,42 @@ public class Container {
     // transient — not persisted
     private transient String dockerId;
 
+    /**
+     * Explicit no-arg constructor: the copy constructor below would otherwise remove the
+     * implicit default one that production call sites rely on.
+     */
+    public Container() {
+    }
+
+    /**
+     * Copy, so a response snapshot can carry the containers as they stood at launch time
+     * without sharing the live task's instances. The background launch replaces the live
+     * task's containers once they are running, and a stop lands them STOPPED.
+     */
+    public Container(Container other) {
+        this.containerArn = other.containerArn;
+        this.taskArn = other.taskArn;
+        this.name = other.name;
+        this.image = other.image;
+        this.lastStatus = other.lastStatus;
+        this.exitCode = other.exitCode;
+        this.reason = other.reason;
+        this.networkBindings = other.networkBindings;
+        this.networkInterfaces = other.networkInterfaces;
+        this.managedAgents = other.managedAgents;
+        this.healthStatus = other.healthStatus;
+        this.runtimeId = other.runtimeId;
+        this.metadataId = other.metadataId;
+        this.imageDigest = other.imageDigest;
+        this.cpu = other.cpu;
+        this.memory = other.memory;
+        this.memoryReservation = other.memoryReservation;
+        this.createdAt = other.createdAt;
+        this.startedAt = other.startedAt;
+        this.finishedAt = other.finishedAt;
+        this.dockerId = other.dockerId;
+    }
+
     public String getContainerArn() { return containerArn; }
     public void setContainerArn(String containerArn) { this.containerArn = containerArn; }
 

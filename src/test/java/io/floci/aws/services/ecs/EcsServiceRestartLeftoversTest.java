@@ -21,12 +21,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -35,6 +37,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -67,7 +70,10 @@ class EcsServiceRestartLeftoversTest {
         restarted.releasePreviousRunLeftovers();
         EcsTask task = restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null,
                 null, null, REGION).getFirst();
-        assertEquals("RUNNING", task.getLastStatus());
+        assertEquals("PENDING", task.getLastStatus());
+        await().atMost(Duration.ofSeconds(5)).until(() -> "RUNNING".equals(
+                restarted.describeTasks("app-cluster", List.of(task.getTaskArn()), REGION)
+                        .getFirst().getLastStatus()));
         restarted.reconcileServices();
         verify(manager, times(2)).startTask(any(), any(), any(), anyString());
         verify(manager).removeLeftoverTaskVolumes();
@@ -176,7 +182,7 @@ class EcsServiceRestartLeftoversTest {
         restarted.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION);
 
         verify(containerManager, times(3)).removeLeftoverContainers();
-        verify(containerManager).startTask(any(), any(), any(), anyString());
+        verify(containerManager, timeout(5000)).startTask(any(), any(), any(), anyString());
     }
 
     @Test
@@ -219,7 +225,7 @@ class EcsServiceRestartLeftoversTest {
 
         verify(containerManager, never()).removeLeftoverContainers();
         verify(containerManager, never()).removeLeftoverTaskVolumes();
-        verify(containerManager).startTask(any(), any(), any(), anyString());
+        verify(containerManager, timeout(5000)).startTask(any(), any(), any(), anyString());
         verify(lbRegistrar).releaseRecordedTargets();
         verify(discoveryRegistrar).releaseRecordedInstances();
     }
@@ -275,14 +281,18 @@ class EcsServiceRestartLeftoversTest {
         ecs.createService("app-cluster", "alpha", "web", 0, LaunchType.EC2, List.of(lb), null, REGION);
 
         // A task of no service at all: any container can take the address a stale entry points at.
-        EcsTask task = ecs.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION)
+        EcsTask answered = ecs.runTask("app-cluster", "web", 1, LaunchType.EC2, null, null, null, null, REGION)
                 .getFirst();
+        assertEquals("PENDING", answered.getLastStatus());
+        await().atMost(Duration.ofSeconds(5)).until(() -> "RUNNING".equals(
+                ecs.describeTasks("app-cluster", List.of(answered.getTaskArn()), REGION)
+                        .getFirst().getLastStatus()));
+        EcsTask task = ecs.describeTasks("app-cluster", List.of(answered.getTaskArn()), REGION).getFirst();
 
-        assertEquals("RUNNING", task.getLastStatus());
         // A target only on the ports the container serves, and never at the VPC-scoped ENI address.
-        verify(lbRegistrar).evictUnrecordedTargets(task, Set.of(TARGET_GROUP_ARN),
+        verify(lbRegistrar, timeout(5000)).evictUnrecordedTargets(task, Set.of(TARGET_GROUP_ARN),
                 Set.of(new EcsTaskAddress(host, targetPort)), REGION);
-        verify(discoveryRegistrar).evictUnrecordedInstances(task, Set.of("srv-alpha"),
+        verify(discoveryRegistrar, timeout(5000)).evictUnrecordedInstances(task, Set.of("srv-alpha"),
                 Set.of(new EcsTaskAddress("10.0.1.5", null, "vpc-app"), new EcsTaskAddress("172.19.0.4", null)),
                 REGION);
     }

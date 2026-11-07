@@ -20,12 +20,14 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -119,6 +121,10 @@ class EcsLinuxParametersDockerIntegrationTest {
         EcsTask task = ecsService.runTask(clusterName, taskDefinitionArn, 1,
                 null, null, null, null, null, REGION).getFirst();
         taskArn = task.getTaskArn();
+        // The launch lands the task RUNNING on the task launcher, and the container start
+        // it waits on is a real one, so allow it the time it takes.
+        await().atMost(Duration.ofSeconds(120)).until(() -> "RUNNING".equals(
+                ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst().getLastStatus()));
         EcsTask described = ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst();
         assertEquals("RUNNING", described.getLastStatus(), "the container must be up: " + described.getStoppedReason());
         String containerId = described.getContainers().getFirst().getRuntimeId();
@@ -166,6 +172,8 @@ class EcsLinuxParametersDockerIntegrationTest {
         EcsTask task = ecsService.runTask(clusterName, taskDefinitionArn, 1,
                 null, null, null, null, null, REGION).getFirst();
         taskArn = task.getTaskArn();
+        await().atMost(Duration.ofSeconds(120)).until(() -> "RUNNING".equals(
+                ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst().getLastStatus()));
         EcsTask described = ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst();
         assertEquals("RUNNING", described.getLastStatus(), "the container must be up: " + described.getStoppedReason());
 

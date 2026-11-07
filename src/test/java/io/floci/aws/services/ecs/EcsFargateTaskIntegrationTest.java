@@ -7,9 +7,11 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -122,6 +124,11 @@ class EcsFargateTaskIntegrationTest {
                 .body(not(containsString("<attachment>")));
 
         String taskArn = response.jsonPath().getString("tasks[0].taskArn");
+        // The ENI is released when the stop lands, and a stop that arrives while the task is
+        // still launching answers before that, so wait for the launch first.
+        await().atMost(Duration.ofSeconds(10)).until(() -> "RUNNING".equals(
+                call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\"" + taskArn + "\"]}", 200)
+                        .jsonPath().getString("tasks[0].lastStatus")));
         call("StopTask", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\"" + taskArn + "\"}", 200)
                 .then().body("task.attachments[0].status", equalTo("DELETED"));
 
@@ -191,19 +198,25 @@ class EcsFargateTaskIntegrationTest {
         String family = seed("fargate-task-stop");
         Response launched = runTask(family, "");
         String taskArn = launched.jsonPath().getString("tasks[0].taskArn");
-        long versionWhenRunning = launched.jsonPath().getLong("tasks[0].version");
+        long versionAtLaunch = launched.jsonPath().getLong("tasks[0].version");
 
         call("StopTask", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\"" + taskArn
                 + "\",\"reason\":\"done\"}", 200).then()
                 .body("task.stopCode", equalTo("UserInitiated"))
                 .body("task.stoppedReason", equalTo("done"));
 
+        // The stop is recorded at once, but the task lands STOPPED on the task launcher once
+        // its launch finishes, so wait for the landing before reading it back.
+        await().atMost(Duration.ofSeconds(10)).until(() -> "STOPPED".equals(
+                call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\"" + taskArn + "\"]}", 200)
+                        .jsonPath().getString("tasks[0].lastStatus")));
+
         Response described = call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\""
                 + taskArn + "\"]}", 200);
         described.then()
                 .body("tasks[0].lastStatus", equalTo("STOPPED"))
                 .body("tasks[0].stopCode", equalTo("UserInitiated"));
-        assertTrue(described.jsonPath().getLong("tasks[0].version") > versionWhenRunning,
+        assertTrue(described.jsonPath().getLong("tasks[0].version") > versionAtLaunch,
                 "stopping a task must advance its version");
         assertTrue(described.jsonPath().getDouble("tasks[0].executionStoppedAt") > 0,
                 "executionStoppedAt must be reported once the task has stopped");

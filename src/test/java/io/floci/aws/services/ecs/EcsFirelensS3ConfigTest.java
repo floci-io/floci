@@ -14,9 +14,11 @@ import io.floci.aws.services.ecs.model.TaskDefinition;
 import io.floci.aws.services.ecs.model.TaskStatus;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -120,10 +122,17 @@ class EcsFirelensS3ConfigTest {
                 LaunchType.EC2, null, null, List.of(), null, "us-east-1");
 
         EcsTask task = tasks.getFirst();
-        assertEquals(TaskStatus.STOPPED.name(), task.getLastStatus());
+        // The answer is the task as it stood at launch time; the failed start lands it STOPPED
+        // on the task launcher, so the stopped state is read back through DescribeTasks.
+        assertEquals(TaskStatus.PENDING.name(), task.getLastStatus());
+        await().atMost(Duration.ofSeconds(5)).until(() -> TaskStatus.STOPPED.name().equals(
+                service.describeTasks("test-cluster", List.of(task.getTaskArn()), "us-east-1")
+                        .getFirst().getLastStatus()));
+        EcsTask stopped = service.describeTasks("test-cluster", List.of(task.getTaskArn()), "us-east-1")
+                .getFirst();
         assertEquals("Unable to download firelens s3 config file: unable to download s3 config "
                         + "extra.conf from bucket firelens-configs: The specified key does not exist.",
-                task.getStoppedReason());
+                stopped.getStoppedReason());
     }
 
     private static ContainerDefinition firelensRouter(String type, String configFileValue) {
