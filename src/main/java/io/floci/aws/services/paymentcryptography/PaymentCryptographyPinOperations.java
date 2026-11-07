@@ -44,8 +44,8 @@ import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRu
 @ApplicationScoped
 public class PaymentCryptographyPinOperations {
 
-    /** The PIN the service generates, when the caller does not bring one. */
-    private static final int GENERATED_PIN_LENGTH = 4;
+    /** The PIN length the Visa path works over: the verification value is over four. */
+    private static final int VISA_PIN_LENGTH = 4;
 
     /** The usages a key may have for the encryption of a PIN block. */
     private static final List<String> PIN_ENCRYPTION_USAGES = List.of(
@@ -118,6 +118,7 @@ public class PaymentCryptographyPinOperations {
         PinBlockFormat format = format(text(request, "PinBlockFormat"));
         String pan = requirePan(text(request, "PrimaryAccountNumber"),
                 "PrimaryAccountNumber (12-19 digits) is required for Visa PVV verification");
+        requireVisaPinLength(request);
         requireHex(text(request, "EncryptedPinBlock"), format.blockHexLength(),
                 "EncryptedPinBlock must be " + format.blockHexLength()
                         + " hexadecimal characters (one " + format.label() + " block)");
@@ -155,14 +156,18 @@ public class PaymentCryptographyPinOperations {
                     pek.keyBytes);
         } catch (IllegalArgumentException e) {
             // The block did not decipher into a well-formed PIN field: the key is another one,
-            // or the block is not the one the caller meant. The request itself was well made,
-            // so this is a failed verification rather than a bad request.
-            throw verificationFailed("the PIN block did not decipher into a "
-                    + format.label() + " PIN field");
+            // the account number is another one, or the block is corrupted. The reference
+            // answers that with the error that says the block is invalid.
+            throw invalidPinBlock();
         }
-        // A wrong key, or a wrong KSN, deciphers to garble. That is a failed verification, not
-        // a server error.
+        // A wrong key, or a wrong KSN, deciphers to garble, and what the block carries is
+        // then not a PIN. That is an invalid block rather than a PIN that does not verify.
         if (!isRecoveredPin(pin)) {
+            throw invalidPinBlock();
+        }
+        // The Visa verification value is a four digit number, so a block that deciphers to a
+        // longer PIN has no value to be compared with.
+        if (pin.length() != VISA_PIN_LENGTH) {
             throw verificationFailed();
         }
         if (!PinCrypto.computePvv(pan, pvki, pin, materialHex(pvk)).equals(pvv)) {
@@ -215,10 +220,7 @@ public class PaymentCryptographyPinOperations {
         if ("VisaPinVerificationValue".equals(variant) && givenBlock.isEmpty()) {
             throw validation("VisaPinVerificationValue.EncryptedPinBlock is required");
         }
-        Integer pinDataLength = request.has("PinDataLength") ? request.path("PinDataLength").asInt() : null;
-        if (pinDataLength != null && pinDataLength != GENERATED_PIN_LENGTH) {
-            throw validation("Visa PVV requires a 4-digit PIN (PinDataLength 4)");
-        }
+        requireVisaPinLength(request);
 
         PinLeg pek = resolvePinLeg(encryptionKeyIdentifier, null, region,
                 "Encrypt", "encrypting a PIN block");
@@ -245,18 +247,24 @@ public class PaymentCryptographyPinOperations {
                 pin = PinCrypto.decipherPinBlock(format, givenBlock, pan, pek.keyBytes);
             } catch (IllegalArgumentException e) {
                 // The caller's block did not decipher into a well-formed PIN field under the
-                // key it named: the block and the key do not go together. The refusal is the
-                // caller's to act on.
-                throw validation("Unable to recover PIN from PIN block: " + e.getMessage());
+                // key it named: the block and the key do not go together.
+                throw invalidPinBlock();
             }
             if (!isRecoveredPin(pin)) {
-                throw validation("Unable to recover PIN from PIN block: the block does not carry a "
-                        + "well-formed " + format.label() + " PIN field");
+                throw invalidPinBlock();
             }
             encryptedPinBlock = givenBlock;
         } else {
-            pin = randomPin(GENERATED_PIN_LENGTH);
+            pin = randomPin(VISA_PIN_LENGTH);
             encryptedPinBlock = PinCrypto.encipherPinBlock(format, pin, pan, pek.keyBytes, random);
+        }
+        // The Visa verification value is a four digit number, so it is computed over a four
+        // digit PIN. A block that carries a longer PIN has no value to be computed, and the
+        // computation refuses it, so the length is checked here where the refusal is the
+        // caller's to act on.
+        if (pin.length() != VISA_PIN_LENGTH) {
+            throw validation("the Visa verification value is computed over a four digit PIN, and "
+                    + "the PIN block carries " + pin.length() + " digits");
         }
         String pvv = PinCrypto.computePvv(pan, pvki, pin, materialHex(pvk));
 
@@ -339,6 +347,12 @@ public class PaymentCryptographyPinOperations {
                 "IncomingTranslationAttributes." + inVariant + ".PrimaryAccountNumber");
         requireTranslationPan(outPan, outFormat,
                 "OutgoingTranslationAttributes." + outVariant + ".PrimaryAccountNumber");
+        // For PCI compliance the incoming and the outgoing account number are the same one,
+        // and a PIN is not translated from one account number to another.
+        if (!inPan.equals(outPan)) {
+            throw validation("the incoming and the outgoing PrimaryAccountNumber must be the "
+                    + "same one, and a PIN is not translated from one account number to another");
+        }
 
         PinLeg in = resolvePinLeg(incomingKeyIdentifier, request.get("IncomingDukptAttributes"), region,
                 "Decrypt", "decrypting a PIN block");
@@ -360,9 +374,8 @@ public class PaymentCryptographyPinOperations {
             pinBlock = PinCrypto.encipherPinBlock(outFormat, pin, outPan, out.keyBytes, random);
         } catch (IllegalArgumentException e) {
             // The incoming block did not decipher into a well-formed PIN field under the
-            // incoming key: the caller's block and key do not go together. The refusal is the
-            // caller's to act on.
-            throw validation("unable to translate PIN block: " + e.getMessage());
+            // incoming key: the caller's block and key do not go together.
+            throw invalidPinBlock();
         }
 
         Map<String, Object> out2 = new LinkedHashMap<>();
@@ -495,6 +508,24 @@ public class PaymentCryptographyPinOperations {
     }
 
     /**
+     * The PIN length the request declares, which the Visa path fixes at four digits.
+     *
+     * <p>The Visa verification value is computed over four PIN digits, so a request that
+     * declares another length names something this path cannot verify.
+     *
+     * @param request the request, whose PinDataLength member may be absent
+     */
+    private static void requireVisaPinLength(JsonNode request) {
+        JsonNode declared = request.get("PinDataLength");
+        if (declared == null || declared.isNull()) {
+            return;
+        }
+        if (!declared.isIntegralNumber() || declared.asInt() != VISA_PIN_LENGTH) {
+            throw validation("Visa PVV requires a 4-digit PIN (PinDataLength 4)");
+        }
+    }
+
+    /**
      * Refuses the wrapped-key form of a PIN encryption key.
      *
      * <p>A wrapped key is a TR-31 key block that the service unwraps with a key-encryption
@@ -607,15 +638,21 @@ public class PaymentCryptographyPinOperations {
      * answer is that the PIN is not the one the issuer holds.
      */
     private static AwsException verificationFailed() {
-        return verificationFailed("the PIN verification failed");
+        return new AwsException("VerificationFailedException", "Pin block verification failed.", 400,
+                Map.of("Reason", "INVALID_PIN"));
     }
 
     /**
-     * The PIN did not verify, and the reason why.
+     * The PIN block the request carries is not one the service can read.
      *
-     * @param reason why the verification did not hold
+     * <p>The reference answers a block that is not a valid PIN block with this error, and
+     * names the three causes: the wrong key, a wrong account number, and a corrupted block.
+     *
+     * @return the error that says the block is invalid
      */
-    private static AwsException verificationFailed(String reason) {
-        return new AwsException("VerificationFailedException", reason, 400);
+    private static AwsException invalidPinBlock() {
+        return new AwsException("ValidationException",
+                "Pin block provided is invalid. Please check your input to ensure all field "
+                        + "values are correct.", 400);
     }
 }

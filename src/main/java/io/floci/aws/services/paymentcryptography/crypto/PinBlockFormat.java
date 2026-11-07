@@ -8,8 +8,9 @@ import java.util.List;
  *
  * <p>Three of the four formats the API names are made: the format 0 and the format 3 are
  * eight-byte Triple DES blocks, and the format 4 is a sixteen-byte AES block. The format 1
- * the API also names is not a format ISO 9564-1 defines, so a request that asks for it is
- * refused rather than answered with a block of some other format.
+ * the API also names is a format ISO 9564-1 defines, a block that carries no PAN, but this
+ * service does not make it, so a request that asks for one is refused rather than answered
+ * with a block of some other format.
  */
 public enum PinBlockFormat {
 

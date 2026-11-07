@@ -19,6 +19,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -137,8 +138,32 @@ class PaymentCryptographyPinOperationsTest {
     }
 
     @Test
+    void aPanOfTwelveDigitsIsAPanAndNotAnAccountField() {
+        // The API takes a primary account number, which carries its own check digit, so a
+        // twelve-digit one leaves eleven digits and the account field is padded with a
+        // zero on the left.
+        assertEquals("014700826395", PinCrypto.account12("147008263956"));
+        // A longer PAN gives the twelve right-most digits without its check digit.
+        assertEquals("147008263956", PinCrypto.account12(PAN));
+        // The verification value follows the account field, so the twelve-digit PAN does
+        // not give the one its own account field would.
+        assertNotEquals(PinCrypto.computePvv(PAN, 1, PIN, PVK),
+                PinCrypto.computePvv("147008263956", 1, PIN, PVK));
+    }
+
+    @Test
     void theVerificationValueIsTheOneTheStandardGives() {
         assertEquals("0463", PinCrypto.computePvv(PAN, 1, PIN, PVK));
+    }
+
+    private static JsonNode visaPinVerificationValue(String block) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode value = mapper.createObjectNode();
+        value.put("EncryptedPinBlock", block);
+        value.put("PinVerificationKeyIndex", 1);
+        ObjectNode variant = mapper.createObjectNode();
+        variant.set("VisaPinVerificationValue", value);
+        return variant;
     }
 
     @Test
@@ -197,6 +222,75 @@ class PaymentCryptographyPinOperationsTest {
                 "VerificationAttributes", visaPin(1, "9999"))),
                 "us-east-1"));
         assertEquals("VerificationFailedException", refused.getErrorCode());
+    }
+
+    @Test
+    void aPinLongerThanFourDigitsDoesNotVerify() {
+        // The Visa verification value is computed over four PIN digits, so a block that
+        // carries a longer PIN is not one the value can be compared with. A block for
+        // "12345" must not verify against the value over "1234".
+        PaymentCryptographyKey pek = pinEncryptionKey();
+        PaymentCryptographyKey pvk = visaVerificationKey();
+        byte[] key = HexFormat.of().parseHex(pek.getKeyMaterialHex());
+        String block = PinCrypto.encipherPinBlock(PinBlockFormat.ISO_FORMAT_0, "12345", PAN, key,
+                new SecureRandom());
+        // The verification value is over the four-digit PIN the issuer holds.
+        String pvv = PinCrypto.computePvv(PAN, 1, PIN, pvk.getKeyMaterialHex());
+        AwsException refused = assertThrows(AwsException.class, () -> pin.verifyPinData(request(Map.of(
+                "EncryptionKeyIdentifier", pek.getArn(),
+                "VerificationKeyIdentifier", pvk.getArn(),
+                "PinBlockFormat", "ISO_FORMAT_0",
+                "PrimaryAccountNumber", PAN,
+                "EncryptedPinBlock", block,
+                "VerificationAttributes", visaPin(1, pvv))),
+                "us-east-1"));
+        assertEquals("VerificationFailedException", refused.getErrorCode());
+    }
+
+    @Test
+    void aDeclaredPinLengthThatIsNotFourIsRefused() {
+        // The Visa verification value is over four PIN digits, so a request that declares
+        // another length names something this path cannot verify.
+        PaymentCryptographyKey pek = pinEncryptionKey();
+        PaymentCryptographyKey pvk = visaVerificationKey();
+        Map<String, Object> generated = pin.generatePinData(request(Map.of(
+                "EncryptionKeyIdentifier", pek.getArn(),
+                "GenerationKeyIdentifier", pvk.getArn(),
+                "PinBlockFormat", "ISO_FORMAT_0",
+                "PrimaryAccountNumber", PAN,
+                "GenerationAttributes", visaPin(1))),
+                "us-east-1");
+        AwsException refused = assertThrows(AwsException.class, () -> pin.verifyPinData(request(Map.of(
+                "EncryptionKeyIdentifier", pek.getArn(),
+                "VerificationKeyIdentifier", pvk.getArn(),
+                "PinBlockFormat", "ISO_FORMAT_0",
+                "PrimaryAccountNumber", PAN,
+                "PinDataLength", 5,
+                "EncryptedPinBlock", generated.get("EncryptedPinBlock"),
+                "VerificationAttributes", visaPin(1, "1234"))),
+                "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aGivenBlockWithALongerPinIsRefused() {
+        // The Visa verification value is a four digit number, so a block that carries a
+        // longer PIN has no value to be computed for it. The request is refused, rather
+        // than the computation failing inside the request.
+        PaymentCryptographyKey pek = pinEncryptionKey();
+        PaymentCryptographyKey pvk = visaVerificationKey();
+        byte[] key = HexFormat.of().parseHex(pek.getKeyMaterialHex());
+        String block = PinCrypto.encipherPinBlock(PinBlockFormat.ISO_FORMAT_0, "12345", PAN, key,
+                new SecureRandom());
+        AwsException refused = assertThrows(AwsException.class,
+                () -> pin.generatePinData(request(Map.of(
+                        "EncryptionKeyIdentifier", pek.getArn(),
+                        "GenerationKeyIdentifier", pvk.getArn(),
+                        "PinBlockFormat", "ISO_FORMAT_0",
+                        "PrimaryAccountNumber", PAN,
+                        "GenerationAttributes", visaPinVerificationValue(block))),
+                        "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
     }
 
     @Test
@@ -430,10 +524,10 @@ class PaymentCryptographyPinOperationsTest {
     }
 
     @Test
-    void aBlockEncipheredUnderAnotherKeyDoesNotVerify() {
-        // The block is enciphered under one key and verified under another. The request is
-        // well made, so the answer is that the verification failed rather than that the
-        // request was wrong.
+    void aBlockThatIsNotReadAsAPinBlockIsRefused() {
+        // The block is enciphered under one key and verified under another, so what it
+        // deciphers to is not a PIN. The reference names that an invalid PIN block, and lists
+        // the wrong key among its causes.
         PaymentCryptographyKey pek = pinEncryptionKey();
         PaymentCryptographyKey otherPek = pinEncryptionKey();
         PaymentCryptographyKey pvk = visaVerificationKey();
@@ -452,7 +546,58 @@ class PaymentCryptographyPinOperationsTest {
                 "EncryptedPinBlock", generated.get("EncryptedPinBlock"),
                 "VerificationAttributes", visaPin(1, "1234"))),
                 "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aPinThatDoesNotVerifyIsRefusedWithTheVerificationError() {
+        // The block is read, and the PIN it carries does not match the verification value.
+        // That is a verification that failed, not an invalid block.
+        PaymentCryptographyKey pek = pinEncryptionKey();
+        PaymentCryptographyKey pvk = visaVerificationKey();
+        Map<String, Object> generated = pin.generatePinData(request(Map.of(
+                "EncryptionKeyIdentifier", pek.getArn(),
+                "GenerationKeyIdentifier", pvk.getArn(),
+                "PinBlockFormat", "ISO_FORMAT_0",
+                "PrimaryAccountNumber", PAN,
+                "GenerationAttributes", visaPin(1))),
+                "us-east-1");
+        AwsException refused = assertThrows(AwsException.class, () -> pin.verifyPinData(request(Map.of(
+                "EncryptionKeyIdentifier", pek.getArn(),
+                "VerificationKeyIdentifier", pvk.getArn(),
+                "PinBlockFormat", "ISO_FORMAT_0",
+                "PrimaryAccountNumber", PAN,
+                "EncryptedPinBlock", generated.get("EncryptedPinBlock"),
+                "VerificationAttributes", visaPin(1, "9999"))),
+                "us-east-1"));
         assertEquals("VerificationFailedException", refused.getErrorCode());
+        assertEquals("Pin block verification failed.", refused.getMessage());
+    }
+
+    @Test
+    void aTranslationBetweenTwoAccountNumbersIsRefused() {
+        // For PCI compliance the incoming and the outgoing account number are the same one,
+        // and a PIN is not translated from one account number to another.
+        PaymentCryptographyKey aesPek = createKey("AES_128", "TR31_P0_PIN_ENCRYPTION_KEY",
+                "Encrypt", "Decrypt");
+        PaymentCryptographyKey tdesPek = pinEncryptionKey();
+        Map<String, Object> generated = pin.generatePinData(request(Map.of(
+                "EncryptionKeyIdentifier", aesPek.getArn(),
+                "GenerationKeyIdentifier", visaVerificationKey().getArn(),
+                "PinBlockFormat", "ISO_FORMAT_4",
+                "PrimaryAccountNumber", PAN,
+                "GenerationAttributes", visaPin(1))),
+                "us-east-1");
+        AwsException refused = assertThrows(AwsException.class,
+                () -> pin.translatePinData(request(Map.of(
+                        "EncryptedPinBlock", generated.get("EncryptedPinBlock"),
+                        "IncomingKeyIdentifier", aesPek.getArn(),
+                        "OutgoingKeyIdentifier", tdesPek.getArn(),
+                        "IncomingTranslationAttributes", nested("IsoFormat4", "PrimaryAccountNumber", PAN),
+                        "OutgoingTranslationAttributes", nested("IsoFormat0",
+                                "PrimaryAccountNumber", "5081470082639565"))),
+                        "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
     }
 
     @Test

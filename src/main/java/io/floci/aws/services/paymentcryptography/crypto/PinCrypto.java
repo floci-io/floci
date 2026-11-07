@@ -7,9 +7,10 @@ import java.util.Random;
  * Issuer PIN primitives: the ISO 9564-1 PIN blocks and their decoders.
  *
  * <p>The account field is the 12 right-most PAN digits <em>excluding the check
- * digit</em>. A PAN that is already 12 digits is accepted as-is, because
- * {@code TranslatePinData} takes the account field rather than a full PAN and
- * rejects anything else.
+ * digit</em>. The API takes a primary account number, which carries its own
+ * check digit, so the digit is dropped and the twelve right-most of what is
+ * left are the field. A PAN of twelve digits leaves eleven, and the field is
+ * padded with a zero on the left.
  *
  * <p>Format 4 is the odd one out. It does not use the account field at all:
  * it carries the whole PAN, and it is the only format an AES key can protect.
@@ -29,17 +30,23 @@ public final class PinCrypto {
     /**
      * The 12-digit ISO-0 account field.
      *
+     * <p>The field is the twelve right-most digits of the PAN without its check
+     * digit, so the digit is dropped and the twelve right-most of what is left
+     * are the field. A PAN of twelve digits leaves eleven, and the field is
+     * padded with a zero on the left.
+     *
      * @throws IllegalArgumentException if the digit count is below 12
      */
     public static String account12(String pan) {
         String d = digits(pan);
-        if (d.length() > 12) {
-            return d.substring(0, d.length() - 1).substring(d.length() - 1 - 12);
+        if (d.length() < 12) {
+            throw new IllegalArgumentException("PAN too short");
         }
-        if (d.length() >= 12) {
-            return d;
+        String withoutCheckDigit = d.substring(0, d.length() - 1);
+        if (withoutCheckDigit.length() >= 12) {
+            return withoutCheckDigit.substring(withoutCheckDigit.length() - 12);
         }
-        throw new IllegalArgumentException("PAN too short");
+        return "0" + withoutCheckDigit;
     }
 
     /**
@@ -340,7 +347,6 @@ public final class PinCrypto {
         String d = digits(pan);
         String pan11 = tspDigits(d);
         String p4 = digits(pin);
-        p4 = p4.substring(0, Math.min(4, p4.length()));
         if (p4.length() != 4) {
             throw new IllegalArgumentException("Visa PVV uses a 4-digit PIN");
         }
@@ -356,25 +362,13 @@ public final class PinCrypto {
      * The 11 digits of the TSP: the 11 right-most digits of the account
      * number, excluding the check digit.
      *
-     * <p>Two forms of the account number reach here, and they differ in
-     * whether the check digit is still there. A whole PAN of 13 digits or more
-     * carries its own check digit, which the TSP leaves out. A 12-digit value
-     * is already the extracted account field - the 12 right-most digits
-     * excluding the check digit - so there is nothing left to drop, and the TSP
-     * is simply its 11 right-most digits.
-     *
-     * <p>Both forms have to give the same 11 digits, or an acquirer working
-     * from the extracted account field and an issuer working from the whole PAN
-     * would compute different PVVs for the same PIN.
+     * <p>The API takes a primary account number, which carries its own check
+     * digit, so the digit is dropped and the eleven right-most of what is left
+     * are the TSP's.
      */
-    private static String tspDigits(String accountNumber) {
-        if (accountNumber.length() == 12) {
-            // Already the extracted account field: its right-most 11 digits.
-            return accountNumber.substring(1);
-        }
-        // A whole PAN: drop the check digit, then take the right-most 11.
-        return accountNumber.substring(0, accountNumber.length() - 1)
-                .substring(accountNumber.length() - 1 - 11);
+    private static String tspDigits(String pan) {
+        return pan.substring(0, pan.length() - 1)
+                .substring(pan.length() - 1 - 11);
     }
 
     /**
