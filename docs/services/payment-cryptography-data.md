@@ -95,6 +95,12 @@ client that talks to the control plane does not reach it by accident.
 - **The American Express cryptogram is refused rather than approximated.** The AEIPS session
   key derivation is proprietary and there is nothing to verify it against, and a plausible
   wrong cryptogram is the one outcome worse than an error.
+- **The card requests are checked against the model.** The account number is twelve to
+  nineteen digits, the expiry is four of them, the service code is three, and the PAN
+  sequence number is two: the EMV ones, as the model states them. A formatted account
+  number and a longer sequence number are refused rather than read as the digits they
+  carry, because the derivation reads the account number and the sequence number as they
+  are given.
 
 The two-segment paths are moved to an internal prefix for the requests signed for this
 service, so a path-style request for a bucket of that name still reaches S3.
