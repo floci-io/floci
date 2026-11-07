@@ -51,8 +51,8 @@ class SecurityHubFindingsCompatibilityTest {
                 .createdAt(timestamp)
                 .updatedAt(timestamp)
                 .severity(severity -> severity.label("MEDIUM"))
-                .title("Test control finding")
-                .description("Imported by the Security Hub compatibility test")
+                .title("Test\ncontrol finding")
+                .description("Imported by\nthe Security Hub compatibility test")
                 .resources(resource -> resource.type("AwsIamRole").id(resourceArn)
                         .partition(TestFixtures.partition()).region(TestFixtures.region().id()))
                 .compliance(compliance -> compliance.status("FAILED").securityControlId("IAM.1"))
@@ -73,6 +73,8 @@ class SecurityHubFindingsCompatibilityTest {
                     .satisfies(candidate -> {
                         assertThat(candidate.productArn()).isEqualTo(productArn);
                         assertThat(candidate.awsAccountId()).isEqualTo(IMPORT_ACCOUNT);
+                        assertThat(candidate.title()).isEqualTo(finding.title());
+                        assertThat(candidate.description()).isEqualTo(finding.description());
                         assertThat(candidate.compliance().statusAsString()).isEqualTo("FAILED");
                         assertThat(candidate.severity().labelAsString()).isEqualTo("MEDIUM");
                         assertThat(candidate.findingProviderFields().severity().labelAsString()).isEqualTo("MEDIUM");

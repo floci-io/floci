@@ -262,6 +262,32 @@ class SecurityHubFindingsServiceTest {
     }
 
     @Test
+    void batchImportAcceptsMultilineTitleAndDescriptionButRejectsWhitespaceOnlyText() {
+        ObjectNode multilineTitle = finding("multiline-title", ACCOUNT, REGION);
+        multilineTitle.put("Title", "First line\nSecond line");
+        ObjectNode multilineDescription = finding("multiline-description", ACCOUNT, REGION);
+        multilineDescription.put("Description", "First line\nSecond line");
+        ObjectNode oneCharacterTitle = finding("one-character-title", ACCOUNT, REGION);
+        oneCharacterTitle.put("Title", "\nX\n");
+        ObjectNode oneCharacterDescription = finding("one-character-description", ACCOUNT, REGION);
+        oneCharacterDescription.put("Description", "\nY\n");
+        ObjectNode blankDescription = finding("blank-description", ACCOUNT, REGION);
+        blankDescription.put("Description", " \n\t ");
+
+        SecurityHubFindingsService.ImportResult result = service.batchImportFindings(REGION,
+                batch(multilineTitle, multilineDescription, oneCharacterTitle, oneCharacterDescription,
+                        blankDescription));
+
+        assertEquals(4, result.successCount());
+        assertEquals(List.of("blank-description"),
+                result.failedFindings().stream().map(SecurityHubFindingsService.ImportFailure::id).toList());
+        assertEquals("InvalidInput", result.failedFindings().getFirst().errorCode());
+        assertEquals(Set.of("multiline-title", "multiline-description", "one-character-title",
+                "one-character-description"), Set.copyOf(service.getFindings(REGION,
+                objectMapper.createObjectNode()).items().stream().map(item -> item.path("Id").asText()).toList()));
+    }
+
+    @Test
     void reimportPreservesInvestigationFieldsAndSameBatchDuplicateUsesFirst() {
         ObjectNode original = finding("one", ACCOUNT, REGION);
         original.put("Title", "first");
