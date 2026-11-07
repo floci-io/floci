@@ -8,7 +8,9 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -107,9 +109,23 @@ public class PipesFilterMatcher {
             JsonNode value = actual == null || !actual.isObject() ? null : actual.get(field.getKey());
             JsonNode expected = field.getValue();
             if (expected.isObject()) {
+                JsonNode decodedValue = value;
+                // Kinesis data arrives base64-encoded; decode it before parsing as JSON.
+                if (value != null && value.isTextual() && "data".equals(field.getKey())
+                        && actual != null && "aws:kinesis".equals(actual.path("eventSource").asText())) {
+                    try {
+                        String text = new String(Base64.getDecoder().decode(value.asText()), StandardCharsets.UTF_8);
+                        JsonNode parsed = decoder != null ? decoder.readTree(text) : null;
+                        if (parsed != null && (parsed.isObject() || parsed.isArray())) {
+                            decodedValue = parsed;
+                        }
+                    } catch (Exception ignored) {
+                        // Not base64 or not JSON; fall through to normal handling.
+                    }
+                }
                 boolean nestedMatches = value == null
                         ? matches(expected, null, decoder)
-                        : matchesNested(expected, decoded(value, decoder), decoder);
+                        : matchesNested(expected, decodedValue != value ? decodedValue : decoded(value, decoder), decoder);
                 if (!nestedMatches) {
                     return false;
                 }
