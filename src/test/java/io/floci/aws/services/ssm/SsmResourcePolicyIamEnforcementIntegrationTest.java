@@ -71,9 +71,11 @@ class SsmResourcePolicyIamEnforcementIntegrationTest {
                     SsmException put = assertThrows(SsmException.class,
                             () -> user.putResourcePolicy(r -> r.resourceArn(deniedArn).policy(POLICY)));
                     assertEquals("AccessDeniedException", put.awsErrorDetails().errorCode());
+                    assertEquals(403, put.statusCode());
                     SsmException get = assertThrows(SsmException.class,
                             () -> user.getResourcePolicies(r -> r.resourceArn(deniedArn)));
                     assertEquals("AccessDeniedException", get.awsErrorDetails().errorCode());
+                    assertEquals(403, get.statusCode());
                 }
 
                 // Another action still acts on the parameter its handler reads, whatever ResourceArn it carries.
@@ -83,7 +85,7 @@ class SsmResourcePolicyIamEnforcementIntegrationTest {
                         .contentType("application/x-amz-json-1.1")
                         .body("{\"Name\":\"" + denied + "\",\"ResourceArn\":\"" + allowedArn + "\"}")
                 .when().post("/")
-                .then().statusCode(400).body(containsString("AccessDeniedException"));
+                .then().statusCode(403).body(containsString("AccessDeniedException"));
             } finally {
                 root.deleteParameter(r -> r.name(denied));
                 root.deleteParameter(r -> r.name(allowed));

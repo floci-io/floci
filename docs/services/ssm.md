@@ -3,6 +3,11 @@
 **Protocol:** JSON 1.1 (`X-Amz-Target: AmazonSSM.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
+With IAM enforcement enabled, authorization failures return `AccessDeniedException`
+with HTTP 403, including denied `iam:PassRole` checks, as specified by the
+[SSM common-error contract](https://docs.aws.amazon.com/systems-manager/latest/APIReference/CommonErrors.html).
+Parameter validation and missing-resource errors retain their own status codes.
+
 ## Supported Actions
 
 ### Parameter Store

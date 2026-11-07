@@ -37,6 +37,10 @@ class SsmGetParameterArnIamEnforcementIntegrationTest {
             try {
                 root.putParameter(request -> request.name(allowed).type("String").value("allowed-value"));
                 root.putParameter(request -> request.name(denied).type("String").value("denied-value"));
+                SsmException missing = assertThrows(SsmException.class,
+                        () -> root.getParameter(request -> request.name(prefix + "/missing")));
+                assertEquals("ParameterNotFound", missing.awsErrorDetails().errorCode());
+                assertEquals(400, missing.statusCode());
                 String allowedArn = root.getParameter(request -> request.name(allowed)).parameter().arn();
                 String deniedArn = root.getParameter(request -> request.name(denied)).parameter().arn();
                 String userName = "ssm-arn-" + UUID.randomUUID();
@@ -52,6 +56,7 @@ class SsmGetParameterArnIamEnforcementIntegrationTest {
                     SsmException error = assertThrows(SsmException.class,
                             () -> user.getParameter(request -> request.name(deniedArn)));
                     assertEquals("AccessDeniedException", error.awsErrorDetails().errorCode());
+                    assertEquals(403, error.statusCode());
                 }
             } finally {
                 root.deleteParameter(request -> request.name(allowed));

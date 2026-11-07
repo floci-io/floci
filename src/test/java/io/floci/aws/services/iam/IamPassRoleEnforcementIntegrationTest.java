@@ -1139,9 +1139,12 @@ class IamPassRoleEnforcementIntegrationTest {
 
         // A grant to pass the role to Lambda does not cover SSM.
         user.policy(actions + "," + passRole(role, LAMBDA));
-        deniedJson(ssm(user, "CreateAssociation").body(association).post("/").then());
-        deniedJson(ssm(user, "UpdateAssociation").body(update).post("/").then());
-        deniedJson(ssm(user, "SendCommand").body(command).post("/").then());
+        ssm(user, "CreateAssociation").body(association).post("/").then()
+                .statusCode(403).body(containsString("AccessDeniedException")).body(containsString("iam:PassRole"));
+        ssm(user, "UpdateAssociation").body(update).post("/").then()
+                .statusCode(403).body(containsString("AccessDeniedException")).body(containsString("iam:PassRole"));
+        ssm(user, "SendCommand").body(command).post("/").then()
+                .statusCode(403).body(containsString("AccessDeniedException")).body(containsString("iam:PassRole"));
 
         user.policy(actions + "," + passRole(role, SSM));
         ssm(user, "CreateAssociation").body(association).post("/").then()
