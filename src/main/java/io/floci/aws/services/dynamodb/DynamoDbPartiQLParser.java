@@ -479,6 +479,15 @@ public class DynamoDbPartiQLParser {
     }
 
     static Stmt parse(String statement, List<JsonNode> parameters) {
+        try {
+            return parseStatement(statement, parameters);
+        } catch (StackOverflowError expected) {
+            // DynamoDB answers a statement nested too deep for its parser the same way, with no message.
+            throw new AwsException("InternalFailure", null, 500);
+        }
+    }
+
+    private static Stmt parseStatement(String statement, List<JsonNode> parameters) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
         DynamoDbPartiQLParser parser = new DynamoDbPartiQLParser(statement, parameters);
         Stmt stmt = parser.parseStmt();
@@ -703,6 +712,11 @@ public class DynamoDbPartiQLParser {
         if (isStar(peek())) {
             throw validationEx(NOT_WELL_FORMED + STAR_WITH_OTHER_ITEMS);
         }
+        if (peekCall()) {
+            Token name = advance();
+            defer("Unexpected path component at " + position(name));
+            return parseCall(name, false);
+        }
         return parsePath();
     }
 
@@ -761,13 +775,24 @@ public class DynamoDbPartiQLParser {
         Map<String, PVal> fields = new LinkedHashMap<>();
         while (peek().type() != TType.RBRACE) {
             String key = parseFieldName();
-            fields.put(key, parseValue(null));
+            fields.put(key, parseFieldValue());
             if (peek().type() == TType.COMMA) {
                 advance();
             }
         }
         consume(TType.RBRACE);
         return fields;
+    }
+
+    private PVal parseFieldValue() {
+        if (!peekCall()) {
+            return parseValue();
+        }
+        Token name = advance();
+        defer("Unsupported data type: " + name.value().toLowerCase(Locale.ROOT) + " under key root at "
+                + position(name));
+        parseCall(name, false);
+        return new PVal.Null();
     }
 
     // UPDATE "Table" SET attr=val [, …] [REMOVE attr [, …]] WHERE …
@@ -1049,9 +1074,7 @@ public class DynamoDbPartiQLParser {
     }
 
     private Cond conditionEquals(Cond cond) {
-        boolean predicateNext = peek().type() == TType.LPAREN
-                || PREDICATE_FUNCTIONS.stream().anyMatch(this::peekFunction);
-        if (predicateNext) {
+        if (peek().type() == TType.LPAREN || peekCall()) {
             Cond other = parseCond();
             return sameTruth(cond, other, new Cond.Not(other));
         }
@@ -1157,7 +1180,16 @@ public class DynamoDbPartiQLParser {
             return new Cond.SizeCmp(path, op, val);
         }
         Token operand = peek();
-        Path path = parsePath();
+        boolean call = peekCall();
+        Path path = call ? parseCall(advance(), false) : parsePath();
+        if (call && !CALL_PREDICATES.contains(peek().type())) {
+            if (COMPARISONS.contains(peek().type())) {
+                advance();
+                requireRightHandSide();
+                parseCallArgument(false);
+            }
+            return new Cond.Missing(path, false);
+        }
         if (peek().type() == TType.BETWEEN) {
             advance();
             requireRightHandSide();
@@ -1214,6 +1246,97 @@ public class DynamoDbPartiQLParser {
     private boolean peekFunction(String name) {
         return peek().type() == TType.IDENT && name.equalsIgnoreCase(peek().value())
                 && tokens.get(pos + 1).type() == TType.LPAREN;
+    }
+
+    private static final Set<TType> CALL_PREDICATES = EnumSet.of(TType.BETWEEN, TType.IN, TType.IS);
+
+    private static final Set<String> AGGREGATE_FUNCTIONS = Set.of("avg", "count", "max", "min", "sum");
+
+    private static final Set<String> KEYWORD_FUNCTIONS = Set.of("avg", "bit_length", "char_length", "character_length",
+            "count", "exists", "lower", "max", "min", "octet_length", "size", "sum", "trim", "upper");
+
+    private boolean peekCall() {
+        return isCall(pos);
+    }
+
+    private boolean isCall(int index) {
+        Token name = tokens.get(index);
+        return name.type() == TType.IDENT && !isStar(name) && tokens.get(index + 1).type() == TType.LPAREN
+                && (!isKeyword(name) || KEYWORD_FUNCTIONS.contains(name.value().toLowerCase(Locale.ROOT)));
+    }
+
+    // The path only stands in for the call. A call always fails the statement, or the call around it does.
+    private Path parseCall(Token name, boolean update) {
+        String function = name.value().toLowerCase(Locale.ROOT);
+        String errorBeforeCall = deferredError;
+        parseCallArguments(name, update);
+        String shapeError = callShapeError(name, addPathSteps(new ArrayList<>()));
+        if (shapeError != null) {
+            deferredError = errorBeforeCall;
+            defer(shapeError);
+        } else if (isFunctionOf(!update, function)) {
+            defer("The function is not allowed in " + (update ? "an update" : "a condition")
+                    + " expression; function: " + function);
+        } else if (!isFunctionOf(update, function)) {
+            defer("Unrecognized function: " + function + " at " + position(name));
+        }
+        return new Path(List.of(new Seg.Name(name.value())));
+    }
+
+    // DynamoDB reports these before it looks at the arguments.
+    private String callShapeError(Token name, boolean pathSteps) {
+        String function = name.value().toLowerCase(Locale.ROOT);
+        if (pathSteps) {
+            return "Unexpected path component at " + position(name);
+        }
+        if (peek().type() == TType.IS) {
+            return "The left hand side argument to IS must be a Variable Reference, Literal, or Path";
+        }
+        return AGGREGATE_FUNCTIONS.contains(function)
+                ? "Unsupported token in expression: " + function + " at " + position(name) : null;
+    }
+
+    private static boolean isFunctionOf(boolean update, String function) {
+        return update
+                ? "list_append".equals(function)
+                : "size".equals(function) || PREDICATE_FUNCTIONS.contains(function);
+    }
+
+    private void parseCallArguments(Token name, boolean update) {
+        String function = name.value().toLowerCase(Locale.ROOT);
+        boolean aggregate = AGGREGATE_FUNCTIONS.contains(function);
+        consume(TType.LPAREN);
+        if (isStar(peek())) {
+            if (!"count".equals(function)) {
+                throw validationEx(NOT_WELL_FORMED + (aggregate ? function : name.value()) + "(*) is not allowed");
+            }
+            advance();
+        } else if (peek().type() != TType.RPAREN) {
+            if (aggregate && (isWord(peek(), "DISTINCT") || peek().type() == TType.ALL)) {
+                advance();
+            }
+            parseCallArgument(update);
+            while (peek().type() == TType.COMMA) {
+                advance();
+                parseCallArgument(update);
+            }
+        } else if (aggregate) {
+            throw validationEx(NOT_WELL_FORMED + "Aggregate functions are always unary");
+        }
+        if (peek().type() != TType.RPAREN) {
+            throw validationEx(NOT_WELL_FORMED + "Expected RIGHT_PAREN");
+        }
+        advance();
+    }
+
+    private void parseCallArgument(boolean update) {
+        if (peekCall()) {
+            parseCall(advance(), update);
+        } else if (peek().type() == TType.IDENT) {
+            parsePath();
+        } else {
+            parseValue();
+        }
     }
 
     private static final Map<String, PartiQLType> TYPE_NAMES = Map.ofEntries(
@@ -1456,6 +1579,10 @@ public class DynamoDbPartiQLParser {
             consume(TType.RPAREN);
             return new Operand.ListAppend(first, second);
         }
+        if (peekCall()) {
+            parseCall(advance(), true);
+            return new Operand.Value(new PVal.Null());
+        }
         if (peek().type() == TType.IDENT) {
             return new Operand.Attribute(parsePath());
         }
@@ -1547,7 +1674,7 @@ public class DynamoDbPartiQLParser {
                     yield null;
                 }
                 case PLUS, MINUS -> checkedNumber(parseSignedNumber(t), nested);
-                default -> throw validationEx("Expected value literal or ?, got: " + t.value());
+                default -> parseCallValue(t, parent, path);
             };
             if (parent != null && parent.close == TType.RBAG) {
                 checkBagMember(parent, value);
@@ -1573,6 +1700,23 @@ public class DynamoDbPartiQLParser {
                 break;
             }
         }
+    }
+
+    private PVal parseCallValue(Token name, OpenCollection parent, String path) {
+        String expectedValue = "Expected value literal or ?, got: " + name.value();
+        if (!isCall(pos - 1)) {
+            throw validationEx(expectedValue);
+        }
+        if (parent != null) {
+            boolean firstInBag = parent.close == TType.RBAG && parent.items.isEmpty();
+            defer((firstInBag ? BAG_MEMBER_TYPES : "Unsupported data type: Call under key " + path) + " at "
+                    + position(name));
+        }
+        parseCall(name, false);
+        if (!literalErrorPending()) {
+            throw validationEx(expectedValue);
+        }
+        return new PVal.Null();
     }
 
     private static final class OpenCollection {
@@ -1667,6 +1811,9 @@ public class DynamoDbPartiQLParser {
     // Stands in for a bag DynamoDB refuses, so the statement can be read to its end.
     private static final PVal.Bag REFUSED_BAG = new PVal.Bag("SS", List.of());
 
+    private static final String BAG_MEMBER_TYPES =
+            "Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags";
+
     // A collection member is refused before DynamoDB looks inside it.
     private void checkBagMember(OpenCollection bag, PVal member) {
         String type = member == null ? null : typeCode(member);
@@ -1675,7 +1822,7 @@ public class DynamoDbPartiQLParser {
         }
         if (type == null || !type.equals(bag.memberType)) {
             bag.invalid = true;
-            defer("Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags");
+            defer(BAG_MEMBER_TYPES);
         }
     }
 
