@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.lambda.LambdaExecutorService;
+import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.stepfunctions.model.Execution;
 import io.floci.aws.services.stepfunctions.model.HistoryEvent;
 import io.floci.aws.services.stepfunctions.model.MockedResponseStep;
@@ -11,6 +12,7 @@ import io.floci.aws.services.stepfunctions.model.MockedTestCase;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.mutiny.core.Vertx;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,8 +23,12 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
@@ -281,6 +287,42 @@ class AslExecutorMockedResponsesTest {
 
     private MockedResponseStep throwStep(int from, int to, String error, String cause) {
         return new MockedResponseStep(from, to, null, error, cause);
+    }
+
+    /** A test case cannot mock a Map state, whose S3 calls stay real, so a mocked execution is evaluated on them too. */
+    @Test
+    void aMockedExecutionsMapS3CallsAreEvaluatedUnderEnforcement() {
+        LambdaTaskAuthorizer authorizer = mock(LambdaTaskAuthorizer.class);
+        S3Service s3 = mock(S3Service.class);
+        when(s3.listObjects(any(), any(), any(), anyInt())).thenReturn(List.of());
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().stepfunctions().maxWaitSeconds()).thenReturn(30);
+        when(config.services().iam().enforcementEnabled()).thenReturn(true);
+        @SuppressWarnings("unchecked")
+        Instance<StepFunctionsService> sfnService = mock(Instance.class);
+        when(sfnService.get()).thenReturn(mock(StepFunctionsService.class));
+        executor = AslExecutorFixture.builder()
+                .lambdaExecutor(lambdaExecutor)
+                .lambdaTaskAuthorizer(authorizer)
+                .s3Service(s3)
+                .sfnService(sfnService)
+                .objectMapper(objectMapper)
+                .config(config)
+                .vertx(vertx)
+                .customResourceLiveness(null)
+                .build();
+        String definition = """
+                {"StartAt":"Run","States":{"Run":{"Type":"Map","End":true,
+                  "ItemReader":{"Resource":"arn:aws:states:::s3:listObjectsV2","Parameters":{"Bucket":"b"}},
+                  "ItemProcessor":{"ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                    "StartAt":"Item","States":{"Item":{"Type":"Pass","End":true}}}}}}
+                """;
+
+        Execution mocked = run(definition, testCase(Map.of("Elsewhere", List.of())), "{}", "mocked");
+
+        assertEquals("SUCCEEDED", mocked.getStatus(), mocked.getCause());
+        verify(authorizer).authorizeMapS3(any(), eq("States.ItemReaderFailed"), any());
+        verify(s3).listObjects(eq("b"), any(), any(), anyInt());
     }
 
     private Execution run(String definition, MockedTestCase mocks) {

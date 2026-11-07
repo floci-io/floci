@@ -109,6 +109,25 @@ public class LambdaTaskAuthorizer {
      */
     void authorize(StateMachine machine, String credentialsRoleArn, String deniedError, List<Permission> permissions,
                    boolean checkExecutionRole) {
+        decide(machine, credentialsRoleArn, deniedError, permissions, checkExecutionRole);
+    }
+
+    /**
+     * Decides the S3 calls a Distributed Map makes as its execution role, which has no error prefix of its own: a
+     * refused permission fails the state with the error its reader or writer fails with on any other S3 failure.
+     * The execution role has to exist and to trust Step Functions, as for a task, and is refused with
+     * {@code States.Permissions}. A Map has no {@code Credentials} to assume.
+     *
+     * @param refusedError the error a refused permission fails with
+     * @throws AslExecutor.FailStateException {@code States.Permissions} for the execution role, and
+     *         {@code refusedError} for a refused permission
+     */
+    void authorizeMapS3(StateMachine machine, String refusedError, List<Permission> permissions) {
+        decide(machine, null, refusedError, permissions, true);
+    }
+
+    private void decide(StateMachine machine, String credentialsRoleArn, String refusedError,
+                        List<Permission> permissions, boolean checkExecutionRole) {
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
         if (checkExecutionRole) {
             IamRole executionRole = role(machine.getRoleArn()).orElseThrow(
@@ -131,7 +150,7 @@ public class LambdaTaskAuthorizer {
             Optional<String> refusal = refusal(effectiveRoleArn, permission.action(), evaluatedOn(permission.resourceArn()),
                     owner.region(), permission.conditionKeys());
             if (refusal.isPresent()) {
-                throw new AslExecutor.FailStateException(deniedError, refusal.get());
+                throw new AslExecutor.FailStateException(refusedError, refusal.get());
             }
         }
     }
