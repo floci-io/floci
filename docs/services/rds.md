@@ -219,9 +219,12 @@ checked against the instance's other window. Modifications apply immediately —
     MySQL and MariaDB use `mysqldump` (`mariadb-dump`) of every user schema, with routines,
     triggers and events, run as the master user, followed by every account other than `root` and
     the image's system accounts, recreated from `SHOW CREATE USER` and `SHOW GRANTS` so they keep
-    their passwords. The `mysql` system schema itself is not copied. The restore waits until the
-    new server accepts the master user over TCP before loading the copy. SQL Server instances are
-    refused with `InvalidDBInstanceState`.
+    their passwords. Roles are copied too, and created before any grant names them. The `mysql`
+    system schema itself is not copied. The restore waits until the new server accepts the master
+    user over TCP before loading the copy. SQL Server instances are refused with
+    `InvalidDBInstanceState`. The dump runs in one transaction, so InnoDB tables are copied as of
+    one moment; as with `mysqldump --single-transaction` elsewhere, a MyISAM or other
+    non-transactional table written to during the snapshot may not be.
 
 ## Cluster parameter groups
 

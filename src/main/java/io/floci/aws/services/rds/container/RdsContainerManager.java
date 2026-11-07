@@ -1275,7 +1275,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
             String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
                     "sh", "/tmp/floci-mysql-dump.sh", tools.client(), tools.dump(), mysqlUser(masterUsername),
-                    tools.dumpFlags(), tools.accountFilter()};
+                    tools.dumpFlags(), tools.accountClause(), tools.roleFilter()};
             ContainerExec.Result result = execInContainer(containerId, cmd, 300);
             if (result.exitCode() != 0) {
                 throw new RuntimeException(tools.dump() + " failed with exit code " + result.exitCode()
@@ -1340,15 +1340,21 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     /**
-     * The client binaries and dump flags of an engine. MariaDB images ship only the {@code mariadb-*}
-     * names, and list roles in {@code mysql.user}, which {@code SHOW CREATE USER} refuses; MySQL's
-     * dump leaves out the GTID state, which a fresh server would refuse to load.
+     * The client binaries and dump flags of an engine, and the end of its account query. MariaDB
+     * images ship only the {@code mariadb-*} names, and list roles in {@code mysql.user} next to
+     * accounts, which {@code SHOW CREATE USER} refuses, so they are recreated with {@code CREATE ROLE}.
+     * A MySQL role is an account, and {@code SHOW CREATE USER} names an account's default roles, so
+     * the accounts used as roles are created first. MySQL's dump leaves out the GTID state, which a
+     * fresh server would refuse to load.
      */
-    record MysqlTools(String client, String dump, String dumpFlags, String accountFilter) {
+    record MysqlTools(String client, String dump, String dumpFlags, String accountClause, String roleFilter) {
         static MysqlTools of(DatabaseEngine engine) {
             return engine == DatabaseEngine.MARIADB
-                    ? new MysqlTools("mariadb", "mariadb-dump", "", "AND is_role = 'N'")
-                    : new MysqlTools("mysql", "mysqldump", "--set-gtid-purged=OFF", "");
+                    ? new MysqlTools("mariadb", "mariadb-dump", "", "AND is_role = 'N'", "is_role = 'Y'")
+                    : new MysqlTools("mysql", "mysqldump", "--set-gtid-purged=OFF",
+                            "ORDER BY (user, host) IN (SELECT FROM_USER, FROM_HOST FROM mysql.role_edges"
+                                    + " UNION SELECT DEFAULT_ROLE_USER, DEFAULT_ROLE_HOST FROM mysql.default_roles) DESC",
+                            "FALSE");
         }
     }
 
@@ -1359,27 +1365,50 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     static String mysqlDumpScript() {
         return """
                 #!/bin/sh
-                # usage: floci-mysql-dump.sh <client> <dump> <user> <dump flags> <account filter>
-                # The password arrives in MYSQL_PWD.
+                # usage: floci-mysql-dump.sh <client> <dump> <user> <dump flags> <account clause> <role filter>
+                # The password arrives in MYSQL_PWD. Names are read one per line, so a schema or
+                # account name with spaces stays one argument.
                 set -ef
-                C="$1"; D="$2"; U="$3"; FLAGS="$4"; FILTER="$5"
+                C="$1"; D="$2"; U="$3"; FLAGS="$4"; ACCOUNT_CLAUSE="$5"; ROLE_FILTER="$6"
                 SQL() { "$C" -h127.0.0.1 --protocol=TCP -u"$U" -N -B -r -e "$1"; }
                 DBS=$(SQL "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN \\
                   ('mysql','sys','performance_schema','information_schema')")
-                if [ -n "$DBS" ]; then
+                set --
+                while IFS= read -r db; do
+                  if [ -n "$db" ]; then set -- "$@" "$db"; fi
+                done <<EOF
+                $DBS
+                EOF
+                if [ $# -gt 0 ]; then
                   # shellcheck disable=SC2086
-                  "$D" -h127.0.0.1 --protocol=TCP -u"$U" --databases $DBS --routines --events --triggers \\
-                    --single-transaction --hex-blob --no-tablespaces $FLAGS
+                  "$D" -h127.0.0.1 --protocol=TCP -u"$U" --routines --events --triggers \\
+                    --single-transaction --hex-blob --no-tablespaces $FLAGS --databases "$@"
                 fi
+                ROLES=$(SQL "SELECT QUOTE(user) FROM mysql.user WHERE $ROLE_FILTER")
                 ACCOUNTS=$(SQL "SELECT CONCAT(QUOTE(user),'@',QUOTE(host)) FROM mysql.user WHERE user NOT IN \\
-                  ('','root','mysql.sys','mysql.session','mysql.infoschema','mariadb.sys','healthcheck') $FILTER")
-                for acct in $ACCOUNTS; do
-                  # MySQL prints a binary password hash as hex only when asked; MariaDB has no such setting.
-                  stmt=$(SQL "SET SESSION print_identified_with_as_hex = ON; SHOW CREATE USER $acct" 2>/dev/null \\
-                         || SQL "SHOW CREATE USER $acct")
-                  echo "$stmt;" | sed 's/^CREATE USER /CREATE USER IF NOT EXISTS /'
-                  SQL "SHOW GRANTS FOR $acct" | sed 's/$/;/'
-                done
+                  ('','root','mysql.sys','mysql.session','mysql.infoschema','mariadb.sys','healthcheck','PUBLIC') $ACCOUNT_CLAUSE")
+                # Every role and account is created before any grant, which can name a role.
+                while IFS= read -r role; do
+                  if [ -n "$role" ]; then echo "CREATE ROLE IF NOT EXISTS $role;"; fi
+                done <<EOF
+                $ROLES
+                EOF
+                while IFS= read -r acct; do
+                  if [ -n "$acct" ]; then
+                    # MySQL prints a binary password hash as hex only when asked; MariaDB has no such setting.
+                    stmt=$(SQL "SET SESSION print_identified_with_as_hex = ON; SHOW CREATE USER $acct" 2>/dev/null \\
+                           || SQL "SHOW CREATE USER $acct")
+                    echo "$stmt;" | sed 's/^CREATE USER /CREATE USER IF NOT EXISTS /'
+                  fi
+                done <<EOF
+                $ACCOUNTS
+                EOF
+                while IFS= read -r grantee; do
+                  if [ -n "$grantee" ]; then SQL "SHOW GRANTS FOR $grantee" | sed 's/$/;/'; fi
+                done <<EOF
+                $ROLES
+                $ACCOUNTS
+                EOF
                 echo "FLUSH PRIVILEGES;"
                 """;
     }

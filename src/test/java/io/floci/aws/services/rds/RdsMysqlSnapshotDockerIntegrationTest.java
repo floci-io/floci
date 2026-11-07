@@ -11,18 +11,21 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.Properties;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
 import static io.floci.aws.testing.RdsRequests.deleteInstance;
 import static io.floci.aws.testing.RdsRequests.rds;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * A MySQL or MariaDB instance's snapshot carries its schemas and its accounts: an instance restored
- * from it holds the same rows, and an account created on the source logs in to the restored
- * instance with its own password. Skipped without Docker.
+ * A MySQL or MariaDB instance's snapshot carries its schemas, its roles and its accounts: an
+ * instance restored from it holds the same rows, including a schema whose name has a space, and an
+ * account created on the source logs in to the restored instance with its own password and reads
+ * through the role it was granted. Skipped without Docker.
  */
 @QuarkusTest
 @Tag("docker")
@@ -37,8 +40,10 @@ class RdsMysqlSnapshotDockerIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"mysql, 8.0", "mariadb, 10.11"})
-    void restoredInstanceHoldsTheSourcesRowsAndAccounts(String engine, String version) throws Exception {
+    @CsvSource(delimiter = '|', quoteCharacter = '"', value = {
+            "mysql | 8.0 | SET DEFAULT ROLE 'readers' TO 'reader'@'%'",
+            "mariadb | 10.11 | SET DEFAULT ROLE 'readers' FOR 'reader'@'%'"})
+    void restoredInstanceHoldsTheSourcesRowsRolesAndAccounts(String engine, String version, String defaultRole) {
         String suffix = Long.toString(System.nanoTime(), 36);
         String sourceId = engine + "-snap-src-" + suffix;
         String restoredId = engine + "-snap-dst-" + suffix;
@@ -48,8 +53,14 @@ class RdsMysqlSnapshotDockerIntegrationTest {
             execute(sourcePort, MASTER_USER, MASTER_PASSWORD,
                     "CREATE TABLE appdb.notes (id INT PRIMARY KEY, body VARCHAR(32))",
                     "INSERT INTO appdb.notes VALUES (1, 'kept')",
+                    "CREATE DATABASE `sales data`",
+                    "CREATE TABLE `sales data`.totals (amount INT)",
+                    "INSERT INTO `sales data`.totals VALUES (7)",
+                    "CREATE ROLE 'readers'",
+                    "GRANT SELECT ON appdb.* TO 'readers'",
                     "CREATE USER 'reader'@'%' IDENTIFIED BY 'R3aderPass'",
-                    "GRANT SELECT ON appdb.* TO 'reader'@'%'");
+                    "GRANT 'readers' TO 'reader'@'%'",
+                    defaultRole);
 
             rds("CreateDBSnapshot")
                     .formParam("DBInstanceIdentifier", sourceId)
@@ -64,6 +75,8 @@ class RdsMysqlSnapshotDockerIntegrationTest {
 
             assertEquals("kept", query(restoredPort, MASTER_USER, MASTER_PASSWORD,
                     "SELECT body FROM appdb.notes WHERE id = 1"));
+            assertEquals("7", query(restoredPort, MASTER_USER, MASTER_PASSWORD,
+                    "SELECT amount FROM `sales data`.totals"));
             assertEquals("1", query(restoredPort, "reader", "R3aderPass", "SELECT COUNT(*) FROM appdb.notes"));
         } finally {
             deleteInstance(restoredId);
@@ -88,44 +101,49 @@ class RdsMysqlSnapshotDockerIntegrationTest {
                 .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
     }
 
-    /**
-     * Runs the statements in one connection. The image restarts its server once after initializing
-     * a new data directory, so a refused connection is retried.
-     */
-    private static void execute(int port, String user, String password, String... statements) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
-        while (true) {
-            try (Connection connection = connect(port, user, password);
-                 Statement statement = connection.createStatement()) {
+    /** Runs the statements in one connection, once the server accepts it (see {@link #whenConnected}). */
+    private static void execute(int port, String user, String password, String... statements) {
+        whenConnected(port, user, password, connection -> {
+            try (Statement statement = connection.createStatement()) {
                 for (String sql : statements) {
                     statement.execute(sql);
                 }
-                return;
-            } catch (SQLException e) {
-                if (System.nanoTime() > deadline) {
-                    throw e;
-                }
-                Thread.sleep(1000);
             }
-        }
+            return null;
+        });
     }
 
-    /** The first column of a query's first row, retried as {@link #execute} is. */
-    private static String query(int port, String user, String password, String sql) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90);
-        while (true) {
-            try (Connection connection = connect(port, user, password);
-                 Statement statement = connection.createStatement();
+    /** The first column of a query's first row, once the server accepts the connection. */
+    private static String query(int port, String user, String password, String sql) {
+        return whenConnected(port, user, password, connection -> {
+            try (Statement statement = connection.createStatement();
                  ResultSet rows = statement.executeQuery(sql)) {
                 rows.next();
                 return rows.getString(1);
-            } catch (SQLException e) {
-                if (System.nanoTime() > deadline) {
-                    throw e;
-                }
-                Thread.sleep(1000);
             }
-        }
+        });
+    }
+
+    private interface SqlWork<T> {
+        T run(Connection connection) throws SQLException;
+    }
+
+    /**
+     * Runs {@code work} in a new connection. Floci reports an instance before its image has
+     * initialized the data directory, on a server that does not listen on TCP, so a refused
+     * connection is tried again until the server it then starts answers.
+     */
+    private static <T> T whenConnected(int port, String user, String password, SqlWork<T> work) {
+        AtomicReference<T> result = new AtomicReference<>();
+        await().atMost(Duration.ofSeconds(90)).pollInterval(Duration.ofSeconds(1))
+                .ignoreExceptionsInstanceOf(SQLException.class)
+                .until(() -> {
+                    try (Connection connection = connect(port, user, password)) {
+                        result.set(work.run(connection));
+                        return true;
+                    }
+                });
+        return result.get();
     }
 
     private static Connection connect(int port, String user, String password) throws SQLException {
