@@ -583,6 +583,19 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
+     * Whether a key is a Triple DES key rather than an AES one.
+     *
+     * <p>The key record knows its algorithm, so the family is read from there and not guessed
+     * from the length of the material, because a 16-byte key is a two-key TDES one and an
+     * AES-128 one, and a 24-byte key is a three-key TDES one and an AES-192 one.
+     */
+    static boolean isTdes(PaymentCryptographyKey key) {
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
+        return algorithm != null && algorithm.isTdes();
+    }
+
+    /**
      * The algorithm byte of a key: {@code A} for an AES key and {@code T} for a TDES one.
      *
      * <p>The key record knows its algorithm, so the byte is read from there and not guessed from
@@ -590,8 +603,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * different keys.
      */
     static String algorithmByte(PaymentCryptographyKey key) {
-        return "AES_256".equals(key.getKeyAlgorithm()) || "AES_192".equals(key.getKeyAlgorithm())
-                || "AES_128".equals(key.getKeyAlgorithm()) ? "A" : "T";
+        return isAes(key) ? "A" : "T";
     }
 
     /** The usage name of a TR-31 usage code, such as {@code TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY}. */

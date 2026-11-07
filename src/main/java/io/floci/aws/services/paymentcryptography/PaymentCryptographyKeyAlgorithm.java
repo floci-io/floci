@@ -88,6 +88,16 @@ enum PaymentCryptographyKeyAlgorithm {
         return aes;
     }
 
+    /**
+     * Whether the key is a Triple DES key rather than an AES one.
+     *
+     * <p>A symmetric key is an AES one or a Triple DES one, so the family follows from the
+     * two.
+     */
+    boolean isTdes() {
+        return symmetric() && !aes;
+    }
+
     /** Whether the key is an EC key, which has a key pair rather than key material. */
     boolean isEcc() {
         return ecc;

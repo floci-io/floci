@@ -59,11 +59,23 @@ MODELS: dict[str, str] = {
     "lambda-core": "lambda",
     "lambda-microvms": "lambda",
     "opensearch": "es",
+    # The data plane is signed for the service, which is one scope for both of its planes.
+    "payment-cryptography-data": "payment-cryptography",
     "pipes": "pipes",
     "quicksight": "quicksight",
     "s3": "s3",
     "s3control": "s3",
     "scheduler": "scheduler",
+}
+
+# The models whose routes are rewritten onto an internal prefix, and the prefix they are rewritten
+# onto, with whether the labels in their paths hold an ARN. A service whose routes sit under such a
+# prefix has them there, and the prefix names them.
+INTERNAL_ROUTES: dict[str, tuple[str, bool]] = {
+    # The Payment Cryptography data plane's routes sit under the prefix its route filter rewrites
+    # them onto, and the key they name is an ARN, whose slashes the rewritten path holds: the label
+    # spans them, as the controller's own path does.
+    "payment-cryptography-data": ("/_paymentcryptography", True),
 }
 
 
@@ -92,10 +104,16 @@ def build(models: dict[str, dict], provenance: str) -> dict:
         model = models[name]
         if model["metadata"].get("protocol") not in ("rest-json", "rest-xml"):
             raise SystemExit(f"error: {name} is not a REST model")
+        prefix, arn_labels = INTERNAL_ROUTES.get(name, ("", False))
         operations = {}
         for operation in sorted(model["operations"]):
             http = model["operations"][operation]["http"]
-            operations[operation] = {"method": http["method"], "requestUri": http["requestUri"]}
+            request_uri = prefix + http["requestUri"]
+            if arn_labels:
+                # A label holding an ARN spans the slashes the ARN holds, which the rewritten path
+                # holds as they are.
+                request_uri = re.sub(r"\{([^}]+)\}", r"{\1+}", request_uri)
+            operations[operation] = {"method": http["method"], "requestUri": request_uri}
         routes[name] = {
             "credentialScope": MODELS[name],
             "apiVersion": model["metadata"]["apiVersion"],
