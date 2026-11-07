@@ -414,8 +414,8 @@ class Ec2InstanceCfnProvisionerTest {
         verify(ec2, never()).modifyInstanceUserData(anyString(), anyString(), any());
     }
 
-    // The tests down to droppingADeclaredPrivateIpAddress... pin the drop-policy.tsv rows of the
-    // properties they drop: what an update that drops each one does.
+    // The tests down to droppingMetadataOptionsWhileTheLaunchTemplateSupplies... pin the
+    // drop-policy.tsv rows of the properties they drop: what an update that drops each one does.
     @Test
     void droppingInstanceTypeGoesBackToTheDefaultAndSecurityGroupsAreKept() throws Exception {
         Instance i1 = reusable("i-1");
@@ -477,6 +477,116 @@ class Ec2InstanceCfnProvisionerTest {
             assertEquals("i-2", r.getPhysicalId(), declared);
             assertTrue(provisioner.hasReplacementUpdate(r), declared);
         }
+    }
+
+    @Test
+    void droppingImageIdWhileTheLaunchTemplateSuppliesADifferentImageReplacesTheInstance() throws Exception {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-2");
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, null, false)).thenReturn(data);
+        stubLaunches("i-1", "i-2");
+        StackResource r = resource("Server");
+        String previous = "{\"ImageId\": \"ami-1\", \"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}";
+        provisioner.provision(r, props(previous), ctx(null));
+        assertEquals("i-1", r.getPhysicalId());
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props(previous)));
+
+        assertEquals("i-2", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        verify(ec2, times(1)).runInstances(anyString(), eq("ami-2"), anyString(), anyInt(), anyInt(), any(),
+                anyList(), any(), any(), anyList(), any(), any(), any(),
+                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    void droppingImageIdWhileTheLaunchTemplateSuppliesTheSameImageKeepsTheInstance() throws Exception {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-1");
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, null, false)).thenReturn(data);
+        reusable("i-1");
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}")));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        verify(ec2, never()).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
+                anyList(), any(), any(), anyList(), any(), any(), any(),
+                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    void droppingKeyNameWhileTheLaunchTemplateSuppliesADifferentKeyReplacesTheInstance() throws Exception {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-1");
+        data.setKeyName("key-2");
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, null, false)).thenReturn(data);
+        List<Instance> instances = stubLaunches("i-1", "i-2");
+        instances.get(0).setKeyName("key-1");
+        StackResource r = resource("Server");
+        String previous = "{\"ImageId\": \"ami-1\", \"KeyName\": \"key-1\", "
+                + "\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}";
+        provisioner.provision(r, props(previous), ctx(null));
+        assertEquals("i-1", r.getPhysicalId());
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props(previous)));
+
+        assertEquals("i-2", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void droppingKeyNameWhileTheLaunchTemplateSuppliesTheSameKeyKeepsTheInstance() throws Exception {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-1");
+        data.setKeyName("key-1");
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, null, false)).thenReturn(data);
+        Instance i1 = reusable("i-1");
+        i1.setKeyName("key-1");
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"KeyName\": \"key-1\", "
+                        + "\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}")));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void droppingMetadataOptionsWhileTheLaunchTemplateSuppliesAMemberAppliesItsValueAndLaunchDefaultsToTheRest()
+            throws Exception {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-1");
+        LaunchTemplateData.MetadataOptions supplied = new LaunchTemplateData.MetadataOptions();
+        supplied.setHttpTokens("required");
+        data.setMetadataOptions(supplied);
+        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, null, false)).thenReturn(data);
+        Instance i1 = stubLaunches("i-1", "i-2").get(0);
+        StackResource r = resource("Server");
+        String previous = "{\"ImageId\": \"ami-1\", "
+                + "\"MetadataOptions\": {\"HttpTokens\": \"optional\", \"HttpPutResponseHopLimit\": 3}, "
+                + "\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}";
+        provisioner.provision(r, props(previous), ctx(null));
+        LaunchTemplateData.MetadataOptions applied = LaunchTemplateData.MetadataOptions.launchDefaults();
+        applied.setHttpTokens("optional");
+        applied.setHttpPutResponseHopLimit(3);
+        i1.setMetadataOptions(applied);
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props(previous)));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        ArgumentCaptor<LaunchTemplateData.MetadataOptions> modified =
+                ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
+        verify(ec2).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), modified.capture());
+        assertEquals("required", modified.getValue().getHttpTokens());
+        assertEquals(1, modified.getValue().getHttpPutResponseHopLimit());
     }
 
     @Test
