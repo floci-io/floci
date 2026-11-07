@@ -53,8 +53,10 @@ final class SecurityHubRequestShapes {
 
     static void checkFinding(JsonNode finding) {
         ObjectNode modeled = MAPPER.createObjectNode();
-        for (String field : List.of("RecordState", "Compliance", "Severity", "FindingProviderFields",
-                "ProductFields", "RelatedFindings")) {
+        for (String field : List.of("SchemaVersion", "Id", "ProductArn", "ProductName", "CompanyName",
+                "GeneratorId", "AwsAccountId", "Types", "CreatedAt", "UpdatedAt", "Title",
+                "Description", "Resources", "RecordState", "Compliance", "Severity",
+                "FindingProviderFields", "ProductFields", "RelatedFindings")) {
             if (finding.has(field)) {
                 modeled.set(field, finding.get(field));
             }

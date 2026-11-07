@@ -10,7 +10,32 @@
   "shapes": {
     "AwsSecurityFinding": {
       "type": "structure",
+      "required": [
+        "SchemaVersion",
+        "Id",
+        "ProductArn",
+        "GeneratorId",
+        "AwsAccountId",
+        "CreatedAt",
+        "UpdatedAt",
+        "Title",
+        "Description",
+        "Resources"
+      ],
       "members": {
+        "SchemaVersion": "NonEmptyString",
+        "Id": "NonEmptyString",
+        "ProductArn": "NonEmptyString",
+        "ProductName": "NonEmptyString",
+        "CompanyName": "NonEmptyString",
+        "GeneratorId": "NonEmptyString",
+        "AwsAccountId": "NonEmptyString",
+        "Types": "TypeList",
+        "CreatedAt": "NonEmptyString",
+        "UpdatedAt": "NonEmptyString",
+        "Title": "NonEmptyString",
+        "Description": "NonEmptyString",
+        "Resources": "ResourceList",
         "VerificationState": "VerificationState",
         "RecordState": "RecordState",
         "Compliance": "Compliance",
@@ -74,7 +99,8 @@
         "Confidence": "RatioScale",
         "Criticality": "RatioScale",
         "Severity": "FindingProviderSeverity",
-        "RelatedFindings": "RelatedFindingList"
+        "RelatedFindings": "RelatedFindingList",
+        "Types": "TypeList"
       }
     },
     "FindingProviderSeverity": {
@@ -126,6 +152,21 @@
       "type": "list",
       "member": "RelatedFinding"
     },
+    "Resource": {
+      "type": "structure",
+      "required": [
+        "Type",
+        "Id"
+      ],
+      "members": {
+        "Type": "NonEmptyString",
+        "Id": "NonEmptyString"
+      }
+    },
+    "ResourceList": {
+      "type": "list",
+      "member": "Resource"
+    },
     "Severity": {
       "type": "structure",
       "members": {
@@ -164,6 +205,10 @@
     "StringFilterList": {
       "type": "list",
       "member": "StringFilter"
+    },
+    "TypeList": {
+      "type": "list",
+      "member": "NonEmptyString"
     },
     "VerificationState": {
       "type": "string",

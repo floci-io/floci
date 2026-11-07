@@ -231,6 +231,37 @@ class SecurityHubFindingsServiceTest {
     }
 
     @Test
+    void vendoredShapeChecksRequiredFindingAndResourceMembers() {
+        ObjectNode valid = finding("valid", ACCOUNT, REGION);
+        for (String field : List.of("SchemaVersion", "Id", "ProductArn", "GeneratorId",
+                "AwsAccountId", "CreatedAt", "UpdatedAt", "Title", "Description", "Resources")) {
+            ObjectNode missing = valid.deepCopy();
+            missing.remove(field);
+            AwsException error = assertThrows(AwsException.class,
+                    () -> SecurityHubRequestShapes.checkFinding(missing), field);
+            assertTrue(error.getMessage().contains("." + field + " is required."), field);
+        }
+
+        ObjectNode blankTitle = valid.deepCopy();
+        blankTitle.put("Title", " \t");
+        assertTrue(assertThrows(AwsException.class,
+                () -> SecurityHubRequestShapes.checkFinding(blankTitle)).getMessage().contains(".Title"));
+
+        for (String field : List.of("Type", "Id")) {
+            ObjectNode missing = valid.deepCopy();
+            ((ObjectNode) missing.path("Resources").get(0)).remove(field);
+            AwsException error = assertThrows(AwsException.class,
+                    () -> SecurityHubRequestShapes.checkFinding(missing), field);
+            assertTrue(error.getMessage().contains(".Resources[]." + field + " is required."), field);
+        }
+        ObjectNode blankResourceId = valid.deepCopy();
+        ((ObjectNode) blankResourceId.path("Resources").get(0)).put("Id", " ");
+        assertTrue(assertThrows(AwsException.class,
+                () -> SecurityHubRequestShapes.checkFinding(blankResourceId))
+                .getMessage().contains(".Resources[].Id"));
+    }
+
+    @Test
     void reimportPreservesInvestigationFieldsAndSameBatchDuplicateUsesFirst() {
         ObjectNode original = finding("one", ACCOUNT, REGION);
         original.put("Title", "first");

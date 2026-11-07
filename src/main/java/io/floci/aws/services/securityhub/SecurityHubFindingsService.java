@@ -146,21 +146,25 @@ public class SecurityHubFindingsService implements Resettable {
         if (finding.toString().getBytes(StandardCharsets.UTF_8).length > MAX_FINDING_BYTES) {
             return invalidFinding("Finding exceeds the 240 KB size limit.");
         }
+        try {
+            SecurityHubRequestShapes.checkFinding(finding);
+        } catch (AwsException e) {
+            return invalidFinding(e.getMessage());
+        }
         if (!"2018-10-08".equals(text(finding, "SchemaVersion"))) {
             return invalidFinding("SchemaVersion must be 2018-10-08.");
         }
         for (Map.Entry<String, Integer> field : Map.of("Id", 512, "ProductArn", 2048,
                 "GeneratorId", 512, "Title", 256, "Description", 1024).entrySet()) {
             String value = text(finding, field.getKey());
-            if (value == null || value.isBlank() || value.length() > field.getValue()) {
-                return invalidFinding(field.getKey() + " is required and must not exceed "
-                        + field.getValue() + " characters.");
+            if (value.length() > field.getValue()) {
+                return invalidFinding(field.getKey() + " must not exceed " + field.getValue() + " characters.");
             }
         }
         for (String field : List.of("ProductName", "CompanyName")) {
             if (finding.has(field)) {
                 String value = text(finding, field);
-                if (value == null || value.isBlank() || value.length() > 128) {
+                if (value == null || value.length() > 128) {
                     return invalidFinding(field + " must contain between 1 and 128 characters.");
                 }
             }
@@ -191,12 +195,6 @@ public class SecurityHubFindingsService implements Resettable {
         JsonNode resources = finding.get("Resources");
         if (resources == null || !resources.isArray() || resources.isEmpty() || resources.size() > 32) {
             return invalidFinding("Resources must contain between 1 and 32 resources.");
-        }
-        for (JsonNode resource : resources) {
-            if (text(resource, "Type") == null || text(resource, "Type").isBlank()
-                    || text(resource, "Id") == null || text(resource, "Id").isBlank()) {
-                return invalidFinding("Each resource requires Type and Id.");
-            }
         }
         JsonNode compliance = finding.get("Compliance");
         if (compliance != null) {
@@ -241,17 +239,7 @@ public class SecurityHubFindingsService implements Resettable {
                 if (!types.isArray() || types.isEmpty() || types.size() > 50) {
                     return invalidFinding("Types must contain between 1 and 50 finding types.");
                 }
-                for (JsonNode type : types) {
-                    if (!type.isTextual() || type.textValue().isBlank()) {
-                        return invalidFinding("Types must contain nonempty strings.");
-                    }
-                }
             }
-        }
-        try {
-            SecurityHubRequestShapes.checkFinding(finding);
-        } catch (AwsException e) {
-            return invalidFinding(e.getMessage());
         }
         return null;
     }

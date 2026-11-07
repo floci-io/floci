@@ -13,11 +13,15 @@ OPERATIONS = ("BatchImportFindings", "GetFindings")
 # Keep the model fields this service validates. Other ASFF fields have separate checks or are
 # preserved without interpretation; walking the entire model would reject unrelated content.
 MEMBERS = {
-    "AwsSecurityFinding": ("VerificationState", "RecordState", "Compliance", "Severity",
-                           "FindingProviderFields", "ProductFields", "RelatedFindings"),
+    "AwsSecurityFinding": ("SchemaVersion", "Id", "ProductArn", "ProductName", "CompanyName",
+                           "GeneratorId", "AwsAccountId", "Types", "CreatedAt", "UpdatedAt",
+                           "Title", "Description", "Resources", "VerificationState", "RecordState",
+                           "Compliance", "Severity", "FindingProviderFields", "ProductFields",
+                           "RelatedFindings"),
+    "Resource": ("Type", "Id"),
     "Compliance": ("Status",),
     "Severity": ("Label",),
-    "FindingProviderFields": ("Confidence", "Criticality", "Severity", "RelatedFindings"),
+    "FindingProviderFields": ("Confidence", "Criticality", "Severity", "RelatedFindings", "Types"),
     "FindingProviderSeverity": ("Label",),
     "GetFindingsRequest": ("Filters", "MaxResults"),
     "AwsSecurityFindingFilters": ("ComplianceAssociatedStandardsId", "RecordState",
@@ -32,7 +36,6 @@ def prepare(model: dict) -> dict:
         shape = model["shapes"][name]
         members = shape["members"]
         shape["members"] = {field: members[field] for field in included}
-        shape.pop("required", None)
     return model
 
 

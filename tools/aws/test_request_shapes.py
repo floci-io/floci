@@ -396,6 +396,20 @@ def test_securityhub_shapes_keep_modelled_findings_and_filter_constraints():
     assert "Double" not in shapes
 
 
+def test_securityhub_shapes_keep_required_findings_and_resource_strings():
+    doc = json.loads(regen_securityhub_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+    required = shapes["AwsSecurityFinding"]["required"]
+    assert required == ["SchemaVersion", "Id", "ProductArn", "GeneratorId", "AwsAccountId",
+                        "CreatedAt", "UpdatedAt", "Title", "Description", "Resources"]
+    for field in required:
+        assert field in shapes["AwsSecurityFinding"]["members"]
+    assert shapes["Resource"]["required"] == ["Type", "Id"]
+    assert shapes["Resource"]["members"] == {"Type": "NonEmptyString", "Id": "NonEmptyString"}
+    assert shapes["ResourceList"]["member"] == "Resource"
+    assert shapes["NonEmptyString"]["pattern"] == r".*\S.*"
+
+
 def test_ecr_shapes_name_the_ecr_model_and_its_registry_setting_actions():
     assert regen_ecr_shapes.MODEL == Path("ecr/2015-09-21")
     assert regen_ecr_shapes.OUTPUT.name == "ecr-request-shapes.json"
