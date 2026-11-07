@@ -1,11 +1,12 @@
 {{- if include "floci.cleanupHook" . }}
 {{- $script := `
-# Best effort: every failure is logged and the hook still exits 0, so it can never block
-# an uninstall. Uses Floci's own ServiceAccount, so it can do nothing Floci cannot.
+# Best effort: every failure is logged and the script still exits 0, and every API call is
+# time-bounded, so a slow or unreachable API server cannot hold up the uninstall. Uses
+# Floci's own ServiceAccount, so it can do nothing Floci cannot.
 sa=/var/run/secrets/kubernetes.io/serviceaccount
 api=https://kubernetes.default.svc
 token="$(cat "$sa/token")"
-k() { curl -sS --cacert "$sa/ca.crt" -H "Authorization: Bearer $token" "$@"; }
+k() { curl -sS --connect-timeout 5 --max-time 20 --cacert "$sa/ca.crt" -H "Authorization: Bearer $token" "$@"; }
 
 selector='app.kubernetes.io%2Fmanaged-by%3Dfloci%2Cfloci.io%2Fservice%3Dlambda'
 pods="$(k "$api/api/v1/namespaces/$LAMBDA_NAMESPACE/pods?labelSelector=$selector" |

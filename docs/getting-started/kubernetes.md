@@ -147,7 +147,8 @@ What the chart sets up for it:
 - **Uninstall cleanup.** Helm removes the ServiceAccount while Floci is still shutting down, so Floci
   can no longer delete the Lambda pods that are warm at that moment. A `pre-delete` hook
   (`cleanup.enabled`, on by default) deletes them, and the `floci-lambda-ca` ConfigMap, first. It
-  runs under Floci's ServiceAccount and never fails an uninstall.
+  runs under Floci's ServiceAccount, bounds every API call and always exits 0; if its pod cannot
+  run at all (for example, the image cannot be pulled), `helm uninstall --no-hooks` skips it.
 
 One Floci instance sweeps every Floci Lambda pod in its Lambda namespace at startup, so give each
 release its own Lambda namespace.

@@ -283,8 +283,9 @@ cleanup:
   # and the floci-lambda-ca ConfigMap Floci created at runtime. Helm removes the
   # ServiceAccount while Floci is still shutting down, so Floci's own drain of warm pods
   # can no longer authenticate and those pods would stay behind until the next install's
-  # orphan sweep. Best effort: the hook never fails an uninstall. Applies to the
-  # kubernetes executor with rbac.create.
+  # orphan sweep. Best effort: its script always exits 0 and bounds every API call. If the
+  # hook pod itself cannot run (its image cannot be pulled), `helm uninstall --no-hooks`
+  # skips it. Applies to the kubernetes executor with rbac.create.
   enabled: true
 
 tests:
