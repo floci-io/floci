@@ -100,6 +100,9 @@ public class EcrRegistryManager {
 
     private volatile boolean started;
     private volatile boolean reconciled;
+    /** Epoch ms of the most recent resolve-triggered reconcile attempt that did not succeed, 0 until one. */
+    private volatile long reconcileAttemptFailedAt;
+    private static final long RECONCILE_RECHECK_MS = 30_000;
     /** host:port Docker reports for the running registry; null until one is started or adopted. */
     private volatile String registryAddress;
     private volatile boolean unavailableLogged;
@@ -296,6 +299,36 @@ public class EcrRegistryManager {
      */
     public void setReconcileHook(Consumer<List<String>> hook) {
         this.reconcileHook = hook;
+    }
+
+    /**
+     * Retries catalog reconciliation when the attempt at {@link #ensureStarted()} failed
+     * or was deferred because the registry was not ready. No-op once reconciliation has
+     * succeeded, when no hook is registered, or when the registry is not yet started.
+     * Data-plane lookups call this so a transient catalog failure does not leave legacy
+     * namespaces permanently unreachable.
+     *
+     * <p>The retry takes the same monitor {@code ensureStarted()} and the storage deletes
+     * hold, so a write-back from the hook cannot land while a concurrent force-delete is
+     * running. A retry that fails again backs off for {@link #RECONCILE_RECHECK_MS} so the
+     * unreconciled window (which answers unavailable) does not pay the registry ping delay
+     * on every lookup.
+     */
+    public synchronized void ensureCatalogReconciled() {
+        if (reconciled || reconcileHook == null || !started) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (reconcileAttemptFailedAt != 0 && now - reconcileAttemptFailedAt < RECONCILE_RECHECK_MS) {
+            return;
+        }
+        runReconcileOnce();
+        reconcileAttemptFailedAt = reconciled ? 0 : now;
+    }
+
+    /** Returns whether catalog reconciliation has completed successfully. */
+    public boolean isCatalogReconciled() {
+        return reconciled;
     }
 
     /**
@@ -502,9 +535,13 @@ public class EcrRegistryManager {
             return;
         }
         try {
-            // Give the registry a moment to be ready on first start
+            // Give the registry a moment to be ready on first start. A not-yet-ready
+            // registry must not mark reconciliation done with an empty catalog: that
+            // would skip legacy namespace recovery and refuse storage that still exists.
+            boolean ready = false;
             for (int i = 0; i < 10; i++) {
                 if (httpClient().ping()) {
+                    ready = true;
                     break;
                 }
                 try {
@@ -514,7 +551,13 @@ public class EcrRegistryManager {
                     return;
                 }
             }
-            List<String> repos = httpClient().catalog();
+            if (!ready) {
+                LOG.warnv("ECR reconcile-on-startup deferred: registry not ready");
+                return;
+            }
+            // catalogStrict distinguishes "no repositories" from a registry failure so a
+            // failed attempt can be retried by {@link #ensureCatalogReconciled}.
+            List<String> repos = httpClient().catalogStrict();
             reconcileHook.accept(repos);
             reconciled = true;
         } catch (Exception e) {

@@ -1664,12 +1664,31 @@ public class EcrService implements ResourceProvider {
                 .isPresent();
     }
 
-    /** Returns the physical registry namespace selected for an ECR repository. */
+    /**
+     * Returns the physical registry namespace selected for an ECR repository.
+     * Resolves only from repository metadata after a successful catalog reconciliation
+     * attempt, preserving legacy mappings and account scope. A name with no metadata behaves
+     * by what the catalog says: while the catalog is unread, a repository with stored images
+     * has no metadata yet, so the name is refused as unavailable instead of answering
+     * {@code RepositoryNotFoundException} for storage that exists; once reconciliation
+     * succeeded the catalog confirmed nobody ever created the name and it answers
+     * {@code RepositoryNotFoundException} so the data plane can map it to OCI
+     * {@code NAME_UNKNOWN}, matching AWS ECR.
+     */
     public String registryRepositoryName(String repositoryName, String registryId, String region) {
         String account = effectiveAccount(registryId);
+        registryManager.ensureCatalogReconciled();
         return repoStore.get(key(region, account, repositoryName))
                 .map(repo -> registryRepositoryName(repo, region))
-                .orElseGet(() -> registryManager.internalRepoName(account, region, repositoryName));
+                .orElseThrow(() -> missingRepository(repositoryName, account));
+    }
+
+    private AwsException missingRepository(String repositoryName, String account) {
+        if (!registryManager.isCatalogReconciled()) {
+            throw new IllegalStateException("ECR catalog has not been reconciled yet; cannot tell "
+                    + "repository '" + repositoryName + "' in registry " + account + " from a missing one.");
+        }
+        return notFound(repositoryName, account);
     }
 
     public void tagResource(String repoName, String registryId, Map<String, String> tags, String region) {

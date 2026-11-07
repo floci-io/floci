@@ -1,6 +1,7 @@
 package io.floci.aws.services.ecr.registry;
 
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.ecr.EcrService;
 import io.floci.aws.testutil.FreePorts;
 import io.vertx.core.Context;
@@ -45,6 +46,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Unit tests for routing AWS-shaped ECR repository URIs through Floci's data plane. */
@@ -797,6 +800,49 @@ class EcrRegistryDataPlaneTest {
         assertEquals("application/json", response.contentType());
         assertEquals("registry/2.0", response.apiVersion());
         assertTrue(response.body().isEmpty());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "GET, /v2/never-created/manifests/1",
+            "HEAD, /v2/never-created/manifests/1",
+            "PUT, /v2/never-created/manifests/1",
+            "POST, /v2/never-created/blobs/uploads/"
+    })
+    void missingRepositoryAnswersNameUnknownBeforeProxy(String method, String path) throws Exception {
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        EcrService ecrService = Mockito.mock(EcrService.class);
+        EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
+        when(config.services().ecr().enabled()).thenReturn(true);
+        when(config.services().ecr().uriStyle()).thenReturn("hostname");
+        when(ecrService.registryRepositoryName("never-created", "000000000000", "us-east-1"))
+                .thenThrow(new AwsException("RepositoryNotFoundException",
+                        "The repository with name 'never-created' does not exist in the registry with id '000000000000'",
+                        400));
+
+        Router router = Router.router(vertx);
+        new EcrRegistryDataPlane(manager, ecrService, config, vertx).register(router);
+        HttpServer dataPlane = vertx.createHttpServer().requestHandler(router)
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.valueOf(method), path);
+        assertEquals(404, response.status());
+        assertEquals("application/json", response.contentType());
+        assertEquals("registry/2.0", response.apiVersion());
+        // HEAD may arrive without a body at the client; GET/PUT/POST carry the OCI error.
+        if (!"HEAD".equals(method)) {
+            JsonArray errors = new JsonObject(response.body()).getJsonArray("errors");
+            assertEquals(1, errors.size());
+            JsonObject error = errors.getJsonObject(0);
+            assertEquals("NAME_UNKNOWN", error.getString("code"));
+            assertTrue(error.getString("message").contains("never-created"));
+            assertTrue(error.getString("message").contains("000000000000"));
+        }
+        verify(manager).ensureStarted();
+        verify(manager).ensureCatalogReconciled();
+        // No registry HTTP client was needed: the name was refused before proxying.
+        verify(manager, never()).httpClient();
     }
 
     @Test
