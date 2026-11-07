@@ -170,8 +170,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `DescribeClusterVersions` | Return the single emulated engine version and its parameter group family |
 | `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
 | `ModifyClusterIamRoles` | Add or remove associated IAM roles and set `DefaultIamRoleArn`; COPY and UNLOAD see the change on new connections |
-| `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
-| `EnableLogging` | Store audit-logging configuration and deliver the selected connection, user, and user-activity audit records to CloudWatch Logs for provisioned clusters |
+| `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration and delivery status |
+| `EnableLogging` | Store audit-logging configuration and deliver connection, user, and user-activity audit records to CloudWatch Logs or Amazon S3 for provisioned clusters |
 | `DisableLogging` | Clear a cluster's audit-logging configuration |
 | `PauseCluster` | Stop a provisioned cluster and its auth proxy while retaining the container and data |
 | `ResumeCluster` | Restart a paused cluster and restore its auth proxy on the same endpoint |
@@ -180,7 +180,7 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
 <!-- floci:actions:end -->
 
-CloudWatch audit events use the AWS log groups `/aws/redshift/cluster/<clusterIdentifier>/<logType>` and CSV log records. `connectionlog` and `userlog` follow the logging export selection. `useractivitylog` additionally requires `enable_user_activity_logging=true` in the cluster parameter group, which is false by default.
+CloudWatch audit events use the AWS log groups `/aws/redshift/cluster/<clusterIdentifier>/<logType>` and CSV log records. S3 audit events are compressed with gzip and delivered to `s3://<bucketName>/[<s3KeyPrefix>/]AWSLogs/<accountId>/redshift/<region>/<YYYY>/<MM>/<DD>/<accountId>_redshift_<region>_<clusterIdentifier>_<logType>_<timestamp>.gz` using pipe-delimited records for `connectionlog` and `userlog`, and standard formatted text for `useractivitylog`. `connectionlog` and `userlog` follow the logging export selection. `useractivitylog` additionally requires `enable_user_activity_logging=true` in the cluster parameter group, which is false by default.
 
 Audit delivery covers PostgreSQL wire connections and Data API connections, including batch statements and retained sessions. Records identify the requested database user and database, even when temporary credentials use a master connection internally. User changes are published after commit and discarded on rollback, including rollback to a savepoint on the wire path. SQL password literals are redacted, including literals separated from `PASSWORD` by SQL comments.
 
