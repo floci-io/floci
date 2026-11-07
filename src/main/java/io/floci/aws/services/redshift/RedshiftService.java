@@ -1514,6 +1514,10 @@ public class RedshiftService implements ManagedSecretRotator {
 
         boolean cloudWatch = "cloudwatch".equalsIgnoreCase(logDestinationType);
         boolean s3Table = "s3table".equalsIgnoreCase(logDestinationType);
+        if (cloudWatch && (bucketName != null || s3KeyPrefix != null)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "BucketName and S3KeyPrefix cannot be specified when LogDestinationType is cloudwatch", 400);
+        }
         if (s3Table && s3TableGranularity != null
                 && !List.of("cluster", "account").contains(s3TableGranularity)) {
             throw new AwsException("InvalidParameterValue",
@@ -1534,6 +1538,7 @@ public class RedshiftService implements ManagedSecretRotator {
             validateS3BucketLogging(clusters.accountId(), cluster, bucketName, s3KeyPrefix);
         }
         cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(cluster.getLoggingGeneration() + 1);
         cluster.setLoggingBucketName(bucketName);
         cluster.setLoggingDestinationType(cloudWatch ? "cloudwatch" : s3Table ? "s3table" : "s3");
         cluster.setLoggingRegion(regionResolver.getRegion());
@@ -1558,11 +1563,10 @@ public class RedshiftService implements ManagedSecretRotator {
         if (serviceCallAuthorizer != null) {
             String clusterRegion = cluster.getLoggingRegion() != null ? cluster.getLoggingRegion() : regionResolver.getRegion();
             String partition = s3Service.bucketPartition(bucketName);
+            String sampleKey = RedshiftAuditLogPublisher.s3DeliveryKey(s3KeyPrefix, accountId, clusterRegion,
+                    cluster.getClusterIdentifier(), "connectionlog", Instant.now());
             String bucketArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName).toString();
-            String basePath = s3KeyPrefix == null || s3KeyPrefix.isBlank()
-                    ? "" : (s3KeyPrefix.endsWith("/") ? s3KeyPrefix : s3KeyPrefix + "/");
-            String sampleKey = basePath + "AWSLogs/" + accountId + "/redshift/" + clusterRegion + "/sample.gz";
-            String objectArn = bucketArn + "/" + sampleKey;
+            String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName + "/" + sampleKey).toString();
             String clusterArn = AwsArnUtils.Arn.of("redshift", clusterRegion, accountId,
                     "cluster:" + cluster.getClusterIdentifier()).toString();
             Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(clusterRegion));
@@ -1576,8 +1580,8 @@ public class RedshiftService implements ManagedSecretRotator {
         }
     }
 
-    public void recordAuditDeliveryOutcome(String accountId, String clusterIdentifier, Instant timestamp,
-                                           boolean success, String failureMessage) {
+    public void recordAuditDeliveryOutcome(String accountId, String clusterIdentifier, long generation,
+                                           Instant timestamp, boolean success, String failureMessage) {
         try {
             withResourceLock(accountId, "cluster", clusterIdentifier, () -> {
                 Optional<Cluster> existing = clusters.getForAccount(accountId, clusterIdentifier);
@@ -1585,7 +1589,7 @@ public class RedshiftService implements ManagedSecretRotator {
                     return null;
                 }
                 Cluster cluster = existing.get();
-                if (!cluster.isLoggingEnabled()) {
+                if (!cluster.isLoggingEnabled() || cluster.getLoggingGeneration() != generation) {
                     return null;
                 }
                 if (success) {
@@ -1611,6 +1615,7 @@ public class RedshiftService implements ManagedSecretRotator {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
         cluster.setLoggingEnabled(false);
+        cluster.setLoggingGeneration(cluster.getLoggingGeneration() + 1);
         cluster.setLoggingBucketName(null);
         cluster.setLoggingS3KeyPrefix(null);
         cluster.setLoggingDestinationType(null);

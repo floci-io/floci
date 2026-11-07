@@ -98,6 +98,11 @@ public class Cluster {
     public String getLastFailureMessage() { return lastFailureMessage; }
     public void setLastFailureMessage(String lastFailureMessage) { this.lastFailureMessage = lastFailureMessage; }
 
+    private long loggingGeneration;
+
+    public long getLoggingGeneration() { return loggingGeneration; }
+    public void setLoggingGeneration(long loggingGeneration) { this.loggingGeneration = loggingGeneration; }
+
     // Cross-region snapshot copy (EnableSnapshotCopy). Enabled exactly when the destination is set.
     private String snapshotCopyDestinationRegion;
     private Integer snapshotCopyRetentionPeriod;

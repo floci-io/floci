@@ -2584,7 +2584,7 @@ class RedshiftServiceTest {
         when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
 
         Instant ts = Instant.parse("2026-11-06T15:30:00Z");
-        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", ts, true, null);
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, ts, true, null);
         assertNull(cluster.getLastSuccessfulDeliveryTime());
         assertNull(cluster.getLastFailureTime());
         verify(clusterBackend, never()).putForAccount(anyString(), anyString(), any());
@@ -2595,19 +2595,35 @@ class RedshiftServiceTest {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(1L);
         when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
 
         Instant ts = Instant.parse("2026-11-06T15:30:00Z");
-        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", ts, true, null);
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, ts, true, null);
         assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
         assertNull(cluster.getLastFailureTime());
         assertNull(cluster.getLastFailureMessage());
 
         Instant failTs = Instant.parse("2026-11-06T15:31:00Z");
-        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", failTs, false, "timeout");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, failTs, false, "timeout");
         assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
         assertEquals(failTs, cluster.getLastFailureTime());
         assertEquals("timeout", cluster.getLastFailureMessage());
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeIgnoresStaleGenerationOutcome() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(2L);
+        when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, ts, true, null);
+        assertNull(cluster.getLastSuccessfulDeliveryTime());
+        assertNull(cluster.getLastFailureTime());
+        verify(clusterBackend, never()).putForAccount(anyString(), anyString(), any());
     }
 
     @Test
@@ -2616,6 +2632,7 @@ class RedshiftServiceTest {
         cluster.setClusterIdentifier("my-cluster");
         cluster.setClusterStatus("available");
         cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(1L);
         cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-pass");
         when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
                 new AccountAwareStorageBackend.AccountEntry<>("111111111111", "my-cluster", cluster)));
@@ -2624,7 +2641,7 @@ class RedshiftServiceTest {
         service.reserve("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-pass", "us-east-1");
 
         Instant ts = Instant.parse("2026-11-06T15:30:00Z");
-        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", ts, true, null);
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, ts, true, null);
         assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
 
         service.release("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-pass", "us-east-1");
@@ -2686,6 +2703,17 @@ class RedshiftServiceTest {
         assertTrue(result.isLoggingEnabled());
         assertEquals("cloudwatch", result.getLoggingDestinationType());
         assertEquals(List.of("connectionlog"), result.getLoggingExports());
+    }
+
+    @Test
+    void enableLoggingRejectsBucketNameWhenDestinationIsCloudWatch() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.enableLogging("my-cluster", "my-bucket", null, "cloudwatch", List.of("connectionlog")));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
     }
 
     @Test

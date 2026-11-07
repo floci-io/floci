@@ -48,22 +48,30 @@ public class RedshiftAuditLogPublisher {
 
     @FunctionalInterface
     public interface DeliveryStatusListener {
-        void recordDeliveryOutcome(String accountId, String clusterIdentifier, Instant timestamp,
-                                   boolean success, String failureMessage);
+        void recordDeliveryOutcome(String accountId, String clusterIdentifier, long loggingGeneration,
+                                   Instant timestamp, boolean success, String failureMessage);
     }
 
+    private static final int STRIPE_COUNT = 64;
     private final CloudWatchLogsService logs;
     private final S3Service s3;
     private final ServiceCallAuthorizer authorizer;
     private final RegionResolver regionResolver;
     private final Clock clock;
     private final Map<String, Registration> registrations = new ConcurrentHashMap<>();
-    private final Map<String, Object> deliveryLocks = new ConcurrentHashMap<>();
+    private final Object[] deliveryStripes = new Object[STRIPE_COUNT];
     private volatile DeliveryStatusListener statusListener;
+
+    {
+        for (int i = 0; i < STRIPE_COUNT; i++) {
+            deliveryStripes[i] = new Object();
+        }
+    }
 
     private record Registration(String region, String identifier, boolean enabled, String destination,
                                 String bucketName, String s3KeyPrefix,
-                                List<String> exports, boolean activityLoggingEnabled) { }
+                                List<String> exports, boolean activityLoggingEnabled,
+                                long loggingGeneration) { }
 
     @Inject
     public RedshiftAuditLogPublisher(CloudWatchLogsService logs, S3Service s3,
@@ -97,7 +105,8 @@ public class RedshiftAuditLogPublisher {
                 cluster.getClusterIdentifier(), cluster.isLoggingEnabled(), cluster.getLoggingDestinationType(),
                 cluster.getLoggingBucketName(), cluster.getLoggingS3KeyPrefix(),
                 cluster.getLoggingExports() == null ? null : List.copyOf(cluster.getLoggingExports()),
-                cluster.isUserActivityLoggingEnabled()));
+                cluster.isUserActivityLoggingEnabled(),
+                cluster.getLoggingGeneration()));
     }
 
     public void unregister(String accountId, String clusterIdentifier) {
@@ -106,32 +115,45 @@ public class RedshiftAuditLogPublisher {
 
     public void publishRegistered(String accountId, String clusterIdentifier, String logType,
                                   Map<String, Object> record) {
-        Registration registration = registrations.get(registryKey(accountId, clusterIdentifier));
-        if (registration == null) {
-            return;
+        try {
+            Registration registration = registrations.get(registryKey(accountId, clusterIdentifier));
+            if (registration == null) {
+                return;
+            }
+            Cluster cluster = registeredCluster(registration);
+            publish(cluster, accountId, registration.region(), logType, record);
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to publish registered Redshift {0} audit event for cluster {1}",
+                    logType, clusterIdentifier);
         }
-        Cluster cluster = registeredCluster(registration);
-        publish(cluster, accountId, registration.region(), logType, record);
     }
 
     public void publishRegisteredActivity(String accountId, String clusterIdentifier, String database,
                                           String username, String sql) {
-        Registration registration = registrations.get(registryKey(accountId, clusterIdentifier));
-        if (registration == null) {
-            return;
+        try {
+            Registration registration = registrations.get(registryKey(accountId, clusterIdentifier));
+            if (registration == null) {
+                return;
+            }
+            Cluster cluster = registeredCluster(registration);
+            publishActivity(cluster, accountId, registration.region(), database, username, sql);
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to publish registered Redshift activity audit event for cluster {0}", clusterIdentifier);
         }
-        Cluster cluster = registeredCluster(registration);
-        publishActivity(cluster, accountId, registration.region(), database, username, sql);
     }
 
     public void publishRegisteredUserChange(String accountId, String clusterIdentifier, String database,
                                             String username, String action, String oldUsername) {
-        Registration registration = registrations.get(registryKey(accountId, clusterIdentifier));
-        if (registration == null) {
-            return;
+        try {
+            Registration registration = registrations.get(registryKey(accountId, clusterIdentifier));
+            if (registration == null) {
+                return;
+            }
+            Cluster cluster = registeredCluster(registration);
+            publishUserChange(cluster, accountId, registration.region(), database, username, action, oldUsername);
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to publish registered Redshift user change audit event for cluster {0}", clusterIdentifier);
         }
-        Cluster cluster = registeredCluster(registration);
-        publishUserChange(cluster, accountId, registration.region(), database, username, action, oldUsername);
     }
 
     private static Cluster registeredCluster(Registration registration) {
@@ -143,6 +165,7 @@ public class RedshiftAuditLogPublisher {
         cluster.setLoggingS3KeyPrefix(registration.s3KeyPrefix());
         cluster.setLoggingExports(registration.exports());
         cluster.setUserActivityLoggingEnabled(registration.activityLoggingEnabled());
+        cluster.setLoggingGeneration(registration.loggingGeneration());
         return cluster;
     }
 
@@ -152,24 +175,38 @@ public class RedshiftAuditLogPublisher {
 
     public void publishActivity(Cluster cluster, String accountId, String region, String database, String username,
                                 String sql) {
-        Map<String, Object> record = new LinkedHashMap<>();
-        record.put("recordtime", Instant.ofEpochMilli(clock.millis()).toString());
-        record.put("db", database);
-        record.put("user", username);
-        record.put("query", "LOG: " + sanitizeSql(sql));
-        publish(cluster, accountId, region, "useractivitylog", record);
+        try {
+            Map<String, Object> record = new LinkedHashMap<>();
+            record.put("recordtime", Instant.ofEpochMilli(clock.millis()).toString());
+            record.put("db", database);
+            record.put("user", username);
+            record.put("query", "LOG: " + sanitizeSql(sql));
+            publish(cluster, accountId, region, "useractivitylog", record);
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to publish Redshift activity audit event for cluster {0}",
+                    cluster != null ? cluster.getClusterIdentifier() : "unknown");
+        }
     }
 
     public void publishConnection(Cluster cluster, String accountId, String region, String database, String username,
                                   String event, String remoteAddress, String error) {
-        publish(cluster, accountId, region, "connectionlog",
-                connectionRecord(database, username, event, remoteAddress, null, error));
+        try {
+            publish(cluster, accountId, region, "connectionlog",
+                    connectionRecord(database, username, event, remoteAddress, null, error));
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to publish Redshift connection audit event for cluster {0}",
+                    cluster != null ? cluster.getClusterIdentifier() : "unknown");
+        }
     }
 
     public void publishRegisteredConnection(String accountId, String clusterIdentifier, String database, String username,
                                             String event, String remoteAddress, int remotePort) {
-        publishRegistered(accountId, clusterIdentifier, "connectionlog",
-                connectionRecord(database, username, event, remoteAddress, remotePort, null));
+        try {
+            publishRegistered(accountId, clusterIdentifier, "connectionlog",
+                    connectionRecord(database, username, event, remoteAddress, remotePort, null));
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to publish registered Redshift connection audit event for cluster {0}", clusterIdentifier);
+        }
     }
 
     private Map<String, Object> connectionRecord(String database, String username, String event, String remoteAddress,
@@ -205,36 +242,46 @@ public class RedshiftAuditLogPublisher {
 
     public void publishUserChange(Cluster cluster, String accountId, String region, String database,
                                   String username, String action, String oldUsername) {
-        Map<String, Object> record = new LinkedHashMap<>();
-        record.put("recordtime", Instant.ofEpochMilli(clock.millis()).toString());
-        record.put("userid", "");
-        record.put("db", database);
-        record.put("username", username);
-        record.put("oldusername", oldUsername == null ? "" : oldUsername);
-        record.put("action", action);
-        record.put("usecreatedb", "");
-        record.put("usesuper", "");
-        record.put("usecatupd", "");
-        record.put("valuntil", "");
-        record.put("pid", "");
-        record.put("xid", "");
-        publish(cluster, accountId, region, "userlog", record);
+        try {
+            Map<String, Object> record = new LinkedHashMap<>();
+            record.put("recordtime", Instant.ofEpochMilli(clock.millis()).toString());
+            record.put("userid", "");
+            record.put("db", database);
+            record.put("username", username);
+            record.put("oldusername", oldUsername == null ? "" : oldUsername);
+            record.put("action", action);
+            record.put("usecreatedb", "");
+            record.put("usesuper", "");
+            record.put("usecatupd", "");
+            record.put("valuntil", "");
+            record.put("pid", "");
+            record.put("xid", "");
+            publish(cluster, accountId, region, "userlog", record);
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to publish Redshift user change audit event for cluster {0}",
+                    cluster != null ? cluster.getClusterIdentifier() : "unknown");
+        }
     }
 
     public void publish(Cluster cluster, String accountId, String region, String logType,
                         Map<String, Object> record) {
-        if (cluster == null || !cluster.isLoggingEnabled()
-                || "useractivitylog".equals(logType) && !cluster.isUserActivityLoggingEnabled()
-                || !LOG_TYPES.contains(logType) || !exports(cluster.getLoggingExports()).contains(logType)) {
-            return;
-        }
+        try {
+            if (cluster == null || !cluster.isLoggingEnabled()
+                    || "useractivitylog".equals(logType) && !cluster.isUserActivityLoggingEnabled()
+                    || !LOG_TYPES.contains(logType) || !exports(cluster.getLoggingExports()).contains(logType)) {
+                return;
+            }
 
-        String destination = cluster.getLoggingDestinationType();
-        if ("cloudwatch".equalsIgnoreCase(destination)) {
-            publishCloudWatch(cluster, accountId, region, logType, record);
-        } else if ("s3".equalsIgnoreCase(destination)
-                || (destination == null && cluster.getLoggingBucketName() != null)) {
-            publishS3(cluster, accountId, region, logType, record);
+            String destination = cluster.getLoggingDestinationType();
+            if ("cloudwatch".equalsIgnoreCase(destination)) {
+                publishCloudWatch(cluster, accountId, region, logType, record);
+            } else if ("s3".equalsIgnoreCase(destination)
+                    || (destination == null && cluster.getLoggingBucketName() != null)) {
+                publishS3(cluster, accountId, region, logType, record);
+            }
+        } catch (Exception ex) {
+            LOG.warnv(ex, "Failed to publish Redshift audit event for cluster {0}",
+                    cluster != null ? cluster.getClusterIdentifier() : "unknown");
         }
     }
 
@@ -254,65 +301,74 @@ public class RedshiftAuditLogPublisher {
         }
     }
 
-    private void publishS3(Cluster cluster, String accountId, String region, String logType,
-                           Map<String, Object> record) {
-        String bucket = cluster.getLoggingBucketName();
-        if (bucket == null || bucket.isBlank() || s3 == null) {
-            return;
-        }
-        Instant now = Instant.ofEpochMilli(clock.millis());
-        ZonedDateTime utc = now.atZone(ZoneOffset.UTC);
+    public static String s3DeliveryKey(String s3KeyPrefix, String accountId, String region,
+                                       String clusterIdentifier, String logType, Instant timestamp) {
+        ZonedDateTime utc = timestamp.atZone(ZoneOffset.UTC);
         String year = String.format("%04d", utc.getYear());
         String month = String.format("%02d", utc.getMonthValue());
         String day = String.format("%02d", utc.getDayOfMonth());
-        String timestamp = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm").format(utc);
-        String filename = accountId + "_redshift_" + region + "_" + cluster.getClusterIdentifier()
-                + "_" + logType + "_" + timestamp + ".gz";
-
-        String prefix = cluster.getLoggingS3KeyPrefix();
-        String basePath = (prefix != null && !prefix.isBlank())
-                ? (prefix.endsWith("/") ? prefix : prefix + "/")
+        String timePart = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm").format(utc);
+        String filename = accountId + "_redshift_" + region + "_" + clusterIdentifier
+                + "_" + logType + "_" + timePart + ".gz";
+        String basePath = (s3KeyPrefix != null && !s3KeyPrefix.isBlank())
+                ? (s3KeyPrefix.endsWith("/") ? s3KeyPrefix : s3KeyPrefix + "/")
                 : "";
-        String key = basePath + "AWSLogs/" + accountId + "/redshift/" + region + "/" + year + "/" + month + "/" + day + "/" + filename;
+        return basePath + "AWSLogs/" + accountId + "/redshift/" + region + "/" + year + "/" + month + "/" + day + "/" + filename;
+    }
 
-        String partition = regionResolver != null ? regionResolver.partitionForRegion(region) : AwsRegions.partitionFor(region);
-        String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucket + "/" + key).toString();
-        String clusterArn = AwsArnUtils.Arn.of("redshift", region, accountId, "cluster:" + cluster.getClusterIdentifier()).toString();
-        Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(region));
-
+    private void publishS3(Cluster cluster, String accountId, String region, String logType,
+                           Map<String, Object> record) {
         try {
+            String bucket = cluster.getLoggingBucketName();
+            if (bucket == null || bucket.isBlank() || s3 == null) {
+                return;
+            }
+            Instant now = Instant.ofEpochMilli(clock.millis());
+            String key = s3DeliveryKey(cluster.getLoggingS3KeyPrefix(), accountId, region,
+                    cluster.getClusterIdentifier(), logType, now);
+
+            String partition = regionResolver != null ? regionResolver.partitionForRegion(region) : AwsRegions.partitionFor(region);
+            String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucket + "/" + key).toString();
+            String clusterArn = AwsArnUtils.Arn.of("redshift", region, accountId, "cluster:" + cluster.getClusterIdentifier()).toString();
+            Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(region));
+
             if (authorizer != null && authorizer.authorize("redshift", "s3:PutObject", objectArn, clusterArn, accountId, requestKeys) != Decision.ALLOW) {
                 String errorMsg = "Access Denied: The bucket policy does not allow Amazon Redshift to put objects.";
                 LOG.warnv("Access Denied delivering Redshift audit log to s3://{0}/{1}", bucket, key);
-                safeRecordOutcome(accountId, cluster.getClusterIdentifier(), now, false, errorMsg);
+                safeRecordOutcome(accountId, cluster.getClusterIdentifier(), cluster.getLoggingGeneration(), now, false, errorMsg);
                 return;
             }
 
             String line = formatS3Line(logType, record);
-            Object lock = deliveryLocks.computeIfAbsent(cluster.getClusterIdentifier(), k -> new Object());
+            int stripeIndex = Math.floorMod((bucket + "/" + key).hashCode(), STRIPE_COUNT);
+            Object lock = deliveryStripes[stripeIndex];
             synchronized (lock) {
                 try {
                     byte[] gzipped = appendGzipMember(bucket, key, line);
                     s3.putObject(bucket, key, gzipped, "application/x-gzip", Map.of());
-                    safeRecordOutcome(accountId, cluster.getClusterIdentifier(), now, true, null);
-                } catch (Exception exception) {
+                    safeRecordOutcome(accountId, cluster.getClusterIdentifier(), cluster.getLoggingGeneration(), now, true, null);
+                } catch (AwsException | IOException exception) {
                     LOG.warnv(exception, "Failed to deliver Redshift {0} audit event to s3://{1}/{2} for cluster {3}",
                             logType, bucket, key, cluster.getClusterIdentifier());
                     String message = exception.getMessage() != null ? exception.getMessage() : "Failed to deliver log to S3";
-                    safeRecordOutcome(accountId, cluster.getClusterIdentifier(), now, false, message);
+                    safeRecordOutcome(accountId, cluster.getClusterIdentifier(), cluster.getLoggingGeneration(), now, false, message);
+                } catch (RuntimeException unexpected) {
+                    LOG.errorv(unexpected, "Unexpected runtime error delivering Redshift {0} audit event to s3://{1}/{2} for cluster {3}",
+                            logType, bucket, key, cluster.getClusterIdentifier());
                 }
             }
         } catch (Exception unexpected) {
-            LOG.warnv(unexpected, "Unexpected error delivering Redshift {0} audit event to s3://{1}/{2} for cluster {3}",
-                    logType, bucket, key, cluster.getClusterIdentifier());
+            LOG.errorv(unexpected, "Unexpected error delivering Redshift {0} audit event to S3 for cluster {1}",
+                    logType, cluster.getClusterIdentifier());
         }
     }
 
-    private void safeRecordOutcome(String accountId, String clusterIdentifier, Instant timestamp,
-                                   boolean success, String message) {
-        if (statusListener != null) {
+    private void safeRecordOutcome(String accountId, String clusterIdentifier, long loggingGeneration,
+                                   Instant timestamp, boolean success, String message) {
+        DeliveryStatusListener listener = this.statusListener;
+        if (listener != null) {
             try {
-                statusListener.recordDeliveryOutcome(accountId, clusterIdentifier, timestamp, success, message);
+                listener.recordDeliveryOutcome(accountId, clusterIdentifier, loggingGeneration, timestamp, success, message);
             } catch (Exception ex) {
                 LOG.warnv(ex, "Delivery status listener threw an exception for cluster {0}", clusterIdentifier);
             }

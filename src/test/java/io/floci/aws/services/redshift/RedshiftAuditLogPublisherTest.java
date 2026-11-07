@@ -1,5 +1,6 @@
 package io.floci.aws.services.redshift;
 
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServiceCallAuthorizer;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
@@ -206,7 +207,7 @@ class RedshiftAuditLogPublisherTest {
 
         AtomicReference<Instant> deliveryTimestamp = new AtomicReference<>();
         AtomicBoolean deliverySuccess = new AtomicBoolean();
-        publisher.setDeliveryStatusListener((acc, clId, ts, success, msg) -> {
+        publisher.setDeliveryStatusListener((acc, clId, gen, ts, success, msg) -> {
             deliveryTimestamp.set(ts);
             deliverySuccess.set(success);
         });
@@ -352,7 +353,7 @@ class RedshiftAuditLogPublisherTest {
 
         AtomicReference<String> failureMsg = new AtomicReference<>();
         AtomicBoolean deliverySuccess = new AtomicBoolean(true);
-        publisher.setDeliveryStatusListener((acc, clId, ts, success, msg) -> {
+        publisher.setDeliveryStatusListener((acc, clId, gen, ts, success, msg) -> {
             deliverySuccess.set(success);
             failureMsg.set(msg);
         });
@@ -368,18 +369,21 @@ class RedshiftAuditLogPublisherTest {
     @Test
     void s3PutObjectFailureRecordsFailureAndDoesNotThrow() {
         S3Service s3 = mock(S3Service.class);
-        doThrow(new RuntimeException("S3 connection timeout")).when(s3)
+        doThrow(new AwsException("InternalError", "S3 connection timeout", 500)).when(s3)
                 .putObject(anyString(), anyString(), any(), anyString(), anyMap());
         ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
         when(authorizer.authorize(anyString(), anyString(), anyString(), any(), any(), any())).thenReturn(Decision.ALLOW);
         RedshiftAuditLogPublisher publisher = s3Publisher(s3, authorizer, Clock.systemUTC());
 
         Cluster cluster = s3Cluster(null, "connectionlog");
+        cluster.setLoggingGeneration(5L);
         publisher.register("111111111111", "us-east-1", cluster);
 
         AtomicReference<String> failureMsg = new AtomicReference<>();
         AtomicBoolean deliverySuccess = new AtomicBoolean(true);
-        publisher.setDeliveryStatusListener((acc, clId, ts, success, msg) -> {
+        AtomicReference<Long> reportedGen = new AtomicReference<>();
+        publisher.setDeliveryStatusListener((acc, clId, gen, ts, success, msg) -> {
+            reportedGen.set(gen);
             deliverySuccess.set(success);
             failureMsg.set(msg);
         });
@@ -388,7 +392,29 @@ class RedshiftAuditLogPublisherTest {
                 "authenticated", "192.0.2.1", 54321));
 
         assertFalse(deliverySuccess.get());
+        assertEquals(5L, reportedGen.get());
         assertTrue(failureMsg.get().contains("S3 connection timeout"));
+    }
+
+    @Test
+    void publishS3DoesNotThrowOnUnexpectedRuntimeException() {
+        S3Service s3 = mock(S3Service.class);
+        doThrow(new IllegalStateException("Unexpected crash")).when(s3)
+                .putObject(anyString(), anyString(), any(), anyString(), anyMap());
+        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
+        when(authorizer.authorize(anyString(), anyString(), anyString(), any(), any(), any())).thenReturn(Decision.ALLOW);
+        RedshiftAuditLogPublisher publisher = s3Publisher(s3, authorizer, Clock.systemUTC());
+
+        Cluster cluster = s3Cluster(null, "connectionlog");
+        publisher.register("111111111111", "us-east-1", cluster);
+
+        AtomicBoolean listenerCalled = new AtomicBoolean(false);
+        publisher.setDeliveryStatusListener((acc, clId, gen, ts, success, msg) -> listenerCalled.set(true));
+
+        assertDoesNotThrow(() -> publisher.publishRegisteredConnection("111111111111", "analytics", "dev", "admin",
+                "authenticated", "192.0.2.1", 54321));
+
+        assertFalse(listenerCalled.get());
     }
 
     @Test
@@ -415,7 +441,7 @@ class RedshiftAuditLogPublisherTest {
 
         Cluster cluster = s3Cluster(null, "connectionlog");
         publisher.register("111111111111", "us-east-1", cluster);
-        publisher.setDeliveryStatusListener((acc, clId, ts, success, msg) -> {
+        publisher.setDeliveryStatusListener((acc, clId, gen, ts, success, msg) -> {
             throw new RuntimeException("Listener boom");
         });
 
