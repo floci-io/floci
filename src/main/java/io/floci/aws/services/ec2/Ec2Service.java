@@ -1111,7 +1111,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 if (inst.getDockerContainerId() != null
                         && containerManager.isContainerRunning(inst.getDockerContainerId())) {
-                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                    restoreVolumeDevice(vol, inst, att.getDevice());
                 }
             }
         }
@@ -1142,9 +1142,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             for (VolumeAttachment att : vol.getAttachments()) {
                 if (inst.getInstanceId().equals(att.getInstanceId())
                         && (inst.getRootDeviceName() == null || !att.getDevice().equals(inst.getRootDeviceName()))) {
-                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                    restoreVolumeDevice(vol, inst, att.getDevice());
                 }
             }
+        }
+    }
+
+    private void restoreVolumeDevice(Volume volume, Instance instance, String device) {
+        try {
+            volumeBlockDeviceManager.attachVolume(volume, instance, device);
+        } catch (AwsException e) {
+            LOG.warnv("Could not restore volume {0} on instance {1}: {2}",
+                    volume.getVolumeId(), instance.getInstanceId(), e.getMessage());
         }
     }
 
@@ -14567,6 +14576,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private final ConcurrentHashMap<String, RefCountedLock> volumeLocks = new ConcurrentHashMap<>();
+    private final Set<VolumeDevice> pendingVolumeAttachments = ConcurrentHashMap.newKeySet();
+
+    private record VolumeDevice(String accountId, String region, String instanceId, String device) {}
 
     private <T> T withVolumeLock(String volumeId, Supplier<T> action) {
         if (volumeId == null) {
@@ -14845,6 +14857,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterValue",
                     "Value '" + device + "' for parameter device is invalid.", 400);
         }
+        return withVolumeLock(volumeId, () -> {
+            String normalizedDevice = device.startsWith("/") ? device : "/dev/" + device;
+            VolumeDevice target = new VolumeDevice(callerAccountId(), region, instanceId, normalizedDevice);
+            if (!pendingVolumeAttachments.add(target)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The device '" + device + "' is already in use by an attachment in progress", 400);
+            }
+            try {
+                return attachVolumeToInstance(region, volumeId, instanceId, device);
+            } finally {
+                pendingVolumeAttachments.remove(target);
+            }
+        });
+    }
+
+    private VolumeAttachment attachVolumeToInstance(String region, String volumeId, String instanceId, String device) {
         Volume volume = getRequiredVolume(region, volumeId);
         Instance inst = getRequiredInstance(region, instanceId);
         if (!List.of("running", "stopped").contains(inst.getState().getName())) {
@@ -14881,6 +14909,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.attachVolume(volume, inst, device);
+        }
+
         VolumeAttachment attachment = new VolumeAttachment();
         attachment.setVolumeId(volumeId);
         attachment.setInstanceId(instanceId);
@@ -14892,10 +14924,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         volume.getAttachments().add(attachment);
         volume.setState("in-use");
         volumes.put(key(region, volumeId), volume);
-
-        if (volumeBlockDeviceManager != null) {
-            volumeBlockDeviceManager.attachVolume(volume, inst, device);
-        }
 
         return attachment;
     }
