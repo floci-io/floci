@@ -125,6 +125,29 @@ class ApiGatewayUsageMeteringIntegrationTest {
         assertUsage(validatedPlanId, validatedKeyId, 1, 0);
     }
 
+    // The refusals are gateway responses, so the API's own QUOTA_EXCEEDED, or its DEFAULT_4XX for a
+    // type it did not customise, shapes the 429.
+    @Test @Order(6)
+    void refusalsAnswerWithTheApisCustomisedGatewayResponses() {
+        customiseGatewayResponse("QUOTA_EXCEEDED", "quota spent");
+        customiseGatewayResponse("DEFAULT_4XX", "slow down");
+
+        call("prod", "secret", quotaKeyValue).then().statusCode(429)
+                .header("Access-Control-Allow-Origin", "*")
+                .body("message", equalTo("quota spent"));
+        call("throttled", "open", throttleKeyValue).then().statusCode(429)
+                .header("Access-Control-Allow-Origin", "*")
+                .body("message", equalTo("slow down"));
+    }
+
+    private void customiseGatewayResponse(String type, String message) {
+        given().contentType(ContentType.JSON)
+                .body("{\"responseParameters\":{\"gatewayresponse.header.Access-Control-Allow-Origin\":\"'*'\"},"
+                        + "\"responseTemplates\":{\"application/json\":\"{\\\"message\\\":\\\"" + message + "\\\"}\"}}")
+                .when().put("/restapis/" + apiId + "/gatewayresponses/" + type)
+                .then().statusCode(201);
+    }
+
     private void mockMethod(String parentId, String pathPart, String methodFields) {
         String resourceId = given().contentType(ContentType.JSON)
                 .body("{\"pathPart\":\"" + pathPart + "\"}")
