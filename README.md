@@ -896,6 +896,18 @@ services:
 
 Without this, services may return URLs using `localhost`, which points to the wrong container from the application container.
 
+### Kubernetes (Helm)
+
+The chart in [`charts/floci`](charts/floci) runs Floci in a cluster, with Lambda functions as pods and least-privilege RBAC:
+
+```bash
+helm install floci ./charts/floci --namespace floci --create-namespace --wait
+helm test floci --namespace floci --logs
+aws --endpoint-url http://floci.floci.svc.cluster.local:4566 s3 ls   # from any pod
+```
+
+See [Kubernetes (Helm)](https://floci.io/floci/getting-started/kubernetes/) for values, persistence, init hooks and Lambda on Kubernetes.
+
 ## Community
 
 Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw) or [GitHub Discussions](https://github.com/orgs/floci-io/discussions). Feature ideas, compatibility questions, design tradeoffs, and rough proposals are welcome.
