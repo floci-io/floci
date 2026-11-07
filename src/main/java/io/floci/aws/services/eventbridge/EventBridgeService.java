@@ -1276,7 +1276,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             JsonNode expected = field.getValue();
             JsonNode actualField = actual.get(field.getKey());
             if (expected.isArray()) {
-                if (!matchesArrayField(expected, actualField)) {
+                if (!matchesArrayField(expected, actualField) && !matchesAnyScalarMember(expected, actualField)) {
                     return false;
                 }
             } else if (expected.isObject()) {
@@ -1297,6 +1297,26 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             }
         }
         return true;
+    }
+
+    private boolean matchesAnyScalarMember(JsonNode patternArray, JsonNode actualArray) {
+        if (actualArray == null || !actualArray.isArray()) {
+            return false;
+        }
+        for (JsonNode member : actualArray) {
+            if (!member.isValueNode()) {
+                continue;
+            }
+            for (JsonNode element : patternArray) {
+                if (element.isObject() && element.has("exists")) {
+                    continue;
+                }
+                if (matchesSingleElement(element, member)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private boolean matchesArrayField(JsonNode arrayNode, String value) {
