@@ -1577,8 +1577,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             mainRt.getRoutes().add(new Route("0.0.0.0/0", igwId, "CreateRoute"));
         }
 
-        // Default NACL - associate with default subnets
+        // Default NACL - create and associate with default subnets
         String defaultAclId = defaultNetworkAclId(region);
+        createDefaultNetworkAcl(region, vpcId, defaultAclId);
         NetworkAcl defaultAcl = networkAcls.get(key(region, defaultAclId)).orElse(null);
         if (defaultAcl != null) {
             for (String subnetId : subnetIds) {
