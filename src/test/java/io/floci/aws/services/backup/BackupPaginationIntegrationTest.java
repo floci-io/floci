@@ -1,22 +1,28 @@
 package io.floci.aws.services.backup;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.services.backup.model.RecoveryPoint;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.JsonPath;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -35,7 +41,14 @@ class BackupPaginationIntegrationTest {
     @AfterEach
     void cleanup() {
         for (String name : vaultNames) {
-            service.deleteBackupVault(name, REGION);
+            try {
+                // Delete recovery points first so the vault can be removed.
+                PaginatedResult<RecoveryPoint> points = service.listRecoveryPointsByBackupVault(name, REGION, null, null);
+                for (RecoveryPoint rp : points.items()) {
+                    try { service.deleteRecoveryPoint(name, rp.getRecoveryPointArn(), REGION); } catch (Exception ignored) {}
+                }
+            } catch (Exception ignored) {}
+            try { service.deleteBackupVault(name, REGION); } catch (Exception ignored) {}
         }
     }
 
@@ -79,6 +92,83 @@ class BackupPaginationIntegrationTest {
                     .body("BackupVaultList.BackupVaultName", contains("boundary-1000"))
                     .body("$", not(hasKey("NextToken")));
         }
+    }
+
+    private void awaitJobState(String auth, String jobId, String expected) {
+        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(25))
+                .until(() -> expected.equals(given().header("Authorization", auth)
+                        .get("/backup-jobs/" + jobId).then().statusCode(200)
+                        .extract().path("State")));
+    }
+
+    private List<String> startThreeJobs(String vault) {
+        String iamRole = "arn:aws:iam::000000000000:role/backup-role";
+        String resourceArn = "arn:aws:dynamodb:" + REGION + ":000000000000:table/my-table";
+        List<String> jobIds = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            String jobId = given().header("Authorization", AUTH).contentType("application/json")
+                    .body("{\"BackupVaultName\":\"%s\",\"ResourceArn\":\"%s\",\"IamRoleArn\":\"%s\"}"
+                            .formatted(vault, resourceArn, iamRole))
+                    .put("/backup-jobs").then().statusCode(200)
+                    .extract().path("BackupJobId");
+            jobIds.add(jobId);
+            awaitJobState(AUTH, jobId, "COMPLETED");
+        }
+        return jobIds;
+    }
+
+    @Test
+    void listBackupJobsPagesThroughJobs() {
+        String vault = "jobs-page-vault";
+        createVault(vault);
+        startThreeJobs(vault);
+
+        List<String> collected = new ArrayList<>();
+        int pages = 0;
+        String token = null;
+        do {
+            RequestSpecification req = given().header("Authorization", AUTH).queryParam("byBackupVaultName", vault)
+                    .queryParam("maxResults", 1);
+            if (token != null) req = req.queryParam("nextToken", token);
+            JsonPath page = req.get("/backup-jobs/").then().statusCode(200).extract().jsonPath();
+            List<String> ids = page.getList("BackupJobs.BackupJobId");
+            assertNotNull(ids);
+            assertEquals(1, ids.size(), "each page must hold exactly one job");
+            collected.addAll(ids);
+            token = page.getString("NextToken");
+            pages++;
+        } while (token != null);
+
+        assertEquals(3, collected.size());
+        assertEquals(3, new HashSet<>(collected).size());
+        assertEquals(3, pages);
+    }
+
+    @Test
+    void listRecoveryPointsByBackupVaultPagesThroughPoints() {
+        String vault = "rp-page-vault";
+        createVault(vault);
+        startThreeJobs(vault);
+
+        List<String> collected = new ArrayList<>();
+        int pages = 0;
+        String token = null;
+        do {
+            RequestSpecification req = given().header("Authorization", AUTH).queryParam("maxResults", 1);
+            if (token != null) req = req.queryParam("nextToken", token);
+            JsonPath page = req.get("/backup-vaults/" + vault + "/recovery-points/")
+                    .then().statusCode(200).extract().jsonPath();
+            List<String> arns = page.getList("RecoveryPoints.RecoveryPointArn");
+            assertNotNull(arns);
+            assertEquals(1, arns.size(), "each page must hold exactly one recovery point");
+            collected.addAll(arns);
+            token = page.getString("NextToken");
+            pages++;
+        } while (token != null);
+
+        assertEquals(3, collected.size());
+        assertEquals(3, new HashSet<>(collected).size());
+        assertEquals(3, pages);
     }
 
     @Test
