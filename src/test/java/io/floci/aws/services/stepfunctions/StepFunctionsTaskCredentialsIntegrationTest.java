@@ -190,6 +190,32 @@ class StepFunctionsTaskCredentialsIntegrationTest {
                 .statusCode(200).body("executions.size()", Matchers.equalTo(0));
     }
 
+    /** With enforcement off a Map's role is not looked at, so one that does not exist still reads and exports. */
+    @Test
+    void mapS3CallsRetainDefaultIamDisabledBehavior() throws Exception {
+        String bucket = "credentials-map-" + UUID.randomUUID();
+        String s3 = auth(SOURCE, "s3");
+        given().port(baseUri.getPort()).header("Authorization", s3).put("/" + bucket).then().statusCode(200);
+        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(), s3, bucket));
+        given().port(baseUri.getPort()).header("Authorization", s3).body("[1,2]")
+                .put("/" + bucket + "/items.json").then().statusCode(200);
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Run", "States", Map.of("Run", Map.of(
+                "Type", "Map", "End", true,
+                "ItemReader", Map.of("Resource", "arn:aws:states:::s3:getObject",
+                        "ReaderConfig", Map.of("InputType", "JSON"),
+                        "Parameters", Map.of("Bucket", bucket, "Key", "items.json")),
+                "ResultWriter", Map.of("Resource", "arn:aws:states:::s3:putObject",
+                        "Parameters", Map.of("Bucket", bucket, "Prefix", "out")),
+                "ItemProcessor", Map.of("ProcessorConfig", Map.of("Mode", "DISTRIBUTED", "ExecutionType", "STANDARD"),
+                        "StartAt", "Item", "States", Map.of("Item", Map.of("Type", "Pass", "End", true)))))));
+
+        Response done = terminal(SOURCE, start(machine(SOURCE, definition, "STANDARD"), "{}"));
+
+        assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
+        String manifest = MAPPER.readTree(done.jsonPath().getString("output")).path("ResultWriterDetails").path("Key").asText();
+        given().port(baseUri.getPort()).header("Authorization", s3).get("/" + bucket + "/" + manifest).then().statusCode(200);
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"direct", "optimized"})
     void lambdaCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
