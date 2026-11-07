@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import io.floci.aws.services.apigatewayv2.model.Integration;
+import io.floci.aws.services.apigatewayv2.model.Stage;
 import io.floci.aws.services.cloudformation.model.Stack;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.restassured.specification.RequestSpecification;
@@ -28,6 +29,12 @@ final class ApiGatewayV2StackTestSupport {
         StackResource api = stack.getResources().get("HttpApi");
         StackResource integration = stack.getResources().get("Integration");
         return apiGatewayV2Service.getIntegration(REGION, api.getPhysicalId(), integration.getPhysicalId());
+    }
+
+    static Stage stage(ApiGatewayV2Service apiGatewayV2Service, Stack stack) {
+        StackResource api = stack.getResources().get("HttpApi");
+        StackResource stage = stack.getResources().get("Stage");
+        return apiGatewayV2Service.getStage(REGION, api.getPhysicalId(), stage.getPhysicalId());
     }
 
     static Stack stack(CloudFormationService cloudFormationService, String stackName) {

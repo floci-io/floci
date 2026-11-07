@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
@@ -19,6 +20,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -35,6 +37,7 @@ class CloudFormationEc2InstanceIntegrationTest {
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/ap-southeast-2/cloudformation/aws4_request";
+    private static final String REGION = "ap-southeast-2";
     private static final String EC2_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/ap-southeast-2/ec2/aws4_request";
     private static final String IAM_AUTH =
@@ -280,6 +283,93 @@ class CloudFormationEc2InstanceIntegrationTest {
             deleteInstanceProfile(firstProfile);
             deleteInstanceProfile(secondProfile);
         }
+    }
+
+    @Test
+    void updateStackThatDropsUserDataClearsItAndLeavesTheInstanceRunning() {
+        String stackName = "cfn-ec2-userdata-drop-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                {
+                  "Conditions": {"Off": {"Fn::Equals": ["a", "a"]}},
+                  "Resources": {
+                    "Server": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"ImageId": "ami-12345678", "InstanceType": "t3.micro"%s}
+                    }
+                  },
+                  "Outputs": {
+                    "InstanceId": {"Value": {"Ref": "Server"}}
+                  }
+                }
+                """;
+        String withUserData = ", \"UserData\": \"first boot\"";
+        String noValue = ", \"UserData\": {\"Fn::If\": [\"Off\", {\"Ref\": \"AWS::NoValue\"}, \"first boot\"]}";
+        try {
+            cfn("CreateStack", stackName, template.formatted(withUserData));
+            String instanceId = instanceIdFrom(describeStacks(stackName, "CREATE_COMPLETE"));
+            assertUserData(instanceId, "Zmlyc3QgYm9vdA==");
+
+            cfn("UpdateStack", stackName, template.formatted(""));
+            String dropped = describeStacks(stackName, "UPDATE_COMPLETE");
+            assertEquals(instanceId, instanceIdFrom(dropped));
+            assertNoUserData(instanceId);
+            assertInstanceRunning(instanceId);
+
+            cfn("UpdateStack", stackName, template.formatted(withUserData));
+            describeStacks(stackName, "UPDATE_COMPLETE");
+            assertUserData(instanceId, "Zmlyc3QgYm9vdA==");
+
+            cfn("UpdateStack", stackName, template.formatted(noValue));
+            describeStacks(stackName, "UPDATE_COMPLETE");
+            assertNoUserData(instanceId);
+            assertInstanceRunning(instanceId);
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    @Test
+    void userDataSetOutsideTheStackSurvivesAnUpdateThatNeverDeclaredIt() {
+        String stackName = "cfn-ec2-userdata-outside-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                {
+                  "Resources": {
+                    "Server": {
+                      "Type": "AWS::EC2::Instance",
+                      "Properties": {"ImageId": "ami-12345678", "InstanceType": "%s"}
+                    }
+                  },
+                  "Outputs": {
+                    "InstanceId": {"Value": {"Ref": "Server"}}
+                  }
+                }
+                """;
+        try {
+            cfn("CreateStack", stackName, template.formatted("t3.micro"));
+            String instanceId = instanceIdFrom(describeStacks(stackName, "CREATE_COMPLETE"));
+            ec2.stopInstances(REGION, List.of(instanceId));
+            ec2.modifyInstanceUserData(REGION, instanceId, "outside");
+            ec2.startInstances(REGION, List.of(instanceId));
+            assertUserData(instanceId, "b3V0c2lkZQ==");
+
+            cfn("UpdateStack", stackName, template.formatted("t3.small"));
+            assertEquals(instanceId, instanceIdFrom(describeStacks(stackName, "UPDATE_COMPLETE")));
+
+            assertUserData(instanceId, "b3V0c2lkZQ==");
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
+    private void assertNoUserData(String instanceId) {
+        Instance instance = ec2.describeInstances(REGION, List.of(instanceId), null).get(0).getInstances().get(0);
+        assertNull(instance.getUserData(), "expected no user data");
+        assertNull(instance.getEncodedUserData(), "expected no encoded user data");
+    }
+
+    private void assertInstanceRunning(String instanceId) {
+        Instance instance = ec2.describeInstances(REGION, List.of(instanceId), null).get(0).getInstances().get(0);
+        assertEquals("running", instance.getState().getName());
     }
 
     private static void assertUserData(String instanceId, String encoded) {

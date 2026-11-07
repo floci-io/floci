@@ -1031,6 +1031,10 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         req.put("stageName", stageName);
         req.put("autoDeploy", ctx.resolveOrDefault(props, "AutoDeploy", "false"));
         Map<String, String> stageVariables = parseStageVariables(props, engine);
+        if (stageVariables == null && ctx.droppedProperties(props).contains("StageVariables")) {
+            // The service replaces the variables on a non-null map, so an empty one clears them.
+            stageVariables = new LinkedHashMap<>();
+        }
         if (stageVariables != null) {
             req.put("stageVariables", stageVariables);
         }
