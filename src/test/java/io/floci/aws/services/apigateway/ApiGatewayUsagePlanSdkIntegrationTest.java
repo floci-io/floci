@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class ApiGatewayUsagePlanSdkIntegrationTest {
@@ -67,5 +68,35 @@ class ApiGatewayUsagePlanSdkIntegrationTest {
                 client.deleteRestApi(r -> r.restApiId(apiId));
             }
         }
+    }
+
+    // Measured on API Gateway: a key in no plan and an unknown key both answer an empty list, and an
+    // empty keyId lists every plan.
+    @Test
+    void getUsagePlansFiltersByKeyId() {
+        try (ApiGatewayClient client = client()) {
+            String first = client.createUsagePlan(r -> r.name("key-filter-first")).id();
+            String second = client.createUsagePlan(r -> r.name("key-filter-second")).id();
+            String inPlan = client.createApiKey(r -> r.name("key-filter-in-plan")).id();
+            String inNoPlan = client.createApiKey(r -> r.name("key-filter-in-no-plan")).id();
+            try {
+                client.createUsagePlanKey(r -> r.usagePlanId(first).keyId(inPlan).keyType("API_KEY"));
+
+                assertEquals(List.of(first), usagePlanIds(client, inPlan));
+                assertEquals(List.of(), usagePlanIds(client, inNoPlan));
+                assertEquals(List.of(), usagePlanIds(client, "missing"));
+                assertTrue(usagePlanIds(client, null).containsAll(List.of(first, second)));
+                assertTrue(usagePlanIds(client, "").containsAll(List.of(first, second)));
+            } finally {
+                client.deleteApiKey(r -> r.apiKey(inPlan));
+                client.deleteApiKey(r -> r.apiKey(inNoPlan));
+                client.deleteUsagePlan(r -> r.usagePlanId(first));
+                client.deleteUsagePlan(r -> r.usagePlanId(second));
+            }
+        }
+    }
+
+    private static List<String> usagePlanIds(ApiGatewayClient client, String keyId) {
+        return client.getUsagePlans(r -> r.keyId(keyId).limit(500)).items().stream().map(UsagePlan::id).toList();
     }
 }

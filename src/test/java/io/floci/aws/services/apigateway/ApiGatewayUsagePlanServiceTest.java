@@ -46,6 +46,9 @@ class ApiGatewayUsagePlanServiceTest {
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(invocation ->
                 stores.computeIfAbsent(invocation.getArgument(1, String.class),
                         ignored -> AccountAwareStorageBackend.inMemory(ACCOUNT)));
+        when(storageFactory.create(anyString(), anyString(), any(), any())).thenAnswer(invocation ->
+                stores.computeIfAbsent(invocation.getArgument(1, String.class),
+                        ignored -> AccountAwareStorageBackend.inMemory(ACCOUNT)));
         return new ApiGatewayService(storageFactory, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
                 mock(TlsCertificateManager.class), new RegionResolver(REGION, ACCOUNT));
     }
