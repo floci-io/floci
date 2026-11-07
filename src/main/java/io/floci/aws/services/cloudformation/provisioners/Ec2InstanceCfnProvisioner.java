@@ -157,7 +157,8 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
             boolean metadataOptionsChange = metadataOptionsToApply != null
                     && Ec2CfnMetadataOptions.changes(optionsBefore, metadataOptionsToApply);
             boolean otherChange = reconcileMutableProperties(region, prior, instanceType, securityGroupIds,
-                    userData, iamInstanceProfileArn, attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
+                    userData, ctx.droppedProperties(props).contains("UserData"), iamInstanceProfileArn,
+                    attributesBefore.get(DECLARED_IAM_PROFILE_ATTR));
             boolean tagsChanged = Ec2Tags.reconcileOwned(ec2Service, region, prior.getInstanceId(),
                     Ec2Tags.ownedKeys(r, DECLARED_TAG_KEYS_ATTR, ctx), desiredTags);
             // Saved on every update that keeps the instance, also one that changes no EC2 setting but
@@ -285,14 +286,16 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
      * "some interruptions" the property is documented with), and a changed IamInstanceProfile is
      * associated or replaced, or disassociated when the template declared one last time and drops it
      * now. Only a declared SecurityGroupIds or UserData is reconciled, so a template that omits them
-     * does not strip what the instance already has (a launch template may have set it). Returns
+     * does not strip what the instance already has (a launch template may have set it); UserData the
+     * previous template declared and this one drops is cleared. Returns
      * whether it changed anything, which a stack rollback has no way to put back here. MetadataOptions
      * is applied after it, as the property's "No interruption" update allows, by the caller, which
      * keeps what it replaces for {@link #rollbackUpdate}.
      */
     private boolean reconcileMutableProperties(String region, Instance prior, String instanceType,
                                                List<String> securityGroupIds, String userData,
-                                               String iamInstanceProfileArn, String priorDeclaredProfileArn) {
+                                               boolean userDataDropped, String iamInstanceProfileArn,
+                                               String priorDeclaredProfileArn) {
         boolean changed = false;
         if (instanceType != null && !instanceType.isBlank()
                 && !instanceType.equals(prior.getInstanceType())) {
@@ -305,6 +308,9 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         }
         if (userData != null && !userData.equals(prior.getUserData())) {
             rewriteUserData(region, prior, userData);
+            changed = true;
+        } else if (userData == null && userDataDropped && prior.getUserData() != null) {
+            rewriteUserData(region, prior, null);
             changed = true;
         }
         return reconcileIamInstanceProfile(region, prior, iamInstanceProfileArn, priorDeclaredProfileArn) || changed;

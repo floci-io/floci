@@ -345,6 +345,141 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     @Test
+    void droppedUserDataIsClearedAcrossAStopAndAStart() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setUserData("old");
+        i1.setState(InstanceState.running());
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"UserData\": \"old\"}")));
+
+        assertEquals("i-1", r.getPhysicalId());
+        InOrder order = inOrder(ec2);
+        order.verify(ec2).stopInstances("us-east-1", List.of("i-1"));
+        order.verify(ec2).modifyInstanceUserData("us-east-1", "i-1", (String) null);
+        order.verify(ec2).startInstances("us-east-1", List.of("i-1"));
+        order.verify(ec2).awaitContainerLaunch(i1);
+    }
+
+    @Test
+    void droppedUserDataOnAStoppedInstanceIsClearedWithoutARestart() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setUserData("old");
+        i1.setState(InstanceState.stopped());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"UserData\": \"old\"}")));
+
+        verify(ec2).modifyInstanceUserData("us-east-1", "i-1", (String) null);
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).startInstances(anyString(), anyList());
+    }
+
+    @Test
+    void userDataSetOutsideTheStackSurvivesAnUpdateThatNeverDeclaredIt() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setUserData("set outside the stack");
+        i1.setState(InstanceState.running());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\"}")));
+
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).modifyInstanceUserData(anyString(), anyString(), any());
+        verify(ec2, never()).startInstances(anyString(), anyList());
+    }
+
+    @Test
+    void anInstanceWithoutUserDataAndWithoutADeclarationIsLeftAlone() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setState(InstanceState.running());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\"}")));
+
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).modifyInstanceUserData(anyString(), anyString(), any());
+    }
+
+    @Test
+    void droppedUserDataOnAnInstanceThatHasNoneStopsNothing() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setState(InstanceState.running());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"UserData\": \"old\"}")));
+
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).modifyInstanceUserData(anyString(), anyString(), any());
+    }
+
+    // The tests down to droppingADeclaredPrivateIpAddress... pin the drop-policy.tsv rows of the
+    // properties they drop: what an update that drops each one does.
+    @Test
+    void droppingInstanceTypeGoesBackToTheDefaultAndSecurityGroupsAreKept() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setInstanceType("m5.large");
+        String previous = "{\"ImageId\": \"ami-1\", \"InstanceType\": \"m5.large\", "
+                + "\"SecurityGroupIds\": [\"sg-1\"]}";
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"), ctx("i-1", props(previous)));
+
+        verify(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.micro");
+        verify(ec2, never()).modifyInstanceGroups(anyString(), anyString(), anyList());
+    }
+
+    @Test
+    void droppingTheLaunchTemplateKeepsTheInstanceAndResizesItToTheDefaultType() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setInstanceType("m5.large");
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}")));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        verify(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.micro");
+    }
+
+    @Test
+    void droppingCreateOnlyAndLaunchOnlyPropertiesKeepsTheInstance() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setKeyName("key");
+        i1.setSubnetId("subnet-1");
+        String previous = "{\"ImageId\": \"ami-1\", \"KeyName\": \"key\", \"SubnetId\": \"subnet-1\", "
+                + "\"NetworkInterfaces\": [{\"AssociatePublicIpAddress\": true}]}";
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{}"), ctx("i-1", props(previous)));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        verify(ec2, never()).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
+                anyList(), any(), any(), anyList(), any(), any(), any(),
+                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    void droppingADeclaredPrivateIpAddressOrAvailabilityZoneReplacesTheInstance() throws Exception {
+        for (String declared : List.of("\"PrivateIpAddress\": \"10.0.0.5\"", "\"AvailabilityZone\": \"us-east-1a\"")) {
+            Instance first = stubLaunches("i-1", "i-2").get(0);
+            StackResource r = resource("Server");
+            provisioner.provision(r, props("{\"ImageId\": \"ami-1\", " + declared + "}"), ctx(null));
+            assertEquals("i-1", r.getPhysicalId());
+            when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                    .thenReturn(List.of(reservationOf(first)));
+
+            provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"),
+                    ctx("i-1", props("{\"ImageId\": \"ami-1\", " + declared + "}")));
+
+            assertEquals("i-2", r.getPhysicalId(), declared);
+            assertTrue(provisioner.hasReplacementUpdate(r), declared);
+        }
+    }
+
+    @Test
     void aStoppedInstanceGetsItsUserDataRewrittenWithoutARestart() throws Exception {
         Instance i1 = reusable("i-1");
         i1.setUserData("old");
@@ -1302,6 +1437,10 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     private ProvisionContext ctx(String priorPhysicalId) {
+        return ctx(priorPhysicalId, null);
+    }
+
+    private ProvisionContext ctx(String priorPhysicalId, JsonNode priorProperties) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
@@ -1309,7 +1448,8 @@ class Ec2InstanceCfnProvisionerTest {
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.omitNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
+        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId,
+                event -> {}, priorProperties);
     }
 
     private JsonNode props(String json) throws Exception {
