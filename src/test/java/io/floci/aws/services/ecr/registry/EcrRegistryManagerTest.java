@@ -27,6 +27,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.HostBlindPortAllocator;
 import io.floci.aws.core.common.docker.PortAllocator;
+import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -34,10 +35,15 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -46,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -145,6 +152,36 @@ class EcrRegistryManagerTest {
                 "io.floci.service", "ecr",
                 "io.floci.account", "000000000000",
                 "io.floci.region", "us-east-1"));
+    }
+
+    @Test
+    void ensureStartedDoesNotBlockWhenAlreadyRunning() throws Exception {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        when(lifecycleManager.presenceOf("container-id")).thenReturn(ContainerPresence.RUNNING);
+        manager.ensureStarted();
+        assertTrue(manager.isStarted());
+
+        CountDownLatch lockAcquired = new CountDownLatch(1);
+        CountDownLatch finishLock = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            synchronized (manager) {
+                lockAcquired.countDown();
+                try {
+                    finishLock.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException ignored) {}
+            }
+        });
+        holder.start();
+        assertTrue(lockAcquired.await(2, TimeUnit.SECONDS));
+
+        try {
+            CompletableFuture<Void> call = CompletableFuture.runAsync(() -> manager.ensureStarted());
+            call.get(2, TimeUnit.SECONDS);
+        } finally {
+            finishLock.countDown();
+            holder.join();
+        }
     }
 
     @Test
@@ -830,6 +867,44 @@ class EcrRegistryManagerTest {
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_layers",
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_manifests",
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_uploads");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void runGarbageCollectTimeoutWithExecStillRunningKeepsAdmissionClosed() throws Exception {
+        ManualClock clock = new ManualClock(Instant.now());
+        manager.setClock(clock);
+        manager.setSleeper(millis -> clock.advance(Duration.ofMillis(millis)));
+
+        when(lifecycleManager.createAndStart(any()))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        when(lifecycleManager.presenceOf("container-id")).thenReturn(ContainerPresence.RUNNING);
+        manager.ensureStarted();
+
+        ExecCreateCmd execCreateCmd = Mockito.mock(ExecCreateCmd.class, Mockito.RETURNS_SELF);
+        ExecCreateCmdResponse execResponse = Mockito.mock(ExecCreateCmdResponse.class);
+        when(dockerClient.execCreateCmd("container-id")).thenReturn(execCreateCmd);
+        when(execCreateCmd.exec()).thenReturn(execResponse);
+        when(execResponse.getId()).thenReturn("gc-exec-1");
+        ExecStartCmd execStartCmd = Mockito.mock(ExecStartCmd.class, Mockito.RETURNS_SELF);
+        when(dockerClient.execStartCmd("gc-exec-1")).thenReturn(execStartCmd);
+        ResultCallback.Adapter<Frame> execCallback = Mockito.mock(ResultCallback.Adapter.class);
+        when(execStartCmd.exec(any())).thenReturn(execCallback);
+        when(execCallback.awaitCompletion(anyLong(), any())).thenReturn(false);
+        InspectExecCmd inspectCmd = Mockito.mock(InspectExecCmd.class);
+        InspectExecResponse inspectResponse = Mockito.mock(InspectExecResponse.class);
+        when(dockerClient.inspectExecCmd("gc-exec-1")).thenReturn(inspectCmd);
+        when(inspectCmd.exec()).thenReturn(inspectResponse);
+        when(inspectResponse.getExitCodeLong()).thenReturn(null);
+
+        assertThrows(RuntimeException.class, () -> manager.runGarbageCollect(1));
+        assertTrue(manager.isGarbageCollecting());
+        assertFalse(manager.tryAcquireWriteAdmission());
+
+        when(inspectResponse.getExitCodeLong()).thenReturn(0L);
+        manager.confirmExecTerminated("gc-exec-1");
+        assertFalse(manager.isGarbageCollecting());
+        assertTrue(manager.tryAcquireWriteAdmission());
     }
 
     @ParameterizedTest
