@@ -316,24 +316,28 @@ public class BedrockAgentCoreControlService {
     // ──────────────────────────── Tagging (Phase 4) ────────────────────────────
 
     public Map<String, String> getTagsByArn(String region, String arn) {
-        return new HashMap<>(getAgentRuntimeByArn(region, arn).getTags());
+        Map<String, String> snapshot = new HashMap<>();
+        updateRuntimeTags(region, arn, snapshot::putAll, false);
+        return snapshot;
     }
 
     public void tagByArn(String region, String arn, Map<String, String> tags) {
-        String runtimeId = getAgentRuntimeByArn(region, arn).getAgentRuntimeId();
-        synchronized (runtimeLock(region, runtimeId)) {
-            AgentRuntime runtime = getAgentRuntime(runtimeId, region);
-            runtime.getTags().putAll(tags);
-            storage.put(key(region, runtimeId), runtime);
-        }
+        updateRuntimeTags(region, arn, runtimeTags -> runtimeTags.putAll(tags), true);
     }
 
     public void untagByArn(String region, String arn, List<String> keys) {
+        updateRuntimeTags(region, arn, runtimeTags -> keys.forEach(runtimeTags::remove), true);
+    }
+
+    private void updateRuntimeTags(String region, String arn, Consumer<Map<String, String>> change,
+                                   boolean persist) {
         String runtimeId = getAgentRuntimeByArn(region, arn).getAgentRuntimeId();
         synchronized (runtimeLock(region, runtimeId)) {
             AgentRuntime runtime = getAgentRuntime(runtimeId, region);
-            keys.forEach(runtime.getTags()::remove);
-            storage.put(key(region, runtimeId), runtime);
+            change.accept(runtime.getTags());
+            if (persist) {
+                storage.put(key(region, runtimeId), runtime);
+            }
         }
     }
 
