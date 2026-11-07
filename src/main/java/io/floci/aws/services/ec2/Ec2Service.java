@@ -158,6 +158,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.util.zip.CRC32;
 
 import static io.floci.aws.services.ec2.Ec2Ids.randomHex;
 
@@ -1558,22 +1559,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
         createDefaultSecurityGroup(region, vpcId, defaultSecurityGroupId(region));
 
-        // Default NACL, with the default subnets associated to it.
-        String defaultAclId = createDefaultNetworkAcl(region, vpcId, "acl-default");
-        NetworkAcl defaultAcl = networkAcls.get(key(region, defaultAclId)).orElse(null);
-        if (defaultAcl != null) {
-            for (String subnetId : subnetIds) {
-                NetworkAclAssociation assoc = new NetworkAclAssociation();
-                assoc.setNetworkAclAssociationId("aclassoc-" + subnetId);
-                assoc.setNetworkAclId(defaultAclId);
-                assoc.setSubnetId(subnetId);
-                defaultAcl.getAssociations().add(assoc);
-            }
-            networkAcls.put(key(region, defaultAclId), defaultAcl);
-        }
-
         // Default internet gateway
-        String igwId = "igw-default";
+        String igwId = defaultInternetGatewayId(region);
         InternetGateway igw = new InternetGateway();
         igw.setInternetGatewayId(igwId);
         igw.setOwnerId(ownerAccountId);
@@ -1581,11 +1568,28 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
         internetGateways.put(key(region, igwId), igw);
 
-        String rtId = createMainRouteTable(region, defaultVpc, "rtb-default", "rtbassoc-default");
+        String rtId = defaultRouteTableId(region);
+        String rtAssocId = defaultRouteTableAssociationId(region);
+        createMainRouteTable(region, defaultVpc, rtId, rtAssocId);
 
         RouteTable mainRt = routeTables.get(key(region, rtId)).orElse(null);
         if (mainRt != null) {
             mainRt.getRoutes().add(new Route("0.0.0.0/0", igwId, "CreateRoute"));
+        }
+
+        // Default NACL - associate with default subnets
+        String defaultAclId = defaultNetworkAclId(region);
+        NetworkAcl defaultAcl = networkAcls.get(key(region, defaultAclId)).orElse(null);
+        if (defaultAcl != null) {
+            for (String subnetId : subnetIds) {
+                String assocId = defaultNetworkAclAssociationId(region, subnetId);
+                NetworkAclAssociation assoc = new NetworkAclAssociation();
+                assoc.setNetworkAclAssociationId(assocId);
+                assoc.setNetworkAclId(defaultAclId);
+                assoc.setSubnetId(subnetId);
+                defaultAcl.getAssociations().add(assoc);
+            }
+            networkAcls.put(key(region, defaultAclId), defaultAcl);
         }
     }
 
@@ -2179,6 +2183,61 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public static String defaultSecurityGroupId(String region) {
         return "sg-default-" + region;
+    }
+
+    /**
+     * Generates a deterministic 17-hex-digit suffix from a seed string using CRC32.
+     * Two CRC32 passes with different seeds provide 64 bits; we take the first 17 hex chars.
+     */
+    private static String deterministicIdSuffix(String seed) {
+        CRC32 crc1 = new CRC32();
+        crc1.update(seed.getBytes(StandardCharsets.UTF_8));
+        CRC32 crc2 = new CRC32();
+        crc2.update((seed + "|second").getBytes(StandardCharsets.UTF_8));
+        long combined = (crc1.getValue() << 32) ^ crc2.getValue();
+        return String.format("%017x", combined & 0x1FFFFFFFFFFFFFFFL);
+    }
+
+    /**
+     * Internet Gateway ID for the default network in a region: igw-<17 hex digits>.
+     */
+    public static String defaultInternetGatewayId(String region) {
+        return "igw-" + deterministicIdSuffix("igw::" + region);
+    }
+
+    /**
+     * Main Route Table ID for the default network in a region: rtb-<17 hex digits>.
+     */
+    public static String defaultRouteTableId(String region) {
+        return "rtb-" + deterministicIdSuffix("rtb::" + region);
+    }
+
+    /**
+     * Main Route Table Association ID for the default network in a region: rtbassoc-<17 hex digits>.
+     */
+    public static String defaultRouteTableAssociationId(String region) {
+        return "rtbassoc-" + deterministicIdSuffix("rtbassoc::" + region);
+    }
+
+    /**
+     * Default Network ACL ID for the default network in a region: acl-<17 hex digits>.
+     */
+    public static String defaultNetworkAclId(String region) {
+        return "acl-" + deterministicIdSuffix("acl::" + region);
+    }
+
+    /**
+     * Network ACL Association ID for a default subnet in a region: aclassoc-<17 hex digits>.
+     */
+    public static String defaultNetworkAclAssociationId(String region, String subnetId) {
+        return "aclassoc-" + deterministicIdSuffix("aclassoc::" + subnetId);
+    }
+
+    /**
+     * Default Internet Gateway Attachment ID: igw-attach-<17 hex digits>.
+     */
+    public static String defaultInternetGatewayAttachmentId(String region, String vpcId) {
+        return "igw-attach-" + deterministicIdSuffix("igw-attach::" + region + "::" + vpcId);
     }
 
     // Resolves the default VPC/security-group id actually on file for a region, falling back to
