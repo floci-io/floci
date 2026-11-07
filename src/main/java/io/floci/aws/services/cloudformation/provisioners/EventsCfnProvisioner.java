@@ -13,6 +13,7 @@ import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
 import io.floci.aws.services.eventbridge.model.BatchParameters;
 import io.floci.aws.services.eventbridge.model.Connection;
+import io.floci.aws.services.eventbridge.model.ConnectionState;
 import io.floci.aws.services.eventbridge.model.EcsParameters;
 import io.floci.aws.services.eventbridge.model.EventBus;
 import io.floci.aws.services.eventbridge.model.HttpParameters;
@@ -25,6 +26,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -328,6 +330,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     public boolean rollbackUpdate(StackResource resource) {
         if ("AWS::Events::ApiDestination".equals(resource.getResourceType())) {
             return rollbackApiDestinationUpdate(resource);
+        }
+        if ("AWS::Events::Connection".equals(resource.getResourceType())) {
+            return rollbackConnectionUpdate(resource);
         }
         String rawSnapshot = resource.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
         if (rawSnapshot == null) {
@@ -906,8 +911,12 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         String connectivityParameters = resolvedObjectAsJson(props, "InvocationConnectivityParameters", ctx);
         String kmsKeyIdentifier = ctx.resolveOptional(props, "KmsKeyIdentifier");
 
+        // A snapshot describes the update in flight; one an earlier update left behind is stale
+        r.getAttributes().remove(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
         Connection connection;
         if (ctx.reusesPriorEntity(name)) {
+            snapshotConnectionBeforeUpdate(r, eventBridgeService.describeConnection(name, ctx.region()),
+                    ctx.region());
             connection = eventBridgeService.updateConnection(name, description, authorizationType,
                     authParameters, connectivityParameters, kmsKeyIdentifier, ctx.region());
         } else {
@@ -934,6 +943,57 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
         JsonNode resolved = ctx.engine().resolveNode(props.get(name));
         return resolved != null && resolved.isObject() && !resolved.isEmpty() ? resolved.toString() : null;
+    }
+
+    private void snapshotConnectionBeforeUpdate(StackResource r, Connection current, String region) {
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("name", current.getName());
+        snapshot.put("description", current.getDescription());
+        snapshot.put("authorizationType", current.getAuthorizationType());
+        snapshot.put("authParameters", current.getAuthParameters());
+        snapshot.put("invocationConnectivityParameters", current.getInvocationConnectivityParameters());
+        snapshot.put("kmsKeyIdentifier", current.getKmsKeyIdentifier());
+        snapshot.put("connectionState",
+                current.getConnectionState() == null ? null : current.getConnectionState().name());
+        snapshot.put("stateReason", current.getStateReason());
+        snapshot.put("lastModifiedTime",
+                current.getLastModifiedTime() == null ? null : current.getLastModifiedTime().toString());
+        snapshot.put("lastAuthorizedTime",
+                current.getLastAuthorizedTime() == null ? null : current.getLastAuthorizedTime().toString());
+        r.getAttributes().put(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    // The snapshot is spent only once the restore succeeded: a restore that throws leaves it for the next attempt
+    private boolean rollbackConnectionUpdate(StackResource resource) {
+        String raw = resource.getAttributes().get(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return false;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the connection update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        Connection previous = new Connection();
+        previous.setName(snapshot.path("name").asText());
+        previous.setDescription(snapshotText(snapshot, "description"));
+        previous.setAuthorizationType(snapshotText(snapshot, "authorizationType"));
+        previous.setAuthParameters(snapshotText(snapshot, "authParameters"));
+        previous.setInvocationConnectivityParameters(snapshotText(snapshot, "invocationConnectivityParameters"));
+        previous.setKmsKeyIdentifier(snapshotText(snapshot, "kmsKeyIdentifier"));
+        String state = snapshotText(snapshot, "connectionState");
+        previous.setConnectionState(state == null ? null : ConnectionState.valueOf(state));
+        previous.setStateReason(snapshotText(snapshot, "stateReason"));
+        String modified = snapshotText(snapshot, "lastModifiedTime");
+        previous.setLastModifiedTime(modified == null ? null : Instant.parse(modified));
+        String authorized = snapshotText(snapshot, "lastAuthorizedTime");
+        previous.setLastAuthorizedTime(authorized == null ? null : Instant.parse(authorized));
+        eventBridgeService.restoreConnection(previous, snapshot.path("region").asText());
+        resource.getAttributes().remove(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
+        return true;
     }
 
     private void deleteConnectionSafe(String name, String region) {
