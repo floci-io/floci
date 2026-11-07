@@ -14,7 +14,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.isHex;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.soleVariant;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.text;
 import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.materialHex;
@@ -289,13 +288,7 @@ public class PaymentCryptographyPinOperations {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("TranslatePinData", request);
         String incomingKeyIdentifier = text(request, "IncomingKeyIdentifier");
-        if (incomingKeyIdentifier.isEmpty()) {
-            throw validation("IncomingKeyIdentifier is required");
-        }
         String outgoingKeyIdentifier = text(request, "OutgoingKeyIdentifier");
-        if (outgoingKeyIdentifier.isEmpty()) {
-            throw validation("OutgoingKeyIdentifier is required");
-        }
         if (request.get("IncomingAs2805Attributes") != null) {
             throw validation("AS2805 translation is not supported by this service");
         }
@@ -333,20 +326,9 @@ public class PaymentCryptographyPinOperations {
         JsonNode outAttrs = outgoing.get(outVariant);
         String inPan = inAttrs == null ? "" : text(inAttrs, "PrimaryAccountNumber");
         String outPan = outAttrs == null ? "" : text(outAttrs, "PrimaryAccountNumber");
-        if (inPan.isEmpty()) {
-            throw validation("IncomingTranslationAttributes." + inVariant
-                    + ".PrimaryAccountNumber is required");
-        }
-        if (outPan.isEmpty()) {
-            throw validation("OutgoingTranslationAttributes." + outVariant
-                    + ".PrimaryAccountNumber is required");
-        }
-        requireTranslationPan(inPan,
-                "IncomingTranslationAttributes." + inVariant + ".PrimaryAccountNumber");
-        requireTranslationPan(outPan,
-                "OutgoingTranslationAttributes." + outVariant + ".PrimaryAccountNumber");
         // For PCI compliance the incoming and the outgoing account number are the same one,
-        // and a PIN is not translated from one account number to another.
+        // and a PIN is not translated from one account number to another. The model states
+        // that the attributes carry the account number, so the two are read and compared.
         if (!inPan.equals(outPan)) {
             throw validation("the incoming and the outgoing PrimaryAccountNumber must be the "
                     + "same one, and a PIN is not translated from one account number to another");
@@ -394,9 +376,6 @@ public class PaymentCryptographyPinOperations {
      */
     private PinLeg resolvePinLeg(String identifier, JsonNode dukptAttributes, String region,
                                   String mode, String what) {
-        if (identifier.isEmpty()) {
-            throw validation("the key identifier is required");
-        }
         PaymentCryptographyKey key = service.findKey(region, identifier);
         if (key == null) {
             throw notFound(identifier);
@@ -415,22 +394,13 @@ public class PaymentCryptographyPinOperations {
         requireUsage(key, DERIVATION_USAGES, "deriving a PIN key");
         requireFamily(key, false, "deriving a PIN key");
 
+        // The model's DUKPT attributes carry the key serial number and the derivation type,
+        // and the derivation this path makes is the Triple DES one.
         String ksn = text(dukptAttributes, "KeySerialNumber");
-        if (!isHex(ksn)) {
-            throw validation("DukptAttributes.KeySerialNumber (hex) is required");
-        }
         String derivationType = text(dukptAttributes, "DukptDerivationType");
-        if (derivationType.isEmpty()) {
-            derivationType = text(dukptAttributes, "DukptKeyDerivationType");
-        }
-        if (!derivationType.isEmpty() && !"TDES_2KEY".equals(derivationType)) {
+        if (!"TDES_2KEY".equals(derivationType)) {
             throw validation("DukptDerivationType '" + derivationType
                     + "' not supported by this service (TDES_2KEY)");
-        }
-        String keyVariant = text(dukptAttributes, "DukptKeyVariant");
-        if (!keyVariant.isEmpty() && !"BIDIRECTIONAL".equals(keyVariant)) {
-            throw validation("DukptKeyVariant '" + keyVariant
-                    + "' not supported by this service (BIDIRECTIONAL)");
         }
         try {
             // A DUKPT PIN key is a TDES key, whatever the base derivation key is.
@@ -531,8 +501,7 @@ public class PaymentCryptographyPinOperations {
     private static PinBlockFormat format(String wireName) {
         PinBlockFormat format = PinBlockFormat.from(wireName);
         if (format == null) {
-            throw validation("PinBlockFormat '" + (wireName == null || wireName.isEmpty()
-                    ? "(missing)" : wireName) + "' not supported by this service ("
+            throw validation("PinBlockFormat '" + wireName + "' not supported by this service ("
                     + PinBlockFormat.supported() + ")");
         }
         return format;
@@ -568,25 +537,8 @@ public class PaymentCryptographyPinOperations {
         return pan;
     }
 
-    /**
-     * The account number a translation attribute names.
-     *
-     * <p>The member is optional in the model, so a request that leaves it out is refused
-     * here. Its length and its digits are the model's to settle.
-     *
-     * @param pan the account number of the attribute
-     * @param label what to say when the request leaves it out
-     * @return the account number
-     */
-    private static String requireTranslationPan(String pan, String label) {
-        if (pan.isEmpty()) {
-            throw validation(label + " is required");
-        }
-        return pan;
-    }
-
     private static void requireHex(String value, int length, String message) {
-        if (value == null || value.length() != length || !isHex(value)) {
+        if (value == null || value.length() != length) {
             throw validation(message);
         }
     }

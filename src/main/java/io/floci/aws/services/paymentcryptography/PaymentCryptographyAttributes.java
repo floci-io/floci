@@ -57,26 +57,4 @@ final class PaymentCryptographyAttributes {
         return found;
     }
 
-    /**
-     * Whether a value is hexadecimal.
-     *
-     * <p>The data plane carries its blobs as hexadecimal, so a value that is not hexadecimal
-     * is not one of them.
-     *
-     * @param value the value to read
-     * @return whether the value is an even number of hexadecimal digits
-     */
-    static boolean isHex(String value) {
-        if (value == null || value.isEmpty() || value.length() % 2 != 0) {
-            return false;
-        }
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-            if (!hex) {
-                return false;
-            }
-        }
-        return true;
-    }
 }

@@ -35,12 +35,14 @@ public final class PinCrypto {
      * are the field. A PAN of twelve digits leaves eleven, and the field is
      * padded with a zero on the left.
      *
-     * @throws IllegalArgumentException if the digit count is below 12
+     * @throws IllegalArgumentException if the PAN has fewer than twelve digits,
+     *         which is fewer than the field holds
      */
     public static String account12(String pan) {
         String d = digits(pan);
         if (d.length() < 12) {
-            throw new IllegalArgumentException("PAN too short");
+            throw new IllegalArgumentException("the account field is twelve digits, and the PAN "
+                    + "has fewer");
         }
         String withoutCheckDigit = d.substring(0, d.length() - 1);
         if (withoutCheckDigit.length() >= 12) {
@@ -198,11 +200,14 @@ public final class PinCrypto {
      * what the standard says: the format 4 PAN field is the complete PAN,
      * where the account field of the formats 0 and 3 is the twelve right-most
      * digits without the check digit.
+     *
+     * <p>The M nibble is four bits, so the PAN it records may be up to twenty
+     * seven digits, which is what the field holds beside the nibble.
      */
     public static byte[] iso4PanField(String pan) {
         String d = digits(pan);
-        if (d.isEmpty() || d.length() > 19) {
-            throw new IllegalArgumentException("PAN must be 1..19 digits");
+        if (d.isEmpty() || d.length() > 27) {
+            throw new IllegalArgumentException("the PAN field holds up to twenty seven digits");
         }
         StringBuilder panField = new StringBuilder();
         panField.append(Integer.toHexString(Math.max(0, d.length() - 12)));
