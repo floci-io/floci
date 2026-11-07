@@ -26,6 +26,7 @@ import io.floci.aws.services.elasticache.model.CacheClusterStatus;
 import io.floci.aws.services.elasticache.model.CacheParameterGroup;
 import io.floci.aws.services.elasticache.model.CacheSubnetGroup;
 import io.floci.aws.services.elasticache.model.ClusterNode;
+import io.floci.aws.services.elasticache.model.ElastiCacheSnapshot;
 import io.floci.aws.services.elasticache.model.ElastiCacheUser;
 import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
@@ -88,6 +89,9 @@ public class ElastiCacheService implements ResourceProvider {
     private final AccountAwareStorageBackend<ElastiCacheUserGroup> userGroups;
     private final AccountAwareStorageBackend<CacheParameterGroup> parameterGroups;
     private final StorageBackend<String, CacheSubnetGroup> subnetGroups;
+    private final AccountAwareStorageBackend<ElastiCacheSnapshot> snapshots;
+    /** RDB archives, base64 encoded, keyed like the snapshot records they belong to. */
+    private final AccountAwareStorageBackend<String> snapshotArchives;
     private final ElastiCacheContainerManager containerManager;
     private final ElastiCacheProxyManager proxyManager;
     private final ValkeyClusterFormation clusterFormation;
@@ -177,6 +181,10 @@ public class ElastiCacheService implements ResourceProvider {
                 new TypeReference<Map<String, CacheParameterGroup>>() {});
         this.subnetGroups = storageFactory.create("elasticache", "elasticache-subnet-groups.json",
                 new TypeReference<Map<String, CacheSubnetGroup>>() {});
+        this.snapshots = storageFactory.create("elasticache", "elasticache-snapshots.json",
+                new TypeReference<Map<String, ElastiCacheSnapshot>>() {});
+        this.snapshotArchives = storageFactory.create("elasticache", "elasticache-snapshot-data.json",
+                new TypeReference<Map<String, String>>() {});
     }
 
     /**
@@ -1320,6 +1328,171 @@ public class ElastiCacheService implements ResourceProvider {
             }
             groups.delete(groupId);
             LOG.infov("Replication group {0} deleted", groupId);
+        }
+    }
+
+    // ── Snapshots ─────────────────────────────────────────────────────────────
+
+    /**
+     * Takes a manual snapshot of a cluster-mode-disabled replication group: the RDB file of its
+     * backend, complete when this returns, so the snapshot is {@code available} straight away.
+     * A cache cluster id names the group it is a member of.
+     */
+    public ElastiCacheSnapshot createSnapshot(String snapshotName, String groupId, String cacheClusterId) {
+        if (snapshotName == null || snapshotName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The parameter SnapshotName must be provided.", 400);
+        }
+        ReplicationGroup group = snapshotSource(groupId, cacheClusterId);
+        String sourceId = group.getReplicationGroupId();
+        if (group.isClusterEnabled()) {
+            throw new AwsException("InvalidParameterValue", "Floci takes snapshots of cluster-mode-disabled"
+                    + " replication groups only; " + sourceId + " is cluster-mode enabled.", 400);
+        }
+        synchronized (lockFor("snapshot:" + snapshotName)) {
+            if (snapshots.get(snapshotName).isPresent()) {
+                throw new AwsException("SnapshotAlreadyExistsFault",
+                        "Snapshot " + snapshotName + " already exists.", 400);
+            }
+            if (group.getStatus() != ReplicationGroupStatus.AVAILABLE) {
+                throw new AwsException("InvalidReplicationGroupState",
+                        "Replication group " + sourceId + " is not available.", 400);
+            }
+            if (group.getContainerId() == null) {
+                throw new AwsException("InvalidReplicationGroupState",
+                        "Replication group " + sourceId + " has no running backend to snapshot.", 400);
+            }
+            String archive;
+            try {
+                archive = containerManager.snapshot(group.getContainerId());
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Failed to snapshot replication group {0}", sourceId);
+                throw new AwsException("InvalidReplicationGroupState",
+                        "Failed to read the data of replication group " + sourceId + ": " + e.getMessage(), 400);
+            }
+            if (archive == null || archive.isEmpty()) {
+                throw new AwsException("InvalidReplicationGroupState",
+                        "Replication group " + sourceId + " returned no data to snapshot.", 400);
+            }
+            ElastiCacheSnapshot snapshot = new ElastiCacheSnapshot();
+            snapshot.setSnapshotName(snapshotName);
+            snapshot.setReplicationGroupId(sourceId);
+            snapshot.setReplicationGroupDescription(group.getDescription());
+            snapshot.setCacheClusterId(cacheClusterId == null || cacheClusterId.isBlank() ? null : cacheClusterId);
+            snapshot.setSnapshotStatus("available");
+            snapshot.setSnapshotSource("manual");
+            snapshot.setEngine(group.getEngine());
+            snapshot.setEngineVersion(group.getEngineVersion());
+            snapshot.setCacheNodeType(group.getCacheNodeType());
+            snapshot.setNumCacheClusters(group.getNumCacheClusters());
+            snapshot.setArn(regionResolver.buildArn("elasticache", regionOf(group.getArn()),
+                    "snapshot:" + snapshotName));
+            snapshot.setCreatedAt(Instant.now());
+            snapshot.setSizeBytes(archive.length() * 3L / 4L);
+            snapshotArchives.put(snapshotName, archive);
+            snapshots.put(snapshotName, snapshot);
+            LOG.infov("ElastiCache snapshot {0} of {1} created ({2} bytes)",
+                    snapshotName, sourceId, String.valueOf(snapshot.getSizeBytes()));
+            return snapshot;
+        }
+    }
+
+    /** The replication group a CreateSnapshot names, directly or through one of its cache clusters. */
+    private ReplicationGroup snapshotSource(String groupId, String cacheClusterId) {
+        if (groupId != null && !groupId.isBlank()) {
+            return getReplicationGroup(groupId);
+        }
+        if (cacheClusterId == null || cacheClusterId.isBlank()) {
+            throw new AwsException("InvalidParameterValue",
+                    "Either ReplicationGroupId or CacheClusterId must be provided.", 400);
+        }
+        Optional<ReplicationGroup> member = listMemberCacheClusters(cacheClusterId).stream()
+                .findFirst().map(MemberCacheCluster::group);
+        if (member.isPresent()) {
+            return member.get();
+        }
+        if (cacheClusters.get(cacheClusterId).isPresent() || memcachedClusters.get(cacheClusterId).isPresent()) {
+            throw new AwsException("InvalidParameterValue", "Floci takes snapshots of replication groups;"
+                    + " " + cacheClusterId + " is a standalone cache cluster.", 400);
+        }
+        throw new AwsException("CacheClusterNotFound", "Cache cluster " + cacheClusterId + " not found.", 404);
+    }
+
+    public ElastiCacheSnapshot getSnapshot(String snapshotName) {
+        return snapshots.get(snapshotName).orElseThrow(() ->
+                new AwsException("SnapshotNotFoundFault", "Snapshot " + snapshotName + " not found.", 404));
+    }
+
+    /** Snapshots matching every one of the name, replication group, cache cluster and source given. */
+    public List<ElastiCacheSnapshot> describeSnapshots(String snapshotName, String groupId, String cacheClusterId,
+                                                       String snapshotSource) {
+        List<ElastiCacheSnapshot> candidates = snapshotName != null && !snapshotName.isBlank()
+                ? List.of(getSnapshot(snapshotName))
+                : snapshots.scan(k -> true);
+        return candidates.stream()
+                .filter(s -> groupId == null || groupId.isBlank() || groupId.equals(s.getReplicationGroupId()))
+                .filter(s -> cacheClusterId == null || cacheClusterId.isBlank()
+                        || cacheClusterId.equals(s.getCacheClusterId()))
+                .filter(s -> snapshotSource == null || snapshotSource.isBlank()
+                        || snapshotSource.equals(s.getSnapshotSource()))
+                .toList();
+    }
+
+    public ElastiCacheSnapshot deleteSnapshot(String snapshotName) {
+        synchronized (lockFor("snapshot:" + snapshotName)) {
+            ElastiCacheSnapshot snapshot = getSnapshot(snapshotName);
+            snapshots.delete(snapshotName);
+            snapshotArchives.delete(snapshotName);
+            snapshot.setSnapshotStatus("deleting");
+            return snapshot;
+        }
+    }
+
+    /**
+     * CreateReplicationGroup with a SnapshotName: a new cluster-mode-disabled group holding the
+     * snapshot's data. The snapshot and its archive are read together, under the lock delete takes,
+     * and checked before the group exists, so a snapshot whose archive is gone is refused rather than
+     * restored as an empty group. A group the archive could not be loaded into is removed again.
+     */
+    public ReplicationGroup createReplicationGroupFromSnapshot(CreateReplicationGroupRequest request,
+                                                               String snapshotName) {
+        String groupId = request.replicationGroupId();
+        String archive;
+        synchronized (lockFor("snapshot:" + snapshotName)) {
+            getSnapshot(snapshotName);
+            archive = snapshotArchives.get(snapshotName).orElse(null);
+            if (archive == null || archive.isEmpty()) {
+                throw new AwsException("InvalidSnapshotState",
+                        "Snapshot " + snapshotName + " has no data to restore.", 400);
+            }
+        }
+        if (resolveClusterEnabled(request)) {
+            throw new AwsException("InvalidParameterCombination", "Snapshot " + snapshotName
+                    + " is of a cluster-mode-disabled replication group and cannot seed the cluster-mode-enabled"
+                    + " group " + groupId + ".", 400);
+        }
+        ReplicationGroup group = createReplicationGroup(request);
+        try {
+            if (group.getContainerId() == null) {
+                throw new AwsException("InvalidReplicationGroupState", "Replication group " + groupId
+                        + " has no running backend to restore snapshot " + snapshotName + " into.", 400);
+            }
+            try {
+                containerManager.restore(group.getContainerId(), archive);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Failed to restore snapshot {0} into replication group {1}", snapshotName, groupId);
+                throw new AwsException("InvalidSnapshotState", "Failed to restore snapshot " + snapshotName
+                        + " into replication group " + groupId + ": " + e.getMessage(), 400);
+            }
+            return group;
+        } catch (AwsException e) {
+            // A group its snapshot could not seed is not handed out: the caller never received it.
+            try {
+                deleteReplicationGroup(groupId);
+            } catch (RuntimeException cleanup) {
+                LOG.warnv(cleanup, "Could not remove replication group {0} after its failed restore", groupId);
+                e.addSuppressed(cleanup);
+            }
+            throw e;
         }
     }
 
