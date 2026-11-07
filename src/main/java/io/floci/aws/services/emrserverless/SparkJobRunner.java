@@ -111,8 +111,8 @@ public interface SparkJobRunner {
      * {@code /home/hadoop} and {@code mnt} at {@code /mnt}; its HDFS, whose NameNode is on the cluster's primary
      * node, named {@code hdfsHost}, which a step's container reaches at {@code hdfsAddress} on the Docker network
      * {@code hdfsNetwork}, the cluster's own, which the container joins (all three null until it runs, the network
-     * also on the host's own network, which steps share with it); and, on a cluster with Hive, the URI of the Hive
-     * metastore service on that node, or null.
+     * also on the host's own network, which steps share with it); and, on a cluster with Hive or HCatalog, the URI of
+     * the Hive metastore service on that node, or null.
      */
     record Storage(String home, String mnt, String hdfsHost, String hdfsAddress, String hdfsNetwork,
                    String hiveMetastore) {

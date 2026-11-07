@@ -127,10 +127,13 @@ but for its bootstrap actions and its storage.
   `s3://<region>.elasticmapreduce/libs/script-runner/script-runner.jar` URI) its script, as the Release
   Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. An `s3-dist-cp` step runs
   Floci's own S3DistCp (see **S3DistCp**), and `hadoop-streaming` and `hadoop-lzo` steps the image's
-  Hadoop (see **Hadoop streaming and MapReduce**). On a cluster whose `Applications` name Hive, a Hive step
-  runs Hive (see **Hive steps**); on one without, `hive-script` runs in the release's image, and says
-  what EMR's does without Hive, "Hive isn't installed.", and the step fails. `pig-script`, which the image
-  does not have, is `FAILED` without running.
+  Hadoop (see **Hadoop streaming and MapReduce**). On a cluster whose `Applications` name Hive, or HCatalog, with
+  which EMR installs Hive's client too, a Hive step runs Hive (see **Hive steps**); on one with neither, `hive-script`
+  runs in the release's image, and says what EMR's does without Hive, "Hive isn't installed.", and the step fails. An
+  `emr-spark-*` release includes neither ("This release includes the following applications: AmazonCloudWatchAgent,
+  Delta, Hudi, Iceberg, JupyterEnterpriseGateway, Livy, and Spark."), so a cluster of one has neither, whatever its
+  `Applications` name: no image with Hive, no metastore service. `pig-script`, which the image does not have, is
+  `FAILED` without running.
 * **Commands and scripts**: they run as the image's `hadoop` user in `/home/hadoop`, with `bash`, Python
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
@@ -150,10 +153,11 @@ but for its bootstrap actions and its storage.
   container of their own, `emr-<cluster-id>-hdfs`, from the release's EMR Serverless Hive image, which has HDFS
   where the release's image has only its client (`hive-image-template` names another), or, for an `emr-spark-*`
   release, which has no Hive image, from `emr-7.5.0`'s, with their data in a third volume, one copy of each block,
-  and permissions off. On a cluster whose `Applications` name Hive, the same container runs Hive's metastore
-  service, on port 9083, its Derby database in that volume and its warehouse in the HDFS; it reaches the S3
-  locations of tables through Floci's S3 as the role of the cluster's EC2 instance profile, as the bootstrap actions
-  do, with a session that goes with the container. It gets the cluster's `core-site` and `hive-site` after its own
+  and permissions off. On a cluster with Hive or HCatalog (see **Which steps run**), the same container runs Hive's
+  metastore service, which EMR's HCatalog server is, on port 9083, its Derby database in that volume and its warehouse
+  in the HDFS; it reaches the S3 locations of tables through Floci's S3 as the role of the cluster's EC2 instance
+  profile, as the bootstrap actions do, with a session that goes with the container. It gets the cluster's `core-site`
+  and `hive-site` after its own
   settings, as EMR's primary node does, so a `hive-site` setting of `hive.metastore.warehouse.dir`, say, holds for the
   service as for the Hive steps. A primary node with the service that an earlier Floci left running starts again, on
   the data its volume keeps, as its session went with that Floci. The container is on a Docker network of the cluster's own, also
@@ -225,7 +229,8 @@ but for its bootstrap actions and its storage.
   Hadoop's `log4j.properties`, so those two do not reach it: a `hadoop-env` `HADOOP_CLASSPATH`, say, is not on
   its class path, and it logs as Spark does.
 * **Hive steps**: an EMR cluster's nodes hold every application it installs, so a cluster whose `Applications` name
-  Hive runs its bootstrap actions and all its steps in an image of the release's with Hive added: the release's EMR
+  Hive, or HCatalog, which installs Hive's client and metastore service, runs its bootstrap actions and all its steps
+  in an image of the release's with Hive added: the release's EMR
   Serverless image with the Hive, Tez, HDFS, MapReduce and YARN of its EMR Serverless Hive image
   (`public.ecr.aws/emr-serverless/hive/<release>`, 2.7 GB unpacked, pulled to make it; `hive-image-template` names
   another). Floci makes it the first time one of the release's clusters needs it: a container of the release's
@@ -251,10 +256,11 @@ but for its bootstrap actions and its storage.
   with the cluster's account as its `hive.metastore.glue.catalogid`, which a `hive-site` one replaces. A table
   without a `LOCATION` is in the cluster's HDFS, under `/user/hive/warehouse` ("By default, this is a location in
   HDFS"), which other steps read as `hdfs:///user/hive/warehouse/<table>`, and an `hdfs://` `LOCATION` is there too.
-  The cluster's Spark steps use that metastore too, so a Spark step with Hive support reads a Hive step's tables and
-  makes tables Hive steps read, as the Glue Data Catalog is the one to pick "when you require a persistent Hive
-  metastore or a Hive metastore shared by different clusters"; a `spark-hive-site` naming its client factory still
-  uses Floci's Glue. Where that service does not run, with `docker-network` set to `host` or `container:<id>`, or to
+  The cluster's Spark steps use that metastore too, as Spark's default catalog "always connects to a Hive metastore"
+  (the Release Guide's "Use an Iceberg cluster with Spark") and its "Using HCatalog" has Spark SQL read a table the
+  HCat CLI made, so a Spark step with Hive support reads a Hive step's tables and makes tables Hive steps read; a
+  `spark-hive-site` naming the Glue Data Catalog's client factory still uses Floci's Glue. Where that service does not
+  run, with `docker-network` set to `host` or `container:<id>`, or to
   `none`, the metastore is an embedded Derby database in the cluster's `/mnt` instead, which only one Hive step at a
   time can use: with `StepConcurrencyLevel` above 1, a Hive step that starts while another runs fails ("Another
   instance of Derby may have already booted the database"), and Spark steps see a Hive step's tables only through

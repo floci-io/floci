@@ -980,9 +980,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
 
     // Floci's settings, then the job's spark-defaults, in the order a later one wins. Spark's own Hadoop configuration
     // takes HDFS's client back from the core-site.xml's view, for Spark and its Hive client, which writes a Hive table
-    // in HDFS only through it. On a cluster with Hive, Spark's Hive client uses the cluster's metastore too, as the
-    // Glue Data Catalog is the one to pick "when you require a persistent Hive metastore or a Hive metastore shared by
-    // different clusters"; a spark-hive-site naming its client factory still wins.
+    // in HDFS only through it. On a cluster with Hive or HCatalog, Spark's Hive client uses the cluster's metastore
+    // too, as the Glue Data Catalog is the one to pick "when you require a persistent Hive metastore or a Hive
+    // metastore shared by different clusters"; a spark-hive-site naming its client factory still wins.
     private static List<SparkSetting> sparkSettings(Job job, String flociEndpoint) {
         List<SparkSetting> hadoop = new ArrayList<>(hadoopSettings(job, flociEndpoint));
         List<SparkSetting> hdfs = hdfsSettings(job.storage());

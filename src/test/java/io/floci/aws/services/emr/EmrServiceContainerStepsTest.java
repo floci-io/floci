@@ -343,6 +343,58 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aHiveStepOnAClusterWithHCatalogRunsHiveInTheReleasesImageWithHive() {
+        EmrCluster requested = cluster("hcatalog", true, hiveStep("report", "-e", "show tables;"));
+        requested.setApplications("[{\"Name\": \"HCatalog\"}]");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        // EMR installs Hive's client with HCatalog, the hive EMR's hive-script looks for.
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(SparkJobRunner.Engine.HIVE, job.engine());
+        assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest")), fixture.releaseImages.asked);
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
+        assertEquals(hdfsStorage(cluster).withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"), job.storage());
+    }
+
+    @Test
+    void aClusterWithHCatalogRunsHivesMetastoreServiceWhichItsSparkStepsUse() {
+        EmrCluster requested = cluster("hcatalog", true, sparkStep("report", "CONTINUE"));
+        requested.setApplications("[{\"Name\": \"HCatalog\"}, {\"Name\": \"Spark\"}]");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        // EMR's HCatalog server is that service.
+        assertEquals("true", fixture.clusterStorage.hdfs.get(0).get(4));
+        assertEquals(hdfsStorage(cluster).withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"),
+                runner.jobs.get(0).storage());
+    }
+
+    @Test
+    void aClusterOfTheAwsRuntimeForSparkNamingHiveOrHCatalogRunsAsOneWithout() {
+        // Its releases include neither, and there is no Hive image of them to make its steps' image from.
+        EmrCluster requested = cluster("spark-runtime-hive", true, hiveStep("report", "-e", "show tables;"));
+        requested.setReleaseLabel("emr-spark-8.1.0");
+        requested.setApplications("[{\"Name\": \"Hive\"}, {\"Name\": \"HCatalog\"}, {\"Name\": \"Spark\"}]");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(), fixture.releaseImages.asked);
+        assertEquals("false", fixture.clusterStorage.hdfs.get(0).get(4));
+        // Its Hive step runs hive-script in the release's own image, which says "Hive isn't installed.".
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(SparkJobRunner.Engine.SPARK, job.engine());
+        assertEquals(List.of("hive-script", "--run-hive-script", "--args", "-e", "show tables;"), job.command());
+        assertEquals("public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest",
+                EmrServerlessSparkRunner.image(job.imageTemplate(), job.releaseLabel(), job.engine()));
+        assertEquals(hdfsStorage(cluster), job.storage());
+    }
+
+    @Test
     void aClusterOfTheAwsRuntimeForSparkWhichHasNoHiveImageRunsItsHdfsInTheHiveImageOfEmr750() {
         EmrCluster requested = cluster("spark-runtime", true, sparkStep("report", "CONTINUE"));
         requested.setReleaseLabel("emr-spark-8.0.0");
