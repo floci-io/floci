@@ -3096,8 +3096,13 @@ public class ApiGatewayService implements ResourceProvider {
      * @return the domain's routing scope if found, or null if no domain matches
      */
     public CustomDomainRoute findDomainByName(String domainName) {
+        String keySuffix = "::" + domainName;
+        // Every request of every service gets here, and scanAllAccountEntries copies every key.
+        if (domainStore.scanRaw(rawKey -> rawKey.endsWith(keySuffix)).isEmpty()) {
+            return null;
+        }
         List<AccountAwareStorageBackend.AccountEntry<CustomDomain>> matches =
-                domainStore.scanAllAccountEntries(key -> key.endsWith("::" + domainName));
+                domainStore.scanAllAccountEntries(key -> key.endsWith(keySuffix));
         if (matches.size() > 1) {
             throw new AwsException("ConflictException",
                     "Custom domain '" + domainName + "' is ambiguous across accounts or regions", 409);
