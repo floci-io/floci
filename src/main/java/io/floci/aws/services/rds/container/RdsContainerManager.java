@@ -1260,6 +1260,141 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     /**
+     * A logical copy of a MySQL or MariaDB server, the counterpart of {@link #createPostgresSnapshot}:
+     * every user schema (with its routines, triggers and events), then every account but root and the
+     * image's own system accounts, recreated from {@code SHOW CREATE USER} and {@code SHOW GRANTS}. The
+     * {@code mysql} system schema itself is not copied, since MySQL 8 cannot load one into a fresh
+     * server. It runs as the master user, whom the instance's init script granted ALL on *.*.
+     */
+    public String createMysqlSnapshot(DatabaseEngine engine, String containerId,
+                                      String masterUsername, String masterPassword) {
+        MysqlTools tools = MysqlTools.of(engine);
+        try (Lease _ = holdContainer(containerId)) {
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/tmp",
+                    "floci-mysql-dump.sh", mysqlDumpScript().getBytes(StandardCharsets.UTF_8), 0755,
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
+            String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
+                    "sh", "/tmp/floci-mysql-dump.sh", tools.client(), tools.dump(), mysqlUser(masterUsername),
+                    tools.dumpFlags(), tools.accountFilter()};
+            ContainerExec.Result result = execInContainer(containerId, cmd, 300);
+            if (result.exitCode() != 0) {
+                throw new RuntimeException(tools.dump() + " failed with exit code " + result.exitCode()
+                        + ": " + result.stderr());
+            }
+            return result.stdout();
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to create " + engine + " snapshot", e);
+        }
+    }
+
+    /**
+     * Replays a {@link #createMysqlSnapshot} copy into a just-created MySQL or MariaDB instance. The
+     * image's entrypoint first initializes the data directory on a server it starts without
+     * networking, then restarts it, so the replay waits until the server answers over TCP rather
+     * than loading the copy into the initializing server that is about to be stopped.
+     */
+    public void restoreMysqlSnapshot(DatabaseEngine engine, String containerId,
+                                     String masterUsername, String masterPassword, String sqlDump) {
+        MysqlTools tools = MysqlTools.of(engine);
+        try (Lease _ = holdContainer(containerId)) {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
+                tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
+                addTarEntry(tar, "dump.sql", sqlDump);
+                addTarEntry(tar, "restore.sh", mysqlRestoreScript());
+            }
+            byte[] archive = bos.toByteArray();
+            RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId,
+                    "/tmp", "mysql-restore", out -> out.write(archive),
+                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
+            String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
+                    "sh", "/tmp/restore.sh", tools.client(), mysqlUser(masterUsername)};
+
+            ContainerExec.Result result = null;
+            // Exit code 2: the server does not accept the master user over TCP yet.
+            for (int i = 0; i < 120; i++) {
+                result = execInContainer(containerId, cmd, 300);
+                if (result.exitCode() != 2) {
+                    break;
+                }
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("Interrupted while restoring " + engine + " snapshot", ie);
+                }
+            }
+
+            if (result == null || result.exitCode() != 0) {
+                String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
+                throw new RuntimeException(tools.client() + " restore failed with exit code "
+                        + (result != null ? result.exitCode() : -1) + ": " + errMsg);
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to restore " + engine + " snapshot", e);
+        }
+    }
+
+    /**
+     * The client binaries and dump flags of an engine. MariaDB images ship only the {@code mariadb-*}
+     * names, and list roles in {@code mysql.user}, which {@code SHOW CREATE USER} refuses; MySQL's
+     * dump leaves out the GTID state, which a fresh server would refuse to load.
+     */
+    record MysqlTools(String client, String dump, String dumpFlags, String accountFilter) {
+        static MysqlTools of(DatabaseEngine engine) {
+            return engine == DatabaseEngine.MARIADB
+                    ? new MysqlTools("mariadb", "mariadb-dump", "", "AND is_role = 'N'")
+                    : new MysqlTools("mysql", "mysqldump", "--set-gtid-purged=OFF", "");
+        }
+    }
+
+    private static String mysqlUser(String masterUsername) {
+        return masterUsername != null && !masterUsername.isBlank() ? masterUsername : "root";
+    }
+
+    static String mysqlDumpScript() {
+        return """
+                #!/bin/sh
+                # usage: floci-mysql-dump.sh <client> <dump> <user> <dump flags> <account filter>
+                # The password arrives in MYSQL_PWD.
+                set -ef
+                C="$1"; D="$2"; U="$3"; FLAGS="$4"; FILTER="$5"
+                SQL() { "$C" -h127.0.0.1 --protocol=TCP -u"$U" -N -B -r -e "$1"; }
+                DBS=$(SQL "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN \\
+                  ('mysql','sys','performance_schema','information_schema')")
+                if [ -n "$DBS" ]; then
+                  # shellcheck disable=SC2086
+                  "$D" -h127.0.0.1 --protocol=TCP -u"$U" --databases $DBS --routines --events --triggers \\
+                    --single-transaction --hex-blob --no-tablespaces $FLAGS
+                fi
+                ACCOUNTS=$(SQL "SELECT CONCAT(QUOTE(user),'@',QUOTE(host)) FROM mysql.user WHERE user NOT IN \\
+                  ('','root','mysql.sys','mysql.session','mysql.infoschema','mariadb.sys','healthcheck') $FILTER")
+                for acct in $ACCOUNTS; do
+                  # MySQL prints a binary password hash as hex only when asked; MariaDB has no such setting.
+                  stmt=$(SQL "SET SESSION print_identified_with_as_hex = ON; SHOW CREATE USER $acct" 2>/dev/null \\
+                         || SQL "SHOW CREATE USER $acct")
+                  echo "$stmt;" | sed 's/^CREATE USER /CREATE USER IF NOT EXISTS /'
+                  SQL "SHOW GRANTS FOR $acct" | sed 's/$/;/'
+                done
+                echo "FLUSH PRIVILEGES;"
+                """;
+    }
+
+    static String mysqlRestoreScript() {
+        return """
+                #!/bin/sh
+                # usage: restore.sh <client> <user>; the password arrives in MYSQL_PWD.
+                C="$1"; U="$2"
+                "$C" -h127.0.0.1 --protocol=TCP -u"$U" -e "SELECT 1" >/dev/null 2>&1 || exit 2
+                "$C" -h127.0.0.1 --protocol=TCP -u"$U" < /tmp/dump.sql || exit 1
+                """;
+    }
+
+    /**
      * Gives a restored database the name a point in time restore asked for. {@code from} is the
      * database the source's dump brought over: its DBName, or the master user's name when it had
      * none, which is how the image names its default database. The rename runs connected to
