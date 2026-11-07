@@ -19,6 +19,7 @@ import software.amazon.awssdk.services.apigateway.model.UsagePlan;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -87,6 +88,12 @@ class ApiGatewayUsagePlanSdkIntegrationTest {
                 assertEquals(List.of(), usagePlanIds(client, "missing"));
                 assertTrue(usagePlanIds(client, null).containsAll(List.of(first, second)));
                 assertTrue(usagePlanIds(client, "").containsAll(List.of(first, second)));
+
+                client.createUsagePlanKey(r -> r.usagePlanId(second).keyId(inPlan).keyType("API_KEY"));
+                assertEquals(Set.of(first, second), Set.copyOf(usagePlanIds(client, inPlan)));
+
+                client.deleteUsagePlanKey(r -> r.usagePlanId(first).keyId(inPlan));
+                assertEquals(List.of(second), usagePlanIds(client, inPlan));
             } finally {
                 client.deleteApiKey(r -> r.apiKey(inPlan));
                 client.deleteApiKey(r -> r.apiKey(inNoPlan));
