@@ -705,6 +705,7 @@ public class DocDbService {
             snapshot.setSnapshotCreateTime(Instant.now());
             snapshot.setClusterCreateTime(cluster.getCreatedAt());
             snapshot.setSizeBytes(archive.data().length() * 3L / 4L);
+            snapshot.setMetadataOnly(config.services().docdb().mock());
             if (tags != null && !tags.isEmpty()) {
                 snapshot.setTags(new LinkedHashMap<>(tags));
             }
@@ -828,16 +829,31 @@ public class DocDbService {
      */
     public DocDbCluster restoreDbClusterFromSnapshot(String clusterId, String snapshotIdOrArn, String engineVersion,
                                                      DocDbClusterSettings settings, Map<String, String> tags) {
-        DocDbClusterSnapshot snapshot = getDbClusterSnapshot(snapshotIdOrArn);
-        String data = snapshotData.get(key(regionResolver.getRegion(), snapshot.getDbClusterSnapshotIdentifier()))
-                .orElse("");
+        String region = regionResolver.getRegion();
+        String snapshotId = getDbClusterSnapshot(snapshotIdOrArn).getDbClusterSnapshotIdentifier();
+        DocDbClusterSnapshot snapshot;
+        String data;
+        // The record and its archive are read together under the lock delete takes, so a restore
+        // sees both or neither, and a snapshot whose archive is gone is refused before any cluster
+        // exists rather than restored as an empty one.
+        synchronized (lockFor("snapshot:" + key(region, snapshotId))) {
+            snapshot = getDbClusterSnapshot(snapshotIdOrArn);
+            data = snapshotData.get(key(region, snapshotId)).orElse(null);
+            boolean restorable = snapshot.isMetadataOnly()
+                    ? config.services().docdb().mock()
+                    : data != null && !data.isEmpty();
+            if (!restorable) {
+                throw new AwsException("InvalidDBClusterSnapshotStateFault",
+                        "DB cluster snapshot " + snapshotId + " has no data to restore.", 400);
+            }
+        }
         String password = snapshot.getMasterPassword() != null ? snapshot.getMasterPassword()
                 : UUID.randomUUID().toString();
         String version = engineVersion != null && !engineVersion.isBlank()
                 ? engineVersion : snapshot.getEngineVersion();
         DocDbCluster cluster = createDbCluster(clusterId, version, snapshot.getMasterUsername(), password, false,
-                restoredFrom(settings, snapshot.isStorageEncrypted(), snapshot.getKmsKeyId()), tags);
-        loadInto(cluster, data);
+                restoredFrom(settings, snapshot.isStorageEncrypted(), snapshot.getKmsKeyId(), true), tags);
+        loadInto(cluster, snapshot.isMetadataOnly() ? "" : data);
         return cluster;
     }
 
@@ -852,23 +868,25 @@ public class DocDbService {
         String password = archive.masterPassword() != null ? archive.masterPassword()
                 : UUID.randomUUID().toString();
         DocDbCluster cluster = createDbCluster(clusterId, source.getEngineVersion(), source.getMasterUsername(),
-                password, false, restoredFrom(settings, source.isStorageEncrypted(), source.getKmsKeyId()), tags);
+                password, false, restoredFrom(settings, source.isStorageEncrypted(), source.getKmsKeyId(), false), tags);
         loadInto(cluster, archive.data());
         return cluster;
     }
 
     /**
-     * The settings a restore creates its cluster with. As both restore references put it, the
-     * cluster is encrypted exactly when its source is, with the source's key unless the request
-     * names another; a key named for an unencrypted source is refused by {@code validate}, as a
-     * live account refuses it. A restore request carries no {@code StorageEncrypted} of its own.
+     * The settings a restore creates its cluster with. A restore request carries no
+     * {@code StorageEncrypted} of its own: the cluster takes its source's encryption and key unless
+     * the request names a key. A snapshot restore may encrypt an unencrypted snapshot that way, as
+     * the restore guide allows; a point-in-time restore may not, and a key named for an unencrypted
+     * source is refused by {@code validate}, as its reference has it.
      */
-    private static DocDbClusterSettings restoredFrom(DocDbClusterSettings requested,
-                                                     boolean sourceEncrypted, String sourceKmsKeyId) {
-        String kmsKeyId = requested.kmsKeyId() != null && !requested.kmsKeyId().isBlank()
-                ? requested.kmsKeyId() : (sourceEncrypted ? sourceKmsKeyId : null);
+    private static DocDbClusterSettings restoredFrom(DocDbClusterSettings requested, boolean sourceEncrypted,
+                                                     String sourceKmsKeyId, boolean keyMayEncrypt) {
+        boolean keyNamed = requested.kmsKeyId() != null && !requested.kmsKeyId().isBlank();
+        String kmsKeyId = keyNamed ? requested.kmsKeyId() : (sourceEncrypted ? sourceKmsKeyId : null);
+        boolean encrypted = sourceEncrypted || (keyNamed && keyMayEncrypt);
         return new DocDbClusterSettings(requested.dbSubnetGroupName(), requested.dbClusterParameterGroupName(),
-                requested.vpcSecurityGroupIds(), sourceEncrypted, kmsKeyId, requested.backupRetentionPeriod(),
+                requested.vpcSecurityGroupIds(), encrypted, kmsKeyId, requested.backupRetentionPeriod(),
                 requested.preferredBackupWindow(), requested.preferredMaintenanceWindow(),
                 requested.deletionProtection());
     }

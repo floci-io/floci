@@ -162,10 +162,7 @@ class DocDbClusterSnapshotIntegrationTest {
     @Test
     @Order(10)
     void snapshotOfAnUnknownClusterIsNotFound() {
-        given()
-            .header("Authorization", AUTH_RDS_SCOPE.replace("/rds/", "/docdb/"))
-            .contentType(FORM)
-            .formParam("Action", "CreateDBClusterSnapshot")
+        docDbRequest("CreateDBClusterSnapshot")
             .formParam("DBClusterSnapshotIdentifier", "orphan-snapshot")
             .formParam("DBClusterIdentifier", "no-such-cluster")
         .when().post("/")
@@ -201,10 +198,7 @@ class DocDbClusterSnapshotIntegrationTest {
     @Test
     @Order(13)
     void theDocDbListFormIncludesDocDbSnapshots() {
-        given()
-            .header("Authorization", AUTH_RDS_SCOPE.replace("/rds/", "/docdb/"))
-            .contentType(FORM)
-            .formParam("Action", "DescribeDBClusterSnapshots")
+        docDbRequest("DescribeDBClusterSnapshots")
         .when().post("/")
         .then()
             .statusCode(200)
@@ -258,10 +252,7 @@ class DocDbClusterSnapshotIntegrationTest {
     @Test
     @Order(17)
     void aSnapshotArnOfAnotherRegionIsNotFound() {
-        given()
-            .header("Authorization", AUTH_RDS_SCOPE.replace("/rds/", "/docdb/"))
-            .contentType(FORM)
-            .formParam("Action", "RestoreDBClusterFromSnapshot")
+        docDbRequest("RestoreDBClusterFromSnapshot")
             .formParam("DBClusterIdentifier", "arn-other-region-restore")
             .formParam("SnapshotIdentifier", listedSnapshotArn.replace(":us-east-1:", ":eu-west-1:"))
         .when().post("/")
@@ -302,6 +293,14 @@ class DocDbClusterSnapshotIntegrationTest {
     private static RequestSpecification request(String action) {
         return given()
             .header("Authorization", AUTH_RDS_SCOPE)
+            .contentType(FORM)
+            .formParam("Action", action);
+    }
+
+    /** As {@link #request}, signed for the docdb endpoint, which dispatches to DocumentDB directly. */
+    private static RequestSpecification docDbRequest(String action) {
+        return given()
+            .header("Authorization", AUTH_RDS_SCOPE.replace("/rds/", "/docdb/"))
             .contentType(FORM)
             .formParam("Action", action);
     }

@@ -30,6 +30,8 @@ public class DocDbClusterSnapshot {
     private Instant snapshotCreateTime;
     private Instant clusterCreateTime;
     private long sizeBytes;
+    /** Taken in mock mode, with no backend to read: the record alone, with no archive to restore. */
+    private boolean metadataOnly;
     private Map<String, String> tags = new LinkedHashMap<>();
 
     public String getDbClusterSnapshotIdentifier() { return dbClusterSnapshotIdentifier; }
@@ -61,6 +63,9 @@ public class DocDbClusterSnapshot {
 
     public String getVpcId() { return vpcId; }
     public void setVpcId(String v) { this.vpcId = v; }
+
+    public boolean isMetadataOnly() { return metadataOnly; }
+    public void setMetadataOnly(boolean v) { this.metadataOnly = v; }
 
     public boolean isStorageEncrypted() { return storageEncrypted; }
     public void setStorageEncrypted(boolean v) { this.storageEncrypted = v; }

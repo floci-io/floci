@@ -4,6 +4,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.docdb.container.DocDbContainerHandle;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
@@ -48,15 +49,22 @@ class DocDbClusterSnapshotServiceTest {
 
     private DocDbService docDbService;
     private DocDbContainerManager containerManager;
+    private EmulatorConfig.DocDbServiceConfig docdbConfig;
+    private StorageBackend<String, String> archives;
 
     @BeforeEach
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> {
+            StorageBackend<String, Object> store = AccountAwareStorageBackend.inMemory("000000000000");
+            if ("docdb-cluster-snapshot-data.json".equals(inv.getArgument(1))) {
+                archives = cast(store);
+            }
+            return store;
+        });
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.DocDbServiceConfig docdbConfig = mock(EmulatorConfig.DocDbServiceConfig.class);
+        docdbConfig = mock(EmulatorConfig.DocDbServiceConfig.class);
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.docdb()).thenReturn(docdbConfig);
         when(docdbConfig.mock()).thenReturn(false);
@@ -150,19 +158,58 @@ class DocDbClusterSnapshotServiceTest {
     }
 
     @Test
-    void aRestoreOfAnUnencryptedSourceStaysUnencryptedAndRefusesAKey() {
+    void anUnencryptedSnapshotRestoresUnencryptedOrEncryptedUnderANamedKey() {
         source(DocDbClusterSettings.defaults());
         docDbService.createDbClusterSnapshot("snap", "source", Map.of());
 
-        DocDbCluster restored = docDbService.restoreDbClusterFromSnapshot("restored", "snap", null,
+        DocDbCluster plain = docDbService.restoreDbClusterFromSnapshot("restored", "snap", null,
                 DocDbClusterSettings.defaults(), Map.of());
-        assertFalse(restored.isStorageEncrypted());
-        assertNull(restored.getKmsKeyId());
+        assertFalse(plain.isStorageEncrypted());
+        assertNull(plain.getKmsKeyId());
 
-        AwsException e = assertThrows(AwsException.class, () -> docDbService.restoreDbClusterFromSnapshot(
-                "keyed", "snap", null,
+        DocDbCluster keyed = docDbService.restoreDbClusterFromSnapshot("keyed", "snap", null,
+                new DocDbClusterSettings(null, null, null, null, KEY_ARN, null, null, null, null), Map.of());
+        assertTrue(keyed.isStorageEncrypted());
+        assertEquals(KEY_ARN, keyed.getKmsKeyId());
+    }
+
+    @Test
+    void aPointInTimeRestoreRefusesAKeyForAnUnencryptedSource() {
+        source(DocDbClusterSettings.defaults());
+
+        AwsException e = assertThrows(AwsException.class, () -> docDbService.restoreDbClusterToPointInTime(
+                "keyed", "source",
                 new DocDbClusterSettings(null, null, null, null, KEY_ARN, null, null, null, null), Map.of()));
         assertEquals("InvalidParameterCombination", e.getErrorCode());
+    }
+
+    @Test
+    void aSnapshotWhoseArchiveIsLostIsRefusedBeforeAnyClusterExists() {
+        source(DocDbClusterSettings.defaults());
+        docDbService.createDbClusterSnapshot("snap", "source", Map.of());
+        archives.clear();
+
+        AwsException e = assertThrows(AwsException.class, () -> docDbService.restoreDbClusterFromSnapshot(
+                "restored", "snap", null, DocDbClusterSettings.defaults(), Map.of()));
+
+        assertEquals("InvalidDBClusterSnapshotStateFault", e.getErrorCode());
+        assertThrows(AwsException.class, () -> docDbService.getDbCluster("restored"));
+        verify(containerManager, never()).tryStart(eq("restored"), anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void aMockModeSnapshotIsMetadataOnlyAndRestoresOnlyInMockMode() {
+        when(docdbConfig.mock()).thenReturn(true);
+        source(DocDbClusterSettings.defaults());
+        DocDbClusterSnapshot snapshot = docDbService.createDbClusterSnapshot("snap", "source", Map.of());
+        assertTrue(snapshot.isMetadataOnly());
+        docDbService.restoreDbClusterFromSnapshot("in-mock", "snap", null, DocDbClusterSettings.defaults(), Map.of());
+
+        when(docdbConfig.mock()).thenReturn(false);
+        AwsException e = assertThrows(AwsException.class, () -> docDbService.restoreDbClusterFromSnapshot(
+                "outside-mock", "snap", null, DocDbClusterSettings.defaults(), Map.of()));
+        assertEquals("InvalidDBClusterSnapshotStateFault", e.getErrorCode());
+        verify(containerManager, never()).restoreCluster(anyString(), anyString());
     }
 
     @Test
@@ -190,6 +237,11 @@ class DocDbClusterSnapshotServiceTest {
         assertEquals(1, docDbService.describeDbClusterSnapshots("snap", "source", "manual").size());
         assertTrue(docDbService.describeDbClusterSnapshots("snap", "another-cluster", null).isEmpty());
         assertTrue(docDbService.describeDbClusterSnapshots("snap", null, "automated").isEmpty());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static StorageBackend<String, String> cast(StorageBackend<String, Object> store) {
+        return (StorageBackend<String, String>) (StorageBackend<?, ?>) store;
     }
 
     private void source(DocDbClusterSettings settings) {
