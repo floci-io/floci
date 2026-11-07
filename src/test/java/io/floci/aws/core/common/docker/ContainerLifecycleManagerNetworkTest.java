@@ -201,6 +201,23 @@ class ContainerLifecycleManagerNetworkTest {
     }
 
     @Test
+    void createAndStartStillConnectsAPublishingContainerWhenTheDaemonAnswersOnlyAfterCreate() {
+        InfoCmd infoCmd = mock(InfoCmd.class);
+        Info info = mock(Info.class);
+        lenient().when(dockerClient.infoCmd()).thenReturn(infoCmd);
+        lenient().when(infoCmd.exec()).thenThrow(new RuntimeException("daemon busy")).thenReturn(info);
+        lenient().when(info.getOperatingSystem()).thenReturn("Ubuntu 24.04.1 LTS");
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        when(inspectOf("container-id").getNetworkSettings()).thenReturn(mock(NetworkSettings.class));
+
+        manager().createAndStart(spec("floci-net", Map.of(8080, 18080), List.of()));
+
+        assertNull(createdHostConfig().getNetworkMode());
+        verify(connectCmd).withNetworkId("floci-net");
+        verify(connectCmd).exec();
+    }
+
+    @Test
     void createReconnectsAPublishingContainerWithItsLinkLocalEndpointOnDockerEngine() {
         daemonRuns("Ubuntu 24.04.1 LTS");
 

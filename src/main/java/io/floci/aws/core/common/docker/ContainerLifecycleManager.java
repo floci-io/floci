@@ -101,7 +101,7 @@ public class ContainerLifecycleManager {
     /** Daemon CPU count, resolved on first use. Null until then, so that empty can mean "unknown". */
     private final AtomicReference<OptionalInt> hostCpuCount = new AtomicReference<>();
 
-    /** Whether the daemon is Docker Desktop, resolved on first use. Null until the daemon has answered. */
+    /** Whether the daemon is Docker Desktop, resolved on first use and kept. Null until then. */
     private final AtomicReference<Boolean> dockerDesktop = new AtomicReference<>();
 
     @Inject
@@ -1769,7 +1769,8 @@ public class ContainerLifecycleManager {
      * network at creation together with port bindings suppresses the published ports, so a
      * container that publishes ports is created on the default bridge and connected afterwards.
      * Any other daemon publishes them on the named network, so the container is created there and
-     * joins it alone. A daemon that cannot be asked is treated as Docker Desktop.
+     * joins it alone. A daemon that cannot be asked is treated as Docker Desktop, and the answer is
+     * kept either way, so a container's create and its start always take the same path.
      */
     private boolean connectsAfterStart(ContainerSpec spec) {
         return spec.publishesPorts() && isDockerDesktop();
@@ -1780,13 +1781,8 @@ public class ContainerLifecycleManager {
         if (known != null) {
             return known;
         }
-        Optional<String> os = DockerDaemon.operatingSystem(dockerClient);
-        if (os.isEmpty()) {
-            return true;
-        }
-        boolean desktop = DockerDaemon.isDockerDesktop(os.get());
-        dockerDesktop.set(desktop);
-        return desktop;
+        boolean desktop = DockerDaemon.operatingSystem(dockerClient).map(DockerDaemon::isDockerDesktop).orElse(true);
+        return dockerDesktop.compareAndSet(null, desktop) ? desktop : dockerDesktop.get();
     }
 
     private static boolean isContainerNetworkMode(String networkMode) {
