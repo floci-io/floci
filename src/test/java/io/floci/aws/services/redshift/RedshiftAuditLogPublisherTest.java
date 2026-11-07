@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -43,9 +44,11 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -341,6 +344,16 @@ class RedshiftAuditLogPublisherTest {
 
     @Test
     void concurrentAuditDeliveriesDoNotCorruptGzipOutput() throws Exception {
+        ConcurrentHashMap<String, byte[]> bucket = new ConcurrentHashMap<>();
+        doAnswer(inv -> {
+            bucket.put(inv.getArgument(1, String.class), inv.getArgument(2, byte[].class));
+            return null;
+        }).when(s3).putObject(eq("audit-bucket"), anyString(), any(), anyString(), anyMap());
+        when(s3.getObject(eq("audit-bucket"), anyString())).thenAnswer(inv -> {
+            byte[] data = bucket.get(inv.getArgument(1, String.class));
+            return data == null ? null : new S3Object("audit-bucket", inv.getArgument(1, String.class), data, "application/x-gzip");
+        });
+
         RedshiftAuditLogPublisher publisher = s3Publisher();
         Cluster cluster = s3Cluster("useractivitylog");
         cluster.setUserActivityLoggingEnabled(true);
@@ -384,6 +397,34 @@ class RedshiftAuditLogPublisherTest {
                         "Missing record SELECT " + t + "_" + i);
             }
         }
+    }
+
+    @Test
+    void emptyingBucketBetweenDeliveriesStartsFreshObject() throws Exception {
+        RedshiftAuditLogPublisher publisher = s3Publisher();
+        Cluster cluster = s3Cluster("useractivitylog");
+        cluster.setUserActivityLoggingEnabled(true);
+
+        String key = "AWSLogs/111111111111/redshift/us-east-1/2026/11/06/"
+                + "111111111111_redshift_us-east-1_analytics_useractivitylog_2026-11-06T15:30.gz";
+        byte[] existingGzip = compressGzip("'2026-11-06T15:30:00Z UTC [ db=dev user=admin pid= userid= xid= ]' LOG: SELECT 1\n");
+        when(s3.getObject("audit-bucket", key)).thenReturn(new S3Object("audit-bucket", key, existingGzip, "application/x-gzip"));
+
+        publisher.publishActivity(cluster, "111111111111", "us-east-1", "dev", "admin", "SELECT 2");
+
+        when(s3.getObject("audit-bucket", key)).thenReturn(null);
+
+        publisher.publishActivity(cluster, "111111111111", "us-east-1", "dev", "admin", "SELECT 3");
+
+        ArgumentCaptor<byte[]> dataCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(s3, times(2)).putObject(eq("audit-bucket"), eq(key), dataCaptor.capture(),
+                eq("application/x-gzip"), eq(Map.of()));
+
+        byte[] secondPutBytes = dataCaptor.getAllValues().get(1);
+        String decompressed = decompressGzip(secondPutBytes);
+        assertFalse(decompressed.contains("SELECT 1"), "Must not resurrect deleted SELECT 1");
+        assertFalse(decompressed.contains("SELECT 2"), "Must not resurrect deleted SELECT 2");
+        assertTrue(decompressed.contains("SELECT 3"));
     }
 
     @Test

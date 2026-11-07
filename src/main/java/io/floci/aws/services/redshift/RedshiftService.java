@@ -1516,10 +1516,6 @@ public class RedshiftService implements ManagedSecretRotator {
 
         boolean cloudWatch = "cloudwatch".equals(destination);
         boolean s3Table = "s3table".equals(destination);
-        if (cloudWatch && (bucketName != null || s3KeyPrefix != null)) {
-            throw new AwsException("InvalidParameterCombination",
-                    "BucketName and S3KeyPrefix cannot be specified when LogDestinationType is cloudwatch", 400);
-        }
         if (s3Table && s3TableGranularity != null
                 && !List.of("cluster", "account").contains(s3TableGranularity)) {
             throw new AwsException("InvalidParameterValue",

@@ -70,6 +70,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.floci.aws.testing.InlineMocks.inlineMock;
+import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -2500,9 +2501,7 @@ class RedshiftServiceTest {
     void enableLoggingRejectsNonexistentS3Bucket() {
         S3Service mockS3 = mock(S3Service.class);
         when(mockS3.bucketExists("missing-bucket")).thenReturn(false);
-        RedshiftService s3AwareService = new RedshiftService(sf, cm, config, regionResolver, proxyManager,
-                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
-                null, null, events, integrationEvents, null, null, mockS3, null);
+        RedshiftService s3AwareService = s3Service(mockS3, null);
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
@@ -2522,9 +2521,7 @@ class RedshiftServiceTest {
         when(authorizer.authorize(eq("redshift"), eq("s3:GetBucketAcl"), anyString(), anyString(), anyString(), anyMap()))
                 .thenReturn(Decision.DENY);
 
-        RedshiftService s3AwareService = new RedshiftService(sf, cm, config, regionResolver, proxyManager,
-                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
-                null, null, events, integrationEvents, null, null, mockS3, authorizer);
+        RedshiftService s3AwareService = s3Service(mockS3, authorizer);
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
@@ -2566,9 +2563,7 @@ class RedshiftServiceTest {
                     return Decision.DENY;
                 });
 
-        RedshiftService s3AwareService = new RedshiftService(sf, cm, config, regionResolver, proxyManager,
-                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
-                null, null, events, integrationEvents, null, null, mockS3, authorizer);
+        RedshiftService s3AwareService = s3Service(mockS3, authorizer);
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
@@ -2588,9 +2583,7 @@ class RedshiftServiceTest {
         when(authorizer.authorize(anyString(), anyString(), anyString(), anyString(), anyString(), anyMap()))
                 .thenReturn(Decision.ALLOW);
 
-        RedshiftService s3AwareService = new RedshiftService(sf, cm, config, regionResolver, proxyManager,
-                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
-                null, null, events, integrationEvents, null, null, mockS3, authorizer);
+        RedshiftService s3AwareService = s3Service(mockS3, authorizer);
 
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
@@ -2605,6 +2598,12 @@ class RedshiftServiceTest {
 
         assertTrue(objectArnCaptor.getValue().contains("audit-bucket/cluster-logs/AWSLogs/111111111111/redshift/"));
         assertEquals(List.of("us-east-1"), keysCaptor.getValue().get("aws:RequestedRegion"));
+    }
+
+    private RedshiftService s3Service(S3Service s3, ServiceCallAuthorizer authorizer) {
+        return new RedshiftService(sf, cm, config, regionResolver, proxyManager,
+                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
+                null, null, events, integrationEvents, null, null, s3, authorizer);
     }
 
     @Test
@@ -2708,6 +2707,7 @@ class RedshiftServiceTest {
         CountDownLatch inLock = new CountDownLatch(1);
         CountDownLatch releaseLock = new CountDownLatch(1);
         CountDownLatch outcomeStarted = new CountDownLatch(1);
+        AtomicReference<Thread> outcomeThread = new AtomicReference<>();
 
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<?> holdingLock = executor.submit(() -> {
@@ -2726,12 +2726,14 @@ class RedshiftServiceTest {
 
             Instant ts = Instant.parse("2026-11-06T15:30:00Z");
             Future<?> outcome = executor.submit(() -> {
+                outcomeThread.set(Thread.currentThread());
                 outcomeStarted.countDown();
                 service.recordAuditDeliveryOutcome(accountId, clusterId, 1L, ts, true, null);
             });
 
             assertTrue(outcomeStarted.await(2, TimeUnit.SECONDS));
-            assertThrows(TimeoutException.class, () -> outcome.get(150, TimeUnit.MILLISECONDS));
+            awaitBlockedOrDone(outcomeThread, outcome);
+            assertFalse(outcome.isDone(), "outcome must wait while holding lock owns the cluster");
 
             releaseLock.countDown();
             holdingLock.get(2, TimeUnit.SECONDS);
@@ -2801,14 +2803,16 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void enableLoggingRejectsBucketNameWhenDestinationIsCloudWatch() {
+    void enableLoggingDropsBucketNameWhenDestinationIsCloudWatch() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("my-cluster");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
-        AwsException ex = assertThrows(AwsException.class, () ->
-                service.enableLogging("my-cluster", "my-bucket", null, "cloudwatch", List.of("connectionlog")));
-        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        Cluster result = service.enableLogging("my-cluster", "my-bucket", "prefix", "cloudwatch", List.of("connectionlog"));
+        assertTrue(result.isLoggingEnabled());
+        assertEquals("cloudwatch", result.getLoggingDestinationType());
+        assertNull(result.getLoggingBucketName());
+        assertNull(result.getLoggingS3KeyPrefix());
     }
 
     @Test
