@@ -10,10 +10,20 @@ import jakarta.inject.Inject;
 
 import java.security.MessageDigest;
 import java.util.HexFormat;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.soleVariant;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.text;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.material;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.materialHex;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireEnabled;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireFamily;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireMode;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyKeyRules.requireUsage;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyService.isAes;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyService.isTdes;
 
 /**
  * The data plane's encryption and its MACs: the operations that use a key to protect data.
@@ -292,48 +302,6 @@ public class PaymentCryptographyCryptoHandler {
     }
 
     /**
-     * Whether a key is an AES key.
-     *
-     * <p>The key record knows its algorithm, so the family is read from there and not guessed
-     * from the length of the material: a sixteen-byte key is a two-key Triple DES one and an
-     * AES-128 one.
-     */
-    private static boolean isAes(PaymentCryptographyKey key) {
-        return PaymentCryptographyService.isAes(key);
-    }
-
-    /**
-     * Whether the key is a Triple DES one.
-     *
-     * <p>The reference ciphers with AES and with Triple DES, and the block and the vector follow
-     * the key's family: sixteen bytes and a sixteen-byte vector for AES, eight for Triple DES.
-     *
-     * @param key the key the cipher runs under
-     * @return whether the key is a Triple DES one
-     */
-    private static boolean isTdes(PaymentCryptographyKey key) {
-        return PaymentCryptographyService.isTdes(key);
-    }
-
-    /**
-     * The family a key's algorithm has to be for an operation.
-     *
-     * <p>The algorithm runs under the key: the ISO 9797 MACs are defined over Triple DES and
-     * the CMAC over AES, so a key of the other family would be read as bytes it is not.
-     *
-     * @param key the key the operation runs under
-     * @param aes whether the operation needs an AES key
-     * @param what the operation, for the message
-     */
-    private static void requireFamily(PaymentCryptographyKey key, boolean aes, String what) {
-        if (isAes(key) != aes) {
-            throw new AwsException("ValidationException",
-                    "the key " + key.getArn() + " is a " + key.getKeyAlgorithm() + " key, and "
-                            + what + " needs a " + (aes ? "AES" : "Triple DES") + " one", 400);
-        }
-    }
-
-    /**
      * The family a key's algorithm belongs to.
      *
      * <p>The cipher runs under the key's own algorithm: an AES key is encrypted with AES and
@@ -403,56 +371,6 @@ public class PaymentCryptographyCryptoHandler {
     }
 
     /**
-     * A key that is disabled does no work.
-     *
-     * <p>The service reads a disabled key and tells the caller about it, but it does not
-     * encrypt with it, decrypt with it, or make a MAC under it.
-     *
-     * @param key the key the request names
-     */
-    private static void requireEnabled(PaymentCryptographyKey key) {
-        if (!key.isEnabled()) {
-            throw new AwsException("ValidationException",
-                    "the key " + key.getArn() + " is disabled", 400);
-        }
-    }
-
-    /**
-     * The material of a key.
-     *
-     * <p>The material is held by the key while the emulator runs and is not written to the
-     * store, so a key read back after a restart has none. A request that needs the material
-     * is then refused with an error that says so, rather than failing on the missing value.
-     *
-     * @param key the key the operation runs under
-     * @return the key's material
-     */
-    private static byte[] material(PaymentCryptographyKey key) {
-        return PaymentCryptographyCrypto.fromHex(materialHex(key));
-    }
-
-    /**
-     * The material of a key, as it is held.
-     *
-     * <p>The material is held by the key while the emulator runs and is not written to the
-     * store, so a key read back after a restart has none. A request that needs the material
-     * is then refused with an error that says so, rather than failing on the missing value.
-     *
-     * @param key the key the operation runs under
-     * @return the key's material, as hexadecimal
-     */
-    private static String materialHex(PaymentCryptographyKey key) {
-        String hex = key.getKeyMaterialHex();
-        if (hex == null || hex.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "the material of the key " + key.getArn() + " is not held: it is kept while the "
-                            + "emulator runs and is not written to the store, so a key read back after "
-                            + "a restart has none", 400);
-        }
-        return hex;
-    }
-
-    /**
      * The block the key's cipher works in: sixteen bytes for AES and eight for Triple DES, as
      * the reference says.
      *
@@ -481,46 +399,6 @@ public class PaymentCryptographyCryptoHandler {
             throw new AwsException("ValidationException",
                     member + " must be a multiple of " + block + " bytes (one "
                             + (isAes(key) ? "AES" : "TDES") + " block)", 400);
-        }
-    }
-
-    /**
-     * The usage a key has to have for an operation.
-     *
-     * <p>The usage is what binds a key to its purpose, so an operation that belongs to one
-     * purpose is not served with a key of another: a PIN encryption key does not encrypt
-     * arbitrary data, and a MAC key does not either. The check is on the usage itself, not
-     * on the mode, because a key may carry the mode and still be of another purpose.
-     *
-     * @param key the key the operation runs under
-     * @param usages the usages the operation serves
-     * @param what the operation, for the message
-     */
-    private static void requireUsage(PaymentCryptographyKey key, List<String> usages, String what) {
-        String usage = key.getKeyUsage();
-        if (usage == null || usages.contains(usage)) {
-            return;
-        }
-        throw new AwsException("ValidationException",
-                "the key " + key.getArn() + " is of the usage " + usage + ", and it may not be used to "
-                        + what + ", which needs a key of the usage " + String.join(" or ", usages), 400);
-    }
-
-    /** The modes of use a key has to have for an operation. */
-    private static void requireMode(PaymentCryptographyKey key, String mode, String what) {
-        Map<String, Boolean> modes = key.getKeyModesOfUse();
-        if (modes == null) {
-            return;
-        }
-        // A NoRestrictions that is false is not a permission: a request that names the
-        // member says nothing about what it allows, so the mode itself decides.
-        if (Boolean.TRUE.equals(modes.get("NoRestrictions"))) {
-            return;
-        }
-        if (!Boolean.TRUE.equals(modes.get(mode))) {
-            throw new AwsException("ValidationException",
-                    "the key " + key.getArn() + " does not have the mode of use " + mode
-                            + ", which it needs to " + what, 400);
         }
     }
 
@@ -623,31 +501,6 @@ public class PaymentCryptographyCryptoHandler {
     /** A MAC over a message under a key. */
     private interface MacFunction {
         byte[] apply(byte[] key, byte[] message);
-    }
-
-    /** The one variant of an attributes structure, or null when there is not exactly one. */
-    private static String soleVariant(JsonNode attributes) {
-        if (attributes == null || !attributes.isObject()) {
-            return null;
-        }
-        String found = null;
-        Iterator<Map.Entry<String, JsonNode>> fields = attributes.fields();
-        while (fields.hasNext()) {
-            if (found != null) {
-                return null;
-            }
-            found = fields.next().getKey();
-        }
-        return found;
-    }
-
-    /** The text of a member. */
-    private static String text(JsonNode request, String member) {
-        if (request == null) {
-            return "";
-        }
-        JsonNode declared = request.get(member);
-        return declared == null || declared.isNull() ? "" : declared.asText("");
     }
 
     /**
