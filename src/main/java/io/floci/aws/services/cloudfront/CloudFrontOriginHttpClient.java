@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudfront;
 
 import io.floci.aws.core.common.SsrfProtection;
+import io.floci.aws.core.common.ValidatingDnsResolver;
 import org.apache.hc.client5.http.ConnectTimeoutException;
 import org.apache.hc.client5.http.ConnectionKeepAliveStrategy;
 import org.apache.hc.client5.http.DnsResolver;
@@ -123,9 +124,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
             Collection<String> allowedPrivateOriginHosts,
             SSLContext sslContext,
             LongSupplier nanoClock) {
-        this(new ValidatingDnsResolver(delegate, allowedPrivateOriginHosts.stream()
-                .map(CloudFrontServingController::normalizeHost)
-                .collect(Collectors.toUnmodifiableSet())), sslContext, nanoClock);
+        this(validatingResolver(delegate, allowedPrivateOriginHosts), sslContext, nanoClock);
     }
 
     private CloudFrontOriginHttpClient(
@@ -708,16 +707,11 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         }
     }
 
-    private record ValidatingDnsResolver(DnsResolver delegate, Set<String> allowedHosts)
-            implements DnsResolver {
-
-        @Override
-        public InetAddress[] resolve(String host) throws UnknownHostException {
-            InetAddress[] addresses = delegate.resolve(host);
+    private static DnsResolver validatingResolver(DnsResolver delegate, Collection<String> allowedPrivateOriginHosts) {
+        Set<String> allowedHosts = allowedPrivateOriginHosts.stream().map(CloudFrontServingController::normalizeHost)
+                .collect(Collectors.toUnmodifiableSet());
+        return new ValidatingDnsResolver(delegate, (host, addresses) -> {
             String normalizedHost = CloudFrontServingController.normalizeHost(host);
-            if (addresses == null || addresses.length == 0) {
-                throw new UnknownHostException("CloudFront origin host has no addresses: " + normalizedHost);
-            }
             if (!allowedHosts.contains(normalizedHost)) {
                 for (InetAddress address : addresses) {
                     if (SsrfProtection.isBlockedAddress(address)) {
@@ -725,12 +719,6 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                     }
                 }
             }
-            return addresses.clone();
-        }
-
-        @Override
-        public String resolveCanonicalHostname(String host) {
-            return CloudFrontServingController.normalizeHost(host);
-        }
+        }, CloudFrontServingController::normalizeHost);
     }
 }

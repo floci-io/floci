@@ -22,7 +22,10 @@ import io.floci.aws.services.appsync.graphql.resolver.AppSyncResolverError;
 import io.floci.aws.services.appsync.graphql.resolver.AppSyncResolverExecutor;
 import io.floci.aws.services.appsync.graphql.resolver.ResolverCallbackSessions;
 import io.floci.aws.services.appsync.model.AuthenticationType;
+import io.floci.aws.services.appsync.model.DataSourceType;
 import io.floci.aws.services.appsync.model.GraphqlApi;
+import io.floci.aws.services.appsync.model.Resolver;
+import io.floci.aws.services.appsync.model.ResolverKind;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
@@ -202,8 +205,8 @@ public class AppSyncExecutionController {
     private Map<String, Object> executeQuery(String apiId, String preparedSdl, Map<String, String> scalars,
                                              ParsedRequest parsed, List<DenyField> denyFields,
                                              PlanResult plan, AppSyncAuthContext authContext) {
-        List<ResolveField> resolveFields = resolverBackedFields(apiId, plan, denyFields);
-        if (resolveFields.isEmpty()) {
+        CallbackPlan callbacks = resolverBackedFields(apiId, plan, denyFields);
+        if (callbacks.fields().isEmpty()) {
             return sidecarClient.execute(preparedSdl, scalars, parsed.query(), parsed.variables(),
                     parsed.operationName(), denyFields);
         }
@@ -211,7 +214,7 @@ public class AppSyncExecutionController {
                      callbackSessions.open(apiId, authContext.identity(), authContext.authType(),
                              authContext.accountId(), authContext.region())) {
             ResolveSpec resolve = new ResolveSpec(reachableEndpoint.baseUrl() + "/_floci/appsync/resolve",
-                    session.token(), resolveFields, RESOLVE_MAX_BATCH);
+                    session.token(), callbacks.fields(), callbacks.maxBatch());
             Map<String, Object> result = sidecarClient.execute(preparedSdl, scalars, parsed.query(),
                     parsed.variables(), parsed.operationName(), denyFields, resolve);
             return withAppendedErrors(result, session.appendedErrors());
@@ -222,36 +225,60 @@ public class AppSyncExecutionController {
      * The coordinates the sidecar should call back for: every planned field that has a resolver and
      * is not already denied, since {@code denyFields} wins and a denied field must never reach one.
      */
-    private List<ResolveField> resolverBackedFields(String apiId, PlanResult plan, List<DenyField> denyFields) {
+    private CallbackPlan resolverBackedFields(String apiId, PlanResult plan, List<DenyField> denyFields) {
         Set<String> denied = new HashSet<>();
         for (DenyField deny : denyFields) {
             denied.add(deny.typeName() + "." + deny.fieldName());
         }
         Map<String, ResolveField> wired = new LinkedHashMap<>();
+        int maxBatch = RESOLVE_MAX_BATCH;
         for (PlannedField field : plan.fields()) {
             String key = field.typeName() + "." + field.fieldName();
             if (denied.contains(key) || wired.containsKey(key)) {
                 continue;
             }
-            if (hasResolver(apiId, field)) {
+            try {
+                Resolver resolver = resolverExecutor.findResolver(apiId, field.typeName(), field.fieldName());
+                if (resolver == null) {
+                    continue;
+                }
                 wired.put(key, new ResolveField(field.typeName(), field.fieldName()));
+                if (usesHttpDataSource(apiId, resolver)) {
+                    maxBatch = 1;
+                }
+            } catch (AwsException e) {
+                // Keep errors on the affected field, including metadata changed during execution.
+                wired.put(key, new ResolveField(field.typeName(), field.fieldName()));
+                maxBatch = 1;
+                LOG.debugv("Could not plan callback batching for {0}.{1}", field.typeName(), field.fieldName());
             }
         }
-        return List.copyOf(wired.values());
+        return new CallbackPlan(List.copyOf(wired.values()), maxBatch);
     }
 
-    private boolean hasResolver(String apiId, PlannedField field) {
-        try {
-            return resolverExecutor.findResolver(apiId, field.typeName(), field.fieldName()) != null;
-        } catch (AwsException e) {
-            // A control-plane failure here (a schema mid-recreation answers 409) must not take down
-            // the whole operation: wire the field anyway and let the callback report it on that
-            // field alone, which is where a resolver failure belongs.
-            LOG.debugv("Could not tell whether {0}.{1} has a resolver: {2}",
-                    field.typeName(), field.fieldName(), e.getMessage());
-            return true;
+    private boolean usesHttpDataSource(String apiId, Resolver resolver) {
+        if (resolver.getKind() != ResolverKind.PIPELINE) {
+            return isHttpDataSource(apiId, resolver.getDataSourceName());
         }
+        Object functions = resolver.getPipelineConfig() == null ? null : resolver.getPipelineConfig().get("functions");
+        if (functions instanceof List<?> ids) {
+            for (Object id : ids) {
+                String dataSource = appSyncService.getFunction(apiId, String.valueOf(id)).getDataSourceName();
+                if (isHttpDataSource(apiId, dataSource)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
+
+    private boolean isHttpDataSource(String apiId, String name) {
+        return name != null && !name.isBlank() && appSyncService.getDataSource(apiId, name).getType() == DataSourceType.HTTP;
+    }
+
+    // HTTP invocations each need their own callback deadline. The sidecar dispatches chunks
+    // concurrently for queries and still executes root mutation fields in their original order.
+    private record CallbackPlan(List<ResolveField> fields, int maxBatch) { }
 
     /**
      * {@code util.appendError} reports errors <em>and</em> keeps the data, which the sidecar's
