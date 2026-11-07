@@ -601,6 +601,27 @@ class PaymentCryptographyPinOperationsTest {
     }
 
     @Test
+    void aTranslationWhoseAttributesCarryNoAccountNumberIsRefused() {
+        // The model's translation attributes carry the account number, and a request that
+        // leaves it out is refused rather than translated.
+        PaymentCryptographyKey aesPek = createKey("AES_128", "TR31_P0_PIN_ENCRYPTION_KEY",
+                "Encrypt", "Decrypt");
+        PaymentCryptographyKey tdesPek = pinEncryptionKey();
+        ObjectNode incoming = mapper.createObjectNode();
+        incoming.putNull("IsoFormat4");
+        AwsException refused = assertThrows(AwsException.class,
+                () -> pin.translatePinData(request(Map.of(
+                        "EncryptedPinBlock", "00112233445566778899AABBCCDDEEFF",
+                        "IncomingKeyIdentifier", aesPek.getArn(),
+                        "OutgoingKeyIdentifier", tdesPek.getArn(),
+                        "IncomingTranslationAttributes", incoming,
+                        "OutgoingTranslationAttributes", nested("IsoFormat0",
+                                "PrimaryAccountNumber", PAN))),
+                        "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
     void aDukptPinKeyIsDerivedFromTheBaseDerivationKey() {
         // A DUKPT PIN key is derived from the base derivation key, so that is what the
         // identifier names, and the key has to allow the derivation.
