@@ -5435,9 +5435,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     }
                 }
                 restoreInstanceFirewall(inst);
-                String accountId = callerAccountId();
-                containerManager.start(inst, () ->
-                        RequestScopes.runAs(accountId, () -> restoreAttachedVolumesForInstance(region, inst)));
+                containerManager.start(inst, () -> restoreAttachedVolumesForInstance(region, inst));
             }
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
