@@ -1174,6 +1174,128 @@ class CodePipelineServiceTest {
         }
     }
 
+    @Test
+    void listActionsIncludesAnActionRegisteredWhileTheRequestWaits() throws Exception {
+        String pipeline = "list-during-action-registration";
+        try {
+            CodePipelineExecution execution = createWaitingApprovalExecution(pipeline);
+            ActionExecution registering = approvalAction();
+            JsonNode response = handleWhileRegisteringAction("ListActionExecutions", """
+                    {"pipelineName":"%s"}
+                    """.formatted(pipeline), execution, registering);
+
+            JsonNode actions = response.path("actionExecutionDetails");
+            assertEquals(1, actions.size());
+            assertEquals(registering.getActionExecutionId(), actions.get(0).path("actionExecutionId").asText());
+            assertEquals(execution.getPipelineExecutionId(), actions.get(0).path("pipelineExecutionId").asText());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void approvalAcceptsAnActionRegisteredWhileTheRequestWaits() throws Exception {
+        String pipeline = "approve-during-action-registration";
+        try {
+            CodePipelineExecution execution = createWaitingApprovalExecution(pipeline);
+            ActionExecution registering = approvalAction();
+            JsonNode response = handleWhileRegisteringAction("PutApprovalResult", """
+                    {
+                        "pipelineName": "%s",
+                        "stageName": "External",
+                        "actionName": "Approve",
+                        "token": "%s",
+                        "result": {"status": "Approved", "summary": "accepted"}
+                    }
+                    """.formatted(pipeline, registering.getToken()), execution, registering);
+
+            assertTrue(response.path("approvedAt").isNumber());
+            assertEquals("Succeeded", registering.getStatus());
+            assertEquals("accepted", registering.getSummary());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void stageStateIncludesAnActionRegisteredOnAnOlderExecution() throws Exception {
+        String pipeline = "state-during-action-registration";
+        try {
+            CodePipelineExecution execution = createWaitingApprovalExecution(pipeline);
+            waitingExecution(storage, pipeline, "newer-execution", 2, "External");
+            JsonNode response = handleWhileRegisteringAction("GetPipelineState", """
+                    {"name":"%s"}
+                    """.formatted(pipeline), execution, approvalAction());
+
+            JsonNode stage = response.path("stageStates").get(0);
+            assertEquals("External", stage.path("stageName").asText());
+            assertEquals(execution.getPipelineExecutionId(),
+                    stage.path("latestExecution").path("pipelineExecutionId").asText());
+            assertEquals("InProgress", stage.path("latestExecution").path("status").asText());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void stageSuccessFilterExcludesAnActionRegisteredWhileTheRequestWaits() throws Exception {
+        String pipeline = "filter-during-action-registration";
+        try {
+            CodePipelineExecution execution = createWaitingApprovalExecution(pipeline);
+            JsonNode response = handleWhileRegisteringAction("ListPipelineExecutions", """
+                    {
+                        "pipelineName": "%s",
+                        "filter": {"succeededInStage": {"stageName": "External"}}
+                    }
+                    """.formatted(pipeline), execution, approvalAction());
+
+            assertTrue(response.path("pipelineExecutionSummaries").isEmpty());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    private CodePipelineExecution createWaitingApprovalExecution(String pipeline) throws Exception {
+        createExternalActionPipeline(service, pipeline, """
+                {"name":"Approve","actionTypeId":{
+                    "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
+                """);
+        return waitingExecution(storage, pipeline, "registering-execution", 1, "External");
+    }
+
+    private ActionExecution approvalAction() {
+        ActionExecution action = new ActionExecution();
+        action.setActionExecutionId("registering-action");
+        action.setStageName("External");
+        action.setActionName("Approve");
+        action.setCategory("Approval");
+        action.setOwner("AWS");
+        action.setProvider("Manual");
+        action.setStatus("InProgress");
+        action.setStartTime(1.0);
+        action.setToken("approval-token");
+        return action;
+    }
+
+    private JsonNode handleWhileRegisteringAction(String operation, String body,
+                                                  CodePipelineExecution execution,
+                                                  ActionExecution registering) throws Exception {
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            AtomicReference<Thread> requestThread = new AtomicReference<>();
+            Future<JsonNode> response;
+            synchronized (execution) {
+                response = requests.submit(() -> {
+                    requestThread.set(Thread.currentThread());
+                    return handle(operation, body);
+                });
+                ThreadStates.awaitBlockedOrDone(requestThread, response);
+                // The worker finishes registering the action before the waiting reader acquires its monitor.
+                execution.getActionExecutions().add(registering);
+            }
+            return response.get(5, TimeUnit.SECONDS);
+        }
+    }
+
     private CodePipelineService serviceWith(CodeBuildService codeBuildService,
                                             CodeDeployService codeDeployService) {
         return new CodePipelineService(
