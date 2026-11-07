@@ -2268,7 +2268,11 @@ public class ApiGatewayService implements ResourceProvider {
         }
 
         DocumentationPart part = new DocumentationPart();
-        part.setId(shortId(6));
+        String id;
+        do {
+            id = shortId(12);
+        } while (documentationPartStore.get(documentationPartKey(region, apiId, id)).isPresent());
+        part.setId(id);
         part.setLocation(location);
         part.setProperties(properties);
         documentationPartStore.putAllAtomically(Map.of(documentationPartKey(region, apiId, part.getId()), part));

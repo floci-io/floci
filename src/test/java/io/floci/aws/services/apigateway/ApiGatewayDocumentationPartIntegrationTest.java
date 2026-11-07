@@ -10,6 +10,9 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockMakers;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.apache5.Apache5HttpClient;
@@ -31,6 +34,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -40,6 +44,7 @@ import java.util.concurrent.TimeUnit;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -209,6 +214,32 @@ class ApiGatewayDocumentationPartIntegrationTest {
                 assertEquals(1, successes);
                 assertEquals(1, service.getDocumentationParts(region, apiId, null, null, null,
                         null, null, null).items().size());
+            }
+        } finally {
+            service.deleteRestApi(region, apiId);
+        }
+    }
+
+    @Test
+    void generatedIdCollisionPreservesBothParts() {
+        String region = "us-east-1";
+        String apiId = service.createRestApi(region, Map.of("name", "documentation-part-id-collision")).getId();
+        UUID collision = UUID.fromString("abcdef00-0000-0000-0000-000000000001");
+        UUID retry = UUID.fromString("12345678-0000-0000-0000-000000000002");
+        try {
+            try (MockedStatic<UUID> ids = Mockito.mockStatic(UUID.class,
+                    Mockito.withSettings().mockMaker(MockMakers.INLINE).defaultAnswer(Mockito.CALLS_REAL_METHODS))) {
+                ids.when(UUID::randomUUID).thenReturn(collision, collision, retry);
+                DocumentationPart first = service.createDocumentationPart(region, apiId, Map.of(
+                        "location", Map.of("type", "MODEL", "name", "First"), "properties", "{}"));
+                DocumentationPart second = service.createDocumentationPart(region, apiId, Map.of(
+                        "location", Map.of("type", "MODEL", "name", "Second"), "properties", "{}"));
+
+                assertNotEquals(first.getId(), second.getId());
+                assertEquals("First", service.getDocumentationPart(region, apiId, first.getId())
+                        .getLocation().get("name"));
+                assertEquals("Second", service.getDocumentationPart(region, apiId, second.getId())
+                        .getLocation().get("name"));
             }
         } finally {
             service.deleteRestApi(region, apiId);
