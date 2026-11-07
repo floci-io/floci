@@ -66,6 +66,77 @@ class JwtClaimsWireFormatTest {
     }
 
     @Test
+    void parsesStringAudienceAsSingleEntry() {
+        ApiGatewayExecuteController.JwtClaims claims = controller.parseJwtClaims(unsignedToken("""
+                {"sub": "u", "aud": "https://api.example.com"}
+                """));
+
+        assertNotNull(claims);
+        assertEquals(List.of("https://api.example.com"), claims.audiences());
+    }
+
+    @Test
+    void parsesArrayAudienceKeepingEveryEntry() {
+        // Auth0 issues this shape whenever the openid scope is requested.
+        ApiGatewayExecuteController.JwtClaims claims = controller.parseJwtClaims(unsignedToken("""
+                {"sub": "u", "aud": ["https://api.example.com", "https://tenant.auth0.com/userinfo"]}
+                """));
+
+        assertNotNull(claims);
+        assertEquals(List.of("https://api.example.com", "https://tenant.auth0.com/userinfo"),
+                claims.audiences());
+    }
+
+    @Test
+    void audienceMatches_arrayAudContainingConfiguredAudience_matches() {
+        ApiGatewayExecuteController.JwtClaims claims = controller.parseJwtClaims(unsignedToken("""
+                {"sub": "u", "aud": ["https://api.example.com", "https://tenant.auth0.com/userinfo"]}
+                """));
+
+        assertTrue(ApiGatewayExecuteController.audienceMatches(
+                List.of("https://api.example.com"), claims));
+    }
+
+    @Test
+    void audienceMatches_arrayAudWithoutConfiguredAudience_doesNotMatch() {
+        ApiGatewayExecuteController.JwtClaims claims = controller.parseJwtClaims(unsignedToken("""
+                {"sub": "u", "aud": ["https://other.example.com", "https://tenant.auth0.com/userinfo"]}
+                """));
+
+        assertFalse(ApiGatewayExecuteController.audienceMatches(
+                List.of("https://api.example.com"), claims));
+    }
+
+    @Test
+    void audienceMatches_cognitoAccessTokenClientId_matches() {
+        ApiGatewayExecuteController.JwtClaims claims = controller.parseJwtClaims(unsignedToken("""
+                {"sub": "u", "client_id": "app-client-123"}
+                """));
+
+        assertNotNull(claims);
+        assertEquals(List.of(), claims.audiences());
+        assertTrue(ApiGatewayExecuteController.audienceMatches(List.of("app-client-123"), claims));
+    }
+
+    @Test
+    void audienceMatches_mismatchedAudWithMatchingClientId_doesNotMatch() {
+        ApiGatewayExecuteController.JwtClaims claims = controller.parseJwtClaims(unsignedToken("""
+                {"sub": "u", "aud": ["other"], "client_id": "expected"}
+                """));
+
+        assertFalse(ApiGatewayExecuteController.audienceMatches(List.of("expected"), claims));
+    }
+
+    @Test
+    void audienceMatches_emptyAudArrayWithMatchingClientId_doesNotMatch() {
+        ApiGatewayExecuteController.JwtClaims claims = controller.parseJwtClaims(unsignedToken("""
+                {"sub": "u", "aud": [], "client_id": "expected"}
+                """));
+
+        assertFalse(ApiGatewayExecuteController.audienceMatches(List.of("expected"), claims));
+    }
+
+    @Test
     void derivesScopesFromScpArrayFirst() {
         ApiGatewayExecuteController.JwtClaims claims = controller.parseJwtClaims(unsignedToken("""
                 {"sub": "u", "scp": ["orders/read", "orders/write"], "scope": "ignored"}
