@@ -278,6 +278,39 @@ class ApiGatewayExecuteApiHostFilterTest {
     }
 
     @Test
+    void extractApiIdRejectsHostsThatCannotBeExecuteApiHosts() {
+        assertNull(ApiGatewayExecuteApiHostFilter.extractApiId("localhost:4566", null));
+        assertNull(ApiGatewayExecuteApiHostFilter.extractApiId(
+                ".execute-api.us-east-1.localhost", null));
+        assertNull(ApiGatewayExecuteApiHostFilter.extractApiId(
+                "a.b.execute-api.us-east-1.localhost", null));
+        assertNull(ApiGatewayExecuteApiHostFilter.extractApiId("sqs.us-east-1.localhost:4566", null));
+    }
+
+    @Test
+    void extractApiIdAcceptsMixedCaseLabel() {
+        assertEquals("abc123", ApiGatewayExecuteApiHostFilter.extractApiId(
+                "AbC123.EXECUTE-API.us-east-1.localhost:4566", null));
+    }
+
+    @Test
+    void filterLeavesNonExecuteApiHostWithoutReadingUriOrAuthorization() {
+        ContainerRequestContext context = (ContainerRequestContext) Proxy.newProxyInstance(
+                ContainerRequestContext.class.getClassLoader(),
+                new Class<?>[] { ContainerRequestContext.class },
+                (proxy, method, args) -> {
+                    if ("getHeaderString".equals(method.getName()) && "Host".equals(args[0])) {
+                        return "sqs.us-east-1.localhost:4566";
+                    }
+                    throw new AssertionError("unexpected call " + method.getName());
+                });
+
+        new ApiGatewayExecuteApiHostFilter(
+                new FakeApiGatewayLookup(), new RegionResolver(REGION, "000000000000"))
+                .filter(context);
+    }
+
+    @Test
     void ignoresRegionShapedLabelThatIsNotAKnownRegion() {
         assertNull(ApiGatewayExecuteApiHostFilter.extractApiId(
                 "abc123.execute-api.zz-nowhere-9.localhost.floci.io", null));

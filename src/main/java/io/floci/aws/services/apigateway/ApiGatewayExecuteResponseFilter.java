@@ -22,6 +22,11 @@ public class ApiGatewayExecuteResponseFilter implements ContainerResponseFilter 
 
     @Override
     public void filter(ContainerRequestContext request, ContainerResponseContext response) {
+        String path = request.getUriInfo().getPath();
+        if (!path.contains("/execute-api/") && !path.startsWith("/restapis/")) {
+            return;
+        }
+        // Reading routeContext creates the request-scoped bean, so other services must not reach it.
         if (!routeContext.isRestApiRoute()) {
             return;
         }
