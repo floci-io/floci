@@ -2,6 +2,7 @@ package io.floci.aws.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
 import org.junit.jupiter.api.Test;
@@ -14,12 +15,16 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class TaskPermissionsTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String ACCOUNT = "111122223333";
     private static final String TOPIC = "arn:aws:sns:eu-west-1:111122223333:orders";
+    private static final String REDSHIFT_CLUSTER = "arn:aws:redshift:eu-west-1:111122223333:cluster:orders";
     private static final String ENDPOINT = "arn:aws:sns:eu-west-1:111122223333:endpoint/GCM/app/id";
 
     /** Each form resolves in the state machine's Region, whichever host it names, as the queue lookup does. */
@@ -61,7 +66,7 @@ class TaskPermissionsTest {
     @ParameterizedTest
     @ValueSource(strings = {"lambda:invoke", "apigateway:invoke", "aws-sdk:sqs:receiveMessage", "aws-sdk:sns:listTopics",
             "sns:publishBatch", "aws-sdk:eventbridge:putEvents", "events:listRules", "states:startExecution",
-            "dynamodb:putItem", "http:invoke"})
+            "dynamodb:query", "http:invoke"})
     void integrationsNotMappedStayUnchecked(String integration) {
         assertEquals(Optional.empty(), TaskPermissions.of(integration(integration), input("orders"), machine("aws")));
     }
@@ -166,6 +171,241 @@ class TaskPermissionsTest {
     void aMalformedEntryLeavesTheOthersChecked() throws Exception {
         assertEquals(List.of(new Permission("events:PutEvents", bus("a"))),
                 eventsPermissions("{\"Entries\":[7,{\"EventBusName\":\"arn:aws:events:\"},{\"EventBusName\":\"a\"}]}"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"putItem,PutItem", "getItem,GetItem", "deleteItem,DeleteItem", "updateItem,UpdateItem", "scan,Scan"})
+    void anOptimizedDynamoDbTaskNeedsItsActionOnTheTable(String api, String operation) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("DynamoDB.", List.of(new Permission("dynamodb:" + operation, table("orders")))),
+                TaskPermissions.of(integration("dynamodb:" + api), json("{\"TableName\":\"orders\"}"), machine("aws"))
+                        .orElseThrow());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"TableName\":\" \"}", "{\"TableName\":{}}"})
+    void anOptimizedDynamoDbTaskNamingNoTableNeedsNoPermission(String request) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("DynamoDB.", List.of()),
+                TaskPermissions.of(integration("dynamodb:putItem"), json(request), machine("aws")).orElseThrow());
+    }
+
+    @Test
+    void anOptimizedDynamoDbApiNotServedStaysUnchecked() throws Exception {
+        assertEquals(Optional.empty(), TaskPermissions.of(integration("dynamodb:query"), json("{\"TableName\":\"t\"}"), machine("aws")));
+    }
+
+    @Test
+    void aTableNamedByItsArnIsEvaluatedAsGiven() throws Exception {
+        String arn = "arn:aws:dynamodb:eu-west-1:444455556666:table/orders";
+        assertEquals(List.of(new Permission("dynamodb:PutItem", arn)), sdkPermissions("putItem", "{\"TableName\":\"" + arn + "\"}"));
+        assertEquals(List.of(new Permission("dynamodb:PutItem", arn)),
+                TaskPermissions.of(integration("dynamodb:putItem"), json("{\"TableName\":\"" + arn + "\"}"), machine("aws"))
+                        .orElseThrow().permissions());
+    }
+
+    @Test
+    void anSdkDynamoDbTaskNamesItsOwnPrefix() throws Exception {
+        assertEquals("DynamoDb.AccessDeniedException", TaskPermissions.of(integration("aws-sdk:dynamodb:getItem"),
+                json("{}"), machine("aws")).orElseThrow().deniedError());
+    }
+
+    @Test
+    void aBatchNeedsItsActionOnEachTable() throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:BatchWriteItem", table("a")),
+                new Permission("dynamodb:BatchWriteItem", table("b"))),
+                sdkPermissions("batchWriteItem", "{\"RequestItems\":{\"a\":[],\"b\":[]}}"));
+        assertEquals(List.of(new Permission("dynamodb:BatchGetItem", table("a")),
+                new Permission("dynamodb:BatchGetItem", table("b"))),
+                sdkPermissions("batchGetItem", "{\"RequestItems\":{\"a\":{},\"b\":{}}}"));
+    }
+
+    @Test
+    void aTransactWriteNeedsEachItemsOwnActionOnItsTable() throws Exception {
+        Map<String, List<String>> enclosing = Map.of("dynamodb:EnclosingOperation", List.of("TransactWriteItems"));
+        assertEquals(List.of(new Permission("dynamodb:PutItem", table("aaa"), enclosing),
+                new Permission("dynamodb:DeleteItem", table("bbb"), enclosing),
+                new Permission("dynamodb:UpdateItem", table("aaa"), enclosing),
+                new Permission("dynamodb:ConditionCheckItem", table("ccc"), enclosing)),
+                sdkPermissions("transactWriteItems", """
+                        {"TransactItems":[{"Put":{"TableName":"aaa"}},{"Delete":{"TableName":"bbb"}},
+                         {"Update":{"TableName":"aaa"}},{"ConditionCheck":{"TableName":"ccc"}}]}"""));
+    }
+
+    @Test
+    void aTransactGetNeedsGetItemOnEachTable() throws Exception {
+        Map<String, List<String>> enclosing = Map.of("dynamodb:EnclosingOperation", List.of("TransactGetItems"));
+        assertEquals(List.of(new Permission("dynamodb:GetItem", table("aaa"), enclosing),
+                new Permission("dynamodb:GetItem", table("bbb"), enclosing)),
+                sdkPermissions("transactGetItems", "{\"TransactItems\":[{\"Get\":{\"TableName\":\"aaa\"}},{\"Get\":{\"TableName\":\"bbb\"}}]}"));
+    }
+
+    /** Execution resolves an ARN within the request's account, so that is the table the item is checked on. */
+    @Test
+    void aTransactItemNamedByAnArnIsTheTableItsExecutionReaches() throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:PutItem", table("aaa"),
+                Map.of("dynamodb:EnclosingOperation", List.of("TransactWriteItems")))),
+                sdkPermissions("transactWriteItems", """
+                        {"TransactItems":[{"Put":{"TableName":"arn:aws:dynamodb:eu-west-1:444455556666:table/aaa"}}]}"""));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"TransactItems\":\"x\"}", "{\"TransactItems\":[{\"Put\":{}}]}",
+            "{\"TransactItems\":[{\"Get\":{\"TableName\":\"aaa\"}}]}",
+            "{\"TransactItems\":[{\"Put\":{\"TableName\":\"arn:aws:dynamodb:ap-south-1:444455556666:table/aaa\"}}]}",
+            "{\"TransactItems\":[{\"Put\":{\"TableName\":\"a\"}}]}",
+            "{\"TransactItems\":[{\"Put\":{\"TableName\":\"arn:aws:s3:::aaa\"}}]}"})
+    void aTransactionNamingNoTableItCanReachNeedsNoPermission(String request) throws Exception {
+        assertEquals(List.of(), sdkPermissions("transactWriteItems", request));
+    }
+
+    @Test
+    void listTablesNeedsItsRegionalCollection() throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:ListTables", table("*"))), sdkPermissions("listTables", "{}"));
+    }
+
+    @Test
+    void anOperationNamingNoTableIsCheckedOnAnyResource() throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:DescribeLimits", "*")), sdkPermissions("describeLimits", "{}"));
+    }
+
+    @Test
+    void aStatementIsAuthorizedByWhatItDoes() throws Exception {
+        assertEquals(List.of(new Permission("dynamodb:PartiQLSelect", table("a"))),
+                sdkPermissions("executeStatement", "{\"Statement\":\"SELECT * FROM \\\"a\\\"\"}"));
+        assertEquals(List.of(new Permission("dynamodb:PartiQLInsert", table("a"))),
+                sdkPermissions("executeStatement", "{\"Statement\":\"INSERT INTO \\\"a\\\" VALUE {'pk':'x'}\"}"));
+    }
+
+    @Test
+    void aResourceThatIsNotAnArnNeedsNoPermission() throws Exception {
+        assertEquals(List.of(), sdkPermissions("tagResource", "{\"ResourceArn\":\"not-an-arn\"}"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"s3:putObject", "aws-sdk:s3:putObject"})
+    void anS3PutNeedsThePermissionOnTheObjectInTheMachinesPartition(String tail) throws Exception {
+        String request = "{\"Bucket\":\"orders\",\"Key\":\"a/b:c+d.txt\"}";
+        assertEquals(TaskPermissions.accessDenied("S3.", List.of(new Permission("s3:PutObject", "arn:aws:s3:::orders/a/b:c+d.txt"))),
+                TaskPermissions.of(integration(tail), json(request), machine("aws")).orElseThrow());
+        assertEquals(List.of(new Permission("s3:PutObject", "arn:aws-cn:s3:::orders/a/b:c+d.txt")),
+                TaskPermissions.of(integration(tail), json(request), machine("aws-cn")).orElseThrow().permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"Bucket\":\"orders\"}", "{\"Key\":\"a\"}", "{\"Bucket\":\"\",\"Key\":\"a\"}",
+            "{\"Bucket\":null,\"Key\":\"a\"}", "{\"Bucket\":\"orders\",\"Key\":null}"})
+    void anS3PutNamingNoObjectNeedsNoPermission(String request) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("S3.", List.of()),
+                TaskPermissions.of(integration("s3:putObject"), json(request), machine("aws")).orElseThrow());
+    }
+
+    @Test
+    void anS3ApiNotServedStaysUnchecked() throws Exception {
+        assertEquals(Optional.empty(), TaskPermissions.of(integration("s3:getObject"), json("{}"), machine("aws")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{\"ResourceArn\":\"%s\",\"SecretArn\":\"%s\"}", "{\"resourceArn\":\"%s\",\"secretArn\":\"%s\"}"})
+    void anRdsDataStatementNeedsItsActionOnTheClusterAndTheSecret(String template) throws Exception {
+        String cluster = "arn:aws:rds:eu-west-1:" + ACCOUNT + ":cluster:orders";
+        String secret = "arn:aws:secretsmanager:eu-west-1:" + ACCOUNT + ":secret:db";
+        assertEquals(TaskPermissions.accessDenied("RdsData.", List.of(new Permission("rds-data:ExecuteStatement", cluster),
+                new Permission("secretsmanager:GetSecretValue", secret))),
+                TaskPermissions.of(integration("aws-sdk:rdsdata:executeStatement"), json(template.formatted(cluster, secret)),
+                        machine("aws")).orElseThrow());
+    }
+
+    @Test
+    void anRdsDataStatementWithNoSecretArnNeedsOnlyItsAction() throws Exception {
+        String cluster = "arn:aws:rds:eu-west-1:" + ACCOUNT + ":cluster:orders";
+        assertEquals(List.of(new Permission("rds-data:ExecuteStatement", cluster)),
+                TaskPermissions.of(integration("aws-sdk:rdsdata:executeStatement"),
+                        json("{\"ResourceArn\":\"" + cluster + "\",\"SecretArn\":\"db\"}"), machine("aws"))
+                        .orElseThrow().permissions());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"ResourceArn\":\"orders\",\"SecretArn\":\"arn:aws:secretsmanager:eu-west-1:1:secret:db\"}"})
+    void anRdsDataStatementNamingNoClusterNeedsNoPermission(String request) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("RdsData.", List.of()),
+                TaskPermissions.of(integration("aws-sdk:rdsdata:executeStatement"), json(request), machine("aws")).orElseThrow());
+    }
+
+    @Test
+    void anRdsDataApiNotServedStaysUnchecked() throws Exception {
+        assertEquals(Optional.empty(), TaskPermissions.of(integration("aws-sdk:rdsdata:beginTransaction"), json("{}"), machine("aws")));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"describeStatement,DescribeStatement", "cancelStatement,CancelStatement",
+            "getStatementResult,GetStatementResult", "getStatementResultV2,GetStatementResult",
+            "listStatements,ListStatements", "listSessions,ListSessions"})
+    void aRedshiftDataOperationOnNoResourceIsCheckedOnAnyResource(String api, String action) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("RedshiftData.", List.of(new Permission("redshift-data:" + action, "*"))),
+                TaskPermissions.of(integration("aws-sdk:redshiftdata:" + api), json("{\"Id\":\"s\"}"), machine("aws")).orElseThrow());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"executeStatement,ExecuteStatement", "batchExecuteStatement,BatchExecuteStatement",
+            "listDatabases,ListDatabases", "listSchemas,ListSchemas", "listTables,ListTables", "describeTable,DescribeTable"})
+    void aRedshiftDataCallOnAClusterNeedsItsActionAndItsSecret(String api, String operation) throws Exception {
+        String secret = "arn:aws:secretsmanager:eu-west-1:" + ACCOUNT + ":secret:db";
+        assertEquals(List.of(new Permission("redshift-data:" + operation, REDSHIFT_CLUSTER),
+                new Permission("secretsmanager:GetSecretValue", secret)),
+                redshiftPermissions(api, "{\"ClusterIdentifier\":\"orders\",\"SecretArn\":\"" + secret + "\"}", null));
+    }
+
+    @Test
+    void aRedshiftDataCallAsADatabaseUserNeedsItsClusterCredentials() throws Exception {
+        String prefix = "arn:aws:redshift:eu-west-1:" + ACCOUNT;
+        assertEquals(List.of(new Permission("redshift-data:ExecuteStatement", REDSHIFT_CLUSTER),
+                new Permission("redshift:GetClusterCredentials", prefix + ":dbuser:orders/admin"),
+                new Permission("redshift:GetClusterCredentials", prefix + ":dbname:orders/dev")),
+                redshiftPermissions("executeStatement",
+                        "{\"ClusterIdentifier\":\"orders\",\"DbUser\":\"admin\",\"Database\":\"dev\"}", null));
+    }
+
+    @Test
+    void aRedshiftDataCallOnAWorkgroupIsEvaluatedOnTheOneItsNameFinds() throws Exception {
+        String workgroup = "arn:aws:redshift-serverless:eu-west-1:" + ACCOUNT + ":workgroup/1234";
+        StoredResourceArns stored = mock(StoredResourceArns.class);
+        when(stored.findByMembers(eq("workgroup"), eq(List.of("analytics")), eq("eu-west-1"))).thenReturn(Optional.of(workgroup));
+        assertEquals(List.of(new Permission("redshift-data:ExecuteStatement", workgroup),
+                new Permission("redshift-serverless:GetCredentials", workgroup)),
+                redshiftPermissions("executeStatement", "{\"WorkgroupName\":\"analytics\"}", stored));
+    }
+
+    @Test
+    void aRedshiftDataCallOnASessionIsEvaluatedOnItsTarget() throws Exception {
+        StoredResourceArns stored = mock(StoredResourceArns.class);
+        when(stored.through("SessionId", "session", "eu-west-1")).thenReturn(List.of(REDSHIFT_CLUSTER));
+        assertEquals(List.of(new Permission("redshift-data:ExecuteStatement", REDSHIFT_CLUSTER)),
+                redshiftPermissions("executeStatement", "{\"SessionId\":\"session\"}", stored));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {"executeStatement|{}", "executeStatement|[]", "executeSql|{\"ClusterIdentifier\":\"c\"}",
+            "noSuchOperation|{}"})
+    void aRedshiftDataCallNamingNothingItNeedsNeedsNoPermission(String api, String request) throws Exception {
+        assertEquals(TaskPermissions.accessDenied("RedshiftData.", List.of()),
+                TaskPermissions.of(integration("aws-sdk:redshiftdata:" + api), json(request), machine("aws")).orElseThrow());
+    }
+
+    @Test
+    void aRedshiftDataSuffixIsNotServedAndStaysUnchecked() throws Exception {
+        assertEquals(Optional.empty(), TaskPermissions.of(integration("aws-sdk:redshiftdata:executeStatement.sync"), json("{}"), machine("aws")));
+    }
+
+    private static List<Permission> sdkPermissions(String api, String request) throws Exception {
+        return TaskPermissions.of(integration("aws-sdk:dynamodb:" + api), json(request), machine("aws")).orElseThrow().permissions();
+    }
+
+    private static List<Permission> redshiftPermissions(String api, String request, StoredResourceArns stored) throws Exception {
+        return TaskPermissions.of(integration("aws-sdk:redshiftdata:" + api), json(request), machine("aws"), stored)
+                .orElseThrow().permissions();
+    }
+
+    private static String table(String name) {
+        return "arn:aws:dynamodb:eu-west-1:" + ACCOUNT + ":table/" + name;
     }
 
     private static List<Permission> snsPermissions(String request) throws Exception {

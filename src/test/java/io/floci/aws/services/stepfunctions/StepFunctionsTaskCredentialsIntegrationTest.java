@@ -33,6 +33,7 @@ import java.util.UUID;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -254,6 +255,60 @@ class StepFunctionsTaskCredentialsIntegrationTest {
 
         assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
         assertEquals(taskRole, taskScheduled(execution).path("taskCredentials").path("roleArn").asText());
+    }
+
+    /** Nothing evaluates a role that does not exist, nor a writer no policy allows. */
+    @ParameterizedTest
+    @ValueSource(strings = {"dynamodb:putItem", "aws-sdk:dynamodb:putItem", "s3:putObject", "aws-sdk:s3:putObject"})
+    void dataCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
+        String name = "credentials-" + UUID.randomUUID();
+        Map<String, Object> arguments;
+        if (integration.contains("dynamodb")) {
+            dynamoDb("CreateTable", Map.of("TableName", name, "BillingMode", "PAY_PER_REQUEST",
+                    "AttributeDefinitions", List.of(Map.of("AttributeName", "pk", "AttributeType", "S")),
+                    "KeySchema", List.of(Map.of("AttributeName", "pk", "KeyType", "HASH"))));
+            cleanup.register(() -> dynamoDb("DeleteTable", Map.of("TableName", name)));
+            arguments = Map.of("TableName", name, "Item", Map.of("pk", Map.of("S", "a")));
+        } else {
+            given().port(baseUri.getPort()).header("Authorization", auth(SOURCE, "s3")).put("/" + name)
+                    .then().statusCode(200);
+            cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(), auth(SOURCE, "s3"), name));
+            arguments = Map.of("Bucket", name, "Key", "a", "Body", "hello");
+        }
+        assertDataTaskIsNotEvaluated(integration, arguments, "SUCCEEDED");
+    }
+
+    /** Past authorization, the service answers: these name a database nothing has, so they fail with its own error. */
+    @ParameterizedTest
+    @ValueSource(strings = {"aws-sdk:rdsdata:executeStatement", "aws-sdk:redshiftdata:executeStatement"})
+    void dataApiCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
+        Map<String, Object> arguments = integration.contains("rdsdata")
+                ? Map.of("ResourceArn", "arn:aws:rds:us-east-1:" + SOURCE + ":cluster:no-such-cluster",
+                        "SecretArn", "arn:aws:secretsmanager:us-east-1:" + SOURCE + ":secret:no-such-secret",
+                        "Sql", "select 1")
+                : Map.of("ClusterIdentifier", "no-such-cluster", "Database", "dev", "Sql", "select 1");
+        assertDataTaskIsNotEvaluated(integration, arguments, "FAILED");
+    }
+
+    private void assertDataTaskIsNotEvaluated(String integration, Map<String, Object> arguments, String status)
+            throws Exception {
+        String taskRole = "arn:aws:iam::" + TARGET + ":role/no-such-role";
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
+                "Type", "Task", "Resource", "arn:aws:states:::" + integration,
+                "Credentials", Map.of("RoleArn", taskRole), "Parameters", arguments, "End", true))));
+
+        String execution = start(machine(SOURCE, definition, "STANDARD"), "{}");
+        Response done = terminal(SOURCE, execution);
+
+        assertEquals(status, done.jsonPath().getString("status"), done.asString());
+        String error = String.valueOf(done.jsonPath().getString("error"));
+        assertFalse(error.endsWith("AccessDeniedException") || "States.Permissions".equals(error), done.asString());
+        assertEquals(taskRole, taskScheduled(execution).path("taskCredentials").path("roleArn").asText());
+    }
+
+    private void dynamoDb(String action, Map<String, ?> input) {
+        sfn().json(SOURCE, "dynamodb", "DynamoDB_20120810." + action, "application/x-amz-json-1.0", input)
+                .then().statusCode(200);
     }
 
     @Test
