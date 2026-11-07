@@ -12,7 +12,11 @@
     "GeneratePinData": "GeneratePinDataInput",
     "VerifyPinData": "VerifyPinDataInput",
     "TranslatePinData": "TranslatePinDataInput",
-    "GenerateMacEmvPinChange": "GenerateMacEmvPinChangeInput"
+    "GenerateMacEmvPinChange": "GenerateMacEmvPinChangeInput",
+    "GenerateCardValidationData": "GenerateCardValidationDataInput",
+    "VerifyCardValidationData": "VerifyCardValidationDataInput",
+    "GenerateAuthRequestCryptogram": "GenerateAuthRequestCryptogramInput",
+    "VerifyAuthRequestCryptogram": "VerifyAuthRequestCryptogramInput"
   },
   "shapes": {
     "AmexAttributes": {
@@ -31,6 +35,26 @@
         "ApplicationTransactionCounter": "HexLengthEquals4",
         "AuthorizationRequestKeyIdentifier": "KeyArnOrKeyAliasType",
         "CurrentPinAttributes": "CurrentPinAttributes"
+      }
+    },
+    "AmexCardSecurityCodeVersion1": {
+      "type": "structure",
+      "required": [
+        "CardExpiryDate"
+      ],
+      "members": {
+        "CardExpiryDate": "CardExpiryDateType"
+      }
+    },
+    "AmexCardSecurityCodeVersion2": {
+      "type": "structure",
+      "required": [
+        "CardExpiryDate",
+        "ServiceCode"
+      ],
+      "members": {
+        "CardExpiryDate": "CardExpiryDateType",
+        "ServiceCode": "ServiceCodeType"
       }
     },
     "ApplicationCryptogramType": {
@@ -56,6 +80,76 @@
         "PaddingType": "PaddingType"
       }
     },
+    "AuthRequestCryptogramType": {
+      "type": "string",
+      "min": 16,
+      "max": 16,
+      "pattern": "[0-9a-fA-F]+"
+    },
+    "CardExpiryDateType": {
+      "type": "string",
+      "min": 4,
+      "max": 4,
+      "pattern": "[0-9]+"
+    },
+    "CardGenerationAttributes": {
+      "type": "structure",
+      "members": {
+        "AmexCardSecurityCodeVersion1": "AmexCardSecurityCodeVersion1",
+        "AmexCardSecurityCodeVersion2": "AmexCardSecurityCodeVersion2",
+        "CardVerificationValue1": "CardVerificationValue1",
+        "CardVerificationValue2": "CardVerificationValue2",
+        "CardHolderVerificationValue": "CardHolderVerificationValue",
+        "DynamicCardVerificationCode": "DynamicCardVerificationCode",
+        "DynamicCardVerificationValue": "DynamicCardVerificationValue"
+      }
+    },
+    "CardHolderVerificationValue": {
+      "type": "structure",
+      "required": [
+        "UnpredictableNumber",
+        "PanSequenceNumber",
+        "ApplicationTransactionCounter"
+      ],
+      "members": {
+        "UnpredictableNumber": "HexLengthBetween2And8",
+        "PanSequenceNumber": "NumberLengthEquals2",
+        "ApplicationTransactionCounter": "HexLengthBetween2And4"
+      }
+    },
+    "CardVerificationAttributes": {
+      "type": "structure",
+      "members": {
+        "AmexCardSecurityCodeVersion1": "AmexCardSecurityCodeVersion1",
+        "AmexCardSecurityCodeVersion2": "AmexCardSecurityCodeVersion2",
+        "CardVerificationValue1": "CardVerificationValue1",
+        "CardVerificationValue2": "CardVerificationValue2",
+        "CardHolderVerificationValue": "CardHolderVerificationValue",
+        "DynamicCardVerificationCode": "DynamicCardVerificationCode",
+        "DynamicCardVerificationValue": "DynamicCardVerificationValue",
+        "DiscoverDynamicCardVerificationCode": "DiscoverDynamicCardVerificationCode"
+      }
+    },
+    "CardVerificationValue1": {
+      "type": "structure",
+      "required": [
+        "CardExpiryDate",
+        "ServiceCode"
+      ],
+      "members": {
+        "CardExpiryDate": "CardExpiryDateType",
+        "ServiceCode": "ServiceCodeType"
+      }
+    },
+    "CardVerificationValue2": {
+      "type": "structure",
+      "required": [
+        "CardExpiryDate"
+      ],
+      "members": {
+        "CardExpiryDate": "CardExpiryDateType"
+      }
+    },
     "CertificateType": {
       "type": "string",
       "min": 1,
@@ -73,6 +167,32 @@
       "min": 16,
       "max": 1024,
       "pattern": "(?:[0-9a-fA-F][0-9a-fA-F])+"
+    },
+    "CryptogramAuthResponse": {
+      "type": "structure",
+      "members": {
+        "ArpcMethod1": "CryptogramVerificationArpcMethod1",
+        "ArpcMethod2": "CryptogramVerificationArpcMethod2"
+      }
+    },
+    "CryptogramVerificationArpcMethod1": {
+      "type": "structure",
+      "required": [
+        "AuthResponseCode"
+      ],
+      "members": {
+        "AuthResponseCode": "HexLengthEquals4"
+      }
+    },
+    "CryptogramVerificationArpcMethod2": {
+      "type": "structure",
+      "required": [
+        "CardStatusUpdate"
+      ],
+      "members": {
+        "CardStatusUpdate": "HexLengthEquals8",
+        "ProprietaryAuthenticationData": "ProprietaryAuthenticationDataType"
+      }
     },
     "CurrentPinAttributes": {
       "type": "structure",
@@ -113,6 +233,19 @@
         "Visa": "VisaAttributes",
         "Emv2000": "Emv2000Attributes",
         "Mastercard": "MasterCardAttributes"
+      }
+    },
+    "DiscoverDynamicCardVerificationCode": {
+      "type": "structure",
+      "required": [
+        "CardExpiryDate",
+        "UnpredictableNumber",
+        "ApplicationTransactionCounter"
+      ],
+      "members": {
+        "CardExpiryDate": "CardExpiryDateType",
+        "UnpredictableNumber": "HexLengthBetween2And8",
+        "ApplicationTransactionCounter": "HexLengthBetween2And4"
       }
     },
     "DukptAttributes": {
@@ -174,6 +307,36 @@
         "REQUEST",
         "RESPONSE"
       ]
+    },
+    "DynamicCardVerificationCode": {
+      "type": "structure",
+      "required": [
+        "UnpredictableNumber",
+        "PanSequenceNumber",
+        "ApplicationTransactionCounter",
+        "TrackData"
+      ],
+      "members": {
+        "UnpredictableNumber": "HexLengthBetween2And8",
+        "PanSequenceNumber": "NumberLengthEquals2",
+        "ApplicationTransactionCounter": "HexLengthBetween2And4",
+        "TrackData": "TrackDataType"
+      }
+    },
+    "DynamicCardVerificationValue": {
+      "type": "structure",
+      "required": [
+        "PanSequenceNumber",
+        "CardExpiryDate",
+        "ServiceCode",
+        "ApplicationTransactionCounter"
+      ],
+      "members": {
+        "PanSequenceNumber": "NumberLengthEquals2",
+        "CardExpiryDate": "CardExpiryDateType",
+        "ServiceCode": "ServiceCodeType",
+        "ApplicationTransactionCounter": "HexLengthBetween2And4"
+      }
     },
     "EcdhDerivationAttributes": {
       "type": "structure",
@@ -303,6 +466,35 @@
         "OFB"
       ]
     },
+    "GenerateAuthRequestCryptogramInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier",
+        "TransactionData",
+        "MajorKeyDerivationMode",
+        "SessionKeyDerivationAttributes"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType",
+        "TransactionData": "TransactionDataType",
+        "MajorKeyDerivationMode": "MajorKeyDerivationMode",
+        "SessionKeyDerivationAttributes": "SessionKeyDerivation"
+      }
+    },
+    "GenerateCardValidationDataInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier",
+        "PrimaryAccountNumber",
+        "GenerationAttributes"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType",
+        "PrimaryAccountNumber": "PrimaryAccountNumberType",
+        "GenerationAttributes": "CardGenerationAttributes",
+        "ValidationDataLength": "IntegerRangeBetween3And5Type"
+      }
+    },
     "GenerateMacEmvPinChangeInput": {
       "type": "structure",
       "required": [
@@ -368,6 +560,18 @@
       "max": 24,
       "pattern": "(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{20}|[0-9a-fA-F]{24})"
     },
+    "HexLengthBetween2And4": {
+      "type": "string",
+      "min": 2,
+      "max": 4,
+      "pattern": "[0-9a-fA-F]+"
+    },
+    "HexLengthBetween2And8": {
+      "type": "string",
+      "min": 2,
+      "max": 8,
+      "pattern": "[0-9a-fA-F]+"
+    },
     "HexLengthEquals1": {
       "type": "string",
       "min": 1,
@@ -378,6 +582,12 @@
       "type": "string",
       "min": 4,
       "max": 4,
+      "pattern": "[0-9a-fA-F]+"
+    },
+    "HexLengthEquals8": {
+      "type": "string",
+      "min": 8,
+      "max": 8,
       "pattern": "[0-9a-fA-F]+"
     },
     "Ibm3624NaturalPin": {
@@ -461,6 +671,11 @@
       "type": "integer",
       "min": 0,
       "max": 6
+    },
+    "IntegerRangeBetween3And5Type": {
+      "type": "integer",
+      "min": 3,
+      "max": 5
     },
     "IntegerRangeBetween4And12": {
       "type": "integer",
@@ -683,6 +898,12 @@
       "max": 19,
       "pattern": "[0-9]+"
     },
+    "ProprietaryAuthenticationDataType": {
+      "type": "string",
+      "min": 1,
+      "max": 16,
+      "pattern": "[0-9a-fA-F]+"
+    },
     "ReEncryptDataInput": {
       "type": "structure",
       "required": [
@@ -710,11 +931,39 @@
         "Dukpt": "DukptEncryptionAttributes"
       }
     },
+    "ServiceCodeType": {
+      "type": "string",
+      "min": 3,
+      "max": 3,
+      "pattern": "[0-9]+"
+    },
     "SessionDerivationDataType": {
       "type": "string",
       "min": 16,
       "max": 16,
       "pattern": "[0-9a-fA-F]+"
+    },
+    "SessionKeyAmex": {
+      "type": "structure",
+      "required": [
+        "PrimaryAccountNumber",
+        "PanSequenceNumber"
+      ],
+      "members": {
+        "PrimaryAccountNumber": "PrimaryAccountNumberType",
+        "PanSequenceNumber": "NumberLengthEquals2"
+      }
+    },
+    "SessionKeyDerivation": {
+      "type": "structure",
+      "members": {
+        "EmvCommon": "SessionKeyEmvCommon",
+        "Mastercard": "SessionKeyMastercard",
+        "Emv2000": "SessionKeyEmv2000",
+        "Amex": "SessionKeyAmex",
+        "Visa": "SessionKeyVisa",
+        "UnionPay": "SessionKeyUnionPay"
+      }
     },
     "SessionKeyDerivationMode": {
       "type": "string",
@@ -732,6 +981,71 @@
       "members": {
         "ApplicationCryptogram": "ApplicationCryptogramType",
         "ApplicationTransactionCounter": "HexLengthEquals4"
+      }
+    },
+    "SessionKeyEmv2000": {
+      "type": "structure",
+      "required": [
+        "PrimaryAccountNumber",
+        "PanSequenceNumber",
+        "ApplicationTransactionCounter"
+      ],
+      "members": {
+        "PrimaryAccountNumber": "PrimaryAccountNumberType",
+        "PanSequenceNumber": "NumberLengthEquals2",
+        "ApplicationTransactionCounter": "HexLengthEquals4"
+      }
+    },
+    "SessionKeyEmvCommon": {
+      "type": "structure",
+      "required": [
+        "PrimaryAccountNumber",
+        "PanSequenceNumber",
+        "ApplicationTransactionCounter"
+      ],
+      "members": {
+        "PrimaryAccountNumber": "PrimaryAccountNumberType",
+        "PanSequenceNumber": "NumberLengthEquals2",
+        "ApplicationTransactionCounter": "HexLengthEquals4"
+      }
+    },
+    "SessionKeyMastercard": {
+      "type": "structure",
+      "required": [
+        "PrimaryAccountNumber",
+        "PanSequenceNumber",
+        "ApplicationTransactionCounter",
+        "UnpredictableNumber"
+      ],
+      "members": {
+        "PrimaryAccountNumber": "PrimaryAccountNumberType",
+        "PanSequenceNumber": "NumberLengthEquals2",
+        "ApplicationTransactionCounter": "HexLengthEquals4",
+        "UnpredictableNumber": "HexLengthEquals8"
+      }
+    },
+    "SessionKeyUnionPay": {
+      "type": "structure",
+      "required": [
+        "PrimaryAccountNumber",
+        "PanSequenceNumber",
+        "ApplicationTransactionCounter"
+      ],
+      "members": {
+        "PrimaryAccountNumber": "PrimaryAccountNumberType",
+        "PanSequenceNumber": "NumberLengthEquals2",
+        "ApplicationTransactionCounter": "HexLengthEquals4"
+      }
+    },
+    "SessionKeyVisa": {
+      "type": "structure",
+      "required": [
+        "PrimaryAccountNumber",
+        "PanSequenceNumber"
+      ],
+      "members": {
+        "PrimaryAccountNumber": "PrimaryAccountNumberType",
+        "PanSequenceNumber": "NumberLengthEquals2"
       }
     },
     "SharedInformation": {
@@ -777,11 +1091,23 @@
       "max": 9984,
       "pattern": "[0-9a-zA-Z]+"
     },
+    "TrackDataType": {
+      "type": "string",
+      "min": 2,
+      "max": 160,
+      "pattern": "[0-9a-fA-F]+"
+    },
     "TransactionAmountType": {
       "type": "string",
       "min": 12,
       "max": 12,
       "pattern": "[0-9]+"
+    },
+    "TransactionDataType": {
+      "type": "string",
+      "min": 2,
+      "max": 1024,
+      "pattern": "[0-9a-fA-F]+"
     },
     "TranslatePinDataInput": {
       "type": "structure",
@@ -837,11 +1163,50 @@
       "type": "structure",
       "members": {}
     },
+    "ValidationDataType": {
+      "type": "string",
+      "min": 3,
+      "max": 5,
+      "pattern": "[0-9]+"
+    },
     "VerificationValueType": {
       "type": "string",
       "min": 4,
       "max": 12,
       "pattern": "[0-9]+"
+    },
+    "VerifyAuthRequestCryptogramInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier",
+        "TransactionData",
+        "AuthRequestCryptogram",
+        "MajorKeyDerivationMode",
+        "SessionKeyDerivationAttributes"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType",
+        "TransactionData": "TransactionDataType",
+        "AuthRequestCryptogram": "AuthRequestCryptogramType",
+        "MajorKeyDerivationMode": "MajorKeyDerivationMode",
+        "SessionKeyDerivationAttributes": "SessionKeyDerivation",
+        "AuthResponseAttributes": "CryptogramAuthResponse"
+      }
+    },
+    "VerifyCardValidationDataInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier",
+        "PrimaryAccountNumber",
+        "VerificationAttributes",
+        "ValidationData"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType",
+        "PrimaryAccountNumber": "PrimaryAccountNumberType",
+        "VerificationAttributes": "CardVerificationAttributes",
+        "ValidationData": "ValidationDataType"
+      }
     },
     "VerifyMacInput": {
       "type": "structure",

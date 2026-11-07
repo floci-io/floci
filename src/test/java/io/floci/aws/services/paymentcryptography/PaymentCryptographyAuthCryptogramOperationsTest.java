@@ -34,8 +34,10 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
 
     private static final String IMK = "0123456789ABCDEFFEDCBA9876543210";
     private static final String PAN = "4111111111111111";
-    private static final String PSN = "0001";
-    private static final String ATC = "0000000000000001";
+    /** The PAN sequence number, which the model states is two digits. */
+    private static final String PSN = "01";
+    /** The application transaction counter, which the model states is two bytes. */
+    private static final String ATC = "0001";
     private static final String TRANSACTION_DATA =
             "000000000100000000000008000000000000080010000000000000000000000000000000";
 
@@ -91,11 +93,13 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
 
     @Test
     void theDerivationsAreTheOnesTheStandardGives() {
+        // The values are the ones the EMV derivation gives for these inputs: the master key
+        // from the packed PAN || PSN, and the session key from the counter and that key.
         byte[] masterKey = EmvCrypto.deriveIccMasterKey(HEX.parseHex(IMK), PAN, PSN);
-        assertEquals("4F5891BFD91C5B106B3445AB2AFD7A89", HEX.formatHex(masterKey));
-        assertEquals("C764C813866737C7985192465B1AC8EA",
+        assertEquals("A768CE9E1551FDE3A45B4C7C3DE9DC52", HEX.formatHex(masterKey));
+        assertEquals("86CBD007BF1C4AE0B52643B64FB9371F",
                 HEX.formatHex(EmvCrypto.deriveIccMasterKeyOptionB(HEX.parseHex(IMK), PAN, PSN)));
-        assertEquals("FE924AE3BF4620D94C8F1351B061D54A",
+        assertEquals("892FA4A7F8C8ABC7464FBF5DD63ECBD5",
                 HEX.formatHex(EmvCrypto.deriveSessionKey(masterKey, HEX.parseHex(ATC))));
     }
 
@@ -150,7 +154,6 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
         ObjectNode amex = mapper.createObjectNode();
         amex.put("PrimaryAccountNumber", PAN);
         amex.put("PanSequenceNumber", PSN);
-        amex.put("ApplicationTransactionCounter", ATC);
         ObjectNode attributes = mapper.createObjectNode();
         attributes.set("Amex", amex);
 
@@ -177,5 +180,45 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
                         "SessionKeyDerivationAttributes", emvCommon())), "us-east-1"));
 
         assertEquals("InvalidKeyUsageException", refused.getErrorCode());
+    }
+
+    @Test
+    void theSequenceNumberTheModelStatesIsTheOneTheDerivationTakes() {
+        PaymentCryptographyKey key = createKey("DeriveKey");
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode common = mapper.createObjectNode();
+        common.put("PrimaryAccountNumber", PAN);
+        // The model states that the PAN sequence number is two digits, and the derivation
+        // reads the last eight bytes of the packed PAN || PSN, so a longer one moves the
+        // window the master key is taken from.
+        common.put("PanSequenceNumber", "0001");
+        common.put("ApplicationTransactionCounter", ATC);
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.set("EmvCommon", common);
+
+        AwsException refused = assertThrows(AwsException.class, () -> cryptogram.generate(
+                request(Map.of(
+                        "KeyIdentifier", key.getArn(),
+                        "TransactionData", TRANSACTION_DATA,
+                        "MajorKeyDerivationMode", "EMV_OPTION_A",
+                        "SessionKeyDerivationAttributes", attributes)), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("PanSequenceNumber"), refused.getMessage());
+    }
+
+    @Test
+    void transactionDataThatIsNotHexadecimalIsRefused() {
+        PaymentCryptographyKey key = createKey("DeriveKey");
+
+        AwsException refused = assertThrows(AwsException.class, () -> cryptogram.generate(
+                request(Map.of(
+                        "KeyIdentifier", key.getArn(),
+                        "TransactionData", "not hexadecimal",
+                        "MajorKeyDerivationMode", "EMV_OPTION_A",
+                        "SessionKeyDerivationAttributes", emvCommon())), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("TransactionData"), refused.getMessage());
     }
 }

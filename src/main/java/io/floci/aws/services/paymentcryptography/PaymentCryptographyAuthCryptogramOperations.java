@@ -3,7 +3,6 @@ package io.floci.aws.services.paymentcryptography;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.paymentcryptography.crypto.EmvCrypto;
-import io.floci.aws.services.paymentcryptography.crypto.PinCrypto;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -13,7 +12,6 @@ import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -94,11 +92,9 @@ public class PaymentCryptographyAuthCryptogramOperations {
      * The cryptogram of an authorization request.
      */
     Map<String, Object> generate(JsonNode request, String region) {
-        String keyIdentifier = requiredKeyIdentifier(request);
+        PaymentCryptographyDataRequestShapes.check("GenerateAuthRequestCryptogram", request);
+        String keyIdentifier = text(request, "KeyIdentifier");
         String transactionData = text(request, "TransactionData");
-        if (!isHex(transactionData)) {
-            throw validation("TransactionData must be hexadecimal");
-        }
         SessionKey sk = resolveDerivation(request);
 
         PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
@@ -122,15 +118,10 @@ public class PaymentCryptographyAuthCryptogramOperations {
      * with it.
      */
     Map<String, Object> verify(JsonNode request, String region) {
-        String keyIdentifier = requiredKeyIdentifier(request);
+        PaymentCryptographyDataRequestShapes.check("VerifyAuthRequestCryptogram", request);
+        String keyIdentifier = text(request, "KeyIdentifier");
         String arqc = text(request, "AuthRequestCryptogram");
-        if (!isHex(arqc) || arqc.length() != 16) {
-            throw validation("AuthRequestCryptogram must be 16 hexadecimal characters");
-        }
         String transactionData = text(request, "TransactionData");
-        if (!isHex(transactionData)) {
-            throw validation("TransactionData must be hexadecimal");
-        }
         SessionKey sk = resolveDerivation(request);
 
         // The response attributes are optional, and the answer carries the response value only
@@ -150,9 +141,6 @@ public class PaymentCryptographyAuthCryptogramOperations {
                 arpcMethod = "1";
                 JsonNode method = responseAttributes.get(variant);
                 arc = text(method, "AuthResponseCode");
-                if (arc.isEmpty()) {
-                    throw validation("AuthResponseAttributes.ArpcMethod1.AuthResponseCode is required");
-                }
             } else if ("ArpcMethod2".equals(variant)) {
                 arpcMethod = "2";
                 // The variant's own members are read before the scheme constraints, because
@@ -180,12 +168,6 @@ public class PaymentCryptographyAuthCryptogramOperations {
                     }
                     throw validation("ARPC method 2 is not used in practice with the Visa session "
                             + "key derivation (method 1 only)");
-                }
-                if (csu == null || !isHex(csu) || csu.length() != 8) {
-                    throw validation("ArpcMethod2.CardStatusUpdate must be 8 hexadecimal characters");
-                }
-                if (!pad.isEmpty() && !isHex(pad)) {
-                    throw validation("ArpcMethod2.ProprietaryAuthenticationData must be hexadecimal");
                 }
             } else {
                 throw validation("AuthResponseAttributes." + variant
@@ -269,17 +251,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
      * both cryptogram operations share.
      */
     private static SessionKey resolveDerivation(JsonNode request) {
-        String mode = text(request, "MajorKeyDerivationMode");
-        boolean optionB;
-        if ("EMV_OPTION_B".equals(mode)) {
-            optionB = true;
-        } else if ("EMV_OPTION_A".equals(mode)) {
-            optionB = false;
-        } else {
-            throw validation("MajorKeyDerivationMode '"
-                    + (mode == null || mode.isEmpty() ? "(missing)" : mode)
-                    + "' not supported by this service (EMV_OPTION_A, EMV_OPTION_B)");
-        }
+        boolean optionB = "EMV_OPTION_B".equals(text(request, "MajorKeyDerivationMode"));
 
         JsonNode skd = request.get("SessionKeyDerivationAttributes");
         if (skd == null) {
@@ -305,41 +277,15 @@ public class PaymentCryptographyAuthCryptogramOperations {
         JsonNode attrs = skd.get(variant);
         String pan = text(attrs, "PrimaryAccountNumber");
         String psn = text(attrs, "PanSequenceNumber");
-        if (psn.isEmpty()) {
-            psn = "00";
-        }
         String atc = text(attrs, "ApplicationTransactionCounter");
-        if (pan.isEmpty()) {
-            throw validation("SessionKeyDerivationAttributes." + variant
-                    + ".PrimaryAccountNumber is required");
-        }
-        String digits = PinCrypto.digits(pan);
-        if (digits.length() < 12 || digits.length() > 19) {
-            throw validation("SessionKeyDerivationAttributes." + variant
-                    + ".PrimaryAccountNumber must be 12 to 19 digits");
-        }
         // The master key derivation takes the last eight bytes of PAN || PSN, so the two together
         // have to supply eight bytes. A PAN that cannot is refused here, by name, rather than
         // inside the derivation.
-        int packed = (digits.length() + PinCrypto.digits(psn).length() + 1) / 2;
+        int packed = (pan.length() + psn.length() + 1) / 2;
         if (packed < 8) {
             throw validation("SessionKeyDerivationAttributes." + variant
                     + ".PrimaryAccountNumber is too short: the PAN and PanSequenceNumber must "
                     + "supply at least 8 bytes for the master key derivation");
-        }
-        if (!DIRECT_SK.contains(variant) && atc.isEmpty()) {
-            throw validation("SessionKeyDerivationAttributes." + variant
-                    + ".ApplicationTransactionCounter is required");
-        }
-        // The counter is hex and the derivation decodes it, so an odd length or a non-hex
-        // character is the caller's mistake, not an internal error.
-        if (!atc.isEmpty()) {
-            String counter = atc.toUpperCase(Locale.ROOT);
-            if (counter.length() % 2 != 0 || !isHex(counter)) {
-                throw validation("SessionKeyDerivationAttributes." + variant
-                        + ".ApplicationTransactionCounter must be an even number of hexadecimal "
-                        + "characters");
-            }
         }
         if (mastercard && optionB) {
             // The reference implementation's own constraint: master key derivation option B is
@@ -353,15 +299,6 @@ public class PaymentCryptographyAuthCryptogramOperations {
             // concatenated block whose layout the caller chooses, so a fixed offset would be
             // right for one CDOL and silently wrong for every other.
             unpredictableNumber = text(attrs, "UnpredictableNumber");
-            if (unpredictableNumber.isEmpty()) {
-                throw validation("SessionKeyDerivationAttributes.Mastercard.UnpredictableNumber "
-                        + "is required");
-            }
-            // EMV tag 9F37 is four bytes, so eight hexadecimal characters.
-            if (unpredictableNumber.length() != 8 || !isHex(unpredictableNumber)) {
-                throw validation("SessionKeyDerivationAttributes.Mastercard.UnpredictableNumber "
-                        + "must be 8 hexadecimal characters (4 bytes)");
-            }
         }
         Scheme scheme = mastercard ? Scheme.MASTERCARD
                 : (common ? Scheme.EMV_COMMON : Scheme.VSDC);
@@ -372,14 +309,6 @@ public class PaymentCryptographyAuthCryptogramOperations {
     }
 
     // ---- the helpers ---------------------------------------------------------
-
-    private String requiredKeyIdentifier(JsonNode request) {
-        String identifier = text(request, "KeyIdentifier");
-        if (identifier.isEmpty()) {
-            throw validation("KeyIdentifier is required");
-        }
-        return identifier;
-    }
 
     private PaymentCryptographyKey requiredKey(String identifier, String region) {
         PaymentCryptographyKey key = service.findKey(region, identifier);
@@ -426,20 +355,6 @@ public class PaymentCryptographyAuthCryptogramOperations {
             found = fields.next().getKey();
         }
         return found;
-    }
-
-    private static boolean isHex(String value) {
-        if (value == null || value.isEmpty() || value.length() % 2 != 0) {
-            return false;
-        }
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-            if (!hex) {
-                return false;
-            }
-        }
-        return true;
     }
 
     /** The text of a request member. */

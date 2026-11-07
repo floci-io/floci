@@ -59,9 +59,10 @@ public class PaymentCryptographyCardValidationOperations {
      * The card validation value of a card account.
      */
     Map<String, Object> generate(JsonNode request, String region) {
-        String keyIdentifier = requiredKeyIdentifier(request);
-        String pan = requirePan(text(request, "PrimaryAccountNumber"));
-        Integer validationDataLength = request.has("ValidationDataLength")
+        PaymentCryptographyDataRequestShapes.check("GenerateCardValidationData", request);
+        String keyIdentifier = text(request, "KeyIdentifier");
+        String pan = text(request, "PrimaryAccountNumber");
+        Integer validationDataLength = request.hasNonNull("ValidationDataLength")
                 ? request.path("ValidationDataLength").asInt()
                 : null;
         if (validationDataLength != null && validationDataLength != 3) {
@@ -85,8 +86,9 @@ public class PaymentCryptographyCardValidationOperations {
      * The card validation value of a card account, verified.
      */
     Map<String, Object> verify(JsonNode request, String region) {
-        String keyIdentifier = requiredKeyIdentifier(request);
-        String pan = requirePan(text(request, "PrimaryAccountNumber"));
+        PaymentCryptographyDataRequestShapes.check("VerifyCardValidationData", request);
+        String keyIdentifier = text(request, "KeyIdentifier");
+        String pan = text(request, "PrimaryAccountNumber");
         String validationData = text(request, "ValidationData");
         if (!validationData.matches("[0-9]{3}")) {
             throw validation("ValidationData must be three digits");
@@ -198,12 +200,6 @@ public class PaymentCryptographyCardValidationOperations {
                 JsonNode value = attributes.get(variant);
                 String expiry = text(value, "CardExpiryDate");
                 String serviceCode = text(value, "ServiceCode");
-                if (expiry.isEmpty()) {
-                    throw validation("CardVerificationValue1.CardExpiryDate is required");
-                }
-                if (serviceCode.isEmpty()) {
-                    throw validation("CardVerificationValue1.ServiceCode is required");
-                }
                 CardAttrs out = new CardAttrs();
                 out.variant = variant;
                 out.expiry = expiry;
@@ -213,10 +209,6 @@ public class PaymentCryptographyCardValidationOperations {
             case "CardVerificationValue2": {
                 JsonNode value = attributes.get(variant);
                 String expiry = text(value, "CardExpiryDate");
-                if (expiry.isEmpty()) {
-                    throw validation("CardVerificationValue2.CardExpiryDate is required");
-                }
-                checkDigits("CardVerificationValue2.CardExpiryDate", expiry, 4, 4);
                 CardAttrs out = new CardAttrs();
                 out.variant = variant;
                 out.expiry = expiry;
@@ -229,23 +221,6 @@ public class PaymentCryptographyCardValidationOperations {
                 String serviceCode = text(value, "ServiceCode");
                 String psn = text(value, "PanSequenceNumber");
                 String atc = text(value, "ApplicationTransactionCounter");
-                if (expiry.isEmpty()) {
-                    throw validation("DynamicCardVerificationValue.CardExpiryDate is required");
-                }
-                if (serviceCode.isEmpty()) {
-                    throw validation("DynamicCardVerificationValue.ServiceCode is required");
-                }
-                if (psn.isEmpty()) {
-                    throw validation("DynamicCardVerificationValue.PanSequenceNumber is required");
-                }
-                if (atc.isEmpty()) {
-                    throw validation(
-                            "DynamicCardVerificationValue.ApplicationTransactionCounter is required");
-                }
-                checkDigits("DynamicCardVerificationValue.CardExpiryDate", expiry, 4, 4);
-                checkDigits("DynamicCardVerificationValue.ServiceCode", serviceCode, 3, 3);
-                checkDigits("DynamicCardVerificationValue.PanSequenceNumber", psn, 2, 2);
-                checkHex("DynamicCardVerificationValue.ApplicationTransactionCounter", atc, 2, 4);
                 CardAttrs out = new CardAttrs();
                 out.variant = variant;
                 out.expiry = expiry;
@@ -260,23 +235,6 @@ public class PaymentCryptographyCardValidationOperations {
                 String atc = text(value, "ApplicationTransactionCounter");
                 String trackData = text(value, "TrackData");
                 String unpredictable = text(value, "UnpredictableNumber");
-                if (psn.isEmpty()) {
-                    throw validation("DynamicCardVerificationCode.PanSequenceNumber is required");
-                }
-                if (atc.isEmpty()) {
-                    throw validation(
-                            "DynamicCardValidationCode.ApplicationTransactionCounter is required");
-                }
-                if (trackData.isEmpty()) {
-                    throw validation("DynamicCardVerificationCode.TrackData is required");
-                }
-                if (unpredictable.isEmpty()) {
-                    throw validation("DynamicCardVerificationCode.UnpredictableNumber is required");
-                }
-                checkDigits("DynamicCardVerificationCode.PanSequenceNumber", psn, 2, 2);
-                checkHex("DynamicCardVerificationCode.ApplicationTransactionCounter", atc, 2, 4);
-                checkHex("DynamicCardVerificationCode.TrackData", trackData, 2, 160);
-                checkHex("DynamicCardVerificationCode.UnpredictableNumber", unpredictable, 2, 8);
                 CardAttrs out = new CardAttrs();
                 out.variant = variant;
                 out.panSequenceNumber = psn;
@@ -289,33 +247,6 @@ public class PaymentCryptographyCardValidationOperations {
                 throw validation(variant + " not supported by this service "
                         + "(only CardVerificationValue1/CardVerificationValue2"
                         + "/DynamicCardVerificationValue/DynamicCardVerificationCode)");
-        }
-    }
-
-    /** A field of exactly decimal digits. */
-    private static void checkDigits(String field, String value, int min, int max) {
-        if (value.length() < min || value.length() > max) {
-            throw validation(field + " must be " + min + " to " + max + " digits");
-        }
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            if (c < '0' || c > '9') {
-                throw validation(field + " must be decimal digits");
-            }
-        }
-    }
-
-    /** A field of hexadecimal characters. */
-    private static void checkHex(String field, String value, int min, int max) {
-        if (value.length() < min || value.length() > max) {
-            throw validation(field + " must be " + min + " to " + max + " hexadecimal characters");
-        }
-        for (int i = 0; i < value.length(); i++) {
-            char c = Character.toLowerCase(value.charAt(i));
-            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-            if (!hex) {
-                throw validation(field + " must be hexadecimal characters");
-            }
         }
     }
 
@@ -335,29 +266,12 @@ public class PaymentCryptographyCardValidationOperations {
         return found;
     }
 
-    private String requiredKeyIdentifier(JsonNode request) {
-        String identifier = text(request, "KeyIdentifier");
-        if (identifier.isEmpty()) {
-            throw validation("KeyIdentifier is required");
-        }
-        return identifier;
-    }
-
     private PaymentCryptographyKey requiredKey(String identifier, String region) {
         PaymentCryptographyKey key = service.findKey(region, identifier);
         if (key == null) {
             throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 400);
         }
         return key;
-    }
-
-    /** The account number, which the card verification value is computed over. */
-    private static String requirePan(String pan) {
-        String digits = pan == null ? "" : pan.replaceAll("\\D", "");
-        if (digits.length() < 12 || digits.length() > 19) {
-            throw validation("PrimaryAccountNumber must be 12-19 digits");
-        }
-        return digits;
     }
 
     /**

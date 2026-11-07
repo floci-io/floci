@@ -155,4 +155,38 @@ class PaymentCryptographyCardValidationOperationsTest {
 
         assertEquals("InvalidKeyUsageException", refused.getErrorCode());
     }
+
+    @Test
+    void anExpiryThatIsNotFourDigitsIsRefused() {
+        PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+                "Generate", "Verify");
+
+        // The model states that the expiry is four digits, and the card verification value
+        // is computed over the expiry the request carries.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> cardValidation.generate(request(Map.of(
+                        "KeyIdentifier", cvk.getArn(),
+                        "PrimaryAccountNumber", PAN,
+                        "GenerationAttributes", cardVerificationValue1("30", "201"))), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("CardExpiryDate"), refused.getMessage());
+    }
+
+    @Test
+    void anAccountNumberThatIsNotDigitsIsRefused() {
+        PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+                "Generate", "Verify");
+
+        // The model states that the account number is digits, so a formatted one is refused
+        // rather than read as the digits it carries.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> cardValidation.generate(request(Map.of(
+                        "KeyIdentifier", cvk.getArn(),
+                        "PrimaryAccountNumber", "5081-4700-8263-9564",
+                        "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("PrimaryAccountNumber"), refused.getMessage());
+    }
 }
