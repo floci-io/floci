@@ -2,10 +2,12 @@ package io.floci.aws.core.common;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.PartitionMatrix;
 import io.floci.aws.testing.PartitionMatrix.PartitionCase;
 import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.arc.Arc;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.config.JsonPathConfig;
 import io.restassured.response.Response;
@@ -45,7 +47,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "aps", "autoscaling", "backup", "batch", "bcmdataexports", "bedrock", "bedrockagentcorecontrol", "ce",
             "cloudfront", "cloudmap", "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito",
             "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dsql", "dynamodb", "ec2",
-            "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elb", "elbv2", "emr", "emrserverless",
+            "ec2instanceconnect", "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elb", "elbv2", "emr", "emrserverless",
             "eventbridge", "eventbridgev2", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "paymentcryptography", "pipes", "quicksight", "ram", "rds", "redshift", "redshiftserverless",
@@ -532,6 +534,51 @@ class PartitionCrossServiceSmokeIntegrationTest {
             .formParam("Cascade", "true")
         .when().post("/"));
         PartitionMatrix.assertGlobalArnIn(partitionCase, created.xmlPath().getString("CreateIpamResponse.ipam.ipamArn"));
+    }
+
+    /**
+     * SendSSHPublicKey answers only RequestId and Success; the caller ARN it mints is read back
+     * from the signed active-keys document IMDS would serve the instance, and the signer host from
+     * the name its certificate is issued under.
+     */
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void instanceConnectCallerArnAndSignerHost(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "ec2-instance-connect");
+        String instanceId = signed(region, "ec2")
+            .formParam("Action", "RunInstances")
+            .formParam("Version", "2016-11-15")
+            .formParam("ImageId", "ami-0123456789abcdef0")
+            .formParam("InstanceType", "t3.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("RunInstancesResponse.instancesSet.item.instanceId");
+        cleanup.register(() -> signed(region, "ec2")
+            .formParam("Action", "TerminateInstances")
+            .formParam("Version", "2016-11-15")
+            .formParam("InstanceId.1", instanceId)
+        .when().post("/"));
+        // A mock launch settles on the next describe, as it does for any other caller.
+        String state = signed(region, "ec2")
+            .formParam("Action", "DescribeInstances")
+            .formParam("Version", "2016-11-15")
+            .formParam("InstanceId.1", instanceId)
+        .when().post("/").then().statusCode(200).extract().xmlPath()
+            .getString("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name");
+        assertEquals("running", state);
+
+        json11(region, "ec2-instance-connect", "AWSEC2InstanceConnectService.SendSSHPublicKey",
+                "{\"InstanceId\":\"" + instanceId + "\",\"InstanceOSUser\":\"admin\",\"SSHPublicKey\":\""
+                + "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl smoke\"}")
+        .when().post("/").then().statusCode(200);
+
+        String document = Arc.container().instance(InstanceConnectKeys.class).get()
+                .activeKeysDocument(region, instanceId, "admin").orElseThrow();
+        String caller = document.lines().filter(line -> line.startsWith("#Caller="))
+                .findFirst().orElseThrow().substring("#Caller=".length());
+        PartitionMatrix.assertGlobalArnIn(partitionCase, caller);
+        assertRegionalHostIn(partitionCase, InstanceConnectKeys.signerCommonName(region));
     }
 
     @ParameterizedTest
