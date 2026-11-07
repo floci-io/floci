@@ -339,11 +339,12 @@ public class RedshiftAuditLogPublisher {
             }
 
             String line = formatS3Line(logType, record);
+            byte[] newMember = compressGzipMember(line);
             int stripeIndex = Math.floorMod((bucket + "/" + key).hashCode(), STRIPE_COUNT);
             Object lock = deliveryStripes[stripeIndex];
             synchronized (lock) {
                 try {
-                    byte[] gzipped = appendGzipMember(bucket, key, line);
+                    byte[] gzipped = appendGzipMember(bucket, key, newMember);
                     s3.putObject(bucket, key, gzipped, "application/x-gzip", Map.of());
                     safeRecordOutcome(accountId, cluster.getClusterIdentifier(), cluster.getLoggingGeneration(), now, true, null);
                 } catch (AwsException | IOException exception) {
@@ -374,14 +375,16 @@ public class RedshiftAuditLogPublisher {
         }
     }
 
-    private byte[] appendGzipMember(String bucket, String key, String newLine) throws IOException {
+    private static byte[] compressGzipMember(String newLine) throws IOException {
         ByteArrayOutputStream lineGz = new ByteArrayOutputStream();
         try (GZIPOutputStream gos = new GZIPOutputStream(lineGz)) {
             gos.write(newLine.getBytes(StandardCharsets.UTF_8));
             gos.write('\n');
         }
-        byte[] newMember = lineGz.toByteArray();
+        return lineGz.toByteArray();
+    }
 
+    private byte[] appendGzipMember(String bucket, String key, byte[] newMember) throws IOException {
         byte[] existingBytes = null;
         try {
             S3Object existingObj = s3.getObject(bucket, key);

@@ -2679,6 +2679,22 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void recordAuditDeliveryOutcomeUsesSuppliedAccountIdRegardlessOfRequestContext() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(1L);
+        when(clusterBackend.getForAccount("999999999999", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("999999999999", "my-cluster", 1L, ts, true, null);
+
+        assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+        verify(clusterBackend).putForAccount("999999999999", "my-cluster", cluster);
+        verify(clusterBackend, never()).put(anyString(), any());
+    }
+
+    @Test
     void modifyClusterIamRolesRejectsMalformedRoleArnWithoutChangingTheCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("c1");
