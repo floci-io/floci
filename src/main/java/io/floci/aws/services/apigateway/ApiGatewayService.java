@@ -16,6 +16,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -73,7 +74,6 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
-import java.time.temporal.ChronoUnit;
 import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -93,7 +93,7 @@ import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class ApiGatewayService implements ResourceProvider {
+public class ApiGatewayService implements ResourceProvider, Resettable {
 
     /** The only partition where API Gateway offers edge-optimized APIs and custom domain names. */
     private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
@@ -151,7 +151,7 @@ public class ApiGatewayService implements ResourceProvider {
     private final Object usagePlanLock = new Object();
     /** Calls admitted per UTC day, keyed region::usagePlanId::keyId::yyyy-MM-dd. */
     private final AccountAwareStorageBackend<Long> usageStore;
-    /** The usage plan throttles' token buckets, keyed region::usagePlanId::keyId; in memory only. */
+    /** The usage plan throttles' token buckets, keyed account::region::usagePlanId::keyId; in memory only. */
     private final Map<String, TokenBucket> throttleBuckets = new HashMap<>();
     /** Guards the usage counts and the token buckets: metering a call is a read-modify-write of both. */
     private final Object usageLock = new Object();
@@ -1777,7 +1777,6 @@ public class ApiGatewayService implements ResourceProvider {
         if (end.isBefore(start)) {
             throw new AwsException("BadRequestException", "Usage end date must be after start date", 400);
         }
-        int days = (int) ChronoUnit.DAYS.between(start, end) + 1;
         int pageSize = resolveUsageLimit(limit);
 
         List<UsagePlanKey> keys = getUsagePlanKeys(region, usagePlanId).stream()
@@ -1811,19 +1810,28 @@ public class ApiGatewayService implements ResourceProvider {
         // Under the metering lock, so a pair never mixes counts from before and after a call.
         synchronized (usageLock) {
             for (UsagePlanKey key : page) {
-                String meterKey = usagePlanKeyPathKey(region, usagePlanId, key.getId());
-                List<long[]> perDay = new ArrayList<>();
-                for (int i = 0; i < days; i++) {
-                    LocalDate day = start.plusDays(i);
-                    perDay.add(quota == null ? new long[] {0L, 0L} : new long[] {usedBetween(meterKey, day, day),
-                            Math.max(0L, quota.limit() - usedBetween(meterKey, quotaPeriodStart(day, quota), day))});
-                }
-                items.put(key.getId(), perDay);
+                items.put(key.getId(), quota == null
+                        ? start.datesUntil(end.plusDays(1)).map(day -> new long[] {0L, 0L}).toList()
+                        : usagePerDay(usagePlanKeyPathKey(region, usagePlanId, key.getId()), start, end, quota));
             }
         }
         // A token only when another page exists; its absence is what ends a caller's loop.
         String next = more && !page.isEmpty() ? page.get(page.size() - 1).getId() : null;
         return new UsageReport(usagePlanId, start.toString(), end.toString(), items, next);
+    }
+
+    /** One pass from the start of {@code start}'s quota period, carrying the period's use from day to day. */
+    private List<long[]> usagePerDay(String meterKey, LocalDate start, LocalDate end, UsagePlan.Quota quota) {
+        List<long[]> perDay = new ArrayList<>();
+        long periodUsed = 0L;
+        for (LocalDate day = quotaPeriodStart(start, quota); !day.isAfter(end); day = day.plusDays(1)) {
+            long used = usageStore.get(meterKey + "::" + day).orElse(0L);
+            periodUsed = (quotaPeriodStart(day, quota).equals(day) ? 0L : periodUsed) + used;
+            if (!day.isBefore(start)) {
+                perDay.add(new long[] {used, Math.max(0L, quota.limit() - periodUsed)});
+            }
+        }
+        return perDay;
     }
 
     /**
@@ -1926,6 +1934,14 @@ public class ApiGatewayService implements ResourceProvider {
             usageStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(usageStore::delete);
             String bucketPrefix = regionResolver.getAccountId() + "::" + prefix;
             throttleBuckets.keySet().removeIf(k -> (k + "::").startsWith(bucketPrefix));
+        }
+    }
+
+    /** Storage is wiped before this runs; the in-memory token buckets go with it. */
+    @Override
+    public void clear() {
+        synchronized (usageLock) {
+            throttleBuckets.clear();
         }
     }
 

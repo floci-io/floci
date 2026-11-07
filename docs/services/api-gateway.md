@@ -701,7 +701,8 @@ recreated with the same id starts unused.
   `quota.offset` days. AWS bounds the offset to the period's length but does not document the anchor,
   so the anchor is inferred.
 - **Throttle.** The plan's `throttle` is a token bucket per key that starts full at `burstLimit` and
-  refills at `rateLimit` requests per second. An empty bucket refuses the call with `429`
+  refills at `rateLimit` requests per second. Buckets are held in memory, so a restart or an emulator
+  reset refills them. An empty bucket refuses the call with `429`
   `{"message":"Too Many Requests"}` and `x-amzn-ErrorType: TooManyRequestsException`. AWS throttles on
   a best-effort basis, so the exact moment a burst is cut off can differ. Per-method stage throttles
   and stage or account level throttles are stored but not enforced.

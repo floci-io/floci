@@ -3,14 +3,19 @@ package io.floci.aws.services.apigateway;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.apigateway.model.GatewayResponseType;
 import io.floci.aws.services.apigateway.model.UsagePlan;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.ManualClock;
+import io.floci.aws.testing.StorageFactories;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -20,13 +25,10 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
-import static org.mockito.Mockito.when;
 
 class ApiGatewayUsageMeteringServiceTest {
 
@@ -36,17 +38,9 @@ class ApiGatewayUsageMeteringServiceTest {
     // A Friday.
     private final ManualClock clock = new ManualClock(Instant.parse("2026-11-06T10:00:00Z"));
     private final RegionResolver regionResolver = spy(new RegionResolver(REGION, ACCOUNT));
-    private final ApiGatewayService service = service(clock, regionResolver);
+    private ApiGatewayService service = service(new InMemoryStorageFactory(ACCOUNT));
 
-    private static ApiGatewayService service(ManualClock clock, RegionResolver regionResolver) {
-        Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
-        StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(invocation ->
-                stores.computeIfAbsent(invocation.getArgument(1, String.class),
-                        ignored -> AccountAwareStorageBackend.inMemory(ACCOUNT)));
-        when(storageFactory.create(anyString(), anyString(), any(), any())).thenAnswer(invocation ->
-                stores.computeIfAbsent(invocation.getArgument(1, String.class),
-                        ignored -> AccountAwareStorageBackend.inMemory(ACCOUNT)));
+    private ApiGatewayService service(StorageFactory storageFactory) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         return new ApiGatewayService(storageFactory, config, mock(TlsCertificateManager.class), regionResolver,
                 new ApiGatewayV2Service(storageFactory, config, regionResolver), clock);
@@ -103,6 +97,7 @@ class ApiGatewayUsageMeteringServiceTest {
         assertEquals(List.of(List.of(0L, 5L), List.of(0L, 5L), List.of(0L, 5L), List.of(0L, 5L),
                         List.of(0L, 5L), List.of(2L, 3L), List.of(1L, 2L)),
                 usage(planId, keyId, "2026-10-31", "2026-11-06"));
+        assertEquals(List.of(List.of(1L, 2L)), usage(planId, keyId, "2026-11-06", "2026-11-06"));
     }
 
     // Measured: a plan without a quota reports [0, 0] for a key it admitted.
@@ -150,6 +145,44 @@ class ApiGatewayUsageMeteringServiceTest {
         assertNull(service.meterApiKeyCall(REGION, planId, keyId));
         doReturn("111111111111").when(regionResolver).getAccountId();
         assertNull(service.meterApiKeyCall(REGION, planId, keyId));
+    }
+
+    // An emulator reset wipes the stores and then calls clear(), which takes the in-memory buckets with them.
+    @Test
+    void resetRefillsTheThrottleBuckets() {
+        String planId = plan(Map.of("throttle", Map.of("burstLimit", 1, "rateLimit", 0.0)));
+        String keyId = keyOn(planId);
+        assertNull(service.meterApiKeyCall(REGION, planId, keyId));
+        assertEquals(GatewayResponseType.THROTTLED, service.meterApiKeyCall(REGION, planId, keyId));
+
+        service.clear();
+
+        assertNull(service.meterApiKeyCall(REGION, planId, keyId));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void quotaUseSurvivesARestart(String mode, @TempDir Path directory) {
+        StorageFactory first = StorageFactories.open(directory, mode, ACCOUNT);
+        String planId;
+        String keyId;
+        try {
+            service = service(first);
+            planId = plan(Map.of("quota", Map.of("limit", 1, "period", "DAY")));
+            keyId = keyOn(planId);
+            assertNull(service.meterApiKeyCall(REGION, planId, keyId));
+        } finally {
+            first.shutdownAll();
+        }
+
+        StorageFactory second = StorageFactories.open(directory, mode, ACCOUNT);
+        try {
+            service = service(second);
+            assertEquals(List.of(List.of(1L, 0L)), usage(planId, keyId, "2026-11-06", "2026-11-06"));
+            assertEquals(GatewayResponseType.QUOTA_EXCEEDED, service.meterApiKeyCall(REGION, planId, keyId));
+        } finally {
+            second.shutdownAll();
+        }
     }
 
     @Test
