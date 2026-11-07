@@ -1471,15 +1471,18 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     /**
      * Deleting a key detaches it from every usage plan, matching AWS. Usage plan keys hold their own
      * copy of the key value, so leaving the associations behind would keep a deleted key working as a
-     * credential on the data plane and keep it listed by GetUsagePlanKeys.
+     * credential on the data plane and keep it listed by GetUsagePlanKeys. Under the plan lock, so
+     * CreateUsagePlanKey cannot attach the key after the sweep.
      */
     public void deleteApiKey(String region, String apiKeyId) {
-        getApiKey(region, apiKeyId);
-        for (UsagePlan plan : getUsagePlans(region)) {
-            usagePlanKeyStore.delete(usagePlanKeyPathKey(region, plan.getId(), apiKeyId));
+        synchronized (usagePlanLock) {
+            getApiKey(region, apiKeyId);
+            for (UsagePlan plan : getUsagePlans(region)) {
+                usagePlanKeyStore.delete(usagePlanKeyPathKey(region, plan.getId(), apiKeyId));
+            }
+            forgetUsage(meterKey -> meterKey.startsWith(region + "::") && meterKey.endsWith("::" + apiKeyId));
+            apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
         }
-        forgetUsage(meterKey -> meterKey.startsWith(region + "::") && meterKey.endsWith("::" + apiKeyId));
-        apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
     }
 
     public ApiKey updateApiKey(String region, String apiKeyId, List<Map<String, String>> patchOperations) {
@@ -1744,7 +1747,7 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
 
     // ──────────────────────────── Usage Plan Keys ────────────────────────────
 
-    /** Under the plan lock, so a key cannot be written after DeleteUsagePlan swept the plan's keys. */
+    /** Under the plan lock, so a key cannot be written after DeleteUsagePlan or DeleteApiKey swept it. */
     public UsagePlanKey createUsagePlanKey(String region, String usagePlanId, Map<String, Object> request) {
         synchronized (usagePlanLock) {
             getUsagePlan(region, usagePlanId);

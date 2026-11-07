@@ -235,27 +235,34 @@ class ApiGatewayUsageMeteringServiceTest {
         assertEquals(List.of(List.of(0L, 1L)), usage(planId, keyId, "2026-11-06", "2026-11-06"));
     }
 
-    @Test
-    void keyAddedWhileItsPlanIsDeletedGoesWithThePlan() {
-        String[] planId = new String[1];
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void keyAddedWhileItsPlanOrItselfIsDeletedIsNotLeftBehind(boolean deleteKey) {
+        String[] ids = new String[2];
         CompletableFuture<?>[] deletion = new CompletableFuture<?>[1];
         InMemoryStorage<String, UsagePlanKey> keys = new InMemoryStorage<>() {
             @Override
             public void put(String key, UsagePlanKey value) {
-                deletion[0] = CompletableFuture.runAsync(() -> service.deleteUsagePlan(REGION, planId[0]));
+                deletion[0] = CompletableFuture.runAsync(() -> {
+                    if (deleteKey) {
+                        service.deleteApiKey(REGION, ids[1]);
+                    } else {
+                        service.deleteUsagePlan(REGION, ids[0]);
+                    }
+                });
                 // Unless adding a key holds the plan lock, the deletion completes here, before the write.
                 deletion[0].copy().completeOnTimeout(null, 200, TimeUnit.MILLISECONDS).join();
                 super.put(key, value);
             }
         };
         service = service(new InMemoryStorageFactory(ACCOUNT).withStore("apigateway-usageplankeys.json", keys));
-        planId[0] = plan(Map.of());
-        String keyId = service.createApiKey(REGION, Map.of("name", "racing", "enabled", true)).getId();
+        ids[0] = plan(Map.of());
+        ids[1] = service.createApiKey(REGION, Map.of("name", "racing", "enabled", true)).getId();
 
-        service.createUsagePlanKey(REGION, planId[0], Map.of("keyId", keyId, "keyType", "API_KEY"));
+        service.createUsagePlanKey(REGION, ids[0], Map.of("keyId", ids[1], "keyType", "API_KEY"));
         deletion[0].join();
 
-        assertEquals(List.of(), service.getUsagePlanKeys(REGION, planId[0]));
+        assertEquals(List.of(), service.getUsagePlanKeys(REGION, ids[0]));
     }
 
     @Test
