@@ -98,14 +98,27 @@ public class LambdaTaskAuthorizer {
      *         {@code States.TaskFailed} for a refused assumption, and {@code deniedError} for a refused permission
      */
     void authorize(StateMachine machine, String credentialsRoleArn, String deniedError, List<Permission> permissions) {
+        authorize(machine, credentialsRoleArn, deniedError, permissions, true);
+    }
+
+    /**
+     * As {@link #authorize(StateMachine, String, String, List)}.
+     *
+     * @param checkExecutionRole false for an integration whose tasks do not refuse an execution role for not existing
+     *                           or not trusting Step Functions: a nested execution, which only needs the permissions
+     */
+    void authorize(StateMachine machine, String credentialsRoleArn, String deniedError, List<Permission> permissions,
+                   boolean checkExecutionRole) {
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
-        IamRole executionRole = role(machine.getRoleArn()).orElseThrow(
-                () -> new AslExecutor.FailStateException("States.Permissions",
-                        "The execution role " + machine.getRoleArn() + " does not exist."));
-        if (!trustEvaluator.allowsService(executionRole.getAssumeRolePolicyDocument(), ServicePrincipals.of("states"),
-                machine.getStateMachineArn(), owner.accountId())) {
-            throw new AslExecutor.FailStateException("States.Permissions",
-                    "The execution role " + machine.getRoleArn() + " does not trust Step Functions.");
+        if (checkExecutionRole) {
+            IamRole executionRole = role(machine.getRoleArn()).orElseThrow(
+                    () -> new AslExecutor.FailStateException("States.Permissions",
+                            "The execution role " + machine.getRoleArn() + " does not exist."));
+            if (!trustEvaluator.allowsService(executionRole.getAssumeRolePolicyDocument(),
+                    ServicePrincipals.of("states"), machine.getStateMachineArn(), owner.accountId())) {
+                throw new AslExecutor.FailStateException("States.Permissions",
+                        "The execution role " + machine.getRoleArn() + " does not trust Step Functions.");
+            }
         }
         String effectiveRoleArn = machine.getRoleArn();
         if (credentialsRoleArn != null) {
