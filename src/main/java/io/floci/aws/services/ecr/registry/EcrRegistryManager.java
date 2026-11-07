@@ -33,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -98,6 +99,8 @@ public class EcrRegistryManager {
     private final PortAllocator portAllocator;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private volatile Clock clock;
+    private volatile Sleeper sleeper;
 
     private volatile boolean started;
     private volatile boolean ready;
@@ -124,6 +127,21 @@ public class EcrRegistryManager {
                               PortAllocator portAllocator,
                               EmulatorConfig config,
                               RegionResolver regionResolver) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector,
+                currentContainerNetworkResolver, portAllocator, config, regionResolver,
+                Clock.systemUTC(), Thread::sleep);
+    }
+
+    EcrRegistryManager(ContainerBuilder containerBuilder,
+                       ContainerLifecycleManager lifecycleManager,
+                       ContainerLogStreamer logStreamer,
+                       ContainerDetector containerDetector,
+                       CurrentContainerNetworkResolver currentContainerNetworkResolver,
+                       PortAllocator portAllocator,
+                       EmulatorConfig config,
+                       RegionResolver regionResolver,
+                       Clock clock,
+                       Sleeper sleeper) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -133,6 +151,21 @@ public class EcrRegistryManager {
         this.config = config;
         this.regionResolver = regionResolver;
         this.hostPort = config.services().ecr().registryBasePort();
+        this.clock = clock;
+        this.sleeper = sleeper;
+    }
+
+    @FunctionalInterface
+    interface Sleeper {
+        void sleep(long millis) throws InterruptedException;
+    }
+
+    void setClock(Clock clock) {
+        this.clock = clock;
+    }
+
+    void setSleeper(Sleeper sleeper) {
+        this.sleeper = sleeper;
     }
 
     /**
@@ -894,19 +927,22 @@ public class EcrRegistryManager {
         }
     }
 
-    private boolean awaitTermination(DockerClient dockerClient, String execId, int maxSeconds) {
-        long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(maxSeconds);
-        while (System.currentTimeMillis() < deadline) {
+    boolean awaitTermination(DockerClient dockerClient, String execId, int maxSeconds) {
+        long deadline = clock.millis() + TimeUnit.SECONDS.toMillis(maxSeconds);
+        while (clock.millis() < deadline) {
             try {
                 InspectExecResponse inspect = dockerClient.inspectExecCmd(execId).exec();
                 if (inspect != null && inspect.getExitCodeLong() != null) {
                     return true;
                 }
-                Thread.sleep(200);
+            } catch (Exception ignored) {
+            }
+            try {
+                // Bug #6150: Pause on every pass even if inspect throws to avoid tight spin loop
+                sleeper.sleep(200);
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 return false;
-            } catch (Exception ignored) {
             }
         }
         return false;
