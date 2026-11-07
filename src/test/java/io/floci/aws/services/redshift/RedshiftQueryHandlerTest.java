@@ -1477,4 +1477,49 @@ class RedshiftQueryHandlerTest {
         String xml = (String) response.getEntity();
         assertTrue(xml.contains("<DbUser>IAM:alice</DbUser>"));
     }
+
+    // ── ModifyClusterSnapshot ─────────────────────────────────────────────────
+
+    @Test
+    void modifyClusterSnapshotRequiresParameters() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        AwsException ex1 = assertThrows(AwsException.class, () -> handler.handle("ModifyClusterSnapshot", params));
+        assertEquals("InvalidParameterValue", ex1.getErrorCode());
+        assertTrue(ex1.getMessage().contains("SnapshotIdentifier is required"));
+
+        params.putSingle("SnapshotIdentifier", "my-snap");
+        AwsException ex2 = assertThrows(AwsException.class, () -> handler.handle("ModifyClusterSnapshot", params));
+        assertEquals("InvalidParameterValue", ex2.getErrorCode());
+        assertTrue(ex2.getMessage().contains("ManualSnapshotRetentionPeriod is required"));
+    }
+
+    @Test
+    void modifyClusterSnapshotDelegatesToServiceAndFormatsXml() {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier("my-snap");
+        snapshot.setClusterIdentifier("my-cluster");
+        snapshot.setSnapshotType("manual");
+        snapshot.setStatus("available");
+        snapshot.setMasterUsername("admin");
+        snapshot.setPort(5439);
+        snapshot.setManualSnapshotRetentionPeriod(45);
+        snapshot.setSnapshotArn("arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/my-snap");
+
+        when(service.modifyClusterSnapshot("my-snap", 45, true)).thenReturn(snapshot);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SnapshotIdentifier", "my-snap");
+        params.putSingle("ManualSnapshotRetentionPeriod", "45");
+        params.putSingle("Force", "true");
+
+        Response response = handler.handle("ModifyClusterSnapshot", params);
+        assertEquals(200, response.getStatus());
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<ModifyClusterSnapshotResponse>"));
+        assertTrue(xml.contains("<ModifyClusterSnapshotResult>"));
+        assertTrue(xml.contains("<SnapshotIdentifier>my-snap</SnapshotIdentifier>"));
+        assertTrue(xml.contains("<ManualSnapshotRetentionPeriod>45</ManualSnapshotRetentionPeriod>"));
+        verify(service).modifyClusterSnapshot("my-snap", 45, true);
+    }
 }

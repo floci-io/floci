@@ -452,6 +452,22 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<SnapshotIdentifier>snap-test-1</SnapshotIdentifier>"));
 
+        // 3b. ModifyClusterSnapshot updates retention period
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "ModifyClusterSnapshot")
+            .formParam("SnapshotIdentifier", "snap-test-1")
+            .formParam("ManualSnapshotRetentionPeriod", "45")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<ModifyClusterSnapshotResponse>"))
+            .body(containsString("<SnapshotIdentifier>snap-test-1</SnapshotIdentifier>"))
+            .body(containsString("<ManualSnapshotRetentionPeriod>45</ManualSnapshotRetentionPeriod>"));
+
         // 4. DeleteCluster
         given()
             .contentType("application/x-www-form-urlencoded")

@@ -2052,6 +2052,87 @@ public class RedshiftService implements ManagedSecretRotator {
                 || clusterIdentifier.equals(snapshot.getClusterIdentifier());
     }
 
+    public Snapshot modifyClusterSnapshot(String snapshotIdentifier, int manualSnapshotRetentionPeriod) {
+        return modifyClusterSnapshot(snapshotIdentifier, manualSnapshotRetentionPeriod, null);
+    }
+
+    public Snapshot modifyClusterSnapshot(String snapshotIdentifier, int manualSnapshotRetentionPeriod, Boolean force) {
+        if (manualSnapshotRetentionPeriod != -1 && (manualSnapshotRetentionPeriod < 1 || manualSnapshotRetentionPeriod > 3653)) {
+            throw new AwsException("InvalidRetentionPeriod",
+                    "ManualSnapshotRetentionPeriod must be -1 or between 1 and 3653.", 400);
+        }
+        String accountId = clusters.accountId();
+        String region = regionResolver.getRegion();
+
+        String snapshotName;
+        String expectedClusterFromArn;
+        if (AwsArnUtils.looksLikeArn(snapshotIdentifier)) {
+            AwsArnUtils.Arn arn;
+            try {
+                arn = AwsArnUtils.parse(snapshotIdentifier);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid snapshot identifier: " + snapshotIdentifier, 400);
+            }
+            String resource = arn.resource();
+            int slash = resource.lastIndexOf('/');
+            if (!"redshift".equals(arn.service()) || !resource.startsWith("snapshot:")
+                    || slash < 0 || slash == resource.length() - 1) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid snapshot identifier: " + snapshotIdentifier, 400);
+            }
+            if (!arn.accountId().equals(accountId)
+                    || !arn.region().equals(region)
+                    || !arn.partition().equals(AwsRegions.partitionFor(region))) {
+                throw new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + snapshotIdentifier + " not found", 404);
+            }
+            String arnCluster = resource.substring("snapshot:".length(), slash);
+            if (arnCluster.isBlank()) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid snapshot identifier: " + snapshotIdentifier, 400);
+            }
+            expectedClusterFromArn = arnCluster;
+            snapshotName = resource.substring(slash + 1);
+        } else {
+            expectedClusterFromArn = null;
+            snapshotName = snapshotIdentifier;
+        }
+
+        return withResourceLock("snapshot", snapshotName, () -> {
+            Snapshot snapshot = findSnapshot(snapshotName).orElse(null);
+            if (snapshot == null) {
+                throw new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + snapshotIdentifier + " not found", 404);
+            }
+            if (expectedClusterFromArn != null && !expectedClusterFromArn.equals(snapshot.getClusterIdentifier())) {
+                throw new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + snapshotIdentifier + " not found", 404);
+            }
+            if (!"available".equals(snapshot.getStatus())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Snapshot " + snapshotIdentifier + " is not available", 400);
+            }
+            if (!"manual".equals(snapshot.getSnapshotType())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Cannot modify an automated snapshot: " + snapshotIdentifier
+                                + ". Only manual snapshots can be modified.", 400);
+            }
+
+            snapshot.setManualSnapshotRetentionPeriod(manualSnapshotRetentionPeriod);
+            String copyKey = copyKey(region, snapshotName);
+            if (snapshotCopies.get(copyKey).isPresent()) {
+                snapshotCopies.putAllAtomically(Map.of(copyKey, snapshot));
+                snapshotCopies.flush();
+            } else {
+                snapshots.putAllAtomically(Map.of(snapshotName, snapshot));
+                snapshots.flush();
+            }
+
+            return snapshot;
+        });
+    }
+
     public Snapshot deleteSnapshot(String snapshotIdentifier) {
         return deleteSnapshot(snapshotIdentifier, null);
     }
