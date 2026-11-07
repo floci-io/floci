@@ -72,7 +72,7 @@ class ApiGatewayUsagePlanSdkIntegrationTest {
     }
 
     // Measured on API Gateway: a key in no plan and an unknown key both answer an empty list, and an
-    // empty keyId lists every plan.
+    // empty or whitespace-only keyId lists every plan.
     @Test
     void getUsagePlansFiltersByKeyId() {
         try (ApiGatewayClient client = client()) {
@@ -87,7 +87,7 @@ class ApiGatewayUsagePlanSdkIntegrationTest {
                 assertEquals(List.of(), usagePlanIds(client, inNoPlan));
                 assertEquals(List.of(), usagePlanIds(client, "missing"));
                 assertTrue(usagePlanIds(client, null).containsAll(List.of(first, second)));
-                assertTrue(usagePlanIds(client, "").containsAll(List.of(first, second)));
+                assertTrue(usagePlanIds(client, " ").containsAll(List.of(first, second)));
 
                 client.createUsagePlanKey(r -> r.usagePlanId(second).keyId(inPlan).keyType("API_KEY"));
                 assertEquals(Set.of(first, second), Set.copyOf(usagePlanIds(client, inPlan)));
