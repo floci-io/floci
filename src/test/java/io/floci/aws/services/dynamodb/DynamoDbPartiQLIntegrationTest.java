@@ -758,6 +758,28 @@ class DynamoDbPartiQLIntegrationTest {
             .body("message", equalTo("Unsupported data type: foo under key root at 1:" + (insert.length() + 1) + ":3"));
     }
 
+    @Test
+    @Order(36)
+    void aConditionFunctionChecksItsOperands() {
+        String where = "SELECT * FROM \"" + TABLE + "\" WHERE ";
+        statement(where + "attribute_exists()")
+            .statusCode(400)
+            .body("message", equalTo("Incorrect number of operands for operator or function; "
+                    + "operator or function: attribute_exists, number of operands: 0"));
+        statement(where + "attribute_exists('a')")
+            .statusCode(400)
+            .body("message", equalTo("Operator or function requires a document path; "
+                    + "operator or function: attribute_exists"));
+        statement(where + "size(1) = 1")
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function; "
+                    + "operator or function: size, operand type: N"));
+        statement(where + "contains(a, a)")
+            .statusCode(400)
+            .body("message", equalTo("The first operand must be distinct from the remaining operands for this "
+                    + "operator or function; operator: contains, first operand: [a]"));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}
