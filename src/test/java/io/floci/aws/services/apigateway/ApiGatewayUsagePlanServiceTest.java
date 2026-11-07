@@ -4,13 +4,11 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.apigateway.model.UsagePlan;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -28,11 +26,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class ApiGatewayUsagePlanServiceTest {
 
@@ -41,15 +36,8 @@ class ApiGatewayUsagePlanServiceTest {
     private static final int REPLACEMENTS = 200_000;
 
     private static ApiGatewayService service() {
-        Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
-        StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(invocation ->
-                stores.computeIfAbsent(invocation.getArgument(1, String.class),
-                        ignored -> AccountAwareStorageBackend.inMemory(ACCOUNT)));
-        when(storageFactory.create(anyString(), anyString(), any(), any())).thenAnswer(invocation ->
-                stores.computeIfAbsent(invocation.getArgument(1, String.class),
-                        ignored -> AccountAwareStorageBackend.inMemory(ACCOUNT)));
-        return new ApiGatewayService(storageFactory, mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
+        return new ApiGatewayService(new InMemoryStorageFactory(ACCOUNT),
+                mock(EmulatorConfig.class, RETURNS_DEEP_STUBS),
                 mock(TlsCertificateManager.class), new RegionResolver(REGION, ACCOUNT));
     }
 
