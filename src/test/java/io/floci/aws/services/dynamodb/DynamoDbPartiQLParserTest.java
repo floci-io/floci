@@ -1078,6 +1078,7 @@ class DynamoDbPartiQLParserTest {
             DELETE FROM "t" WHERE pk = 1 RETURNING ALL NEW * x      | LEFTOVER
             INSERT INTO "t" a VALUE {'pk': 1}                       | LEFTOVER
             INSERT INTO "t" {'pk': 1e126};                          | MULTIPLE_ITEMS
+            INSERT INTO "t" list_append(a)                          | MULTIPLE_ITEMS
             INSERT INTO "t" AS a VALUE {'pk': 1}                    | NWF Unexpected term
             SELECT * FROM "t" WHERE at = 1                          | NWF Unexpected term
             UPDATE "t" SET as = 1 WHERE pk = 1                      | NWF Expected identifier for simple path
