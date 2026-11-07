@@ -172,6 +172,28 @@ class IamTagOnCreateEnforcementIntegrationTest {
     }
 
     /**
+     * KMS's handler iterates {@code Tags} whatever it holds, so an object whose member is named as its structure's key
+     * still tags the key with that structure: a deny on the tag holds on the create's own action and on the tagging
+     * action alike.
+     */
+    @Test
+    void aTagInAnObjectIsCheckedThoughAMemberOfTheSameNameIsNoTag() {
+        User user = user("tag-collision");
+        String allowed = allow("kms:CreateKey") + "," + allow("kms:TagResource");
+        for (String action : List.of("kms:CreateKey", "kms:TagResource")) {
+            user.policy(allowed + ",{\"Effect\":\"Deny\",\"Action\":\"" + action + "\",\"Resource\":\"*\","
+                    + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}");
+            refusedJson(user.json("kms", "TrentService.CreateKey", "1.1").body(keyTaggedByObject("red"))
+                    .post("/").then(), action);
+            String keyId = user.json("kms", "TrentService.CreateKey", "1.1").body(keyTaggedByObject("blue")).post("/")
+                    .then().statusCode(200).extract().path("KeyMetadata.KeyId");
+            admin("kms").header("X-Amz-Target", "TrentService.ListResourceTags")
+                    .contentType("application/x-amz-json-1.1").body("{\"KeyId\":\"" + keyId + "\"}").post("/")
+                    .then().statusCode(200).body("Tags.find { it.TagKey == 'team' }.TagValue", equalTo("blue"));
+        }
+    }
+
+    /**
      * The tagging action is found by the operation, not by the action it is authorized as: Budgets'
      * {@code CreateBudget} is authorized as {@code budgets:ModifyBudget}.
      */
@@ -441,8 +463,9 @@ class IamTagOnCreateEnforcementIntegrationTest {
     /**
      * OpenSearch refuses a {@code TagList} that is not as its model has it, before it changes anything, so no reading
      * of one can differ from the tags a domain gets: under every grant and a deny on {@code team=red}, none of these
-     * creates a domain, among them an object whose structure's key is also its member's name and a tag of the denied
-     * key with no value after it. {@code AddTags} shares the reader, and tags at the model's limits are kept.
+     * creates a domain, among them a tag of the denied key with no value after it. An object whose structure's key is
+     * also its member's name is refused by the deny, its structure read as a tag. {@code AddTags} shares the reader,
+     * and tags at the model's limits are kept.
      */
     @ParameterizedTest
     @CsvSource({"/2021-01-01/opensearch/domain, es:CreateDomain",
@@ -452,14 +475,15 @@ class IamTagOnCreateEnforcementIntegrationTest {
         String name = "tag-os-" + suffix();
         String arn = "arn:aws:es:us-east-1:" + ACCOUNT + ":domain/" + name;
         String red = "{\"Key\":\"team\",\"Value\":\"red\"}";
+        String inObject = "{\"team\":" + red + "}";
         user.policy(allow(create));
-        refusedRest(user.rest("es").body(domainWithTagList(name, "{\"team\":" + red + "}")).post(path).then(),
-                "es:AddTags");
+        refusedRest(user.rest("es").body(domainWithTagList(name, inObject)).post(path).then(), "es:AddTags");
 
         user.policy(allow(create) + "," + allow("es:AddTags") + ",{\"Effect\":\"Deny\",\"Action\":\"es:AddTags\","
                 + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}");
         refusedRest(user.rest("es").body(domainWithTagList(name, "[" + red + "]")).post(path).then(), "es:AddTags");
-        for (String tagList : List.of("{\"team\":" + red + "}", "[" + red + ",{\"Key\":\"team\"}]",
+        refusedRest(user.rest("es").body(domainWithTagList(name, inObject)).post(path).then(), "es:AddTags");
+        for (String tagList : List.of("[" + red + ",{\"Key\":\"team\"}]",
                 "[" + red + ",{\"Key\":\"team\",\"Value\":null}]", "[{\"Value\":\"blue\"}]",
                 "[{\"Key\":\"\",\"Value\":\"blue\"}]", "[{\"Key\":123,\"Value\":\"blue\"}]",
                 "[{\"Key\":\"team\",\"Value\":{\"a\":1}}]", "[\"team\"]",
@@ -539,6 +563,11 @@ class IamTagOnCreateEnforcementIntegrationTest {
         return """
                 {"FunctionName":"%s","Runtime":"nodejs20.x","Handler":"index.handler","Role":"%s",
                  "Tags":{"team":"blue"}}""".formatted(name, role);
+    }
+
+    /** A {@code CreateKey} body whose {@code Tags} is an object, its one member named as its structure's key. */
+    private static String keyTaggedByObject(String team) {
+        return "{\"Tags\":{\"team\":{\"TagKey\":\"team\",\"TagValue\":\"" + team + "\"}}}";
     }
 
     /** A {@code CreateAnalyzer} body tagging the analyzer with the {@code team} given, or with no tags. */
