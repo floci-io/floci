@@ -19,11 +19,16 @@ import org.junit.jupiter.api.Test;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.IamException;
+import software.amazon.awssdk.services.iam.model.Role;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.AssumeRoleWithSamlResponse;
+import software.amazon.awssdk.services.sts.model.Credentials;
+import software.amazon.awssdk.services.sts.model.GetCallerIdentityResponse;
 import software.amazon.awssdk.services.sts.model.StsException;
 
 import javax.xml.crypto.dsig.CanonicalizationMethod;
@@ -58,6 +63,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -66,6 +72,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -383,8 +390,8 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                 String trust = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Principal\":{\"Federated\":\"" + providerArn
                         + "\"},\"Action\":\"sts:AssumeRoleWithSAML\"}]}";
-                roleArn = client.createRole(b -> b.roleName(name).assumeRolePolicyDocument(trust)
-                        .maxSessionDuration(maximum)).role().arn();
+                roleArn = client.createRole(b -> b.roleName(name).path("/teams/saml/").assumeRolePolicyDocument(trust)
+                        .maxSessionDuration(maximum).tags(tag -> tag.key("team").value("federated"))).role().arn();
             } catch (RuntimeException | Error failure) {
                 try {
                     close();
@@ -402,6 +409,21 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                     .principalArn(providerArn).durationSeconds(duration)
                     .samlAssertion(assertion(roleArn, providerArn, expiry, AUDIENCE, ISSUER, sign)));
             sessions.add(response.credentials().accessKeyId());
+            Role role = client.getRole(b -> b.roleName(name)).role();
+            Credentials credentials = response.credentials();
+            GetCallerIdentityResponse identity;
+            try (StsClient caller = StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                    .credentialsProvider(StaticCredentialsProvider.create(AwsSessionCredentials.create(
+                            credentials.accessKeyId(), credentials.secretAccessKey(), credentials.sessionToken())))
+                    .build()) {
+                identity = caller.getCallerIdentity();
+            }
+            assertAll(
+                    () -> assertEquals(role.roleId() + ":saml-subject", response.assumedRoleUser().assumedRoleId()),
+                    () -> assertEquals(response.assumedRoleUser().arn(), identity.arn()),
+                    () -> assertEquals(role.roleId() + ":saml-subject", identity.userId()),
+                    () -> assertEquals(Map.of("team", "federated"),
+                            iamService.resolveCallerArns(credentials.accessKeyId()).orElseThrow().principalTags()));
             return response;
         }
 

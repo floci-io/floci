@@ -11,19 +11,23 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.Role;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.AssumeRoleWithWebIdentityRequest;
+import software.amazon.awssdk.services.sts.model.AssumeRoleWithWebIdentityResponse;
 import software.amazon.awssdk.services.sts.model.Credentials;
+import software.amazon.awssdk.services.sts.model.GetCallerIdentityResponse;
 import software.amazon.awssdk.services.sts.model.StsException;
 
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -60,7 +64,8 @@ class WebIdentityDurationIntegrationTest {
              StsClient sts = StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
                      .credentialsProvider(AnonymousCredentialsProvider.create()).build()) {
             Role role = admin.createRole(b -> b.roleName(keyName).path("/teams/web/")
-                    .maxSessionDuration(maximum).assumeRolePolicyDocument(trust)).role();
+                    .maxSessionDuration(maximum).assumeRolePolicyDocument(trust)
+                    .tags(tag -> tag.key("team").value("federated"))).role();
             try {
                 String token = oidc.mintServiceAccountToken(keyName, issuer, "default",
                         "untrusted".equals(tokenKind) ? "other" : "app", "sts.amazonaws.com", 3600);
@@ -72,12 +77,25 @@ class WebIdentityDurationIntegrationTest {
                 }
                 Instant before = Instant.now();
                 if ("allow".equals(expected)) {
-                    Credentials credentials = sts.assumeRoleWithWebIdentity(request.build()).credentials();
+                    AssumeRoleWithWebIdentityResponse response = sts.assumeRoleWithWebIdentity(request.build());
+                    Credentials credentials = response.credentials();
                     sessions.add(credentials);
                     int seconds = requested == 0 ? 3600 : requested;
                     assertFalse(credentials.expiration().isBefore(before.plusSeconds(seconds - 1)));
                     assertFalse(credentials.expiration().isAfter(Instant.now().plusSeconds(seconds)));
-                    assertTrue(iam.resolveCallerArns(credentials.accessKeyId()).isPresent());
+                    GetCallerIdentityResponse identity;
+                    try (StsClient caller = StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                            .credentialsProvider(StaticCredentialsProvider.create(AwsSessionCredentials.create(
+                                    credentials.accessKeyId(), credentials.secretAccessKey(), credentials.sessionToken())))
+                            .build()) {
+                        identity = caller.getCallerIdentity();
+                    }
+                    assertAll(
+                            () -> assertEquals(role.roleId() + ":duration", response.assumedRoleUser().assumedRoleId()),
+                            () -> assertEquals(response.assumedRoleUser().arn(), identity.arn()),
+                            () -> assertEquals(role.roleId() + ":duration", identity.userId()),
+                            () -> assertEquals(Map.of("team", "federated"),
+                                    iam.resolveCallerArns(credentials.accessKeyId()).orElseThrow().principalTags()));
                 } else {
                     StsException error = assertThrows(StsException.class, () ->
                             sessions.add(sts.assumeRoleWithWebIdentity(request.build()).credentials()));
