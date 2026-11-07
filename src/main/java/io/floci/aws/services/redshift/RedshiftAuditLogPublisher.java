@@ -1,20 +1,36 @@
 package io.floci.aws.services.redshift;
 
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.ServiceCallAuthorizer;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
+import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.redshift.model.Cluster;
+import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 @ApplicationScoped
 public class RedshiftAuditLogPublisher {
@@ -30,26 +46,56 @@ public class RedshiftAuditLogPublisher {
                     "usecatupd", "valuntil", "pid", "xid", "recordtime"),
             "useractivitylog", List.of("recordtime", "db", "user", "pid", "userid", "xid", "query"));
 
+    @FunctionalInterface
+    public interface DeliveryStatusListener {
+        void recordDeliveryOutcome(String accountId, String clusterIdentifier, Instant timestamp,
+                                   boolean success, String failureMessage);
+    }
+
     private final CloudWatchLogsService logs;
+    private final S3Service s3;
+    private final ServiceCallAuthorizer authorizer;
+    private final RegionResolver regionResolver;
     private final Clock clock;
     private final Map<String, Registration> registrations = new ConcurrentHashMap<>();
+    private final Map<String, Object> deliveryLocks = new ConcurrentHashMap<>();
+    private volatile DeliveryStatusListener statusListener;
 
     private record Registration(String region, String identifier, boolean enabled, String destination,
+                                String bucketName, String s3KeyPrefix,
                                 List<String> exports, boolean activityLoggingEnabled) { }
 
     @Inject
-    public RedshiftAuditLogPublisher(CloudWatchLogsService logs) {
-        this(logs, Clock.systemUTC());
+    public RedshiftAuditLogPublisher(CloudWatchLogsService logs, S3Service s3,
+                                     ServiceCallAuthorizer authorizer, RegionResolver regionResolver) {
+        this(logs, s3, authorizer, regionResolver, Clock.systemUTC());
     }
 
-    RedshiftAuditLogPublisher(CloudWatchLogsService logs, Clock clock) {
+    public RedshiftAuditLogPublisher(CloudWatchLogsService logs) {
+        this(logs, null, null, null, Clock.systemUTC());
+    }
+
+    public RedshiftAuditLogPublisher(CloudWatchLogsService logs, Clock clock) {
+        this(logs, null, null, null, clock);
+    }
+
+    RedshiftAuditLogPublisher(CloudWatchLogsService logs, S3Service s3,
+                              ServiceCallAuthorizer authorizer, RegionResolver regionResolver, Clock clock) {
         this.logs = logs;
+        this.s3 = s3;
+        this.authorizer = authorizer;
+        this.regionResolver = regionResolver;
         this.clock = clock;
+    }
+
+    public void setDeliveryStatusListener(DeliveryStatusListener statusListener) {
+        this.statusListener = statusListener;
     }
 
     public void register(String accountId, String region, Cluster cluster) {
         registrations.put(registryKey(accountId, cluster.getClusterIdentifier()), new Registration(region,
                 cluster.getClusterIdentifier(), cluster.isLoggingEnabled(), cluster.getLoggingDestinationType(),
+                cluster.getLoggingBucketName(), cluster.getLoggingS3KeyPrefix(),
                 cluster.getLoggingExports() == null ? null : List.copyOf(cluster.getLoggingExports()),
                 cluster.isUserActivityLoggingEnabled()));
     }
@@ -93,6 +139,8 @@ public class RedshiftAuditLogPublisher {
         cluster.setClusterIdentifier(registration.identifier());
         cluster.setLoggingEnabled(registration.enabled());
         cluster.setLoggingDestinationType(registration.destination());
+        cluster.setLoggingBucketName(registration.bucketName());
+        cluster.setLoggingS3KeyPrefix(registration.s3KeyPrefix());
         cluster.setLoggingExports(registration.exports());
         cluster.setUserActivityLoggingEnabled(registration.activityLoggingEnabled());
         return cluster;
@@ -176,12 +224,22 @@ public class RedshiftAuditLogPublisher {
     public void publish(Cluster cluster, String accountId, String region, String logType,
                         Map<String, Object> record) {
         if (cluster == null || !cluster.isLoggingEnabled()
-                || !"cloudwatch".equalsIgnoreCase(cluster.getLoggingDestinationType())
                 || "useractivitylog".equals(logType) && !cluster.isUserActivityLoggingEnabled()
                 || !LOG_TYPES.contains(logType) || !exports(cluster.getLoggingExports()).contains(logType)) {
             return;
         }
 
+        String destination = cluster.getLoggingDestinationType();
+        if ("cloudwatch".equalsIgnoreCase(destination)) {
+            publishCloudWatch(cluster, accountId, region, logType, record);
+        } else if ("s3".equalsIgnoreCase(destination)
+                || (destination == null && cluster.getLoggingBucketName() != null)) {
+            publishS3(cluster, accountId, region, logType, record);
+        }
+    }
+
+    private void publishCloudWatch(Cluster cluster, String accountId, String region, String logType,
+                                   Map<String, Object> record) {
         String group = "/aws/redshift/cluster/" + cluster.getClusterIdentifier() + "/" + logType;
         String stream = cluster.getClusterIdentifier();
         try {
@@ -194,6 +252,104 @@ public class RedshiftAuditLogPublisher {
             LOG.warnv(exception, "Failed to publish Redshift {0} audit event for cluster {1}",
                     logType, cluster.getClusterIdentifier());
         }
+    }
+
+    private void publishS3(Cluster cluster, String accountId, String region, String logType,
+                           Map<String, Object> record) {
+        String bucket = cluster.getLoggingBucketName();
+        if (bucket == null || bucket.isBlank() || s3 == null) {
+            return;
+        }
+        Instant now = Instant.ofEpochMilli(clock.millis());
+        ZonedDateTime utc = now.atZone(ZoneOffset.UTC);
+        String year = String.format("%04d", utc.getYear());
+        String month = String.format("%02d", utc.getMonthValue());
+        String day = String.format("%02d", utc.getDayOfMonth());
+        String timestamp = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm").format(utc);
+        String filename = accountId + "_redshift_" + region + "_" + cluster.getClusterIdentifier()
+                + "_" + logType + "_" + timestamp + ".gz";
+
+        String prefix = cluster.getLoggingS3KeyPrefix();
+        String basePath = (prefix != null && !prefix.isBlank())
+                ? (prefix.endsWith("/") ? prefix : prefix + "/")
+                : "";
+        String key = basePath + "AWSLogs/" + accountId + "/redshift/" + region + "/" + year + "/" + month + "/" + day + "/" + filename;
+
+        String partition = regionResolver != null ? regionResolver.partitionForRegion(region) : AwsRegions.partitionFor(region);
+        String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucket + "/" + key).toString();
+        String clusterArn = AwsArnUtils.Arn.of("redshift", region, accountId, "cluster:" + cluster.getClusterIdentifier()).toString();
+
+        if (authorizer != null && authorizer.authorize("redshift", "s3:PutObject", objectArn, clusterArn, accountId) != Decision.ALLOW) {
+            String errorMsg = "Access Denied: The bucket policy does not allow Amazon Redshift to put objects.";
+            LOG.warnv("Access Denied delivering Redshift audit log to s3://{0}/{1}", bucket, key);
+            if (statusListener != null) {
+                statusListener.recordDeliveryOutcome(accountId, cluster.getClusterIdentifier(), now, false, errorMsg);
+            }
+            return;
+        }
+
+        String line = formatS3Line(logType, record);
+        Object lock = deliveryLocks.computeIfAbsent(cluster.getClusterIdentifier(), k -> new Object());
+        synchronized (lock) {
+            try {
+                byte[] gzipped = appendAndGzip(bucket, key, line);
+                s3.putObject(bucket, key, gzipped, "application/x-gzip", Map.of());
+                if (statusListener != null) {
+                    statusListener.recordDeliveryOutcome(accountId, cluster.getClusterIdentifier(), now, true, null);
+                }
+            } catch (Exception exception) {
+                LOG.warnv(exception, "Failed to deliver Redshift {0} audit event to s3://{1}/{2} for cluster {3}",
+                        logType, bucket, key, cluster.getClusterIdentifier());
+                if (statusListener != null) {
+                    String message = exception.getMessage() != null ? exception.getMessage() : "Failed to deliver log to S3";
+                    statusListener.recordDeliveryOutcome(accountId, cluster.getClusterIdentifier(), now, false, message);
+                }
+            }
+        }
+    }
+
+    private byte[] appendAndGzip(String bucket, String key, String newLine) throws IOException {
+        ByteArrayOutputStream existingText = new ByteArrayOutputStream();
+        try {
+            S3Object existingObj = s3.getObject(bucket, key);
+            if (existingObj != null && existingObj.getData() != null && existingObj.getData().length > 0) {
+                try (GZIPInputStream gis = new GZIPInputStream(new ByteArrayInputStream(existingObj.getData()))) {
+                    gis.transferTo(existingText);
+                }
+            }
+        } catch (AwsException e) {
+            if (!"NoSuchKey".equals(e.getErrorCode())) {
+                throw e;
+            }
+        }
+        existingText.write(newLine.getBytes(StandardCharsets.UTF_8));
+        existingText.write('\n');
+
+        ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+        try (GZIPOutputStream gos = new GZIPOutputStream(compressed)) {
+            gos.write(existingText.toByteArray());
+        }
+        return compressed.toByteArray();
+    }
+
+    private static String formatS3Line(String logType, Map<String, Object> record) {
+        if ("useractivitylog".equals(logType)) {
+            String recordTime = String.valueOf(record.getOrDefault("recordtime", ""));
+            String db = String.valueOf(record.getOrDefault("db", ""));
+            String user = String.valueOf(record.getOrDefault("user", ""));
+            String pid = String.valueOf(record.getOrDefault("pid", ""));
+            String userid = String.valueOf(record.getOrDefault("userid", ""));
+            String xid = String.valueOf(record.getOrDefault("xid", ""));
+            String query = String.valueOf(record.getOrDefault("query", ""));
+            return "'" + recordTime + " UTC [ db=" + db + " user=" + user + " pid=" + pid
+                    + " userid=" + userid + " xid=" + xid + " ]' " + query;
+        }
+        return LOG_COLUMNS.get(logType).stream()
+                .map(col -> {
+                    Object val = record.get(col);
+                    return val == null ? "" : val.toString();
+                })
+                .collect(Collectors.joining("|"));
     }
 
     private void createIfMissing(String accountId, String region, String group, String stream) {

@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.ServiceCallAuthorizer;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -17,6 +18,7 @@ import io.floci.aws.services.dynamodb.backend.DynamoDbOperations;
 import io.floci.aws.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
 import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
+import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.rds.proxy.PasswordValidator;
 import io.floci.aws.services.redshift.container.RedshiftContainerHandle;
 import io.floci.aws.services.redshift.container.RedshiftContainerManager;
@@ -48,6 +50,7 @@ import org.mockito.InOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -890,6 +893,7 @@ class RedshiftServiceTest {
     private RedshiftIntegrationEventPublisher integrationEvents;
     private DynamoDbTableAccess zeroEtlTables;
     private RedshiftServerlessService zeroEtlServerless;
+    private EmulatorConfig config;
     private S3Service zeroEtlS3;
     private RedshiftService service;
 
@@ -915,7 +919,7 @@ class RedshiftServiceTest {
         dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.resolve()).thenReturn("localhost");
 
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        config = mock(EmulatorConfig.class);
         EmulatorConfig.StorageConfig storageConfig = mock(EmulatorConfig.StorageConfig.class);
         when(config.storage()).thenReturn(storageConfig);
         when(storageConfig.persistentPath()).thenReturn("target/test-data");
@@ -2482,6 +2486,75 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void enableLoggingRejectsPrefixStartingWithSlash() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.enableLogging("my-cluster", "my-bucket", "/logs", null, null));
+        assertEquals("InvalidS3KeyPrefixFault", ex.getErrorCode());
+    }
+
+    @Test
+    void enableLoggingRejectsNonexistentS3Bucket() {
+        S3Service mockS3 = mock(S3Service.class);
+        when(mockS3.bucketExists("missing-bucket")).thenReturn(false);
+        RedshiftService s3AwareService = new RedshiftService(sf, cm, config, regionResolver, proxyManager,
+                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
+                null, null, events, integrationEvents, null, null, mockS3, null);
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                s3AwareService.enableLogging("my-cluster", "missing-bucket", "logs", null, null));
+        assertEquals("BucketNotFoundFault", ex.getErrorCode());
+    }
+
+    @Test
+    void enableLoggingRejectsInsufficientS3BucketPolicy() {
+        S3Service mockS3 = mock(S3Service.class);
+        when(mockS3.bucketExists("audit-bucket")).thenReturn(true);
+        when(mockS3.bucketPartition("audit-bucket")).thenReturn("aws"); // partition-literal: mock test partition
+        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
+        when(authorizer.authorize(eq("redshift"), eq("s3:GetBucketAcl"), anyString(), anyString(), anyString()))
+                .thenReturn(Decision.DENY);
+
+        RedshiftService s3AwareService = new RedshiftService(sf, cm, config, regionResolver, proxyManager,
+                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
+                null, null, events, integrationEvents, null, null, mockS3, authorizer);
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                s3AwareService.enableLogging("my-cluster", "audit-bucket", "logs", null, null));
+        assertEquals("InsufficientS3BucketPolicyFault", ex.getErrorCode());
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeUpdatesClusterStatus() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", ts, true, null);
+        assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+        assertNull(cluster.getLastFailureTime());
+        assertNull(cluster.getLastFailureMessage());
+
+        Instant failTs = Instant.parse("2026-11-06T15:31:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", failTs, false, "timeout");
+        assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+        assertEquals(failTs, cluster.getLastFailureTime());
+        assertEquals("timeout", cluster.getLastFailureMessage());
+    }
+
+    @Test
     void modifyClusterIamRolesRejectsMalformedRoleArnWithoutChangingTheCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("c1");
@@ -2637,6 +2710,9 @@ class RedshiftServiceTest {
         cluster.setLoggingEnabled(true);
         cluster.setLoggingBucketName("my-bucket");
         cluster.setLoggingS3KeyPrefix("logs/");
+        cluster.setLastSuccessfulDeliveryTime(Instant.parse("2026-11-06T15:30:00Z"));
+        cluster.setLastFailureTime(Instant.parse("2026-11-06T15:31:00Z"));
+        cluster.setLastFailureMessage("failed");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
         Cluster result = service.disableLogging("my-cluster");
@@ -2644,6 +2720,9 @@ class RedshiftServiceTest {
         assertFalse(result.isLoggingEnabled());
         assertNull(result.getLoggingBucketName());
         assertNull(result.getLoggingS3KeyPrefix());
+        assertNull(result.getLastSuccessfulDeliveryTime());
+        assertNull(result.getLastFailureTime());
+        assertNull(result.getLastFailureMessage());
         verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
         verify(clusterBackend).flush();
     }

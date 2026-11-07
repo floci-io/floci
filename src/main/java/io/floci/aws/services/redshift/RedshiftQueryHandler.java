@@ -1374,12 +1374,20 @@ public class RedshiftQueryHandler {
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
-    // No log delivery is emulated, so delivery timestamps and failure fields are omitted.
     private String buildLoggingStatusXml(Cluster cluster) {
+        String lastSuccessful = cluster.getLastSuccessfulDeliveryTime() != null
+                ? DateTimeFormatter.ISO_INSTANT.format(cluster.getLastSuccessfulDeliveryTime())
+                : null;
+        String lastFailure = cluster.getLastFailureTime() != null
+                ? DateTimeFormatter.ISO_INSTANT.format(cluster.getLastFailureTime())
+                : null;
         XmlBuilder builder = new XmlBuilder()
             .elem("LoggingEnabled", cluster.isLoggingEnabled())
             .elem("BucketName", cluster.getLoggingBucketName())
             .elem("S3KeyPrefix", cluster.getLoggingS3KeyPrefix())
+            .elem("LastSuccessfulDeliveryTime", lastSuccessful)
+            .elem("LastFailureTime", lastFailure)
+            .elem("LastFailureMessage", cluster.getLastFailureMessage())
             .elem("LogDestinationType", cluster.getLoggingDestinationType());
         if (cluster.getLoggingExports() != null) {
             builder.start("LogExports");
