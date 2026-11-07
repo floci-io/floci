@@ -778,6 +778,42 @@ class EventBridgeTestEventPatternIntegrationTest {
     }
 
     @Test
+    void wildcardMatchesAnS3ObjectKey() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[\\"aws.s3\\"],\\"detail-type\\":[\\"Object Created\\"],\\"detail\\":{\\"object\\":{\\"key\\":[{\\"wildcard\\":\\"templates/*/v*/.switchboard.yaml\\"}]}}}",
+                    "Event": "{\\"source\\":\\"aws.s3\\",\\"detail-type\\":\\"Object Created\\",\\"detail\\":{\\"bucket\\":{\\"name\\":\\"registry\\"},\\"object\\":{\\"key\\":\\"templates/app/v1.0.0/.switchboard.yaml\\"}}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void wildcardNoMatchOnAnS3ObjectKey() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[\\"aws.s3\\"],\\"detail-type\\":[\\"Object Created\\"],\\"detail\\":{\\"object\\":{\\"key\\":[{\\"wildcard\\":\\"templates/*/v*/.switchboard.yaml\\"}]}}}",
+                    "Event": "{\\"source\\":\\"aws.s3\\",\\"detail-type\\":\\"Object Created\\",\\"detail\\":{\\"bucket\\":{\\"name\\":\\"registry\\"},\\"object\\":{\\"key\\":\\"templates/app/v1.0.0/assets/index.js\\"}}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
     void missingEventRejected() {
         given()
             .contentType(EVENT_BRIDGE_CONTENT_TYPE)

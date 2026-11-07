@@ -19,6 +19,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StarWildcard;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -1389,6 +1390,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             }
             if (element.has("suffix")) {
                 return value != null && value.endsWith(element.get("suffix").asText());
+            }
+            // Amazon EventBridge User Guide, Comparison operators for use in event patterns,
+            // Matching using wildcards: each * matches any run of characters in a string value,
+            // and \* and \\ stand for a literal * and \.
+            if (element.has("wildcard")) {
+                JsonNode wildcard = element.get("wildcard");
+                return value != null && wildcard.isTextual()
+                        && StarWildcard.matchesEscaped(wildcard.asText(), value);
             }
             if (element.has("equals-ignore-case")) {
                 return value != null && value.equalsIgnoreCase(element.get("equals-ignore-case").asText());
