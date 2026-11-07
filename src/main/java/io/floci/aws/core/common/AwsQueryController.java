@@ -211,6 +211,11 @@ public class AwsQueryController {
                 if ("docdb".equalsIgnoreCase(engine)
                        || docDbService.hasCluster(clusterId, region)
                        || docDbService.hasInstance(instanceId, region)
+                       || docDbService.hasCluster(formParams.getFirst("SourceDBClusterIdentifier"), region)
+                       // A create names the snapshot it makes, not one that exists: it follows its cluster.
+                       || (!"CreateDBClusterSnapshot".equals(action)
+                               && docDbService.hasClusterSnapshot(formParams.getFirst("DBClusterSnapshotIdentifier"), region))
+                       || docDbService.hasClusterSnapshot(formParams.getFirst("SnapshotIdentifier"), region)
                        || namesDocDbResource(formParams.getFirst("ResourceName"), region)) {
                         yield docDbQueryHandler.handle(action, formParams);
                 }
@@ -300,7 +305,9 @@ public class AwsQueryController {
      * check has to run on every route that reaches DocumentDB, not only the {@code rds} scope.
      *
      * <p>Only the identifier being created is checked: {@code CreateDBInstance} names its parent
-     * cluster too, and that cluster existing in RDS is the normal case rather than a clash.
+     * cluster too, and that cluster existing in RDS is the normal case rather than a clash. The
+     * restores create a cluster and {@code CreateDBClusterSnapshot} a snapshot, so those identifiers
+     * are checked against both stores, which share one cluster and cluster-snapshot ARN space.
      */
     private Response rdsAlreadyHoldsIdentifier(String action,
                                                MultivaluedMap<String, String> formParams,
@@ -312,6 +319,19 @@ public class AwsQueryController {
         if ("CreateDBInstance".equals(action) && rdsService.hasClusterOrInstance(
                 null, formParams.getFirst("DBInstanceIdentifier"), region)) {
             return xmlErrorResponse("DBInstanceAlreadyExists", "DB Instance already exists", 400);
+        }
+        if ("RestoreDBClusterFromSnapshot".equals(action) || "RestoreDBClusterToPointInTime".equals(action)) {
+            String clusterId = formParams.getFirst("DBClusterIdentifier");
+            if (rdsService.hasClusterOrInstance(clusterId, null, region) || docDbService.hasCluster(clusterId, region)) {
+                return xmlErrorResponse("DBClusterAlreadyExistsFault", "DB Cluster already exists", 400);
+            }
+        }
+        if ("CreateDBClusterSnapshot".equals(action)) {
+            String snapshotId = formParams.getFirst("DBClusterSnapshotIdentifier");
+            if (rdsService.hasClusterSnapshot(snapshotId, region) || docDbService.hasClusterSnapshot(snapshotId, region)) {
+                return xmlErrorResponse("DBClusterSnapshotAlreadyExistsFault",
+                        "DB cluster snapshot " + snapshotId + " already exists.", 400);
+            }
         }
         return null;
     }
@@ -336,6 +356,8 @@ public class AwsQueryController {
         return switch (action) {
             case "DescribeDBClusters" -> isBlank(formParams.getFirst("DBClusterIdentifier"));
             case "DescribeDBInstances" -> isBlank(formParams.getFirst("DBInstanceIdentifier"));
+            case "DescribeDBClusterSnapshots" -> isBlank(formParams.getFirst("DBClusterSnapshotIdentifier"))
+                    && isBlank(formParams.getFirst("DBClusterIdentifier"));
             default -> false;
         };
     }

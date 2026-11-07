@@ -2812,11 +2812,24 @@ public class RdsQueryHandler {
     }
 
     private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params, String region) {
+        String snapshotId = params.getFirst("DBClusterSnapshotIdentifier");
         XmlBuilder xml = new XmlBuilder().start("DBClusterSnapshots");
         for (DbClusterSnapshot s : service.describeDbClusterSnapshots(
-                params.getFirst("DBClusterSnapshotIdentifier"), params.getFirst("DBClusterIdentifier"),
+                snapshotId, params.getFirst("DBClusterIdentifier"),
                 params.getFirst("SnapshotType"), region)) {
             xml.raw(dbClusterSnapshotXml(s));
+        }
+        // The list form covers the whole RDS family, as DescribeDBClusters does: a live account
+        // lists DocumentDB cluster snapshots here too. The identifier form is routed to the store
+        // that owns the identifier.
+        if (snapshotId == null || snapshotId.isBlank()) {
+            String clusterId = params.getFirst("DBClusterIdentifier");
+            if (clusterId == null || clusterId.isBlank()) {
+                clusterId = extractRdsFilterValue(params, "db-cluster-id");
+            }
+            for (String row : docDbQueryHandler.clusterSnapshotRowsXml(clusterId, params.getFirst("SnapshotType"))) {
+                xml.start("DBClusterSnapshot").raw(row).end("DBClusterSnapshot");
+            }
         }
         xml.end("DBClusterSnapshots");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterSnapshots", AwsNamespaces.RDS, xml.build())).build();
