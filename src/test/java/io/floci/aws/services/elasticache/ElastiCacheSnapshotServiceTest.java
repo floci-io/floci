@@ -15,20 +15,26 @@ import io.floci.aws.services.elasticache.proxy.ElastiCacheProxyManager;
 import io.floci.aws.services.kms.KmsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -45,12 +51,13 @@ class ElastiCacheSnapshotServiceTest {
 
     private ElastiCacheService service;
     private ElastiCacheContainerManager containerManager;
+    private ElastiCacheProxyManager proxyManager;
     private final Map<String, AccountAwareStorageBackend<?>> backendsByFile = new ConcurrentHashMap<>();
 
     @BeforeEach
     void setUp() {
         containerManager = mock(ElastiCacheContainerManager.class);
-        ElastiCacheProxyManager proxyManager = mock(ElastiCacheProxyManager.class);
+        proxyManager = mock(ElastiCacheProxyManager.class);
         StorageFactory storageFactory = mock(StorageFactory.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
@@ -94,6 +101,24 @@ class ElastiCacheSnapshotServiceTest {
     }
 
     @Test
+    void theRdbIsLoadedBeforeTheGroupIsPublishedOrReachable() {
+        group("source");
+        service.createSnapshot("snap", "source", null);
+        AtomicReference<String> duringLoad = new AtomicReference<>();
+        doAnswer(inv -> {
+            duringLoad.set(fault(() -> service.getReplicationGroup("restored")));
+            return null;
+        }).when(containerManager).restore("container-restored", RDB);
+
+        service.createReplicationGroupFromSnapshot(request("restored", null), "snap");
+
+        assertEquals("ReplicationGroupNotFoundFault", duringLoad.get());
+        InOrder order = inOrder(containerManager, proxyManager);
+        order.verify(containerManager).restore("container-restored", RDB);
+        order.verify(proxyManager).startProxy(eq("restored"), any(), anyInt(), anyString(), anyInt(), any());
+    }
+
+    @Test
     void aCacheClusterIdNamesTheGroupItBelongsTo() {
         group("source");
         String member = service.memberCacheClusters(service.getReplicationGroup("source")).getFirst().cacheClusterId();
@@ -103,6 +128,44 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("source", snapshot.getReplicationGroupId());
         assertEquals(member, snapshot.getCacheClusterId());
         assertEquals("CacheClusterNotFound", fault(() -> service.createSnapshot("other", null, "no-such-cluster")));
+    }
+
+    @Test
+    void aCacheClusterNamedWithAGroupMustBeOneOfItsMembers() {
+        group("source");
+        group("another");
+        String member = service.memberCacheClusters(service.getReplicationGroup("source")).getFirst().cacheClusterId();
+        String stranger = service.memberCacheClusters(service.getReplicationGroup("another")).getFirst().cacheClusterId();
+
+        assertEquals("InvalidParameterCombination", fault(() -> service.createSnapshot("snap", "source", stranger)));
+        assertEquals(member, service.createSnapshot("snap", "source", member).getCacheClusterId());
+    }
+
+    @Test
+    void theGroupCannotBeDeletedWhileItsRdbIsRead() throws Exception {
+        group("source");
+        AtomicReference<Thread> deleter = new AtomicReference<>();
+        AtomicReference<Throwable> deleteFailure = new AtomicReference<>();
+        when(containerManager.snapshot("container-source")).thenAnswer(inv -> {
+            Thread thread = new Thread(() -> {
+                try {
+                    service.deleteReplicationGroup("source");
+                } catch (Throwable t) {
+                    deleteFailure.set(t);
+                }
+            });
+            deleter.set(thread);
+            thread.start();
+            awaitBlockedOrDone(thread);
+            assertTrue(thread.isAlive(), "the delete ran while the RDB was being read");
+            return RDB;
+        });
+
+        assertEquals("available", service.createSnapshot("snap", "source", null).getSnapshotStatus());
+        deleter.get().join(10_000);
+
+        assertNull(deleteFailure.get());
+        assertEquals("ReplicationGroupNotFoundFault", fault(() -> service.getReplicationGroup("source")));
     }
 
     @Test
@@ -152,6 +215,8 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("InvalidSnapshotState",
                 fault(() -> service.createReplicationGroupFromSnapshot(request("restored", null), "snap")));
         assertEquals("ReplicationGroupNotFoundFault", fault(() -> service.getReplicationGroup("restored")));
+        verify(proxyManager, never()).startProxy(eq("restored"), any(), anyInt(), anyString(), anyInt(), any());
+        verify(containerManager).stop(any());
     }
 
     @Test
@@ -176,6 +241,7 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("deleting", service.deleteSnapshot("snap").getSnapshotStatus());
         assertEquals("SnapshotNotFoundFault", fault(() -> service.describeSnapshots("snap", null, null, null)));
         assertEquals("SnapshotNotFoundFault", fault(() -> service.deleteSnapshot("snap")));
+        assertEquals("InvalidParameterValue", fault(() -> service.deleteSnapshot(null)));
         assertEquals("SnapshotNotFoundFault",
                 fault(() -> service.createReplicationGroupFromSnapshot(request("restored", null), "snap")));
     }

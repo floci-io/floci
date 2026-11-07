@@ -335,9 +335,12 @@ provisioning its container is refused too.
 
 `CreateSnapshot` saves the backend's dataset (`SAVE`) and keeps the RDB file with the snapshot
 record, so the snapshot is `available` when the call returns. `CreateReplicationGroup` with
-`SnapshotName` starts a new cluster-mode-disabled group and loads that file into it before the
-group is returned; a group the file could not be loaded into is removed again. A snapshot whose
-file is missing is refused with `InvalidSnapshotState` before any group is created.
+`SnapshotName` starts a new cluster-mode-disabled group and loads that file into its backend
+before the group is listed or its endpoint accepts connections; a group the file could not be
+loaded into is rolled back like any failed create. A snapshot whose file is missing is refused
+with `InvalidSnapshotState` before any group is created. A group cannot be deleted or modified
+while its snapshot is being taken, and a `CacheClusterId` given with a `ReplicationGroupId`
+must be one of that group's members.
 
 Snapshots outlive the group they were taken from, as on AWS. They are taken of
 cluster-mode-disabled replication groups only: a cluster-mode-enabled group, a standalone cache
