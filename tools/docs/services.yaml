@@ -42,6 +42,7 @@ services:
     sources:
       - { path: services/paymentcryptography/PaymentCryptographyCryptoController.java, mode: rest }
       - { path: services/paymentcryptography/PaymentCryptographyPinController.java, mode: rest }
+      - { path: services/paymentcryptography/PaymentCryptographyCardController.java, mode: rest }
     exclude_actions:
       - GenerateMacEmvPinChange
   - service: applicationautoscaling

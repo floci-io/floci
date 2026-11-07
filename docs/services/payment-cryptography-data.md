@@ -20,6 +20,10 @@ client that talks to the control plane does not reach it by accident.
 | `GeneratePinData` | Generate a PIN block and the verification value that goes with it, on `POST /pindata/generate` |
 | `VerifyPinData` | Verify a PIN block against the verification value the issuer holds, on `POST /pindata/verify` |
 | `TranslatePinData` | Re-encipher a PIN block from one key to another, on `POST /pindata/translate` |
+| `GenerateCardValidationData` | Generate the card verification value of a card account, on `POST /cardvalidationdata/generate` |
+| `VerifyCardValidationData` | Verify a card verification value against the one the issuer holds, on `POST /cardvalidationdata/verify` |
+| `GenerateAuthRequestCryptogram` | Generate the cryptogram an authorization request carries, on `POST /cryptogram/generate` |
+| `VerifyAuthRequestCryptogram` | Verify the cryptogram an authorization request carries, on `POST /cryptogram/verify` |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -75,6 +79,22 @@ client that talks to the control plane does not reach it by accident.
   the session key the EMV secure messaging rules define, which this service does not make. It
   is not one of the actions the service lists as supported. The wrapped-key form of a PIN
   encryption key is refused too, because the unwrapping is part of the key exchange.
+- **The card verification value is the three digit value of the X9 algorithm.** It is computed
+  from the account number, the expiry and the service code, enciphered under the card
+  verification key, and the value is the decimalized left-most digits of the enciphered block.
+  The static values take a key of the `TR31_C0_CARD_VERIFICATION_KEY` usage. The dynamic ones
+  are computed from the transaction rather than from the card's own fields, and they take a
+  key of the `TR31_E6_EMV_MKEY_OTHER` or the `TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS` usage that
+  may derive.
+- **The authorization cryptogram is the ARQC of the transaction.** It is the ISO 9797-1
+  algorithm 3 retail MAC over the transaction data, cut to eight bytes, under a session key
+  the request's derivation produces. Three derivations are served: the EMV common session key
+  and the EMV 2000 one, which is the same, the Mastercard one, which also diversifies with
+  the terminal's unpredictable number, and the Visa one, which derives no session key at all
+  and enciphers the transaction data under the ICC master key.
+- **The American Express cryptogram is refused rather than approximated.** The AEIPS session
+  key derivation is proprietary and there is nothing to verify it against, and a plausible
+  wrong cryptogram is the one outcome worse than an error.
 
 The two-segment paths are moved to an internal prefix for the requests signed for this
 service, so a path-style request for a bucket of that name still reaches S3.

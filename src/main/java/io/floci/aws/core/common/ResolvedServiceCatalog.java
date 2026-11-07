@@ -67,6 +67,7 @@ import io.floci.aws.services.mwaa.MwaaController;
 import io.floci.aws.services.oam.OamController;
 import io.floci.aws.services.opensearch.ElasticsearchController;
 import io.floci.aws.services.opensearch.OpenSearchController;
+import io.floci.aws.services.paymentcryptography.PaymentCryptographyCardController;
 import io.floci.aws.services.paymentcryptography.PaymentCryptographyCryptoController;
 import io.floci.aws.services.paymentcryptography.PaymentCryptographyPinController;
 import io.floci.aws.services.pipes.PipesController;
@@ -324,7 +325,8 @@ public class ResolvedServiceCatalog {
                         // scope its own plane is named by is an alias of that one.
                         Set.of(), Set.of("payment-cryptography", "payment-cryptography-data"), Set.of(),
                         Set.of(PaymentCryptographyCryptoController.class,
-                                PaymentCryptographyPinController.class)),
+                                PaymentCryptographyPinController.class,
+                                PaymentCryptographyCardController.class)),
                 descriptor("secretsmanager", "secretsmanager", config.services().secretsmanager().enabled(), true,
                         "secretsmanager", storageMode(config.storage().services().secretsmanager().mode(), config.storage().mode()),
                         config.storage().services().secretsmanager().flushIntervalMs(), null, ServiceProtocol.JSON,
