@@ -479,6 +479,15 @@ public class DynamoDbPartiQLParser {
     }
 
     static Stmt parse(String statement, List<JsonNode> parameters) {
+        try {
+            return parseStatement(statement, parameters);
+        } catch (StackOverflowError expected) {
+            // DynamoDB answers a statement nested too deep for its parser the same way, with no message.
+            throw new AwsException("InternalFailure", null, 500);
+        }
+    }
+
+    private static Stmt parseStatement(String statement, List<JsonNode> parameters) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
         DynamoDbPartiQLParser parser = new DynamoDbPartiQLParser(statement, parameters);
         Stmt stmt = parser.parseStmt();

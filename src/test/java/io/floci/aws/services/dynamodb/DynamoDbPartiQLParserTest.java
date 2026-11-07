@@ -483,6 +483,16 @@ class DynamoDbPartiQLParserTest {
         assertEquals("Statement wasn't well formed, can't be processed: " + message, e.getMessage());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"f(", "(", "NOT "})
+    void answersAStatementNestedTooDeepWithAnInternalFailure(String nesting) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(
+                "SELECT * FROM \"t\" WHERE " + nesting.repeat(1_000_000), List.of()));
+
+        assertEquals("InternalFailure", e.getErrorCode());
+        assertEquals(500, e.getHttpStatus());
+    }
+
     @Test
     void stillRefusesAConditionFunctionAsAValue() {
         AwsException e = assertThrows(AwsException.class,
