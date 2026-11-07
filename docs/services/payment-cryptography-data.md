@@ -50,8 +50,15 @@ client that talks to the control plane does not reach it by accident.
   twelve-digit account field. The blocks are enciphered in ECB mode, which is what the standard
   defines, and they are not padded. The verification value is the Visa PIN verification value,
   computed under a key of the `TR31_V2_VISA_PIN_VERIFICATION_KEY` usage, and it is a four-digit
-  verification value. A PIN that does not verify fails the request with
-  `VerificationFailedException`, because the answer of a verification has no verdict in it.
+  verification value, so the PIN it is computed over is a four-digit one. A PIN that does not
+  verify fails the request with `VerificationFailedException`, because the answer of a
+  verification has no verdict in it.
+- **A PIN block that is not one the service can read is a different failure.** A block that
+  does not decipher into a PIN field, because the key is another one, the account number is
+  another one, or the block is corrupted, is refused with `ValidationException` and the
+  message the reference uses. A PIN is not translated from one account number to another:
+  `TranslatePinData` refuses a request whose incoming and outgoing `PrimaryAccountNumber`
+  differ, for PCI compliance.
 - **The PIN operations are not the IBM 3624 ones, and the AS2805 translation is not made.** A
   request that asks for one of them is refused with the error that says so, rather than
   answered with something of another kind. The EMV PIN change MAC is refused as well: it needs
