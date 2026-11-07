@@ -404,6 +404,93 @@ class DynamoDbPartiQLParserTest {
                 "SELECT m.\"inner\", m.foo FROM \"t\" WHERE m.attribute_exists = 1", List.of()));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SELECT * FROM "t" WHERE foo(1)                                 | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE EXISTS(pk) = 1                         | Unrecognized function: exists at 1:25:6
+            SELECT * FROM "t" WHERE "FOO"(1)                               | Unrecognized function: foo at 1:25:5
+            SELECT * FROM "t" WHERE pk = set_add(a, <<1>>)                 | Unrecognized function: set_add at 1:30:7
+            SELECT * FROM "t" WHERE foo(bar(1))                            | Unrecognized function: bar at 1:29:3
+            SELECT * FROM "t" WHERE foo(1) AND pk = <<>>                   | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE foo(1) < pk                            | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE foo(1) BETWEEN 1 AND 2                 | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE foo(1) IN [bar(2)]                     | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE NOT (foo(1) = bar(2))                  | Unrecognized function: foo at 1:30:3
+            SELECT * FROM "t" WHERE pk IN [foo(1)]                         | Unrecognized function: foo at 1:32:3
+            SELECT * FROM "t" WHERE pk < foo(1)                            | Unrecognized function: foo at 1:30:3
+            SELECT * FROM "t" WHERE true = foo(1)                          | Unrecognized function: foo at 1:32:3
+            SELECT * FROM "t" WHERE pk = size(foo(1))                      | Unrecognized function: foo at 1:35:3
+            SELECT * FROM "t" WHERE foo(size(a))                           | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE foo(attribute_exists(a))               | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE pk = <<>> AND foo(1)                   | Empty bags are not supported
+            SELECT * FROM "t" WHERE foo(<<>>)                              | Empty bags are not supported
+            SELECT * FROM "t" WHERE pk = [foo(1), <<>>]                    | Unsupported data type: Call under key root[0] at 1:31:3
+            SELECT * FROM "t" WHERE pk = {'a': [foo(1)]}                   | Unsupported data type: Call under key root.a[0] at 1:37:3
+            SELECT * FROM "t" WHERE pk = <<foo(1)>>                        | Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags at 1:32:3
+            SELECT * FROM "t" WHERE pk = <<'a', foo(1)>>                   | Unsupported data type: Call under key root at 1:37:3
+            SELECT * FROM "t" WHERE foo(1).a = 1                           | Unexpected path component at 1:25:3
+            SELECT * FROM "t" WHERE foo(<<>>)[0]                           | Unexpected path component at 1:25:3
+            SELECT * FROM "t" WHERE pk = foo(1).a                          | Unexpected path component at 1:30:3
+            SELECT * FROM "t" WHERE foo(<<>>) IS NULL                      | The left hand side argument to IS must be a Variable Reference, Literal, or Path
+            SELECT * FROM "t" WHERE count(*) IS NULL                       | The left hand side argument to IS must be a Variable Reference, Literal, or Path
+            SELECT * FROM "t" WHERE list_append(a, [foo(1)]) AND pk = <<>> | Unsupported data type: Call under key root[0] at 1:41:3
+            SELECT * FROM "t" WHERE pk = list_append(a, [1])               | The function is not allowed in a condition expression; function: list_append
+            SELECT * FROM "t" WHERE count(<<>>) = 1                        | Unsupported token in expression: count at 1:25:5
+            SELECT * FROM "t" WHERE foo(1) AND SUM(DISTINCT a)             | Unrecognized function: foo at 1:25:3
+            UPDATE "t" SET a = foo(1) WHERE pk = 1                         | Unrecognized function: foo at 1:20:3
+            UPDATE "t" SET a = 'x' + foo(1) WHERE pk = 1                   | Unrecognized function: foo at 1:26:3
+            UPDATE "t" SET a = foo(list_append(b, [1])) WHERE pk = 1       | Unrecognized function: foo at 1:20:3
+            UPDATE "t" SET a = list_append(foo(1), [1]) WHERE pk = 1       | Unrecognized function: foo at 1:32:3
+            UPDATE "t" SET a = foo(1) WHERE bar(2)                         | Unrecognized function: bar at 1:33:3
+            UPDATE "t" SET a = foo(1) WHERE pk = <<>>                      | Empty bags are not supported
+            UPDATE "t" SET a = size(b), c = foo(1) WHERE pk = 1            | The function is not allowed in an update expression; function: size
+            UPDATE "t" SET a = foo(attribute_exists(b)) WHERE pk = 1       | The function is not allowed in an update expression; function: attribute_exists
+            UPDATE "t" SET a = [size(b)] WHERE pk = 1                      | Unsupported data type: Call under key root[0] at 1:21:4
+            UPDATE "t" SET a = count(*) WHERE pk = 1                       | Unsupported token in expression: count at 1:20:5
+            SELECT foo(<<>>) FROM "t" WHERE bar(1)                         | Unexpected path component at 1:8:3
+            SELECT pk, COUNT(*) FROM "t"                                   | Unexpected path component at 1:12:5
+            SELECT COUNT(DISTINCT pk) FROM "t"                             | Unexpected path component at 1:8:5
+            SELECT foo(1).a FROM "t"                                       | Unexpected path component at 1:8:3
+            SELECT foo(1) FROM a.b.c                                       | A path may contain at most 2 components in the FROM clause
+            INSERT INTO "t" VALUE {'pk': foo(<<>>)}                        | Unsupported data type: foo under key root at 1:30:3
+            INSERT INTO "t" VALUE {'pk': 'a', 'x': LOWER(1), 'y': <<>>}    | Unsupported data type: lower under key root at 1:40:5
+            INSERT INTO "t" VALUE {'pk': 'a', 'x': {'y': foo(<<>>)}}       | Unsupported data type: Call under key root.y at 1:46:3
+            INSERT INTO "t" VALUE {'pk': 'a', 'x': <<>>, 'y': foo(1)}      | Empty bags are not supported
+            """)
+    void refusesACallByWhereItStands(String statement, String message) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals(message, e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SELECT * FROM "t" WHERE foo(*)         | foo(*) is not allowed
+            SELECT * FROM "t" WHERE FOO(*, 1)      | FOO(*) is not allowed
+            SELECT * FROM "t" WHERE SUM(*)         | sum(*) is not allowed
+            SELECT COUNT() FROM "t"                | Aggregate functions are always unary
+            SELECT * FROM "t" WHERE foo(1 2)       | Expected RIGHT_PAREN
+            SELECT foo(1 FROM "t"                  | Expected RIGHT_PAREN
+            SELECT * FROM "t" WHERE foo(           | Unexpected term
+            SELECT * FROM "t" WHERE foo(1,)        | Unexpected term
+            SELECT * FROM "t" WHERE foo(m.inner)   | Invalid path dot component
+            SELECT * FROM "t" WHERE foo(1) =       | Missing right-hand side expression of infix operator
+            INSERT INTO "t" VALUE {'pk': foo(1 2)} | Expected RIGHT_PAREN
+            """)
+    void aSyntaxErrorInACallWinsOverTheCall(String statement, String message) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals("Statement wasn't well formed, can't be processed: " + message, e.getMessage());
+    }
+
+    @Test
+    void stillRefusesAConditionFunctionAsAValue() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> DynamoDbPartiQLParser.parse("SELECT * FROM \"t\" WHERE pk = size(a)", List.of()));
+
+        assertEquals("Expected value literal or ?, got: size", e.getMessage());
+    }
+
     @Test
     void namesWhatFollowsALongRunOfSigns() {
         AwsException e = assertThrows(AwsException.class,
