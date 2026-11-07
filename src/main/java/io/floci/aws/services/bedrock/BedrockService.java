@@ -72,6 +72,8 @@ public class BedrockService implements ResourceProvider {
     private static final List<String> OUTPUT_MODALITIES = List.of("TEXT", "IMAGE", "EMBEDDING", "SPEECH", "VIDEO");
     private static final List<String> INFERENCE_TYPES = List.of("ON_DEMAND", "PROVISIONED");
     private static final List<String> CUSTOMIZATION_TYPES = List.of("FINE_TUNING", "CONTINUED_PRE_TRAINING", "DISTILLATION");
+    private static final String FOUNDATION_MODEL_PREFIX = "foundation-model/";
+    private static final String INFERENCE_PROFILE_PREFIX = "inference-profile/";
     private static final List<String> INFERENCE_PROFILE_TYPES = List.of("SYSTEM_DEFINED", "APPLICATION");
 
     /** {@code TagList} from the AWS model: at most 200 items on one request. */
@@ -292,19 +294,18 @@ public class BedrockService implements ResourceProvider {
     }
 
     public BedrockModelCatalog.FoundationModel getFoundationModel(String modelIdentifier, String region) {
-        String modelId = resourceIdOf(modelIdentifier, "foundation-model/", region, Set.of(""));
+        String modelId = foundationModelIdOf(modelIdentifier, region);
         Optional<BedrockModelCatalog.FoundationModel> served = BedrockModelCatalog.modelsIn(region).stream()
                 .filter(model -> model.modelId().equals(modelId))
                 .findFirst();
         if (served.isPresent()) {
             return served.get();
         }
-        // AWS answers a model it knows but does not serve in the Region with a validation error.
         if (BedrockModelCatalog.MODELS.stream().anyMatch(model -> model.modelId().equals(modelId))) {
             throw new AwsException("ValidationException",
                     "The provided model identifier is not valid in this Region.", 400);
         }
-        throw new AwsException("ResourceNotFoundException", "The model " + modelIdentifier + " was not found.", 404);
+        throw invalidModelIdentifier();
     }
 
     public PaginatedResult<BedrockModelCatalog.InferenceProfile> listInferenceProfiles(String typeEquals,
@@ -320,8 +321,7 @@ public class BedrockService implements ResourceProvider {
     }
 
     public BedrockModelCatalog.InferenceProfile getInferenceProfile(String inferenceProfileIdentifier, String region) {
-        String profileId = resourceIdOf(inferenceProfileIdentifier, "inference-profile/", region,
-                Set.of("", regionResolver.getAccountId()));
+        String profileId = inferenceProfileIdOf(inferenceProfileIdentifier, region);
         return BedrockModelCatalog.profilesFrom(region).stream()
                 .filter(profile -> profile.inferenceProfileId().equals(profileId))
                 .findFirst()
@@ -330,29 +330,66 @@ public class BedrockService implements ResourceProvider {
     }
 
     /**
-     * The id an identifier names: the identifier itself, or the resource id of an ARN. An ARN must
-     * name a Bedrock {@code resourcePrefix} resource in the calling Region and its partition, owned
-     * by one of {@code accounts}; any other ARN names nothing here.
+     * The model id an identifier names. AWS answers every identifier it cannot resolve to a model,
+     * an unknown id or an ARN of another Region, service or account, with a validation error.
      */
-    private String resourceIdOf(String identifier, String resourcePrefix, String region, Set<String> accounts) {
+    private String foundationModelIdOf(String identifier, String region) {
+        AwsArnUtils.Arn arn = arnOf(identifier);
+        if (arn == null) {
+            return identifier;
+        }
+        if (!isBedrockArnIn(arn, region) || !arn.accountId().isEmpty()
+                || !arn.resource().startsWith(FOUNDATION_MODEL_PREFIX)) {
+            throw invalidModelIdentifier();
+        }
+        return arn.resource().substring(FOUNDATION_MODEL_PREFIX.length());
+    }
+
+    /**
+     * The profile id an identifier names. As AWS does, an ARN of another service or without an
+     * account is invalid, one of another account is denied, and one of another Region names nothing.
+     */
+    private String inferenceProfileIdOf(String identifier, String region) {
+        AwsArnUtils.Arn arn = arnOf(identifier);
+        if (arn == null) {
+            return identifier;
+        }
+        if (!"bedrock".equals(arn.service()) || arn.accountId().isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "The provided inference profile identifier " + identifier + " is invalid.", 400);
+        }
+        if (!arn.accountId().equals(regionResolver.getAccountId())) {
+            throw new AwsException("AccessDeniedException",
+                    "You don't have access to the inference profile " + identifier + ".", 403);
+        }
+        if (!isBedrockArnIn(arn, region) || !arn.resource().startsWith(INFERENCE_PROFILE_PREFIX)) {
+            throw new AwsException("ResourceNotFoundException", "Resource " + identifier + " does not exist.", 404);
+        }
+        return arn.resource().substring(INFERENCE_PROFILE_PREFIX.length());
+    }
+
+    /** The ARN an identifier is, or {@code null} for a plain id. */
+    private static AwsArnUtils.Arn arnOf(String identifier) {
         if (identifier == null || identifier.isBlank()) {
             throw new AwsException("ValidationException", "The identifier is required.", 400);
         }
         if (!AwsArnUtils.looksLikeArn(identifier)) {
-            return identifier;
+            return null;
         }
-        AwsArnUtils.Arn arn;
         try {
-            arn = AwsArnUtils.parse(identifier);
+            return AwsArnUtils.parse(identifier);
         } catch (IllegalArgumentException e) {
             throw new AwsException("ValidationException", "The identifier " + identifier + " is not a valid ARN.", 400);
         }
-        if (!"bedrock".equals(arn.service()) || !regionResolver.partitionForRegion(region).equals(arn.partition())
-                || !region.equals(arn.region()) || !accounts.contains(arn.accountId())
-                || !arn.resource().startsWith(resourcePrefix)) {
-            throw new AwsException("ResourceNotFoundException", "Resource " + identifier + " does not exist.", 404);
-        }
-        return arn.resource().substring(resourcePrefix.length());
+    }
+
+    private boolean isBedrockArnIn(AwsArnUtils.Arn arn, String region) {
+        return "bedrock".equals(arn.service()) && region.equals(arn.region())
+                && regionResolver.partitionForRegion(region).equals(arn.partition());
+    }
+
+    private static AwsException invalidModelIdentifier() {
+        return new AwsException("ValidationException", "The provided model identifier is invalid.", 400);
     }
 
     private static void requireOneOf(String parameter, String value, List<String> allowed) {

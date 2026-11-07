@@ -119,9 +119,10 @@ and their US and EU system-defined inference profiles.
 The answers depend on the calling Region, as on AWS:
 
 - A model is listed when its card shows it served in that Region, or when one of its
-  inference profiles can be called from it. `GetFoundationModel` on a catalog model the
-  Region does not serve returns `ValidationException`, as AWS does; an unknown model id
-  returns `ResourceNotFoundException`. The message text is Floci's own.
+  inference profiles can be called from it. `GetFoundationModel` answers a catalog model
+  the Region does not serve, an unknown model id, and an ARN that does not name a
+  foundation model in the calling Region and partition with `ValidationException`, as AWS
+  does.
 - `byOutputModality` accepts `SPEECH` and `VIDEO` as well as the published `TEXT`,
   `IMAGE` and `EMBEDDING`, as AWS does. No catalog model produces speech or video, so
   those filters return an empty list.
@@ -134,9 +135,11 @@ The answers depend on the calling Region, as on AWS:
   itself, and empty where it is reachable only through an inference profile, so
   `byInferenceType=ON_DEMAND` leaves those out.
 - `modelArn` is `arn:<partition>:bedrock:<region>::foundation-model/<modelId>`, and
-  `inferenceProfileArn` carries the calling Region and account. An ARN passed to
-  `GetFoundationModel` or `GetInferenceProfile` must name that resource in the calling
-  Region, partition and account; any other ARN returns `ResourceNotFoundException`.
+  `inferenceProfileArn` carries the calling Region and account. `GetInferenceProfile`
+  answers an ARN of another service or without an account with `ValidationException`,
+  one of another account with `AccessDeniedException`, and one of another Region,
+  partition or resource type with `ResourceNotFoundException`.
+- The error codes and statuses follow AWS; the message text is Floci's own.
 
 Deviations: models that are not in the catalog are not listed, provisioned throughput is
 never reported, and `customizationsSupported` is always empty, so `byCustomizationType`

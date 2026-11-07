@@ -11,6 +11,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.bedrock.BedrockClient;
+import software.amazon.awssdk.services.bedrock.model.AccessDeniedException;
 import software.amazon.awssdk.services.bedrock.model.FoundationModelDetails;
 import software.amazon.awssdk.services.bedrock.model.FoundationModelSummary;
 import software.amazon.awssdk.services.bedrock.model.GetInferenceProfileResponse;
@@ -83,11 +84,11 @@ class BedrockModelCatalogIntegrationTest {
     }
 
     @Test
-    void getFoundationModelRefusesAnUnknownModelAsNotFound() {
+    void getFoundationModelRefusesAnUnknownModelAsInvalid() {
         try (BedrockClient client = client("eu-west-1")) {
-            ResourceNotFoundException unknown = assertThrows(ResourceNotFoundException.class,
+            ValidationException unknown = assertThrows(ValidationException.class,
                     () -> client.getFoundationModel(request -> request.modelIdentifier("amazon.no-such-model-v1:0")));
-            assertEquals(404, unknown.statusCode());
+            assertEquals(400, unknown.statusCode());
         }
     }
 
@@ -152,23 +153,45 @@ class BedrockModelCatalogIntegrationTest {
         "arn:aws:bedrock:eu-west-1::custom-model/" + NOVA_MICRO})
     void getFoundationModelRefusesAnArnThatDoesNotNameTheModelInTheRegion(String arn) {
         try (BedrockClient client = client("eu-west-1")) {
-            ResourceNotFoundException error = assertThrows(ResourceNotFoundException.class,
+            ValidationException error = assertThrows(ValidationException.class,
                     () -> client.getFoundationModel(request -> request.modelIdentifier(arn)));
-            assertEquals(404, error.statusCode());
+            assertEquals(400, error.statusCode());
         }
     }
 
     @ParameterizedTest
     @ValueSource(strings = {
-        "arn:aws:bedrock:us-west-1:741623800004:inference-profile/us.amazon.nova-lite-v1:0",
         "arn:aws:bedrock:us-east-1:" + ACCOUNT + ":inference-profile/us.amazon.nova-lite-v1:0",
-        "arn:aws:bedrock-runtime:us-west-1:" + ACCOUNT + ":inference-profile/us.amazon.nova-lite-v1:0",
+        "arn:aws-cn:bedrock:us-west-1:" + ACCOUNT + ":inference-profile/us.amazon.nova-lite-v1:0",
         "arn:aws:bedrock:us-west-1:" + ACCOUNT + ":application-inference-profile/us.amazon.nova-lite-v1:0"})
     void getInferenceProfileRefusesAnArnThatDoesNotNameTheProfileInTheRegion(String arn) {
         try (BedrockClient client = client("us-west-1")) {
             ResourceNotFoundException error = assertThrows(ResourceNotFoundException.class,
                     () -> client.getInferenceProfile(request -> request.inferenceProfileIdentifier(arn)));
             assertEquals(404, error.statusCode());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "arn:aws:bedrock-runtime:us-west-1:" + ACCOUNT + ":inference-profile/us.amazon.nova-lite-v1:0",
+        "arn:aws:bedrock:us-west-1::inference-profile/us.amazon.nova-lite-v1:0"})
+    void getInferenceProfileRefusesAnArnOfAnotherServiceOrWithoutAnAccountAsInvalid(String arn) {
+        try (BedrockClient client = client("us-west-1")) {
+            ValidationException error = assertThrows(ValidationException.class,
+                    () -> client.getInferenceProfile(request -> request.inferenceProfileIdentifier(arn)));
+            assertEquals(400, error.statusCode());
+        }
+    }
+
+    @Test
+    void getInferenceProfileRefusesAnArnOfAnotherAccountAsAccessDenied() {
+        try (BedrockClient client = client("us-west-1")) {
+            AccessDeniedException error = assertThrows(AccessDeniedException.class,
+                    () -> client.getInferenceProfile(request -> request
+                            .inferenceProfileIdentifier("arn:aws:bedrock:us-west-1:741623800004:inference-profile/"
+                                    + "us.amazon.nova-lite-v1:0")));
+            assertEquals(403, error.statusCode());
         }
     }
 
