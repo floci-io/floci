@@ -2,6 +2,7 @@ package io.floci.aws.core.common.docker;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
@@ -18,6 +19,7 @@ import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
+import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
@@ -37,8 +39,10 @@ import org.jboss.logging.Logger;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -1048,6 +1052,30 @@ public class ContainerLifecycleManager {
                 .withContainerNetwork(new ContainerNetwork().withAliases(alias))
                 .exec();
         LOG.debugv("Connected {0} to network {1} as {2}", containerId, networkName, alias);
+    }
+
+    /**
+     * The last {@code lines} lines the container {@code containerId} wrote, standard output and error together, or as
+     * much of them as Docker gave within {@code timeout}; empty when it gave none. For the message of a container that
+     * failed, which a failure to read them should not replace, so that is only logged.
+     */
+    public String lastLogLines(String containerId, int lines, Duration timeout) {
+        StringBuffer output = new StringBuffer();
+        ResultCallback.Adapter<Frame> reader = new ResultCallback.Adapter<>() {
+            @Override
+            public void onNext(Frame frame) {
+                output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+            }
+        };
+        try (reader) {
+            dockerClient.logContainerCmd(containerId).withStdOut(true).withStdErr(true).withTail(lines).exec(reader)
+                    .awaitCompletion(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (IOException | RuntimeException e) {
+            LOG.debugv(e, "Could not read the log of container {0}: {1}", containerId, e.getMessage());
+        }
+        return output.toString().strip();
     }
 
     /**

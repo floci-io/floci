@@ -58,6 +58,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -129,6 +130,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private final String imageTemplate;
     private final String hiveImageTemplate;
     private final String dockerNetwork;
+    // What the NodeManager of a cluster that runs YARN offers its containers.
+    private final ClusterStorage.Yarn nodeManager;
     // The steps a thread is running, by account and id; a RUNNING container step not here was left by a restart.
     private final Set<String> executing = new HashSet<>();
     // Likewise the clusters a thread is bootstrapping.
@@ -248,6 +251,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         this.imageTemplate = config.services().emr().imageTemplate().orElse(null);
         this.hiveImageTemplate = config.services().emr().hiveImageTemplate().orElse(null);
         this.dockerNetwork = config.services().emr().dockerNetwork().orElse(null);
+        this.nodeManager = new ClusterStorage.Yarn(config.services().emr().yarnNodeMemoryMb(),
+                config.services().emr().yarnNodeVcores());
         this.lifecycle = new EmrClusterLifecycle(config.services().emr().clusterStartupDelaySeconds(),
                 config.services().emr().stepDurationSeconds(),
                 config.services().emr().clusterTerminationDelaySeconds(), eventPublisher,
@@ -1458,31 +1463,36 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             }
             EmrSparkSteps.HiveCommand hive = EmrSparkSteps.hive(step, cluster.getReleaseLabel(),
                     cluster.getApplications(), cluster.getConfigurations(), SNAPSHOT_MAPPER);
-            List<String> application = hive == null ? EmrSparkSteps.application(step) : null;
+            boolean yarn = runsYarn(cluster);
+            List<String> application = hive == null ? EmrSparkSteps.application(step, yarn) : null;
             List<String> command = hive == null && application == null ? EmrSparkSteps.command(step) : null;
             SparkJobRunner.Storage storage = null;
             if ((hive != null || application != null || command != null) && clusterStorage != null) {
                 storage = clusterStorage.volumes(cluster.getId());
                 cluster.setStorageCreated(true);
             }
-            // The image a cluster's bootstrap left, which holds what its release's does; else a cluster with Hive's,
-            // which the step's thread makes, or the release's.
+            // The image a cluster's bootstrap left, which holds what its release's does; else a cluster with Hive's or
+            // YARN's, which the step's thread makes, or the release's.
             String image = cluster.getBootstrapImage() != null ? cluster.getBootstrapImage() : imageTemplate;
             Supplier<String> releaseImage = cluster.getBootstrapImage() == null ? releaseImage(cluster) : null;
             // Every EMR cluster runs HDFS on its primary node, which the step's thread starts when it is not running:
-            // a NameNode and a DataNode, in a container of the release's Hive image, the one with HDFS's daemons, and
-            // on a cluster with Hive or HCatalog its metastore service.
+            // a NameNode and a DataNode, on a cluster with Hive or HCatalog its metastore service, and on one that runs
+            // YARN a ResourceManager and a NodeManager, in a container of the image its steps run in, as an EMR
+            // cluster's nodes hold every application it installs, or else of the release's Hive image, the one with
+            // HDFS's daemons.
             String clusterId = cluster.getId();
             String hdfsHost = masterPrivateDnsName(cluster);
             String hdfsImage = hdfsImage(cluster.getReleaseLabel());
+            ClusterStorage.Yarn nodeYarn = yarn
+                    ? nodeManager.withHadoopFolder(EmrReleaseImages.hadoopFolder(cluster.getReleaseLabel())) : null;
             ClusterStorage.HiveMetastore hiveMetastore = EmrSparkSteps.installsHive(cluster.getReleaseLabel(),
                     cluster.getApplications(), SNAPSHOT_MAPPER)
                     ? new ClusterStorage.HiveMetastore(instanceProfileRole(cluster, accountId),
                             EmrSparkSteps.hiveMetastoreSettings(cluster.getConfigurations(), SNAPSHOT_MAPPER))
                     : null;
-            Function<BooleanSupplier, SparkJobRunner.Storage> hdfs = storage == null ? null
-                    : stopped -> clusterStorage.hdfs(clusterId, accountId, region, hdfsHost, hdfsImage, dockerNetwork,
-                            hiveMetastore, stopped);
+            BiFunction<String, BooleanSupplier, SparkJobRunner.Storage> hdfs = storage == null ? null
+                    : (stepImage, stopped) -> clusterStorage.hdfs(clusterId, accountId, region, hdfsHost,
+                            nodeYarn != null ? stepImage : hdfsImage, dockerNetwork, hiveMetastore, nodeYarn, stopped);
             SparkJobRunner.Job job;
             if (hive != null) {
                 job = new SparkJobRunner.Job(SERVICE, step.getId(), accountId, region, cluster.getReleaseLabel(),
@@ -1510,7 +1520,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
             StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation,
                     teardowns.get());
             executing.add(stepKey(accountId, step.getId()));
-            stepExecutor.execute(() -> runStep(job, launch, releaseImage, hdfs));
+            String containerLogs = yarn ? EmrSparkSteps.containerLogFolder(cluster) : null;
+            stepExecutor.execute(() -> runStep(job, launch, releaseImage, hdfs, containerLogs));
         }
 
         @Override
@@ -1520,9 +1531,10 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     // A step's thread: its driver runs to its end, or the step fails at once when Floci does not run its kind. A
-    // cluster with Hive's image is made first, when it is not there yet, so a failure to make it fails the step.
+    // cluster with Hive's or YARN's image is made first, when it is not there yet, so a failure to make it fails the
+    // step.
     private void runStep(SparkJobRunner.Job job, StepLaunch launch, Supplier<String> releaseImage,
-                         Function<BooleanSupplier, SparkJobRunner.Storage> hdfs) {
+                         BiFunction<String, BooleanSupplier, SparkJobRunner.Storage> hdfs, String containerLogs) {
         String failure;
         if (job == null) {
             failure = EmrSparkSteps.NOT_RUN;
@@ -1536,7 +1548,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 // a cancel, its cluster's end or a reset has passed does not start, so it makes none.
                 if (job.storage() != null && !progress.cancelled()) {
                     clusterStorage.create(launch.clusterId(), launch.accountId(), launch.region());
-                    running = running.onStorage(hdfs.apply(progress::cancelled));
+                    running = running.onStorage(hdfs.apply(running.imageTemplate(), progress::cancelled));
                 }
                 outcome = sparkRunner.run(running, progress);
             } catch (ClusterStorage.Stopped e) {
@@ -1559,8 +1571,20 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 clusterStorage.remove(launch.clusterId());
             }
             if (outcome.stopped()) {
+                // A cancelled step's cluster-mode driver wrote only to its application's logs, which go in S3 before its
+                // cluster's storage can; one that never ran has none, and Floci's own teardown leaves them on the node.
+                if (containerLogs != null && progress.driverStarted && teardowns.get() == launch.teardownsBefore()) {
+                    clusterStorage.archiveContainerLogs(launch.clusterId(), launch.accountId(), launch.region(),
+                            containerLogs);
+                }
                 RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> driverStopped(launch)));
                 return;
+            }
+            // Before the step ends, so its cluster-mode driver's output is there once it has: only the client's is in
+            // its own stdout and stderr, as on EMR.
+            if (containerLogs != null && outcome.failure() == null) {
+                clusterStorage.archiveContainerLogs(launch.clusterId(), launch.accountId(), launch.region(),
+                        containerLogs);
             }
             failure = failureOf(job, outcome);
         }
@@ -1613,20 +1637,37 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * What makes, on the thread that needs it, the image a cluster that installs Hive starts from, its release's EMR
-     * Serverless image with its EMR Serverless Hive image's Hive, and returns the image's id: an EMR cluster's nodes
-     * hold every application it installs, so its bootstrap actions and steps all run in it. Null for a cluster
-     * without Hive, which starts from the release's EMR Serverless image.
+     * What makes, on the thread that needs it, the image a cluster that installs Hive, or runs YARN, starts from, its
+     * release's EMR Serverless image with its EMR Serverless Hive image's HDFS, MapReduce and YARN, and Hive for a
+     * cluster with Hive, and returns the image's id: an EMR cluster's nodes hold every application it installs, so its
+     * bootstrap actions, its steps and its primary node's YARN all run in it. A release of the AWS runtime for Apache
+     * Spark has no EMR Serverless Hive image, so {@link #SPARK_RUNTIME_HDFS_RELEASE}'s gives its Hadoop. Null for a
+     * cluster with neither, which starts from the release's EMR Serverless image.
      */
     private Supplier<String> releaseImage(EmrCluster cluster) {
-        if (releaseImages == null
-                || !EmrSparkSteps.installsHive(cluster.getReleaseLabel(), cluster.getApplications(), SNAPSHOT_MAPPER)) {
+        if (releaseImages == null) {
+            return null;
+        }
+        boolean withHive = EmrSparkSteps.installsHive(cluster.getReleaseLabel(), cluster.getApplications(),
+                SNAPSHOT_MAPPER);
+        if (!withHive && !runsYarn(cluster)) {
             return null;
         }
         String release = cluster.getReleaseLabel();
         String spark = EmrServerlessSparkRunner.image(imageTemplate, release);
-        String hive = EmrServerlessSparkRunner.image(hiveImageTemplate, release, SparkJobRunner.Engine.HIVE);
-        return () -> releaseImages.image(release, spark, hive);
+        String hive = hdfsImage(release);
+        return () -> releaseImages.image(release, spark, hive, withHive);
+    }
+
+    /**
+     * Whether a cluster's primary node runs YARN, which its steps' Spark runs on: "the primary node runs the YARN
+     * ResourceManager service", and a core node "YARN NodeManager daemons, Hadoop MapReduce tasks, and Spark executors".
+     * It does on a network of the cluster's own, as its metastore does. A cluster bootstrapped by an earlier Floci runs
+     * from an image that may hold no YARN, so it keeps to local mode, its HDFS in the release's Hive image, as it did.
+     */
+    private boolean runsYarn(EmrCluster cluster) {
+        return releaseImages != null && clusterStorage != null && clusterStorage.ownNetwork(dockerNetwork)
+                && (cluster.getBootstrapImage() == null || cluster.isBootstrapImageRunsYarn());
     }
 
     /**
@@ -1725,6 +1766,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         if (outcome.image() != null) {
             code = null;
             message = null;
+            // Asked before the image is the cluster's, while it says only that the release's image made this one.
+            cluster.setBootstrapImageRunsYarn(runsYarn(cluster));
         } else if (outcome.exitCode() != null) {
             message = BOOTSTRAP_ACTION_FAILED.formatted(master, outcome.failedAction());
         } else if (outcome.failedAction() != null) {
@@ -1768,6 +1811,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private final class StepProgress implements SparkJobRunner.Progress {
 
         private final StepLaunch launch;
+        // Whether the step's driver has started, so it may have left an application's logs on the cluster's nodes.
+        private volatile boolean driverStarted;
 
         StepProgress(StepLaunch launch) {
             this.launch = launch;
@@ -1776,6 +1821,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         @Override
         public void started() {
             // The step has been RUNNING since it started; the driver's start changes nothing a caller sees.
+            driverStarted = true;
         }
 
         @Override
