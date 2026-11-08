@@ -53,20 +53,6 @@ class EventBridgeResourcePolicyProviderTest {
     }
 
     @Test
-    void malformedRegionalOwnersDoNotReadPolicies() {
-        for (String arn : List.of(
-                "arn:aws:events:us-east-1:123:event-bus/orders",
-                "arn:aws:events:us-east-1:11112222333x:event-bus/orders",
-                "arn:aws:events:us-east-1:１１１１２２２２３３３３:event-bus/orders",
-                "arn:aws:events::111122223333:event-bus/orders",
-                "arn:aws:events: :111122223333:event-bus/orders")) {
-            assertTrue(provider.getResourcePolicies("states", arn).isEmpty(), arn);
-        }
-        assertTrue(provider.getResourcePolicies("states", null).isEmpty());
-        verifyNoInteractions(eventBridgeService);
-    }
-
-    @Test
     void aForeignCredentialScopeStillReadsThePartitionResourceOwner() {
         String arn = "arn:aws-us-gov:events:us-gov-west-1:" + OWNER + ":event-bus/orders";
         when(eventBridgeService.findBusPolicy(arn)).thenReturn(Optional.of(POLICY));

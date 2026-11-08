@@ -1,5 +1,6 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.core.common.AccountResolver;
 import io.floci.aws.core.common.AwsArnUtils;
 
 import java.util.List;
@@ -25,9 +26,7 @@ public interface ResourcePolicyProvider {
             return Optional.empty();
         }
         AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
-        String accountId = arn.accountId();
-        if (arn.region().isBlank() || accountId.length() != 12
-                || !accountId.chars().allMatch(character -> character >= '0' && character <= '9')) {
+        if (arn.region().isBlank() || !AccountResolver.isAccountId(arn.accountId())) {
             return Optional.empty();
         }
         return Optional.of(arn);
