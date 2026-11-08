@@ -277,8 +277,7 @@ class CloudFormationSesReceiptRuleIntegrationTest {
         template.withObject("/Outputs").putObject("BucketName").putObject("Value").put("Ref", "Bucket");
         cfn.createStack(r -> r.stackName(stackName).templateBody(template.toString()));
         Stack created = CfnStackWaits.awaitStatus(cfn, stackName, "CREATE_COMPLETE");
-        String bucket = created.outputs().stream().filter(o -> "BucketName".equals(o.outputKey()))
-                .findFirst().orElseThrow().outputValue();
+        String bucket = CfnStackWaits.output(created, "BucketName");
         ReceiptRule rule = ses.describeReceiptRule(ruleSet, "store", "us-east-1");
         assertEquals("S3Action", rule.getActions().getFirst().getType());
         assertEquals(bucket, rule.getActions().getFirst().property("BucketName"));

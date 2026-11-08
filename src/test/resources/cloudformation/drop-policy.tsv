@@ -68,11 +68,11 @@ AWS::AppSync::Resolver	SyncConfig	clear
 AWS::AppSync::Resolver	TypeName	create-only
 AWS::EC2::EIP	Tags	clear
 AWS::EC2::Instance	AvailabilityZone	create-only	a drop differs from the declared value, so the instance is replaced
-AWS::EC2::Instance	IamInstanceProfile	clear	the profile is disassociated
+AWS::EC2::Instance	IamInstanceProfile	clear	the profile is disassociated, unless a launch template still supplies one, which takes its place
 AWS::EC2::Instance	ImageId	create-only	a drop is read as no preference and the instance is kept, unless a launch template still supplies a different image, which replaces it
 AWS::EC2::Instance	InstanceType	default:t3.micro	when no launch template supplies a type
 AWS::EC2::Instance	KeyName	create-only	a drop is read as no preference and the instance is kept, unless a launch template still supplies a different key, which replaces it
-AWS::EC2::Instance	LaunchTemplate	keep:the instance is kept, and the instance type and the MetadataOptions members the template supplied go back to their defaults
+AWS::EC2::Instance	LaunchTemplate	keep:the instance is kept, the instance type and the MetadataOptions members the template supplied go back to their defaults, and the instance profile it supplied is disassociated
 AWS::EC2::Instance	MetadataOptions	default:launch defaults, member by member	a member the launch template still supplies takes the template's value
 AWS::EC2::Instance	NetworkInterfaces	keep:read only when an instance launches
 AWS::EC2::Instance	PrivateIpAddress	create-only	a drop differs from the declared value, so the instance is replaced
