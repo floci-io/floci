@@ -12,6 +12,7 @@ import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.ManualClock;
 import io.floci.aws.testing.StorageFactories;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -25,7 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -239,19 +240,26 @@ class ApiGatewayUsageMeteringServiceTest {
     @ValueSource(booleans = {false, true})
     void keyAddedWhileItsPlanOrItselfIsDeletedIsNotLeftBehind(boolean deleteKey) {
         String[] ids = new String[2];
+        AtomicReference<Thread> deleter = new AtomicReference<>();
         CompletableFuture<?>[] deletion = new CompletableFuture<?>[1];
         InMemoryStorage<String, UsagePlanKey> keys = new InMemoryStorage<>() {
             @Override
             public void put(String key, UsagePlanKey value) {
                 deletion[0] = CompletableFuture.runAsync(() -> {
+                    deleter.set(Thread.currentThread());
                     if (deleteKey) {
                         service.deleteApiKey(REGION, ids[1]);
                     } else {
                         service.deleteUsagePlan(REGION, ids[0]);
                     }
                 });
-                // Unless adding a key holds the plan lock, the deletion completes here, before the write.
-                deletion[0].copy().completeOnTimeout(null, 200, TimeUnit.MILLISECONDS).join();
+                // The deletion blocks behind the plan lock this write holds; without it, it sweeps first.
+                try {
+                    ThreadStates.awaitBlockedOrDone(deleter, deletion[0]);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
                 super.put(key, value);
             }
         };
