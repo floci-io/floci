@@ -25,7 +25,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * A MySQL or MariaDB instance's snapshot carries its schemas, its roles and its accounts: an
  * instance restored from it holds the same rows, including a schema whose name has a space, and an
  * account created on the source logs in to the restored instance with its own password and reads
- * through the role it was granted. Skipped without Docker.
+ * through the role it was granted. A snapshot requested straight after CreateDBInstance waits for
+ * the image to finish initializing the instance. Skipped without Docker.
  */
 @QuarkusTest
 @Tag("docker")
@@ -48,8 +49,13 @@ class RdsMysqlSnapshotDockerIntegrationTest {
         String sourceId = engine + "-snap-src-" + suffix;
         String restoredId = engine + "-snap-dst-" + suffix;
         String snapshotId = engine + "-snap-" + suffix;
+        String earlySnapshotId = engine + "-snap-early-" + suffix;
         try {
             int sourcePort = createInstance(sourceId, engine, version);
+            rds("CreateDBSnapshot")
+                    .formParam("DBInstanceIdentifier", sourceId)
+                    .formParam("DBSnapshotIdentifier", earlySnapshotId)
+            .when().post("/").then().statusCode(200);
             execute(sourcePort, MASTER_USER, MASTER_PASSWORD,
                     "CREATE TABLE appdb.notes (id INT PRIMARY KEY, body VARCHAR(32))",
                     "INSERT INTO appdb.notes VALUES (1, 'kept')",
@@ -81,9 +87,11 @@ class RdsMysqlSnapshotDockerIntegrationTest {
         } finally {
             deleteInstance(restoredId);
             deleteInstance(sourceId);
-            rds("DeleteDBSnapshot")
-                    .formParam("DBSnapshotIdentifier", snapshotId)
-            .when().post("/");
+            for (String id : new String[] {snapshotId, earlySnapshotId}) {
+                rds("DeleteDBSnapshot")
+                        .formParam("DBSnapshotIdentifier", id)
+                .when().post("/");
+            }
         }
     }
 

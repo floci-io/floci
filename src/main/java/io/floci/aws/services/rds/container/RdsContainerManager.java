@@ -37,6 +37,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -1211,31 +1212,39 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
     public void restorePostgresSnapshot(String containerId, String masterUsername, String sqlDump) {
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        Map<String, String> files = new LinkedHashMap<>();
+        files.put("dump.sql", sqlDump);
+        files.put("restore.sh", postgresRestoreScript());
+        runSnapshotScript(containerId, "postgres-restore", files,
+                new String[]{"sh", "/tmp/restore.sh", effectiveUser}, 60, 120, "psql restore");
+    }
 
+    /**
+     * Uploads {@code files} into the container's {@code /tmp} and runs {@code cmd}, again every second
+     * while it exits 2, which the snapshot scripts answer while the server does not accept connections
+     * yet: a just-created MySQL or MariaDB container is still initializing its data directory on a
+     * server that does not listen on TCP, and psql exits 2 when it cannot connect. Returns the
+     * command's output; any other failure, or a server still not answering after {@code attempts}
+     * tries, throws with {@code operation} and the command's error output.
+     */
+    private String runSnapshotScript(String containerId, String uploadName, Map<String, String> files,
+                                     String[] cmd, int attempts, int timeoutSeconds, String operation) {
         try (Lease _ = holdContainer(containerId)) {
-            String restoreScript = postgresRestoreScript();
-
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
                 tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
-
-                addTarEntry(tar, "dump.sql", sqlDump);
-                addTarEntry(tar, "restore.sh", restoreScript);
+                for (Map.Entry<String, String> file : files.entrySet()) {
+                    addTarEntry(tar, file.getKey(), file.getValue());
+                }
             }
-
             byte[] archive = bos.toByteArray();
             RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId,
-                    "/tmp", "postgres-restore", out -> out.write(archive),
+                    "/tmp", uploadName, out -> out.write(archive),
                     RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
 
-            String[] cmd = { "sh", "/tmp/restore.sh", effectiveUser };
-
             ContainerExec.Result result = null;
-            for (int i = 0; i < 60; i++) {
-                result = execInContainer(containerId, cmd, 120);
-                if (result.exitCode() == 0) {
-                    break;
-                }
+            for (int i = 0; i < attempts; i++) {
+                result = execInContainer(containerId, cmd, timeoutSeconds);
                 if (result.exitCode() != 2) {
                     break;
                 }
@@ -1243,100 +1252,56 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     Thread.sleep(1000);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted while restoring postgres snapshot", ie);
+                    throw new RuntimeException("Interrupted while waiting to run " + operation, ie);
                 }
             }
 
             if (result == null || result.exitCode() != 0) {
                 String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
-                throw new RuntimeException("psql restore failed with exit code "
+                throw new RuntimeException(operation + " failed with exit code "
                         + (result != null ? result.exitCode() : -1) + ": " + errMsg);
-            }
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to restore postgres snapshot", e);
-        }
-    }
-
-    /**
-     * A logical copy of a MySQL or MariaDB server, the counterpart of {@link #createPostgresSnapshot}:
-     * every user schema (with its routines, triggers and events), then every account but root and the
-     * image's own system accounts, recreated from {@code SHOW CREATE USER} and {@code SHOW GRANTS}. The
-     * {@code mysql} system schema itself is not copied, since MySQL 8 cannot load one into a fresh
-     * server. It runs as the master user, whom the instance's init script granted ALL on *.*.
-     */
-    public String createMysqlSnapshot(DatabaseEngine engine, String containerId,
-                                      String masterUsername, String masterPassword) {
-        MysqlTools tools = MysqlTools.of(engine);
-        try (Lease _ = holdContainer(containerId)) {
-            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/tmp",
-                    "floci-mysql-dump.sh", mysqlDumpScript().getBytes(StandardCharsets.UTF_8), 0755,
-                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
-            String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
-                    "sh", "/tmp/floci-mysql-dump.sh", tools.client(), tools.dump(), mysqlUser(masterUsername),
-                    tools.dumpFlags(), tools.accountClause(), tools.roleFilter()};
-            ContainerExec.Result result = execInContainer(containerId, cmd, 300);
-            if (result.exitCode() != 0) {
-                throw new RuntimeException(tools.dump() + " failed with exit code " + result.exitCode()
-                        + ": " + result.stderr());
             }
             return result.stdout();
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
-            throw new RuntimeException("Failed to create " + engine + " snapshot", e);
+            throw new RuntimeException("Failed to run " + operation, e);
         }
     }
 
     /**
-     * Replays a {@link #createMysqlSnapshot} copy into a just-created MySQL or MariaDB instance. The
-     * image's entrypoint first initializes the data directory on a server it starts without
-     * networking, then restarts it, so the replay waits until the server answers over TCP rather
-     * than loading the copy into the initializing server that is about to be stopped.
+     * A logical copy of a MySQL or MariaDB server, the counterpart of {@link #createPostgresSnapshot}:
+     * every user schema (with its routines, triggers and events), then every role and every account
+     * but root and the image's own system accounts, recreated from {@code SHOW CREATE USER} and
+     * {@code SHOW GRANTS}. The {@code mysql} system schema itself is not copied, since MySQL 8 cannot
+     * load one into a fresh server. It runs as the master user, whom the instance's init script
+     * granted ALL on *.*, once the server accepts that user over TCP: Floci reports an instance
+     * {@code available} while the image is still initializing it.
+     */
+    public String createMysqlSnapshot(DatabaseEngine engine, String containerId,
+                                      String masterUsername, String masterPassword) {
+        MysqlTools tools = MysqlTools.of(engine);
+        String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
+                "sh", "/tmp/floci-mysql-dump.sh", tools.client(), tools.dump(), mysqlUser(masterUsername),
+                tools.dumpFlags(), tools.accountClause(), tools.roleFilter()};
+        return runSnapshotScript(containerId, "mysql-dump", Map.of("floci-mysql-dump.sh", mysqlDumpScript()),
+                cmd, 120, 300, tools.dump());
+    }
+
+    /**
+     * Replays a {@link #createMysqlSnapshot} copy into a just-created MySQL or MariaDB instance, once
+     * its server accepts the master user over TCP rather than into the initializing server the
+     * image is about to stop.
      */
     public void restoreMysqlSnapshot(DatabaseEngine engine, String containerId,
                                      String masterUsername, String masterPassword, String sqlDump) {
         MysqlTools tools = MysqlTools.of(engine);
-        try (Lease _ = holdContainer(containerId)) {
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
-                tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
-                addTarEntry(tar, "dump.sql", sqlDump);
-                addTarEntry(tar, "restore.sh", mysqlRestoreScript());
-            }
-            byte[] archive = bos.toByteArray();
-            RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId,
-                    "/tmp", "mysql-restore", out -> out.write(archive),
-                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
-            String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
-                    "sh", "/tmp/restore.sh", tools.client(), mysqlUser(masterUsername)};
-
-            ContainerExec.Result result = null;
-            // Exit code 2: the server does not accept the master user over TCP yet.
-            for (int i = 0; i < 120; i++) {
-                result = execInContainer(containerId, cmd, 300);
-                if (result.exitCode() != 2) {
-                    break;
-                }
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted while restoring " + engine + " snapshot", ie);
-                }
-            }
-
-            if (result == null || result.exitCode() != 0) {
-                String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
-                throw new RuntimeException(tools.client() + " restore failed with exit code "
-                        + (result != null ? result.exitCode() : -1) + ": " + errMsg);
-            }
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to restore " + engine + " snapshot", e);
-        }
+        Map<String, String> files = new LinkedHashMap<>();
+        files.put("dump.sql", sqlDump);
+        files.put("restore.sh", mysqlRestoreScript());
+        String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
+                "sh", "/tmp/restore.sh", tools.client(), mysqlUser(masterUsername)};
+        runSnapshotScript(containerId, "mysql-restore", files, cmd, 120, 300, tools.client() + " restore");
     }
 
     /**
@@ -1371,6 +1336,10 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 set -ef
                 C="$1"; D="$2"; U="$3"; FLAGS="$4"; ACCOUNT_CLAUSE="$5"; ROLE_FILTER="$6"
                 SQL() { "$C" -h127.0.0.1 --protocol=TCP -u"$U" -N -B -r -e "$1"; }
+                # Exit 2: the server does not accept the master user over TCP yet. Past this point a
+                # failure exits 1, even mysqldump's own exit 2, so it is not retried as one.
+                SQL "SELECT 1" >/dev/null 2>&1 || exit 2
+                trap 'rc=$?; if [ "$rc" = 2 ]; then exit 1; fi' EXIT
                 DBS=$(SQL "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN \\
                   ('mysql','sys','performance_schema','information_schema')")
                 set --
