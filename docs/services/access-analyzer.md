@@ -4,13 +4,14 @@
 
 **Endpoint:** `http://localhost:4566`
 
-Floci supports the analyzer lifecycle used by local governance workflows.
+Floci supports the analyzer lifecycle and basic policy validation used by local governance workflows.
 
 ## Supported Actions
 
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
+| `ValidatePolicy` | Checks basic policy syntax and grammar and returns paginated findings with source locations. |
 | `ListAnalyzers` | - |
 | `CreateAnalyzer` | - |
 | `DeleteAnalyzer` | - |
@@ -18,6 +19,18 @@ Floci supports the analyzer lifecycle used by local governance workflows.
 <!-- floci:actions:end -->
 
 Analyzer state is account and Region scoped and persisted through `StorageFactory`.
+
+## Policy validation
+
+`ValidatePolicy` accepts a JSON policy string at `POST /policy/validation`. It does not require an analyzer, persist the submitted policy, or change permissions. It supports `IDENTITY_POLICY`, `RESOURCE_POLICY`, `SERVICE_CONTROL_POLICY`, and `RESOURCE_CONTROL_POLICY` requests. With IAM enforcement enabled, callers need `access-analyzer:ValidatePolicy` on `Resource: "*"`, and `ListAnalyzers` needs `access-analyzer:ListAnalyzers` the same way, both actions AWS authorizes on no resource. `CreateAnalyzer`, `GetAnalyzer` and `DeleteAnalyzer` need their action on the analyzer they name, `arn:aws:access-analyzer:<region>:<account>:analyzer/<name>`, as AWS authorizes them on the analyzer: `CreateAnalyzer` the one its `analyzerName` gives, the others the one in their path. A `CreateAnalyzer` that carries `tags` also needs `access-analyzer:TagResource` on that analyzer, and its own action is checked with the tags as `aws:RequestTag/<key>` and `aws:TagKeys`, as the Service Reference lists both for it.
+
+The local checks cover malformed JSON, repeated object keys, document and statement shapes, required elements, mutually exclusive elements, policy versions, duplicate statement identifiers, principal key names, condition operator names, and selected empty-value suggestions. Resource policies accept the API's supported `validatePolicyResourceType` values; the IAM trust-policy type permits statements without a resource element. Generic resource policies containing trust actions use the same trust-policy context. `BinaryEquals` is recognized as policy syntax, but Floci's IAM evaluator does not execute it.
+
+Findings include an issue code, severity, explanation, documentation link, JSON path, and source span. Spans refer to the original policy string, with zero-based offsets and columns, one-based lines, and an exclusive end. Malformed policy JSON and repeated object keys return `JSON_SYNTAX_ERROR` findings in a successful response. Repeated-key findings point to the repeated key in the submitted text. Invalid request members return `ValidationException`; malformed outer request JSON returns `SerializationException`.
+
+Use `maxResults` and `nextToken` query parameters to page through findings. The default page size is 100 and the supported range is 1 to 1000. Tokens are opaque, bound to the policy document, policy type, resource type, and locale, and expire when Floci restarts. The page size may change between requests.
+
+These are basic syntax and grammar checks, not the full AWS policy analyzer. Floci does not validate action existence, service-specific resource or condition semantics, or security best practices. An empty findings list only means that the implemented checks found no issue. Accepted `locale` values currently return English explanations. These limits also apply when a resource type is supplied.
 
 ## AWS-compatible failures
 

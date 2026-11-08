@@ -1,0 +1,8 @@
+package io.floci.aws.services.ssoadmin.model;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@RegisterForReflection
+public record AssignmentOperation(String requestId, String status, long createdDateEpochMillis,
+                                  String accountId, String permissionSetArn,
+                                  String principalId, String principalType, String failureReason) {}

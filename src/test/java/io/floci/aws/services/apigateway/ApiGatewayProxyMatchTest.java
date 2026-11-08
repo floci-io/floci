@@ -1,0 +1,380 @@
+package io.floci.aws.services.apigateway;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.apigateway.model.ApiGatewayResource;
+import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
+import io.floci.aws.services.apigatewayv2.websocket.WebSocketConnectionManager;
+import io.floci.aws.services.elbv2.ElbV2Service;
+import io.floci.aws.services.lambda.LambdaService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.List;
+import java.util.regex.Matcher;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+@ExtendWith(MockitoExtension.class)
+class ApiGatewayProxyMatchTest {
+
+    @Mock ApiGatewayService apiGatewayService;
+    @Mock ApiGatewayV2Service apiGatewayV2Service;
+    @Mock LambdaService lambdaService;
+    @Mock VtlTemplateEngine vtlEngine;
+    @Mock AwsServiceRouter serviceRouter;
+    @Mock WebSocketConnectionManager webSocketConnectionManager;
+    @Mock ElbV2Service elbV2Service;
+
+    private ApiGatewayExecuteController ctrl;
+
+    @BeforeEach
+    void setUp() {
+        ctrl = new ApiGatewayExecuteController(apiGatewayService, null, apiGatewayV2Service, lambdaService,
+                new RegionResolver("us-east-1", "000000000000"),
+                new ObjectMapper(), vtlEngine, serviceRouter, webSocketConnectionManager, elbV2Service, null,
+                new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null);
+    }
+
+    private ApiGatewayResource resource(String id, String parentId, String pathPart, String path) {
+        ApiGatewayResource r = new ApiGatewayResource();
+        r.setId(id);
+        r.setParentId(parentId);
+        r.setPathPart(pathPart);
+        r.setPath(path);
+        return r;
+    }
+
+    @Test
+    void rootProxyMatchesEverything() {
+        ApiGatewayResource rootProxy = resource("r1", "root", "{proxy+}", "/{proxy+}");
+
+        assertSame(rootProxy, ctrl.matchResource(List.of(rootProxy), "/anything"));
+        assertSame(rootProxy, ctrl.matchResource(List.of(rootProxy), "/"));
+        assertSame(rootProxy, ctrl.matchResource(List.of(rootProxy), "/a/b/c"));
+    }
+
+    @Test
+    void siblingProxyRoutesToCorrectParent() {
+        ApiGatewayResource authProxy = resource("r1", "root", "{proxy+}", "/auth/{proxy+}");
+        ApiGatewayResource productsProxy = resource("r2", "root", "{proxy+}", "/products/{proxy+}");
+        List<ApiGatewayResource> resources = List.of(authProxy, productsProxy);
+
+        assertSame(authProxy, ctrl.matchResource(resources, "/auth/login"));
+        assertSame(productsProxy, ctrl.matchResource(resources, "/products/123"));
+        assertSame(productsProxy, ctrl.matchResource(resources, "/products/abc/def"));
+        assertNull(ctrl.matchResource(resources, "/other"));
+    }
+
+    @Test
+    void emptyProxySegmentDoesNotMatchNonRootProxy() {
+        ApiGatewayResource authProxy = resource("r1", "root", "{proxy+}", "/auth/{proxy+}");
+        ApiGatewayResource productsProxy = resource("r2", "root", "{proxy+}", "/products/{proxy+}");
+
+        assertNull(ctrl.matchResource(List.of(authProxy), "/auth/"));
+        assertNull(ctrl.matchResource(List.of(authProxy, productsProxy), "/auth/"));
+        assertNull(ctrl.matchResource(List.of(authProxy, productsProxy), "/products/"));
+    }
+
+    @Test
+    void rootProxyFallbackWhenNoSpecificMatch() {
+        ApiGatewayResource rootProxy = resource("r0", "root", "{proxy+}", "/{proxy+}");
+        ApiGatewayResource authProxy = resource("r1", "root", "{proxy+}", "/auth/{proxy+}");
+        List<ApiGatewayResource> resources = List.of(rootProxy, authProxy);
+
+        assertSame(authProxy, ctrl.matchResource(resources, "/auth/login"));
+        assertSame(rootProxy, ctrl.matchResource(resources, "/other"));
+        assertSame(rootProxy, ctrl.matchResource(resources, "/"));
+    }
+
+    @Test
+    void exactMatchTakesPriorityOverProxy() {
+        ApiGatewayResource exact = resource("r1", "root", "login", "/auth/login");
+        ApiGatewayResource authProxy = resource("r2", "root", "{proxy+}", "/auth/{proxy+}");
+        List<ApiGatewayResource> resources = List.of(authProxy, exact);
+
+        assertSame(exact, ctrl.matchResource(resources, "/auth/login"));
+        assertSame(authProxy, ctrl.matchResource(resources, "/auth/register"));
+    }
+
+    @Test
+    void templatePathTakesPriorityOverProxy() {
+        ApiGatewayResource itemDetail = resource("r1", "root", "{id}", "/items/{id}");
+        ApiGatewayResource itemsProxy = resource("r2", "root", "{proxy+}", "/items/{proxy+}");
+        List<ApiGatewayResource> resources = List.of(itemsProxy, itemDetail);
+
+        assertSame(itemDetail, ctrl.matchResource(resources, "/items/123"));
+        assertSame(itemsProxy, ctrl.matchResource(resources, "/items/123/sub"));
+    }
+
+    @Test
+    void longestParentPrefixWins() {
+        ApiGatewayResource apiProxy = resource("r1", "root", "{proxy+}", "/api/{proxy+}");
+        ApiGatewayResource apiV1Proxy = resource("r2", "root", "{proxy+}", "/api/v1/{proxy+}");
+        List<ApiGatewayResource> resources = List.of(apiV1Proxy, apiProxy);
+
+        assertSame(apiV1Proxy, ctrl.matchResource(resources, "/api/v1/users"));
+        assertSame(apiProxy, ctrl.matchResource(resources, "/api/v2"));
+        assertNull(ctrl.matchResource(resources, "/api/"));
+    }
+
+    @Test
+    void noMatchReturnsNull() {
+        ApiGatewayResource authProxy = resource("r1", "root", "{proxy+}", "/auth/{proxy+}");
+
+        assertNull(ctrl.matchResource(List.of(authProxy), "/"));
+        assertNull(ctrl.matchResource(List.of(authProxy), "/other/path"));
+    }
+
+    @Test
+    void testMatchResourcesPrecedence() {
+        ApiGatewayResource widgets = resource("r1", "root", "widgets", "/widgets");
+        ApiGatewayResource rootProxy = resource("r2", "root", "{proxy+}", "/{proxy+}");
+        List<ApiGatewayResource> resources = List.of(rootProxy, widgets);
+
+        List<ApiGatewayResource> matched = ctrl.matchResources(resources, "/widgets");
+        assertEquals(2, matched.size());
+        assertSame(widgets, matched.get(0));
+        assertSame(rootProxy, matched.get(1));
+    }
+
+    @Test
+    void testMatchResourcesMultipleProxies() {
+        ApiGatewayResource rootProxy = resource("r1", "root", "{proxy+}", "/{proxy+}");
+        ApiGatewayResource authProxy = resource("r2", "root", "{proxy+}", "/auth/{proxy+}");
+        ApiGatewayResource usersProxy = resource("r3", "root", "{proxy+}", "/auth/users/{proxy+}");
+        List<ApiGatewayResource> resources = List.of(rootProxy, authProxy, usersProxy);
+
+        List<ApiGatewayResource> matched = ctrl.matchResources(resources, "/auth/users/details");
+        assertEquals(3, matched.size());
+        assertSame(usersProxy, matched.get(0));
+        assertSame(authProxy, matched.get(1));
+        assertSame(rootProxy, matched.get(2));
+    }
+
+    // ──────────────────────────── arbitrary greedy parameter names ────────────────────────────
+    // AWS: "you can use any string for the greedy path parameter name". Routing must key on the
+    // trailing "+", not on the literal {proxy+}, or a resource such as /assets/{rest+} only half
+    // routes: the single-segment template matcher accepts /assets/foo while the multi-segment
+    // /assets/img/logo.png, the whole point of a greedy resource, matches nothing.
+
+    @Test
+    void greedyResourceMatchesRegardlessOfParameterName() {
+        ApiGatewayResource assets = resource("r1", "root", "{rest+}", "/assets/{rest+}");
+        List<ApiGatewayResource> resources = List.of(assets);
+
+        assertSame(assets, ctrl.matchResource(resources, "/assets/img/logo.png"));
+        assertSame(assets, ctrl.matchResource(resources, "/assets/foo"));
+        assertNull(ctrl.matchResource(resources, "/assets/"));
+        assertNull(ctrl.matchResource(resources, "/other/thing"));
+    }
+
+    @Test
+    void rootGreedyWithNonProxyNameMatchesEverything() {
+        ApiGatewayResource rootGreedy = resource("r1", "root", "{path+}", "/{path+}");
+
+        assertSame(rootGreedy, ctrl.matchResource(List.of(rootGreedy), "/anything"));
+        assertSame(rootGreedy, ctrl.matchResource(List.of(rootGreedy), "/"));
+        assertSame(rootGreedy, ctrl.matchResource(List.of(rootGreedy), "/a/b/c"));
+    }
+
+    @Test
+    void specificityRulesHoldForNonProxyGreedyNames() {
+        ApiGatewayResource exact = resource("r1", "root", "logo.png", "/assets/logo.png");
+        ApiGatewayResource template = resource("r2", "root", "{id}", "/assets/{id}");
+        ApiGatewayResource greedy = resource("r3", "root", "{rest+}", "/assets/{rest+}");
+        List<ApiGatewayResource> resources = List.of(greedy, template, exact);
+
+        // exact > template > greedy, unchanged by the parameter's name
+        assertSame(exact, ctrl.matchResource(resources, "/assets/logo.png"));
+        assertSame(template, ctrl.matchResource(resources, "/assets/banner.png"));
+        assertSame(greedy, ctrl.matchResource(resources, "/assets/img/logo.png"));
+    }
+
+    @Test
+    void longestParentPrefixWinsAcrossMixedGreedyNames() {
+        ApiGatewayResource apiGreedy = resource("r1", "root", "{proxy+}", "/api/{proxy+}");
+        ApiGatewayResource apiV1Greedy = resource("r2", "root", "{rest+}", "/api/v1/{rest+}");
+        List<ApiGatewayResource> resources = List.of(apiGreedy, apiV1Greedy);
+
+        assertSame(apiV1Greedy, ctrl.matchResource(resources, "/api/v1/users"));
+        assertSame(apiGreedy, ctrl.matchResource(resources, "/api/v2/users"));
+
+        List<ApiGatewayResource> matched = ctrl.matchResources(resources, "/api/v1/users/1");
+        assertEquals(2, matched.size());
+        assertSame(apiV1Greedy, matched.get(0));
+        assertSame(apiGreedy, matched.get(1));
+    }
+
+    @Test
+    void aParameterNamedWithATrailingPlusIsNotConfusedWithAnOrdinaryOne() {
+        // {id} is a single-segment template; it must keep matching exactly one segment even when a
+        // greedy sibling exists, and must not be mistaken for greedy by the new prefix helper.
+        ApiGatewayResource template = resource("r1", "root", "{id}", "/items/{id}");
+        List<ApiGatewayResource> resources = List.of(template);
+
+        assertSame(template, ctrl.matchResource(resources, "/items/1"));
+        assertNull(ctrl.matchResource(resources, "/items/1/sub"));
+    }
+
+    // ──────────────────────────── greedy below a path parameter ────────────────────────────
+    // Measured on AWS: every matching resource, exact, parameterised or greedy, is ranked by its
+    // literal segments, then by its segments before the greedy parameter, then by the leftmost
+    // literal. A greedy resource is no longer special-cased behind every parameterised one.
+
+    @Test
+    void greedyResourceBelowAPathParameterMatches() {
+        ApiGatewayResource list = resource("r1", "root", "{kind}", "/v1/admin/catalog/{kind}");
+        ApiGatewayResource item = resource("r2", "r1", "{name+}", "/v1/admin/catalog/{kind}/{name+}");
+        List<ApiGatewayResource> resources = List.of(item, list);
+
+        assertSame(item, ctrl.matchResource(resources, "/v1/admin/catalog/scopes/teos/sur-df"));
+        assertSame(item, ctrl.matchResource(resources, "/v1/admin/catalog/scopes/teos"));
+        assertSame(list, ctrl.matchResource(resources, "/v1/admin/catalog/scopes"));
+        assertNull(ctrl.matchResource(List.of(item), "/v1/admin/catalog/scopes/"));
+        assertNull(ctrl.matchResource(List.of(item), "/v1/admin/other/scopes/teos"));
+    }
+
+    @Test
+    void moreLiteralSegmentsWinAcrossParameterisedAndGreedyResources() {
+        ApiGatewayResource greedy = resource("r1", "root", "{proxy+}", "/s/b/{proxy+}");
+        ApiGatewayResource template = resource("r2", "root", "{y}", "/s/{x}/{y}");
+        ApiGatewayResource deepTemplate = resource("r3", "root", "{v}", "/s/{x}/{y}/{z}/{v}");
+        List<ApiGatewayResource> resources = List.of(template, deepTemplate, greedy);
+
+        assertSame(greedy, ctrl.matchResource(resources, "/s/b/c"));
+        assertSame(greedy, ctrl.matchResource(resources, "/s/b/c/d/e"));
+        assertSame(template, ctrl.matchResource(resources, "/s/a/c"));
+    }
+
+    @Test
+    void moreLiteralSegmentsBeatADeeperGreedyParent() {
+        ApiGatewayResource shallow = resource("r1", "root", "{proxy+}", "/q/b/{proxy+}");
+        ApiGatewayResource deep = resource("r2", "root", "{p+}", "/q/{x}/{y}/{p+}");
+        ApiGatewayResource early = resource("r3", "root", "{p+}", "/m/b/{y}/{z}/{p+}");
+        ApiGatewayResource late = resource("r4", "root", "{q+}", "/m/{x}/c/d/{q+}");
+        List<ApiGatewayResource> resources = List.of(deep, shallow, early, late);
+
+        assertSame(shallow, ctrl.matchResource(resources, "/q/b/c/d"));
+        assertSame(deep, ctrl.matchResource(resources, "/q/a/c/d"));
+        assertSame(late, ctrl.matchResource(resources, "/m/b/c/d/e"));
+    }
+
+    @Test
+    void deeperGreedyParentWinsAtEqualLiteralSegments() {
+        ApiGatewayResource nested = resource("r1", "root", "{y+}", "/a/{x}/{y+}");
+        ApiGatewayResource literal = resource("r2", "root", "{proxy+}", "/a/b/{proxy+}");
+        ApiGatewayResource deeper = resource("r3", "root", "{z+}", "/a/{x}/c/{z+}");
+        List<ApiGatewayResource> resources = List.of(nested, literal, deeper);
+
+        assertSame(nested, ctrl.matchResource(resources, "/a/one/two/three"));
+        assertSame(literal, ctrl.matchResource(resources, "/a/b/c"));
+        assertEquals(List.of(deeper, literal, nested), ctrl.matchResources(resources, "/a/b/c/d"));
+    }
+
+    @Test
+    void leftmostLiteralBreaksATie() {
+        ApiGatewayResource leftLiteral = resource("r1", "root", "{p+}", "/n/b/{y}/{p+}");
+        ApiGatewayResource rightLiteral = resource("r2", "root", "{q+}", "/n/{x}/c/{q+}");
+
+        assertSame(leftLiteral, ctrl.matchResource(List.of(rightLiteral, leftLiteral), "/n/b/c/d"));
+        assertSame(leftLiteral, ctrl.matchResource(List.of(leftLiteral, rightLiteral), "/n/b/c/d"));
+    }
+
+    @Test
+    void pathParameterMatchesAnEmptySegment() {
+        ApiGatewayResource template = resource("r1", "root", "two", "/a/{x}/two");
+
+        assertSame(template, ctrl.matchResource(List.of(template), "/a//two"));
+    }
+
+    // ──────────────────────────── trailing-slash preservation (#1557) ────────────────────────────
+
+    @Test
+    void preservesTrailingSlashFromRawRequestPath() {
+        assertEquals("/thing/", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/thing", "/restapis/abc/prod/_user_request_/thing/"));
+        assertEquals("/a/b/", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/a/b", "/restapis/abc/prod/_user_request_/a/b/"));
+    }
+
+    @Test
+    void leavesPathUnchangedWhenRawRequestHasNoTrailingSlash() {
+        assertEquals("/thing", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/thing", "/restapis/abc/prod/_user_request_/thing"));
+    }
+
+    @Test
+    void doesNotDuplicateSlashOrAlterRootOrHandleNullRaw() {
+        // Root path is never turned into "//".
+        assertEquals("/", ApiGatewayExecuteController.preserveTrailingSlash(
+                "/", "/restapis/abc/prod/_user_request_/"));
+        // An already-normalized path that ends in "/" is not doubled.
+        assertEquals("/thing/", ApiGatewayExecuteController.preserveTrailingSlash("/thing/", "/x/thing/"));
+        // Null raw path is tolerated.
+        assertEquals("/thing", ApiGatewayExecuteController.preserveTrailingSlash("/thing", null));
+    }
+
+    // ──────────────────────────── ELB_LISTENER_ARN ────────────────────────────
+
+    @Test
+    void elbListenerArnMatchesAlbAndExtractsRegion() {
+        Matcher m = ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/my-lb/abcdef0123456789/0011223344556677");
+        assertTrue(m.matches());
+        assertEquals("us-east-1", m.group(1));
+    }
+
+    @Test
+    void elbListenerArnMatchesNlb() {
+        Matcher m = ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws:elasticloadbalancing:us-west-2:000000000000:listener/net/my-nlb/abcdef0123456789/0011223344556677");
+        assertTrue(m.matches());
+        assertEquals("us-west-2", m.group(1));
+    }
+
+    @Test
+    void elbListenerArnMatchesGovAndChinaPartitions() {
+        assertTrue(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws-us-gov:elasticloadbalancing:us-gov-west-1:0:listener/app/lb/a/b").matches());
+        assertTrue(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws-cn:elasticloadbalancing:cn-north-1:0:listener/net/lb/a/b").matches());
+    }
+
+    @Test
+    void elbListenerArnRejectsNonListenerElbArns() {
+        // LoadBalancer ARN, not a listener
+        assertFalse(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws:elasticloadbalancing:us-east-1:0:loadbalancer/app/my-lb/abc").matches());
+        // Target group ARN
+        assertFalse(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws:elasticloadbalancing:us-east-1:0:targetgroup/my-tg/abc").matches());
+        // Listener rule ARN
+        assertFalse(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws:elasticloadbalancing:us-east-1:0:listener-rule/app/lb/a/b/c").matches());
+    }
+
+    @Test
+    void elbListenerArnRejectsUnsupportedListenerSubtypes() {
+        // gateway / unknown lb subtypes — not yet supported by HttpAlbIntegration in CDK
+        assertFalse(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws:elasticloadbalancing:us-east-1:0:listener/gwy/lb/a/b").matches());
+        assertFalse(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws:elasticloadbalancing:us-east-1:0:listener/unknown/lb/a/b").matches());
+    }
+
+    @Test
+    void elbListenerArnRejectsOtherServiceArns() {
+        // Lambda function ARN — what AWS_PROXY integrations use; must NOT trigger ELB resolution
+        assertFalse(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "arn:aws:lambda:us-east-1:0:function:my-fn").matches());
+        // Plain http URL — what regular HTTP_PROXY integrations use
+        assertFalse(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher(
+                "http://example.com/path").matches());
+        // Empty / blank
+        assertFalse(ApiGatewayExecuteController.ELB_LISTENER_ARN.matcher("").matches());
+    }
+}

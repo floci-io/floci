@@ -224,7 +224,7 @@ def test_build_without_cdk_carries_flags_from_the_previous_file():
 
 
 def test_build_without_cdk_refuses_a_region_it_cannot_carry():
-    with pytest.raises(ValueError, match="no aws-cdk checkout"):
+    with pytest.raises(ValueError, match="nothing to carry over"):
         r.build(PARTITIONS, ENDPOINTS, None, {"partitions": []}, "test")
 
 
@@ -442,6 +442,40 @@ def test_cli_writes_then_reports_up_to_date_then_detects_drift(tmp_path, capsys)
     }))
     assert r.main(["--check"] + common) == 1
     assert "make aws-data-sync" in capsys.readouterr().out
+
+
+def test_cli_carry_region_flags_ignores_a_cdk_checkout_that_moved(tmp_path, capsys):
+    data, cdk = write_sources(tmp_path)
+    output = tmp_path / "partitions.json"
+    common = ["--botocore-data", str(data), "--cdk", str(cdk), "--output", str(output)]
+    assert r.main(common) == 0
+    written = output.read_text()
+
+    entities = cdk / r.CDK_ENTITIES
+    moved = ENTITIES.replace("  RULE_CLASSIC_PARTITION_BECOMES_OPT_IN,\n", "")
+    moved = moved.replace("];", "  RULE_CLASSIC_PARTITION_BECOMES_OPT_IN,\n];")
+    assert moved != ENTITIES
+    entities.write_text(moved)
+    assert r.main(["--check"] + common) == 1
+    capsys.readouterr()
+
+    assert r.main(["--check", "--carry-region-flags"] + common) == 0
+    assert r.main(["--carry-region-flags"] + common) == 0
+    assert output.read_text() == written
+
+
+def test_cli_carry_region_flags_refuses_a_new_region(tmp_path):
+    data, cdk = write_sources(tmp_path)
+    output = tmp_path / "partitions.json"
+    common = ["--botocore-data", str(data), "--cdk", str(cdk), "--output", str(output)]
+    assert r.main(common) == 0
+
+    partitions = json.loads(json.dumps(PARTITIONS))
+    partitions["partitions"][0]["regions"]["eu-new-1"] = {"description": "New"}
+    (data / "partitions.json").write_text(json.dumps(partitions))
+    with pytest.raises(ValueError, match="eu-new-1.*nothing to carry over"):
+        r.main(["--carry-region-flags"] + common)
+    assert r.main(common) == 0
 
 
 def test_cli_check_ignores_provenance_differences(tmp_path):

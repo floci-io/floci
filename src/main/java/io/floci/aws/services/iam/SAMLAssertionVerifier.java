@@ -1,0 +1,258 @@
+package io.floci.aws.services.iam;
+
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsRegionFacts;
+import io.floci.aws.core.common.Digests;
+import io.floci.aws.services.iam.model.SAMLProvider;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
+
+import javax.xml.crypto.dsig.CanonicalizationMethod;
+import javax.xml.crypto.dsig.Reference;
+import javax.xml.crypto.dsig.Transform;
+import javax.xml.crypto.dsig.XMLSignature;
+import javax.xml.crypto.dsig.XMLSignatureFactory;
+import javax.xml.crypto.dsig.dom.DOMValidateContext;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Set;
+
+/** Verifies the specific SAML assertion contract consumed by STS. */
+final class SAMLAssertionVerifier {
+    private static final String SAML = "urn:oasis:names:tc:SAML:2.0:assertion";
+    private static final String DS = "http://www.w3.org/2000/09/xmldsig#";
+    private static final String AUDIENCE = "urn:amazon:webservices";
+    static final String ASSERTION_INVALID = "The SAML assertion is invalid.";
+    static final String SIGNATURE_INVALID = "Response signature invalid";
+    // SAML 2.0 core 5.4.4. AWS rejects any other reference transform as an invalid signature.
+    private static final Set<String> ALLOWED_TRANSFORMS = Set.of(
+            Transform.ENVELOPED, CanonicalizationMethod.EXCLUSIVE, CanonicalizationMethod.EXCLUSIVE_WITH_COMMENTS);
+
+    private SAMLAssertionVerifier() {}
+
+    record Verified(String issuer, String subject, String subjectType, String nameQualifier,
+                    Instant expiration, List<RolePair> roles) {}
+    record RolePair(String roleArn, String principalArn) {}
+
+    static Verified verify(String encoded, SAMLProvider provider, Instant now) throws InvalidAssertionException {
+        try {
+            byte[] bytes = Base64.getDecoder().decode(encoded);
+            Document document = SAMLXml.document(new String(bytes, StandardCharsets.UTF_8));
+            Element assertion = document.getDocumentElement();
+            if ("Response".equals(assertion.getLocalName())) {
+                assertion = first(assertion, SAML, "Assertion");
+            }
+            if (assertion == null || !"Assertion".equals(assertion.getLocalName())
+                    || !SAML.equals(assertion.getNamespaceURI())) {
+                throw invalid("assertion root");
+            }
+            String assertionId = assertion.getAttribute("ID");
+            if (assertionId == null || assertionId.isBlank()) {
+                throw invalid("assertion ID");
+            }
+            assertion.setIdAttribute("ID", true);
+            Element signature = first(assertion, DS, "Signature");
+            if (signature == null) {
+                throw invalid("signature missing");
+            }
+            Element signedInfo = first(signature, DS, "SignedInfo");
+            if (signedInfo == null) {
+                throw invalid("signed info missing");
+            }
+            // Checked on the DOM because unmarshalling some transform parameters fails in the native image.
+            NodeList transforms = signedInfo.getElementsByTagNameNS(DS, "Transform");
+            for (int i = 0; i < transforms.getLength(); i++) {
+                String algorithm = ((Element) transforms.item(i)).getAttribute("Algorithm");
+                if (!ALLOWED_TRANSFORMS.contains(algorithm)) {
+                    throw new InvalidAssertionException("reference transform " + algorithm, SIGNATURE_INVALID);
+                }
+            }
+            X509Certificate certificate = certificate(provider.getCertificate());
+            DOMValidateContext context = new DOMValidateContext(certificate.getPublicKey(), signature);
+            context.setProperty("org.jcp.xml.dsig.secureValidation", Boolean.TRUE);
+            XMLSignature xmlSignature = XMLSignatureFactory.getInstance("DOM").unmarshalXMLSignature(context);
+            if (xmlSignature.getSignedInfo().getReferences().size() != 1
+                    || !(xmlSignature.getSignedInfo().getReferences().get(0) instanceof Reference reference)
+                    || !("#" + assertionId).equals(reference.getURI())) {
+                throw invalid("signature reference");
+            }
+            if (!xmlSignature.validate(context)) {
+                throw invalid("signature validation");
+            }
+
+            String issuer = childText(assertion, SAML, "Issuer");
+            if (!provider.getEntityId().equals(issuer)) {
+                throw invalid("issuer");
+            }
+            Element conditions = first(assertion, SAML, "Conditions");
+            if (conditions == null) {
+                throw invalid("conditions missing");
+            }
+            Instant notBefore = instant(conditions.getAttribute("NotBefore"));
+            Instant notOnOrAfter = instant(conditions.getAttribute("NotOnOrAfter"));
+            if (notBefore != null && now.isBefore(notBefore)) {
+                throw invalid("not before");
+            }
+            if (notOnOrAfter == null || !now.isBefore(notOnOrAfter)) {
+                throw invalid("assertion expiry");
+            }
+            Element restriction = first(conditions, SAML, "AudienceRestriction");
+            if (restriction == null || !hasText(restriction, SAML, "Audience", AUDIENCE)) {
+                throw invalid("audience");
+            }
+
+            Element subject = first(assertion, SAML, "Subject");
+            String name = childText(subject, SAML, "NameID");
+            if (name == null || name.isBlank()) {
+                throw invalid("subject");
+            }
+            Element nameId = first(subject, SAML, "NameID");
+            String subjectType = nameId == null ? null : nameId.getAttribute("Format");
+            NodeList confirmations = subject == null
+                    ? null : ((Element) subject).getElementsByTagNameNS(SAML, "SubjectConfirmation");
+            if (confirmations == null || confirmations.getLength() == 0) {
+                throw invalid("subject confirmation missing");
+            }
+            boolean validBearer = false;
+            for (int i = 0; i < confirmations.getLength(); i++) {
+                Element confirmation = (Element) confirmations.item(i);
+                if (!"urn:oasis:names:tc:SAML:2.0:cm:bearer".equals(confirmation.getAttribute("Method"))) {
+                    continue;
+                }
+                Element confirmationData = first(confirmation, SAML, "SubjectConfirmationData");
+                if (confirmationData == null) {
+                    continue;
+                }
+                String recipient = confirmationData.getAttribute("Recipient");
+                Instant confirmationExpiry = instant(confirmationData.getAttribute("NotOnOrAfter"));
+                if (expectedRecipient(provider).equals(recipient)
+                        && confirmationExpiry != null && now.isBefore(confirmationExpiry)) {
+                    validBearer = true;
+                    break;
+                }
+            }
+            if (!validBearer) {
+                throw invalid("valid bearer subject confirmation missing");
+            }
+
+            List<RolePair> roles = new ArrayList<>();
+            NodeList attributes = assertion.getElementsByTagNameNS(SAML, "Attribute");
+            for (int i = 0; i < attributes.getLength(); i++) {
+                Element attribute = (Element) attributes.item(i);
+                if (!"https://aws.amazon.com/SAML/Attributes/Role".equals(attribute.getAttribute("Name"))) {
+                    continue;
+                }
+                NodeList values = attribute.getElementsByTagNameNS(SAML, "AttributeValue");
+                for (int j = 0; j < values.getLength(); j++) {
+                    String[] pair = values.item(j).getTextContent().trim().split(",", -1);
+                    if (pair.length != 2) {
+                        throw invalid("role pair format");
+                    }
+                    if (AwsArnUtils.isArnFor(pair[0], "iam") && pair[1].contains(":saml-provider/")) {
+                        roles.add(new RolePair(pair[0], pair[1]));
+                    } else if (AwsArnUtils.isArnFor(pair[1], "iam") && pair[0].contains(":saml-provider/")) {
+                        roles.add(new RolePair(pair[1], pair[0]));
+                    } else {
+                        throw invalid("role pair ARN");
+                    }
+                }
+            }
+            if (roles.isEmpty()) {
+                throw invalid("role pair missing");
+            }
+            String nameQualifier = Base64.getEncoder().encodeToString(
+                    Digests.sha1((issuer + provider.getArn()).getBytes(StandardCharsets.UTF_8)));
+            return new Verified(issuer, name, subjectType, nameQualifier, notOnOrAfter, roles);
+        } catch (InvalidAssertionException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new InvalidAssertionException(e);
+        }
+    }
+
+    private static X509Certificate certificate(String encoded) throws Exception {
+        byte[] der = Base64.getDecoder().decode(encoded.replaceAll("\\s+", ""));
+        return (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(new ByteArrayInputStream(der));
+    }
+
+    private static Element first(Node parent, String namespace, String local) {
+        if (parent == null) {
+            return null;
+        }
+        NodeList list = ((Element) parent).getElementsByTagNameNS(namespace, local);
+        return list.getLength() == 0 ? null : (Element) list.item(0);
+    }
+    private static String childText(Node parent, String namespace, String local) {
+        Element e = first(parent, namespace, local);
+        return e == null ? null : e.getTextContent().trim();
+    }
+
+    private static boolean hasText(Node parent, String namespace, String local, String expected) {
+        NodeList list = ((Element) parent).getElementsByTagNameNS(namespace, local);
+        for (int i = 0; i < list.getLength(); i++) {
+            if (expected.equals(list.item(i).getTextContent().trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Instant instant(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(text);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException(e);
+        }
+    }
+    private static InvalidAssertionException invalid(String reason) {
+        return new InvalidAssertionException(reason);
+    }
+
+    static final class InvalidAssertionException extends Exception {
+        private final String awsMessage;
+
+        InvalidAssertionException(Throwable cause) {
+            super(cause);
+            this.awsMessage = ASSERTION_INVALID;
+        }
+
+        InvalidAssertionException(String message) {
+            this(message, ASSERTION_INVALID);
+        }
+
+        InvalidAssertionException(String reason, String awsMessage) {
+            super(reason);
+            this.awsMessage = awsMessage;
+        }
+
+        String awsMessage() {
+            return awsMessage;
+        }
+    }
+
+    /**
+     * The console sign-on URL a bearer assertion must name, in the provider's partition. The CDK
+     * publishes none for {@code aws-iso-e}, {@code aws-iso-f} and {@code aws-eusc}; there the
+     * commercial URL is kept, as every partition used before the per-partition table, rather than
+     * refusing every assertion.
+     */
+    // Package-private for unit testing.
+    static String expectedRecipient(SAMLProvider provider) {
+        String partition = AwsArnUtils.parse(provider.getArn()).partition();
+        return AwsRegionFacts.samlSignOnUrl(partition)
+                .or(() -> AwsRegionFacts.samlSignOnUrl("aws"))
+                .orElseThrow();
+    }
+}

@@ -82,8 +82,10 @@ termination status, and answers an unknown cluster with `ValidationException` "S
 does not exist.", as AWS does.
 Instance groups and fleets report `RUNNING` from the cluster's creation until it is `TERMINATED`. Then
 they report `TERMINATED` with zero running or provisioned capacity; their requested and target
-capacities remain recorded. `ListInstances` retains each group's instances with their original
-synthetic IDs and `TERMINATED` status for 30 days after termination. New groups or fleets are rejected
+capacities remain recorded. `ListInstances` numbers the synthetic IDs and addresses of the `MASTER`
+group's instance first, so the primary node keeps `i-00000000000000001` and `10.0.0.1`, as
+`DescribeCluster`'s `MasterPublicDnsName` says, while the other groups resize; it retains each group's
+instances with their original synthetic IDs and `TERMINATED` status for 30 days after termination. New groups or fleets are rejected
 on terminated clusters. As on AWS, `ModifyInstanceGroups` answers `ValidationException` "An instance
 group may only be modified when the cluster is running or waiting." for a cluster in any other state,
 and `ModifyInstanceFleet` answers `InvalidRequestException` "A job flow that is shutting down,
@@ -117,46 +119,197 @@ but for its bootstrap actions and its storage.
 * **Which steps run**: a `command-runner.jar` step whose first argument is `spark-submit`, the way the
   Management Guide writes Spark steps, runs the arguments after it, without its `--master` and
   `--deploy-mode`. A custom JAR step runs its `MainClass`, or else the one its manifest names, through
-  `spark-submit`, with the JAR and the step's `Args`. Any other `command-runner.jar` step runs its
+  `spark-submit`, with the JAR and the step's `Args`; a MapReduce job it starts, such as the Management
+  Guide's `wordcount` of Hadoop's examples JAR, runs in local mode (see **Hadoop streaming and MapReduce**).
+  A `Jar` of `/usr/lib/hadoop-mapreduce/hadoop-streaming.jar`, where EMR has it, runs the image's
+  `/usr/lib/hadoop/hadoop-streaming.jar`. Any other `command-runner.jar` step runs its
   command, its first argument, with the rest, and a `script-runner.jar` step (by name, or by its
   `s3://<region>.elasticmapreduce/libs/script-runner/script-runner.jar` URI) its script, as the Release
-  Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. `hive-script`,
-  `pig-script`, `hadoop-streaming`, `hadoop-lzo` and `s3-dist-cp`, which the image does not have, are
+  Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. An `s3-dist-cp` step runs
+  Floci's own S3DistCp (see **S3DistCp**), and `hadoop-streaming` and `hadoop-lzo` steps the image's
+  Hadoop (see **Hadoop streaming and MapReduce**). On a cluster whose `Applications` name Hive, or HCatalog, with
+  which EMR installs Hive's client too, a Hive step runs Hive (see **Hive steps**); on one with neither, `hive-script`
+  runs in the release's image, and says what EMR's does without Hive, "Hive isn't installed.", and the step fails. An
+  `emr-spark-*` release includes neither ("This release includes the following applications: AmazonCloudWatchAgent,
+  Delta, Hudi, Iceberg, JupyterEnterpriseGateway, Livy, and Spark."), so a cluster of one has neither, whatever its
+  `Applications` name: no image with Hive, no metastore service. `pig-script`, which the image does not have, is
   `FAILED` without running.
 * **Commands and scripts**: they run as the image's `hadoop` user in `/home/hadoop`, with `bash`, Python
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
   run with the step's other arguments; a path not in S3 is run as it is, a bare name from `/home/hadoop`
   when a file there has it, one a former step left there included. `hadoop fs` and `hdfs dfs` reach the
-  cluster's HDFS (see **Storage**). A `spark-submit` they start runs in local mode on Floci's S3 with the
-  cluster's `spark-defaults` and `spark-hive-site`, which Floci puts in a Spark configuration of its own,
-  ahead of the image's EMR Serverless master; its own `--master yarn` or `--deploy-mode cluster` fails, as
-  there is no YARN.
-* **Storage**: a cluster's primary node keeps its disks while the cluster lives, and so does Floci: each
-  step's container mounts the cluster's two Docker volumes, one at `/home/hadoop` and one at `/mnt`, so what
-  a step leaves there is there for the steps after it, and for steps running at the same time. HDFS, "best
-  used for caching the results produced by intermediate job-flow steps", as the Management Guide puts it,
-  is the `hdfs` folder of `/mnt`. In Spark, `hdfs://` paths, and paths without a scheme ("hdfs:// (or no
-  prefix)"), lead there through Hadoop's `ViewFileSystemOverloadScheme`, a relative path under
-  `/user/hadoop` as in HDFS, and a structured streaming query keeps its checkpoints through Spark's file
-  system checkpoint manager; the cluster's `spark-defaults` can set any of these otherwise. A command's
-  `hadoop fs` gets the same, through a copy of the image's Hadoop configuration, or of the folder a
-  `spark-env` export of `HADOOP_CONF_DIR` names; the image's `hdfs` command cannot run, so `hdfs dfs` runs
-  as `hadoop fs`, and its other commands fail. What the bootstrap actions left in `/home/hadoop` or `/mnt`
-  comes with the image the steps run in, and Docker copies it into the
-  volumes when the first step starts. The volumes go once the cluster has ended and its last step is done
-  ("HDFS is ephemeral storage that is reclaimed when you terminate a cluster"), on a state reset, and, for
-  clusters that are gone or have ended, when the EMR service starts, unless
-  `reconcile-containers-on-startup` is off. HDFS is a folder, without a NameNode or replication: an
-  `hdfs://` path naming a host is not served, `hadoop fs -ls /` fails ("URI scheme is not "file""), where
-  `-ls -d /` and a folder below it do not, and `hadoop fs` does not reach S3, as its classpath has no AWS
-  SDK v2 and the image's EMRFS is not pointed at Floci (`aws s3 cp` does). `/tmp` is each container's own.
+  cluster's HDFS (see **Storage**) and Floci's S3. A `spark-submit` they start runs in local mode on Floci's S3 with the
+  cluster's `spark-defaults`, `core-site`, `spark-hive-site` and `spark-log4j2`, which Floci puts in a Spark
+  configuration of its own, a copy of the folder a `spark-env` export of `SPARK_CONF_DIR` names, else of the
+  image's, ahead of the image's EMR Serverless master; its own `--master yarn` or `--deploy-mode cluster`
+  fails, as there is no YARN.
+* **Storage**: a cluster's primary node keeps its disks while the cluster lives, and so does Floci: each step's
+  container mounts the cluster's two Docker volumes, one at `/home/hadoop` and one at `/mnt`, so what a step leaves
+  there is there for the steps after it, and for steps running at the same time. What the bootstrap actions left in
+  `/home/hadoop` or `/mnt` comes with the image the steps run in, and Docker copies it into the volumes when the
+  first step starts. Every cluster runs HDFS, "best used for caching the results produced by intermediate job-flow
+  steps", as the Management Guide puts it: a NameNode and a DataNode on its primary node, which Floci runs in a
+  container of their own, `emr-<cluster-id>-hdfs`, from the release's EMR Serverless Hive image, which has HDFS
+  where the release's image has only its client (`hive-image-template` names another), or, for an `emr-spark-*`
+  release, which has no Hive image, from `emr-7.5.0`'s, with their data in a third volume, one copy of each block,
+  and permissions off. On a cluster with Hive or HCatalog (see **Which steps run**), the same container runs Hive's
+  metastore service, which EMR's HCatalog server is, on port 9083, its Derby database in that volume and its warehouse
+  in the HDFS; it reaches the S3 locations of tables through Floci's S3 as the role of the cluster's EC2 instance
+  profile, as the bootstrap actions do, with a session that goes with the container. It gets the cluster's `core-site`
+  and `hive-site` after its own
+  settings, as EMR's primary node does, so a `hive-site` setting of `hive.metastore.warehouse.dir`, say, holds for the
+  service as for the Hive steps. A primary node with the service that an earlier Floci left running starts again, on
+  the data its volume keeps, as its session went with that Floci. The container is on a Docker network of the cluster's own, also
+  `emr-<cluster-id>-hdfs`, which the cluster's steps join besides their own, so the steps of other clusters, another
+  account's included, cannot reach its files or tables; each cluster whose HDFS runs takes one network from the
+  Docker daemon's address pools. When Floci runs in a container, that container joins the network of each cluster
+  with Hive too, as `floci`, which is how the metastore reaches Floci's S3, and leaves it when the HDFS container
+  goes. The cluster's first step starts it, and waits for it: a step whose cluster's HDFS is not ready within two
+  minutes fails ("The step could not start: The HDFS of EMR cluster ... did not start within 120 seconds"). If its
+  NameNode, DataNode or metastore exits, its container ends with it, and the cluster's next step starts it again on
+  its data. Their warnings and errors are the container's output, which `docker logs` shows. With `docker-network`
+  set to `host`, steps reach it on the host's loopback, and its daemons listen there only, as anyone reaching them
+  could change its files, on the host's own ports (8020, 9870, 9866, 9864, 9867), so only one cluster's HDFS runs at
+  a time. With `container:<id>`, its container joins that namespace as the steps do, and listens on its loopback in
+  the same way; the primary node's name goes in the hosts file that namespace's containers share, `<id>`'s own
+  included. In both, the metastore service does not run: Hive 3's has no setting for the address it listens on, so
+  it would take 9083 on every interface of the namespace, the host's own for `host`, and Hive steps keep a metastore
+  of their own (see **Hive steps**). With `none`, steps have no network, so the cluster runs no HDFS, and its steps
+  run as without one. Steps reach
+  it by the primary node's `PrivateDnsName`, as `ListInstances` gives it (`ip-10-0-0-1.ec2.internal`, say), on port
+  8020: `hdfs://` paths without a host, and paths without a scheme ("hdfs:// (or no prefix)"), lead there through
+  `fs.defaultFS`, a relative path under `/user/hadoop`, and the cluster's `spark-defaults` and `core-site` can set
+  it otherwise. A command's `hadoop fs` gets the same, through a copy of the image's Hadoop configuration, or of the
+  folder a `spark-env` export of `HADOOP_CONF_DIR` names, with the cluster's `core-site` after it, which wins; the
+  image's `hdfs` command cannot run, so `hdfs dfs` runs as `hadoop fs`, and its other commands fail. A structured
+  streaming query keeps its checkpoints through Spark's file system checkpoint manager, as its default one refuses
+  an `hdfs://` path without a host. In a command's Hadoop configuration, which a custom JAR's MapReduce in the
+  driver reads too, the `hdfs` scheme is a view of that HDFS in which one folder, `/tmp/hadoop/mapred/staging`, is
+  the container's own, for MapReduce in local mode (see **Hadoop streaming and MapReduce**); Spark and Hive keep
+  HDFS's own client, so a Spark step can write a Hive table there. The HDFS container, its network and the volumes
+  go once the cluster has ended and its last step is done ("HDFS is ephemeral storage that is reclaimed when you terminate a
+  cluster"), on a state reset, and, for clusters that are gone or have ended, when the EMR service starts, unless
+  `reconcile-containers-on-startup` is off. A shutdown of Floci removes the HDFS containers of the clusters that are
+  still up, and their next step starts them again, on the data their volume keeps. `/tmp` is each container's own.
+* **Hadoop streaming and MapReduce**: a step's `hadoop` command runs MapReduce in local mode, in its own JVM,
+  as there is no YARN: the image has MapReduce only in Spark's shaded Hadoop client, which Floci makes the
+  command's MapReduce home (`HADOOP_MAPRED_HOME`, unless a `spark-env` export names one), so it is on the
+  command's class path whatever `HADOOP_CLASSPATH` a command sets, and a copy of its `mapred-site.xml` sets
+  `mapreduce.framework.name` to `local`. This has run on the `emr-7.5.0` and `emr-7.10.0` images; on another,
+  whose Spark jars may be named otherwise, the step's standard error names each jar of the three the MapReduce
+  home links that the image lacks, as a job that needs it fails later, on its class path. So a
+  `command-runner.jar` step whose first argument is `hadoop-streaming`, which "Submits an Hadoop streaming
+  program. In the console and some SDKs, this is a streaming step", as the Release Guide's tools table puts it
+  (the AWS CLI's `Type=STREAMING` becomes one), runs the image's `hadoop-streaming.jar` with the step's other
+  arguments: its mapper and reducer can come from Floci's S3 through `-files`, `-cacheFile` or
+  `-cacheArchive`, and its `-input` and `-output` can be in Floci's S3 or the cluster's HDFS. A job stages its
+  files in `/tmp/hadoop/mapred/staging`, a folder of the step's container, then looks for them at that path
+  of the default file system, the cluster's HDFS, so there the `hdfs` scheme leads to that folder. A
+  `hadoop-lzo` step runs the image's LZO indexer the same way, as does a `hadoop jar` a command or script
+  runs. `s3://` and `s3a://` paths reach Floci's S3
+  through S3A, with the AWS SDK Spark's own S3A finds, in place of the image's EMRFS, which is not pointed at
+  Floci. The image's `log4j.properties` for Hadoop is empty, so Hadoop logs to the step's standard error, from
+  `INFO` up, in the layout of the Management Guide's step log lines, and `stderr.gz` holds a failed job's
+  reason ("ERROR org.apache.hadoop.streaming.StreamJob (main): Error Launching job : Output directory ...
+  already exists"), which EMR writes to the step's `syslog`. A MapReduce job a custom JAR step's
+  `spark-submit` starts runs in local mode the same way, in the driver's JVM, as `spark-submit` puts the
+  copied Hadoop configuration (`HADOOP_CONF_DIR`) on its class path; with the image's, whose `mapred-site.xml`
+  names YARN, the job would wait for it without end. The cluster's `mapred-site` properties, which "Change
+  values in the MapReduce application's mapred-site.xml file", come before Floci's `mapreduce.framework.name`
+  and staging folder, which win, so a job's own `-D mapreduce.framework.name=yarn` still fails, and
+  `mapreduce.application.classpath`, which the Release Guide gives for a custom JAR's dependencies, changes
+  nothing, as a job's tasks run in its own JVM. The cluster's `hadoop-log4j` properties, which "Change values
+  in Hadoop's log4j.properties file", follow the `log4j.properties` lines, a later key winning, and its
+  `hadoop-env` exports, which "Change values in the Hadoop environment for all Hadoop components", start the
+  `hadoop-env.sh` the `hadoop` command reads, as given, with no shell expansion, as `spark-env`'s are, ahead
+  of the image's own lines, which add to `HADOOP_CLASSPATH` rather than set it, so the Release Guide's
+  `HADOOP_CLASSPATH` of `/path/to/my.jar` keeps the LZO codec the image's `core-site.xml` names; a name a
+  shell cannot export is left out. A custom JAR step's `spark-submit` reads neither `hadoop-env.sh` nor
+  Hadoop's `log4j.properties`, so those two do not reach it: a `hadoop-env` `HADOOP_CLASSPATH`, say, is not on
+  its class path, and it logs as Spark does.
+* **Hive steps**: an EMR cluster's nodes hold every application it installs, so a cluster whose `Applications` name
+  Hive, or HCatalog, which installs Hive's client and metastore service, runs its bootstrap actions and all its steps
+  in an image of the release's with Hive added: the release's EMR
+  Serverless image with the Hive, Tez, HDFS, MapReduce and YARN of its EMR Serverless Hive image
+  (`public.ecr.aws/emr-serverless/hive/<release>`, 2.7 GB unpacked, pulled to make it; `hive-image-template` names
+  another). Floci makes it the first time one of the release's clusters needs it: a container of the release's
+  image, never started, gets the Hive image's folders, and is committed, as a bootstrap's is, as
+  `floci-aws-emr-release:<release>-<hash>`, 0.6 GB more than the release's image, and kept for the release's next
+  cluster (`docker image rm` removes it); a newer pull of either image makes another. A failure to make it, a Hive
+  image that cannot be pulled say, fails the step that needed it ("The step could not start: ..."), or, for a
+  bootstrap, ends the cluster with `INTERNAL_ERROR`. The two images ship different builds of one goodies JAR under
+  one name, so Tez keeps the Hive image's, and Hive runs with the Hive image's Hadoop configuration, which puts Tez
+  on its class path, while the cluster's other steps keep the release image's. Then a `command-runner.jar` step
+  running `hive-script`, as the AWS CLI writes a `Type=Hive` step (`hive-script --run-hive-script --args` and the
+  step's `Args`), or `hive` itself, runs Hive: `hive-script` runs `hive` with the arguments after `--args`, as the
+  image's `hadoop` user in `/home/hadoop`, with Tez in local mode in its JVM, as an [EMR Serverless Hive job
+  run](emr-serverless.md#running-hive-job-runs)'s does, on the cluster's storage. It gets the cluster's `core-site`,
+  `tez-site` and `hive-site` properties, each a `--hiveconf`, then the step's own arguments, so a `--hiveconf` of
+  the step's wins over a classification's, as it does over `hive-site.xml`; the cluster's `hive-env` exports are its
+  environment. Floci's settings come before them all, and any of them replaces one: S3A on Floci's S3 for `s3://`,
+  Tez in local mode, the cluster's HDFS, and its metastore. "By default, Hive records metastore information in a
+  MySQL database on the primary node's file system", which Floci keeps in a Derby database of the metastore service
+  its primary node runs (see **Storage**), so a table one Hive step makes is there for the next, until the cluster
+  ends, and any number of Hive steps use it at once. The `hive-site` setting of
+  `hive.metastore.client.factory.class` the Release Guide gives for the Glue Data Catalog uses Floci's Glue instead,
+  with the cluster's account as its `hive.metastore.glue.catalogid`, which a `hive-site` one replaces. A table
+  without a `LOCATION` is in the cluster's HDFS, under `/user/hive/warehouse` ("By default, this is a location in
+  HDFS"), which other steps read as `hdfs:///user/hive/warehouse/<table>`, and an `hdfs://` `LOCATION` is there too.
+  The cluster's Spark steps use that metastore too, as Spark's default catalog "always connects to a Hive metastore"
+  (the Release Guide's "Use an Iceberg cluster with Spark") and its "Using HCatalog" has Spark SQL read a table the
+  HCat CLI made, so a Spark step with Hive support reads a Hive step's tables and makes tables Hive steps read; a
+  `spark-hive-site` naming the Glue Data Catalog's client factory still uses Floci's Glue. Where that service does not
+  run, with `docker-network` set to `host` or `container:<id>`, or to
+  `none`, the metastore is an embedded Derby database in the cluster's `/mnt` instead, which only one Hive step at a
+  time can use: with `StepConcurrencyLevel` above 1, a Hive step that starts while another runs fails ("Another
+  instance of Derby may have already booted the database"), and Spark steps see a Hive step's tables only through
+  the Glue Data Catalog. What the bootstrap actions installed is there for every step, Hive's included. A script or
+  command that starts `hive` itself gets none of these settings: only a Hive step runs Hive. Hive's own log stays in
+  the container.
+* **S3DistCp**: the image has no `s3-dist-cp`, so a `command-runner.jar` step whose
+  first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
+  `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
+  S3 paths in Floci's S3, the cluster's HDFS (`hdfs:///output`, or a path without a scheme) or a file of
+  the container, a source folder's files keeping their folders under `--dest`. It takes the Release
+  Guide's options, `--name=value` or `--name value`, and `-D property=value`. `--srcPattern` and
+  `--groupBy` match the whole source path, as Python regular expressions, which share Java's common
+  syntax. `--groupBy` concatenates the files whose groups give the same name, which is the groups' text,
+  into the folder of the first of them, and refuses a regular expression with no group, as S3DistCp does;
+  `--targetSize` breaks a group larger than it into parts named with a number before the extension.
+  `--outputCodec` (`gzip`, `gz`, `lzo`, `lzop`, `snappy`, or `none` to decompress) decompresses each
+  source by its own extension and replaces that extension with the codec's; without it a file's
+  compression stays as it is, and a group keeps the compression its files share, named with that codec's
+  extension, or has none when they differ, each file decompressed so that the group is one stream.
+  `--deleteOnSuccess` deletes the copied files, but not their folders, once
+  all are copied. `--outputManifest` writes gzipped JSON lines (`path`, `baseName`, `srcDir`, `size`) to
+  `--dest`; `--previousManifest` leaves out the files it names by `baseName`, and fails the step when it
+  is not there unless `--requirePreviousManifest` is `false` (`=false` or `false` after it);
+  `--copyFromManifest` copies the files it names. `--srcPrefixesFile` copies the files under each of its
+  lines instead of listing `--src`, a line ending in `/` naming that folder alone and any other a prefix as
+  S3 lists one (`logs/day` takes in `logs/day-old/`).
+  `--s3ServerSideEncryption`, `--storageClass`, `--disableMultipartUpload` and
+  `--multipartUploadChunkSize` set S3A's matching settings; `--s3Endpoint` is ignored, as S3 is Floci's. A
+  bucket name with an underscore fails the step, as S3DistCp "does not support" one, and so does a copy
+  Hadoop fails, leaving what was copied, as S3DistCp does. `--appendToLastFile` puts the new data after
+  what a destination file holds, through a copy renamed over it, on every file system, as S3 cannot append
+  in place. The copy has a name of its own and goes if the writing fails; the file steps
+  aside, under a name of its own too, until the copy has taken its place, and comes back if it cannot, so a
+  failed append leaves it as it was. A copy that would write two files to the same path, the manifest included
+  (`a.log` and `a.log.gz` with `--outputCodec=gzip`, say), a file over one of its own sources, as with the
+  same `--src` and `--dest`, a file outside `--dest`, through a `..` in a manifest's `baseName` or in
+  `--outputManifest`, or a file with no name, from a `--groupBy` whose groups matched nothing, say, fails
+  before it writes anything. A step's log has one line saying what was copied.
+  Floci's own readings, as no source says: the grouped file's folder, `--numberFiles` putting the number
+  straight before the file's name, a group's compression without `--outputCodec`, and failing a copy that
+  would write over its own output or source, or outside `--dest`.
 * **HTTPS**: with [TLS](../configuration/tls.md) on, each step's container, and the bootstrap actions'
   one, also gets Floci's CA bundle as a Java trust store, which every JVM in it uses, as an
   [EMR Serverless job run](emr-serverless.md#running-spark-job-runs)'s do, so Java code reaches Floci
   over HTTPS too, and through AWS's own endpoint names with `FLOCI_DNS_SPOOF_AWS_ENDPOINTS`.
 * **Bootstrap actions**: a cluster with `BootstrapActions` is `BOOTSTRAPPING` until they have run, one
-  after the other, in one container of the release's image, whatever the second half of
+  after the other, in one container of the release's image (with Hive added for a cluster with Hive, see
+  **Hive steps**), whatever the second half of
   `cluster-startup-delay-seconds`. Each action's script is read from Floci's S3 (an `s3n://` or `s3a://`
   path names the same bucket, and another path is the image's own) and runs with its `Args` in
   `/home/hadoop`, with the credentials of the cluster's `JobFlowRole` instance profile, as a step would.
@@ -195,17 +348,33 @@ but for its bootstrap actions and its storage.
 * **Cancelling**: `CancelSteps` on a `RUNNING` step, and `TerminateJobFlows`, stop its driver at once; a
   cancelled step takes no `ActionOnFailure`. A step Floci was running when it stopped is `FAILED` once
   Floci is back, and its `ActionOnFailure` is taken then. Floci's shutdown and a state reset stop every
-  driver, and start no other step; a driver a hard stop left running is removed when the EMR service
+  driver, then the clusters' HDFS, a step not yet at its driver as if its driver were stopped, and start no other
+  step; a driver a hard stop left running is removed when the EMR service
   starts, before any step can start, unless `reconcile-containers-on-startup` is off.
 * **What `spark-submit` gets**: the step's arguments, after the `spark-defaults` properties of the
-  cluster's `Configurations` and its `spark-hive-site` ones as `spark.hadoop.` settings, which Spark's Hive
-  client reads as it would `hive-site.xml`, so the Management Guide's `hive.metastore.client.factory.class`
-  for the Glue Data Catalog applies; a `spark.hadoop.` setting in `spark-defaults` wins over the same one in
-  `spark-hive-site`. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases
+  cluster's `Configurations` and its `core-site` and `spark-hive-site` ones as `spark.hadoop.` settings,
+  which Spark's Hadoop configuration, and its Hive client's, take as they would `core-site.xml` and
+  `hive-site.xml`, so the Management Guide's `hive.metastore.client.factory.class` for the Glue Data Catalog
+  applies; a `spark-hive-site` setting wins over the same one in `core-site`, and a `spark.hadoop.` setting
+  in `spark-defaults` over both. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases
   before 7.10.0 too, where `s3://` would otherwise be EMRFS, so the application and its files can be read
-  from there; the Glue Data Catalog client is pointed at Floci's Glue, and `hdfs://` paths, and those
-  without a scheme, at the cluster's HDFS. A step's `Properties` are not applied, nor are the other
-  classifications (`core-site`, `hadoop-env`, `spark-log4j2` and the rest).
+  from there; the Glue Data Catalog client is pointed at Floci's Glue, with the cluster's account as its
+  `hive.metastore.glue.catalogid` (from `emr-7.10.0` the client would otherwise ask STS for it), which a
+  `spark-hive-site` one replaces for a Data Catalog in another account; and `hdfs://` paths, and those
+  without a scheme, at the cluster's HDFS. The cluster's `spark-log4j2` properties, which "Change values in
+  Spark's log4j2.properties file", follow the `log4j2.properties` of the folder a `spark-env` export of
+  `SPARK_CONF_DIR` names, else of the image's, in a copy of the step's own, a later key winning, so
+  `rootLogger.level` set to `warn` quiets Spark's `INFO` lines. Its `HADOOP_CONF_DIR` is the copy of the
+  cluster's Hadoop configuration a command's `hadoop` gets, `mapred-site` included (see **Hadoop streaming
+  and MapReduce**). Other classifications (`spark-metrics`, `spark-log4j` for releases before 6.8.0,
+  `mapred-env` and the rest) are not applied.
+* **A step's `Properties`**: "Java properties that are set when the step runs. You can use these properties
+  to pass key-value pairs to your main function", as the API Reference puts it. A custom JAR step's are
+  system properties of the JVM its main class runs in, which `System.getProperty` reads, passed to
+  `spark-submit` in `SPARK_SUBMIT_OPTS` after any Java options a `spark-env` export puts there, so a step's
+  own win. A `command-runner.jar` or `script-runner.jar` step's would be those of the runner's own JVM,
+  which Floci has none of, and a JVM's system properties do not pass to a process it starts, so they go
+  nowhere. This is Floci's reading, as that sentence is the only source.
 * **`spark-env`**: the variables the cluster's `spark-env` exports, in its nested `export` classification,
   are in each step's container environment, `PYSPARK_PYTHON` or `JAVA_HOME` say, replacing any of Floci's
   own with the same name. They are set as given, with no shell expansion of a `$VARIABLE` in
@@ -225,8 +394,20 @@ but for its bootstrap actions and its storage.
   and the other log folders are not written, nothing is copied while a step runs (EMR copies its logs
   every five minutes), and `FailureDetails` has no `LogFile`.
 * **Image**: `image-template` names another image, such as a mirror or a dated tag of the release's
-  image: `registry.internal/emr-serverless/spark/%s:20250425`. A release with no EMR Serverless image
-  fails its steps with "The step could not start: Could not pull image".
+  image: `registry.internal/emr-serverless/spark/%s:20250425`, and `hive-image-template` another Hive image:
+  `registry.internal/emr-serverless/hive/%s:20250425`. Every cluster's steps need both, the Hive image for the
+  cluster's HDFS (see **Storage**), so a mirror sets both, and carries `emr-7.5.0`'s Hive image for an `emr-spark-*`
+  release. A release with no EMR Serverless image, or another with no EMR Serverless Hive image, fails its steps
+  with "The step could not start: Could not pull image".
+
+### Known limitations
+
+- **No Hive metastore service in a network namespace the steps share.** With `docker-network` set to `host` or
+  `container:<id>`, the primary node runs HDFS but not Hive's metastore service: Hive 3's has no setting for the
+  address it listens on, so it would serve its tables, and the files under them, on every interface of the
+  namespace, the host's own for `host`. Hive steps there keep an embedded Derby database in the cluster's `/mnt`, so
+  only one Hive step at a time can use it, and Spark steps see a Hive step's tables only through the Glue Data
+  Catalog. On a cluster's own network, the default, the service runs (see **Storage** and **Hive steps**).
 
 ## EventBridge events
 
@@ -277,7 +458,8 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_CLUSTER_TERMINATION_DELAY_SECONDS` | `0` | Seconds a cluster stays `TERMINATING` before it is `TERMINATED`; `0` ends it at once |
 | `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps)) |
 | `FLOCI_SERVICES_EMR_DOCKER_NETWORK` | the global default | Docker network for step containers |
-| `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label |
+| `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label; a mirror sets `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` too |
+| `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/hive/%s:latest` | The EMR Serverless Hive image every `docker` cluster runs its HDFS in, and a cluster with Hive takes Hive from, `%s` standing for the cluster's release label, or `emr-7.5.0` for the HDFS of an `emr-spark-*` release; see [Storage and Hive steps](#running-steps) |
 | `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers and bootstrap containers a previous run of this Floci left on the Docker daemon, and the images bootstrap actions left for clusters that are gone or have ended, when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |
 
 ## Release catalogue

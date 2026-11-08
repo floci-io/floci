@@ -128,6 +128,35 @@ GUIDE_GOVCLOUD_APIGATEWAY = (
     "The Amazon Route\u00a053 Hosted Zone ID for the regional endpoint in the AWS GovCloud (US-West) Region is"
     " Z1K6XKP9SAGWDV. The Amazon Route\u00a053 Hosted Zone ID for the regional endpoint in the AWS GovCloud (US-East)"
     " Region is Z3SE9ATJYCRCZJ.\n")
+GENERAL_REFERENCE_APIGATEWAY = """
+Amazon API Gateway control plane
+
+| Region Name  | Region  | Endpoint  | Protocol
+
+| US East (N. Virginia)  | us-east-1  |
+apigateway.us-east-1.amazonaws.com
+
+apigateway-fips.us-east-1.amazonaws.com
+|
+HTTPS
+
+HTTPS
+
+Amazon API Gateway data plane
+
+| Region Name  | Region  | Endpoint  | Protocol  | Route 53 Hosted Zone ID
+
+| US East (N. Virginia)  | us-east-1  | execute-api.us-east-1.amazonaws.com  | HTTPS  |
+Z1UJRXOUMOOFQ8
+
+| AWS GovCloud (US-East)  | us-gov-east-1  | execute-api.us-gov-east-1.amazonaws.com  | HTTPS  |
+Z3SE9ATJYCRCZJ
+
+| AWS GovCloud (US-West)  | us-gov-west-1  | execute-api.us-gov-west-1.amazonaws.com  | HTTPS  |
+Z1K6XKP9SAGWDV
+
+Service quotas
+"""
 RDS_CLI_EXAMPLE = '''
 "Endpoint": {
     "Address": "mydbinstancecf.abcexample.us-east-1.rds.amazonaws.com",
@@ -164,6 +193,7 @@ def write_sources(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         (guides, r.APIGATEWAY_REGIONAL_ZONE_PAGE, GUIDE_GOVCLOUD_APIGATEWAY),
         (guides, r.RDS_ZONE_SENTENCES["us-east-1"][0], RDS_CLI_EXAMPLE),
         (botocore, r.BOTOCORE_CLOUDFRONT, BOTOCORE_CLOUDFRONT),
+        (tmp_path, r.APIGATEWAY_ENDPOINTS_PAGE, GENERAL_REFERENCE_APIGATEWAY),
     ] + [(guides, r.CONSOLE_HOST_SENTENCES[partition][0], body) for partition, body in GUIDES.items()]:
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -272,6 +302,39 @@ def test_api_gateway_regional_zones_resolve_the_region_by_its_description():
         r.parse_apigateway_regional_zones(west_only, PARTITIONS)
 
 
+def test_api_gateway_endpoint_table_reads_the_data_plane_rows_only():
+    assert r.parse_apigateway_endpoint_zones(GENERAL_REFERENCE_APIGATEWAY) == {
+        "us-east-1": "Z1UJRXOUMOOFQ8", "us-gov-east-1": "Z3SE9ATJYCRCZJ", "us-gov-west-1": "Z1K6XKP9SAGWDV"}
+    with pytest.raises(ValueError, match="no data plane hosted zone row"):
+        r.parse_apigateway_endpoint_zones("Amazon API Gateway control plane\n")
+    # a row that loses its zone is refused rather than read as a region AWS does not list
+    with pytest.raises(ValueError, match="3 execute-api hosts but 2 readable rows"):
+        r.parse_apigateway_endpoint_zones(GENERAL_REFERENCE_APIGATEWAY.replace("Z1UJRXOUMOOFQ8\n", "\n"))
+    # a host of another region in the row is not that row's zone
+    with pytest.raises(ValueError, match="3 execute-api hosts but 2 readable rows"):
+        r.parse_apigateway_endpoint_zones(GENERAL_REFERENCE_APIGATEWAY.replace(
+            "execute-api.us-east-1.", "execute-api.us-east-2."))
+    with pytest.raises(ValueError, match="two hosted zones for us-east-1"):
+        r.parse_apigateway_endpoint_zones(GENERAL_REFERENCE_APIGATEWAY.replace("Service quotas", """
+| US East (N. Virginia)  | us-east-1  | execute-api.us-east-1.amazonaws.com  | HTTPS  |
+Z9ZZZZZZZZZZZZ
+"""))
+
+
+def test_build_refuses_an_endpoint_table_the_govcloud_guide_contradicts(tmp_path):
+    tf, cdk, guides, botocore = write_sources(tmp_path)
+    page = tmp_path / r.APIGATEWAY_ENDPOINTS_PAGE
+    page.write_text(GENERAL_REFERENCE_APIGATEWAY.replace("Z1K6XKP9SAGWDV", "Z9ZZZZZZZZZZZZ"), encoding="utf-8")
+    with pytest.raises(ValueError, match="us-gov-west-1 is Z9ZZZZZZZZZZZZ but gov/govcloud-abp.md states Z1K6XKP9SAGWDV"):
+        r.build(tf, cdk, guides, botocore, PARTITIONS)
+    # nor one that dropped a GovCloud row
+    page.write_text(GENERAL_REFERENCE_APIGATEWAY.replace(
+        "| AWS GovCloud (US-East)  | us-gov-east-1  | execute-api.us-gov-east-1.amazonaws.com  | HTTPS  |\nZ3SE9ATJYCRCZJ\n",
+        ""), encoding="utf-8")
+    with pytest.raises(ValueError, match="us-gov-east-1 is None"):
+        r.build(tf, cdk, guides, botocore, PARTITIONS)
+
+
 def test_rds_example_requires_one_zone_for_the_matching_region():
     page, pattern = r.RDS_ZONE_SENTENCES["us-east-1"]
     assert r.parse_guide_sentence(RDS_CLI_EXAMPLE, pattern, page) == "Z2R2ITUGPM61AM"
@@ -288,6 +351,7 @@ def test_build_merges_sources_with_terraform_winning_the_s3_conflicts(tmp_path):
     assert document["_source"]["rds"] == "https://docs.aws.amazon.com/cli/v1/reference/rds/describe-db-instances.html"
     assert regions["us-east-1"] == {"albHostedZoneId": "Z35SXDOTRQ7X7K", "classicElbHostedZoneId": "Z35SXDOTRQ7X7K",
                                     "nlbHostedZoneId": "Z26RNL4JYFTOTI", "s3WebsiteHostedZoneId": "Z3AQBSTGFYJSTF",
+                                    "apiGatewayRegionalHostedZoneId": "Z1UJRXOUMOOFQ8",
                                     "rdsHostedZoneId": "Z2R2ITUGPM61AM"}
     assert regions["af-south-1"]["s3WebsiteHostedZoneId"] == "Z83WF9RJE8B12"
     assert regions["us-isof-south-1"] == {"s3WebsiteHostedZoneId": "Z03376072I8GXC2DXUFXI",
@@ -306,7 +370,9 @@ def test_build_merges_sources_with_terraform_winning_the_s3_conflicts(tmp_path):
                                         "consoleHost": "console.amazonaws-us-gov.com"}
     assert regions["us-gov-west-1"] == {"apiGatewayRegionalHostedZoneId": "Z1K6XKP9SAGWDV"}
     assert regions["us-gov-east-1"]["apiGatewayRegionalHostedZoneId"] == "Z3SE9ATJYCRCZJ"
-    assert "apiGatewayRegionalHostedZoneId" not in regions["us-east-1"]
+    assert regions["us-east-1"]["apiGatewayRegionalHostedZoneId"] == "Z1UJRXOUMOOFQ8"
+    assert "apiGatewayRegionalHostedZoneId" not in regions["af-south-1"], "a region with no row stays absent"
+    assert document["_source"]["apiGatewayRegionalHostedZones"].startswith(r.APIGATEWAY_ENDPOINTS_URL)
     assert partitions["aws-iso-f"] == {"vpcEndpointServiceNamePrefix": "gov.ic.hci.csp.vpce"}
 
 

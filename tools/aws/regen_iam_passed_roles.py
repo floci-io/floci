@@ -112,6 +112,7 @@ NOT_COVERED = {
     "kafka": "REST routes no rule maps yet",
     "macie2": "REST routes no rule maps yet",
     "mq": "REST routes no rule maps yet",
+    "quicksight": "metadata-only REST subset; role passing and iam:PassRole checks are not implemented",
     "rum": "REST routes no rule maps yet",
     "s3tables": "REST routes no rule maps yet",
 }
@@ -393,6 +394,9 @@ MEMBER_SERVICES = {
         "taskRoleArn": ECS_TASKS,
         "infrastructureRoleArn": ECS_INFRASTRUCTURE,
     },
+    # "Amazon EMR uses this role" for the session. The reference also lists
+    # managed-compute.elasticmapreduce, but the request cannot say which compute it runs on.
+    "elasticmapreduce:StartSession": {"ExecutionRoleArn": "elasticmapreduce"},
     # rds-preview is the principal of RDS's preview environment; PassedRoles' RDS cases pass to rds.
     "rds:*": {"*": "rds"},
 }

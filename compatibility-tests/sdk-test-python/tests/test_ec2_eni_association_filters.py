@@ -1,4 +1,4 @@
-"""Primary ENI filters and VPC-dependent EIP release verified against live EC2."""
+"""Network interface association filters and Elastic IP lifecycle."""
 
 import uuid
 from contextlib import ExitStack
@@ -41,7 +41,10 @@ def test_default_subnet_filter_excludes_custom_subnets(ec2_client, filter_name):
 
 @pytest.mark.parametrize("supplied_interface", [False, True])
 @pytest.mark.parametrize("default_vpc", [False, True])
-def test_network_interface_association_filters(ec2_client, supplied_interface, default_vpc):
+@pytest.mark.parametrize("by_interface_id", [False, True])
+def test_network_interface_association_filters(
+    ec2_client, supplied_interface, default_vpc, by_interface_id
+):
     with ExitStack() as cleanup:
         if default_vpc:
             subnet = ec2_client.describe_subnets(
@@ -64,18 +67,23 @@ def test_network_interface_association_filters(ec2_client, supplied_interface, d
         instances = ec2_client.run_instances(
             ImageId=image, InstanceType="t3.nano", MinCount=1, MaxCount=1,
             **placement)["Instances"]
-        instances += ec2_client.run_instances(
+        cleanup.callback(terminate_and_wait, ec2_client,
+                         [instance["InstanceId"] for instance in instances])
+        other_instances = ec2_client.run_instances(
             ImageId=image, InstanceType="t3.nano", MinCount=1, MaxCount=1,
             SubnetId=subnet)["Instances"]
         cleanup.callback(terminate_and_wait, ec2_client,
-                         [instance["InstanceId"] for instance in instances])
+                         [instance["InstanceId"] for instance in other_instances])
+        instances += other_instances
         eni_ids = [instance["NetworkInterfaces"][0]["NetworkInterfaceId"]
                    for instance in instances]
         allocation = ec2_client.allocate_address(Domain="vpc")["AllocationId"]
         allocation_cleanup = cleanup.enter_context(ExitStack())
         allocation_cleanup.callback(ec2_client.release_address, AllocationId=allocation)
+        target = ({"NetworkInterfaceId": eni_ids[0]} if by_interface_id
+                  else {"InstanceId": instances[0]["InstanceId"]})
         association = ec2_client.associate_address(
-            AllocationId=allocation, InstanceId=instances[0]["InstanceId"])["AssociationId"]
+            AllocationId=allocation, **target)["AssociationId"]
         association_cleanup = cleanup.enter_context(ExitStack())
         association_cleanup.callback(ec2_client.disassociate_address, AssociationId=association)
         # Floci resolves a reachable address on association; read the actual association.
@@ -115,6 +123,135 @@ def test_network_interface_association_filters(ec2_client, supplied_interface, d
         assert matched(**{"association.ip-owner-id": [owner]}) == []
         assert "Association" not in ec2_client.describe_network_interfaces(
             NetworkInterfaceIds=[eni_ids[0]])["NetworkInterfaces"][0]
+
+
+def _release_address(ec2_client, allocation_id):
+    address = ec2_client.describe_addresses(AllocationIds=[allocation_id])["Addresses"][0]
+    if address.get("AssociationId"):
+        ec2_client.disassociate_address(AssociationId=address["AssociationId"])
+    ec2_client.release_address(AllocationId=allocation_id)
+
+
+@pytest.mark.parametrize("secondary", [False, True])
+def test_detached_interface_address_association(ec2_client, secondary):
+    with ExitStack() as cleanup:
+        vpc = ec2_client.create_vpc(CidrBlock="10.237.0.0/24")["Vpc"]["VpcId"]
+        cleanup.callback(ec2_client.delete_vpc, VpcId=vpc)
+        subnet = ec2_client.create_subnet(
+            VpcId=vpc, CidrBlock="10.237.0.0/26")["Subnet"]["SubnetId"]
+        cleanup.callback(ec2_client.delete_subnet, SubnetId=subnet)
+        interface = ec2_client.create_network_interface(
+            SubnetId=subnet, PrivateIpAddresses=[
+                {"PrivateIpAddress": "10.237.0.4", "Primary": True},
+                {"PrivateIpAddress": "10.237.0.5", "Primary": False},
+            ])["NetworkInterface"]
+        eni_id = interface["NetworkInterfaceId"]
+        cleanup.callback(ec2_client.delete_network_interface, NetworkInterfaceId=eni_id)
+        private_ip = next(ip["PrivateIpAddress"] for ip in interface["PrivateIpAddresses"]
+                          if ip["Primary"] != secondary)
+        allocations = []
+        for _ in range(2):
+            allocation = ec2_client.allocate_address(Domain="vpc")["AllocationId"]
+            cleanup.callback(_release_address, ec2_client, allocation)
+            allocations.append(allocation)
+
+        def read_interface():
+            return ec2_client.describe_network_interfaces(NetworkInterfaceIds=[eni_id])["NetworkInterfaces"][0]
+
+        for allocation in allocations:
+            arguments = {"PrivateIpAddress": private_ip} if secondary else {}
+            association = ec2_client.associate_address(
+                AllocationId=allocation, NetworkInterfaceId=eni_id, **arguments)["AssociationId"]
+            observed = read_interface()
+            address = ec2_client.describe_addresses(AllocationIds=[allocation])["Addresses"][0]
+            assert address["AssociationId"] == association
+            assert address["NetworkInterfaceId"] == eni_id
+            assert address["PrivateIpAddress"] == private_ip
+            assert not address.get("InstanceId")
+            private = next(ip for ip in observed["PrivateIpAddresses"] if ip["PrivateIpAddress"] == private_ip)
+            assert private["Association"]["AssociationId"] == association
+            assert private["Association"]["AllocationId"] == allocation
+            assert private["Association"]["IpOwnerId"] == observed["OwnerId"]
+            if secondary:
+                assert "Association" not in observed
+            else:
+                assert observed["Association"] == private["Association"]
+                filtered = ec2_client.describe_network_interfaces(Filters=[
+                    {"Name": "association.public-ip", "Values": [address["PublicIp"]]},
+                    {"Name": "association.ip-owner-id", "Values": [observed["OwnerId"]]},
+                ])["NetworkInterfaces"]
+                assert [item["NetworkInterfaceId"] for item in filtered] == [eni_id]
+
+        previous = ec2_client.describe_addresses(AllocationIds=[allocations[0]])["Addresses"][0]
+        assert not previous.get("AssociationId")
+        assert not previous.get("NetworkInterfaceId")
+        before = ec2_client.describe_addresses(AllocationIds=allocations)["Addresses"]
+        for invalid, code in [
+            ({}, "MissingParameter"),
+            ({"NetworkInterfaceId": "eni-00000000000000000"}, "InvalidNetworkInterfaceID.NotFound"),
+            ({"NetworkInterfaceId": eni_id, "PrivateIpAddress": "10.237.0.61"}, "InvalidParameterValue"),
+            ({"NetworkInterfaceId": eni_id, "InstanceId": "i-00000000000000000"},
+             "InvalidParameterCombination"),
+        ]:
+            with pytest.raises(ClientError) as error:
+                ec2_client.associate_address(AllocationId=allocations[1], **invalid)
+            assert error.value.response["Error"]["Code"] == code
+            assert error.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+            assert ec2_client.describe_addresses(AllocationIds=allocations)["Addresses"] == before
+
+        ec2_client.disassociate_address(AssociationId=association)
+        observed = read_interface()
+        assert "Association" not in observed
+        assert all("Association" not in ip for ip in observed["PrivateIpAddresses"])
+
+
+def _delete_nat_gateway(ec2_client, nat_gateway_id):
+    ec2_client.delete_nat_gateway(NatGatewayId=nat_gateway_id)
+    ec2_client.get_waiter("nat_gateway_deleted").wait(
+        NatGatewayIds=[nat_gateway_id], WaiterConfig={"Delay": 1, "MaxAttempts": 120})
+
+
+@pytest.mark.parametrize("managed_by", ["nat_gateway", "vpc_endpoint"])
+def test_service_managed_interface_association_is_unsupported(ec2_client, managed_by):
+    """Known service interfaces are unsupported, and rejection preserves the EIP."""
+    with ExitStack() as cleanup:
+        vpc = ec2_client.create_vpc(CidrBlock="10.237.0.0/24")["Vpc"]["VpcId"]
+        cleanup.callback(ec2_client.delete_vpc, VpcId=vpc)
+        subnet = ec2_client.create_subnet(
+            VpcId=vpc, CidrBlock="10.237.0.0/26")["Subnet"]["SubnetId"]
+        cleanup.callback(ec2_client.delete_subnet, SubnetId=subnet)
+        if managed_by == "nat_gateway":
+            gateway = ec2_client.create_nat_gateway(
+                SubnetId=subnet, ConnectivityType="private")["NatGateway"]
+            cleanup.callback(_delete_nat_gateway, ec2_client, gateway["NatGatewayId"])
+            ec2_client.get_waiter("nat_gateway_available").wait(
+                NatGatewayIds=[gateway["NatGatewayId"]], WaiterConfig={"Delay": 1, "MaxAttempts": 120})
+            gateway = ec2_client.describe_nat_gateways(
+                NatGatewayIds=[gateway["NatGatewayId"]])["NatGateways"][0]
+            interface_id = gateway["NatGatewayAddresses"][0]["NetworkInterfaceId"]
+        else:
+            endpoint = ec2_client.create_vpc_endpoint(
+                VpcId=vpc, VpcEndpointType="Interface", SubnetIds=[subnet],
+                ServiceName=f"com.amazonaws.{ec2_client.meta.region_name}.ssm")["VpcEndpoint"]
+            cleanup.callback(ec2_client.delete_vpc_endpoints, VpcEndpointIds=[endpoint["VpcEndpointId"]])
+            interface_id = endpoint["NetworkInterfaceIds"][0]
+        interface = ec2_client.describe_network_interfaces(
+            NetworkInterfaceIds=[interface_id])["NetworkInterfaces"][0]
+        assert interface["RequesterManaged"]
+
+        original = ec2_client.create_network_interface(SubnetId=subnet)["NetworkInterface"]["NetworkInterfaceId"]
+        cleanup.callback(ec2_client.delete_network_interface, NetworkInterfaceId=original)
+        allocation = ec2_client.allocate_address(Domain="vpc")["AllocationId"]
+        cleanup.callback(_release_address, ec2_client, allocation)
+        ec2_client.associate_address(AllocationId=allocation, NetworkInterfaceId=original)
+        before = ec2_client.describe_addresses(AllocationIds=[allocation])["Addresses"]
+        with pytest.raises(ClientError) as error:
+            ec2_client.associate_address(AllocationId=allocation, NetworkInterfaceId=interface_id)
+        assert error.value.response["Error"]["Code"] == "Unsupported"
+        assert error.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+        assert ec2_client.describe_addresses(AllocationIds=[allocation])["Addresses"] == before
+        assert ec2_client.describe_network_interfaces(
+            NetworkInterfaceIds=[interface_id])["NetworkInterfaces"][0] == interface
 
 
 @pytest.mark.parametrize("supplied_interface", [False, True])

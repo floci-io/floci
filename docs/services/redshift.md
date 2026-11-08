@@ -140,9 +140,12 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `DeleteTags` | Remove tags by key from a resource |
 | `DescribeTags` | List tagged resources and their tags |
 | `CreateClusterSubnetGroup` | Register a cluster subnet group (metadata only) |
-| `CreateIntegration` | Create a DynamoDB Streams to provisioned Redshift zero-ETL integration. Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
+| `CreateIntegration` | Create a DynamoDB zero-ETL integration from a table (or a stream) to a Redshift Serverless namespace (or a provisioned cluster). Accepts `Description`, `KMSKeyId`, `AdditionalEncryptionContext` and `TagList` |
 | `DescribeIntegrations` | List integrations with `Filters`, `MaxRecords` and `Marker` pagination, or the one an `IntegrationArn` names |
 | `DeleteIntegration` | Remove a zero-ETL integration |
+| `PutResourcePolicy` | Set the resource policy of a Redshift Serverless namespace or a provisioned cluster, see [Resource policies](#resource-policies) |
+| `GetResourcePolicy` | Return the resource policy of a namespace or cluster |
+| `DeleteResourcePolicy` | Remove the resource policy of a namespace or cluster |
 | `DescribeClusterSubnetGroups` | List subnet groups, optionally filtered by name |
 | `ModifyClusterSubnetGroup` | Update a subnet group's description or subnet list |
 | `DeleteClusterSubnetGroup` | Remove a subnet group |
@@ -167,8 +170,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `DescribeClusterVersions` | Return the single emulated engine version and its parameter group family |
 | `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
 | `ModifyClusterIamRoles` | Add or remove associated IAM roles and set `DefaultIamRoleArn`; COPY and UNLOAD see the change on new connections |
-| `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
-| `EnableLogging` | Store audit-logging configuration and deliver the selected connection, user, and user-activity audit records to CloudWatch Logs for provisioned clusters |
+| `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration and delivery status |
+| `EnableLogging` | Store audit-logging configuration and deliver connection, user, and user-activity audit records to CloudWatch Logs or Amazon S3 for provisioned clusters |
 | `DisableLogging` | Clear a cluster's audit-logging configuration |
 | `PauseCluster` | Stop a provisioned cluster and its auth proxy while retaining the container and data |
 | `ResumeCluster` | Restart a paused cluster and restore its auth proxy on the same endpoint |
@@ -177,7 +180,7 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
 <!-- floci:actions:end -->
 
-CloudWatch audit events use the AWS log groups `/aws/redshift/cluster/<clusterIdentifier>/<logType>` and CSV log records. `connectionlog` and `userlog` follow the logging export selection. `useractivitylog` additionally requires `enable_user_activity_logging=true` in the cluster parameter group, which is false by default.
+CloudWatch audit events use the AWS log groups `/aws/redshift/cluster/<clusterIdentifier>/<logType>` and CSV log records. S3 audit events are compressed with gzip and delivered to `s3://<bucketName>/[<s3KeyPrefix>/]AWSLogs/<accountId>/redshift/<region>/<YYYY>/<MM>/<DD>/<accountId>_redshift_<region>_<clusterIdentifier>_<logType>_<timestamp>.gz` using pipe-delimited records for `connectionlog` and `userlog`, and standard formatted text for `useractivitylog`. `connectionlog` and `userlog` follow the logging export selection. `useractivitylog` additionally requires `enable_user_activity_logging=true` in the cluster parameter group, which is false by default.
 
 Audit delivery covers PostgreSQL wire connections and Data API connections, including batch statements and retained sessions. Records identify the requested database user and database, even when temporary credentials use a master connection internally. User changes are published after commit and discarded on rollback, including rollback to a savepoint on the wire path. SQL password literals are redacted, including literals separated from `PASSWORD` by SQL comments.
 
@@ -291,6 +294,38 @@ UNLOAD ('SELECT * FROM people') TO 's3://my-data/export/' IAM_ROLE default CSV;
 See AWS's [default IAM role guide](https://docs.aws.amazon.com/redshift/latest/mgmt/default-iam-role.html)
 and [COPY authorization parameters](https://docs.aws.amazon.com/redshift/latest/dg/copy-parameters-authorization.html).
 
+### COPY JOB
+
+A job stores the parameters of a COPY from Amazon S3 so that they can be reused:
+
+```sql
+COPY public.target_table FROM 's3://my-bucket/staging/'
+IAM_ROLE 'arn:aws:iam::000000000000:role/Load'
+JOB CREATE my_copy_job AUTO ON;
+
+COPY JOB LIST;
+COPY JOB SHOW my_copy_job;
+COPY JOB ALTER my_copy_job AUTO OFF;
+COPY JOB DROP my_copy_job;
+```
+
+Jobs live in the cluster database and are listed in `sys_copy_job`, with AWS's columns. `JOB CREATE` and
+`COPY JOB DROP` are refused inside a transaction block. A job needs an S3 source and an explicit `IAM_ROLE`,
+and cannot use `MANIFEST`, access keys, `MAXERROR` or `IGNOREALLERRORS`. Names cannot contain a hyphen and
+must fit in 127 UTF-8 bytes. A database holds at most 200 jobs, including when jobs are created concurrently.
+Simple Query, Extended Query and the Redshift Data API are supported. Transaction restrictions are checked when a job
+command executes, including when a prepared statement is reused. Regular users can manage their own jobs
+and see their own rows in `sys_copy_job`; superusers can see all rows.
+
+COPY options are stored for execution time, including formats the ordinary COPY simulator does not yet
+implement. The COPY JOB restrictions above are checked at creation time.
+
+Jobs only record the COPY for now: nothing loads files automatically, and `COPY JOB RUN` is refused. The
+SQLSTATEs and messages of the refusals are Floci's own, not captured from AWS.
+
+See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.html) and
+[auto-copy](https://docs.aws.amazon.com/redshift/latest/dg/loading-data-copy-job.html) references.
+
 ### Snapshot copy grants
 
 - **`KmsKeyId` defaults to an alias ARN.** Floci has no per-account AWS-managed key, so
@@ -375,9 +410,28 @@ Set `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED=false` to turn publishin
 
 ## DynamoDB zero-ETL
 
-The supported zero-ETL path is DynamoDB Streams to a provisioned Redshift cluster. The source ARN
-must identify an enabled local DynamoDB stream, and the target ARN must identify an existing
-provisioned Redshift cluster.
+As in AWS, `SourceArn` is a DynamoDB table ARN and `TargetArn` is a Redshift Serverless namespace
+ARN. Floci also accepts a DynamoDB stream ARN as the source and a provisioned cluster ARN
+(`arn:aws:redshift:<region>:<account>:cluster:<identifier>`) as the target. A source table that
+does not exist is refused with `IntegrationSourceNotFoundFault`, and a namespace that does not exist
+with `IntegrationTargetNotFoundFault`. A source stream that does not exist is refused with DynamoDB's
+`ResourceNotFoundException`, and a provisioned cluster target that does not exist with `ClusterNotFound`.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift create-integration \
+  --integration-name orders-zero-etl \
+  --source-arn arn:aws:dynamodb:us-east-1:000000000000:table/orders \
+  --target-arn arn:aws:redshift-serverless:us-east-1:000000000000:namespace/<namespace-id>
+```
+
+A namespace target is written through the namespace's workgroup, into the namespace's database as
+its admin user. Until the namespace has a workgroup, polling fails and the integration reports
+`failed`; it becomes `active` on the first poll after the workgroup exists.
+
+AWS reads the changes of a table source without DynamoDB Streams. Floci reads them from the table's
+latest stream, so a table source replicates changes only while the table has one, and a table that
+never had a stream gets its initial backfill only. The integration picks up a stream turned on after
+it was created, and moves to the new stream when streams are turned off and on again.
 
 Each stream record is written to a stable landing table named `floci_zetl_<integration-id>`.
 The landing table stores the event id, event name, source, region, sequence number, creation time,
@@ -395,6 +449,58 @@ restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `sy
 approximation to indicate that initial backfill is in progress); it becomes `active` once the scan is
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
+
+### S3 event integrations
+
+`CreateIntegration` also takes an Amazon S3 bucket as the source (`arn:aws:s3:::<bucket>`), the first step of
+auto-copy. The target is a Serverless namespace ARN, or the provisioned cluster ARN described above; AWS's
+`arn:aws:redshift:<region>:<account>:namespace:<id>` form of a provisioned target is not accepted yet.
+`SourceType` is `s3-event-notifications`, and the `source-types` filter of `DescribeIntegrations` matches it.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift create-integration \
+  --integration-name lake-auto-copy \
+  --source-arn arn:aws:s3:::my-bucket \
+  --target-arn arn:aws:redshift-serverless:us-east-1:000000000000:namespace/<namespace-id>
+```
+
+The bucket has to exist in the caller's account (`IntegrationSourceNotFoundFault` otherwise), to be in the
+Region of the integration, and to have no period in its name. A bucket with no stored Region is treated as
+Floci's default Region. Its ARN must have empty Region and account fields and the integration's partition. A provisioned
+target must match the local cluster's full ARN (`IntegrationTargetNotFoundFault` otherwise).
+A bucket joins a target once (`IntegrationConflictOperationFault`), and a
+target takes at most 50 S3 event integrations (`IntegrationQuotaExceededFault`). Those two fault names are
+Floci's reading of the AWS API's fault list; their messages are not captured from AWS.
+
+The integration is `active` as soon as it is created, where AWS reports `creating` first. It does not load
+anything yet, and the bucket policy, the namespace resource policy and the existing notifications of the bucket
+are not checked. [COPY JOB](#copy-job) statements work independently of the integration.
+
+### Resource policies
+
+A zero-ETL integration needs a resource policy on its target that lets the source in.
+`PutResourcePolicy`, `GetResourcePolicy` and `DeleteResourcePolicy` take the ARN of a Redshift
+Serverless namespace or of a provisioned cluster, so `aws_redshift_resource_policy` applies as it
+does on AWS:
+
+- The policy must be a nonempty JSON object, or the call is refused with `InvalidPolicyFault` before
+  the resource is looked up.
+- The policy is stored the way AWS returns it: `Version` and `Statement` first, each statement's
+  `Effect`, `Principal`, `Action`, `Resource` and `Condition` first, other keys after them in the
+  order sent, pretty-printed. The provider compares policies by content, so this causes no drift.
+- A namespace that does not exist is `ResourceNotFoundFault` ("The requested namespace doesn't
+  exist."), as is a cluster that does not exist, or a resource without a policy on
+  `GetResourcePolicy` and `DeleteResourcePolicy`.
+- An ARN in another Region, a namespace id that is not a UUID, and an ARN of any other resource type
+  (a workgroup, a snapshot) are `InvalidParameterValue`, with AWS's messages.
+- Deleting the namespace or cluster deletes its policy.
+- Floci does not evaluate the policy: `CreateIntegration` does not require one.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift put-resource-policy \
+  --resource-arn arn:aws:redshift-serverless:us-east-1:000000000000:namespace/<namespace-id> \
+  --policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"redshift.amazonaws.com"},"Action":"redshift:AuthorizeInboundIntegration","Resource":"*"}]}'
+```
 
 ### EventBridge events
 
@@ -422,8 +528,9 @@ data-type, pause and resume, serverless restore and modification events do not o
 is best effort. It is skipped when the EventBridge service is disabled, a refused or failed
 delivery is logged, and neither changes the outcome of the Redshift operation.
 
-Serverless Redshift targets, schema inference, and relational projection are not supported in this
-first implementation.
+Schema inference, relational projection and `CREATE DATABASE ... FROM INTEGRATION` are not
+supported, and a provisioned cluster's namespace ARN (`arn:aws:redshift:<region>:<account>:namespace:<id>`)
+is not accepted as a target.
 
 ## CloudFormation
 
@@ -662,8 +769,29 @@ GROUP BY c.country ORDER BY total DESC;
 
 This path needs Docker for PostgreSQL and the existing floci-duck runtime used to read external
 data. Use the `floci.duck` configuration described under [Athena](athena.md) to supply a reachable
-runtime when container management is unsuitable. This iteration validates CSV relational reads;
-it does not add new file formats or partition pruning.
+runtime when container management is unsuitable.
+
+Tables declared `STORED AS PARQUET` (or with a Parquet input format or SerDe in Glue) are read the same
+way. Columns are matched to the Parquet files by name, ignoring case. A declared column that a partition's
+files do not carry, as when the column was added to the table after those files were written, reads as
+`NULL`. A value that cannot be converted to the declared type fails the query.
+
+A partitioned table is loaded partition by partition, and a query loads only the partitions its `WHERE`
+can select, as Spectrum reads only those. Only these are listed, checked against the role's S3 access and
+read, so a partition that no predicate of the query selects can be unreadable without failing the query.
+A predicate selects partitions when it is a top-level `AND` term of the `WHERE` of the block that names the
+table, uses only partition keys, literals, comparisons, `IN`, `BETWEEN`, `IS [NOT] NULL`, `AND`, `OR` and
+`NOT`, covers an integer, date or string key (a string key only for `=`, `<>` and `IN`), and is false for a
+row whose keys are all NULL, so that a table on the nullable side of an outer join keeps its rows. Any
+other predicate leaves every partition in. The query still runs unchanged on the rows loaded, so pruning
+never changes a result. Partitions loaded by one query stay for the next: a later query adds the ones it
+needs, reloads the ones whose objects or Glue entry changed and drops the ones Glue no longer lists.
+When two partitions hold key values that PostgreSQL casts to the same value, such as integer `1` and `01`,
+rows can no longer be told apart by partition, so a query on that table loads every partition and replaces
+the whole table when any of them changes.
+Pruning applies to the simple query protocol and the Data API. A session in a transaction block, and a client
+on the extended query protocol (the default of the PostgreSQL JDBC driver, unless `preferQueryMode=simple`),
+load every partition.
 
 Materialized relations are cached in the cluster database. Each new query checks the associated
 role, trust policy and S3 access before using cached data, following the existing S3 enforcement
@@ -678,10 +806,16 @@ Creating an external schema or table
 inside a transaction, including a Data API batch (which runs as one transaction), is rejected before changing the catalogs: AWS does not allow `CREATE EXTERNAL TABLE` inside a transaction block (SQLSTATE `25001`).
 Cold loads and reloads require database privileges to maintain the materialized table and catalog;
 ordinary users with schema USAGE and table SELECT can read an existing committed cache entry.
-The current floci-duck transfer uses account-scoped development credentials. Cold loads and reloads
-with `FLOCI_SERVICES_S3_ENFORCE_AUTH=true` are not supported by that transfer path yet.
-Role association and trust are still checked before cached reads; S3 policy checks follow the
-configured enforcement mode. This is a Floci limitation, not AWS behavior.
+Role association and trust are checked before every read, cached or not, and S3 policy checks follow
+the configured enforcement mode. With `FLOCI_SERVICES_S3_ENFORCE_AUTH=true` the floci-duck transfer of
+a cold load or reload is signed with the role's own short-lived session (access key, secret key and
+session token), so the role's identity policy and the bucket policy are evaluated for the transfer
+itself, and a deny stops it with SQLSTATE `42501`. The transfer writes its result to Floci's internal
+scratch bucket; because AWS Spectrum performs no S3 write and realistic role policies, permissions
+boundaries or SCPs follow AWS's read-only permissions on source data, this internal scratch write
+is authorized ahead of the role's policies directly for the minted transfer session key and scratch key,
+verifying Floci's internal tag on the bucket. Reads of the scratch bucket and every other bucket stay under
+normal policy evaluation.
 
 Writes to external relations are rejected. AWS prohibits external UPDATE/DELETE but supports
 some external INSERT operations; external INSERT is an intentional Floci limitation here. Use
@@ -749,18 +883,15 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   sensitivity. `FORMAT AS JSON 'auto ignorecase'` performs case-insensitive key matching. Input
   objects can be separated by any whitespace, including multiline pretty-printed JSON. Non-object root
   values abort the load. When columns are not specified in the COPY statement, table column names and
-  order are automatically discovered from the database catalog, but only over the **Simple Query
-  protocol**. Over Extended Query (the default for a JDBC `PreparedStatement`, and for a plain
-  `Statement` under recent pgjdbc versions) the column list is fixed by the time `Parse` is sent,
-  before any backend round trip is possible, so catalog discovery cannot run there: omitting the column
-  list fails the COPY with a clear error instead of silently guessing. Specify the column list explicitly
-  for Extended Query, or connect with `preferQueryMode=simple` to use discovery. Nested objects and
-  arrays are serialized as JSON strings.
+  order are automatically discovered from the database catalog when the statement executes, through
+  Simple Query, Extended Query and the Data API. Nested objects and arrays are serialized as JSON strings.
+  With `MAXERROR` greater than 1, input is processed as JSON lines so a malformed line can be skipped;
+  multiline pretty-printed JSON is supported only without error tolerance.
 - `MANIFEST` resolves file keys from a JSON manifest file (`{"entries": [{"url": "s3://...", "mandatory": boolean}]}`),
   compatible with output from `UNLOAD ... MANIFEST`. Missing files marked `mandatory: true` abort the load.
   When `mandatory` is omitted, it defaults to `false`. All entries in the manifest must reside in the same S3
   bucket as the manifest file itself; cross-bucket manifest entries are rejected as an intentional deviation.
-- `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
+- `IGNOREHEADER` and `HEADER` skip lines from the start of every resolved object, as AWS does for a parallel load of several files.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
 - `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster (at
   `CreateCluster` or through `ModifyClusterIamRoles`; connections opened before a change keep the
@@ -771,9 +902,14 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   request. `IAM_ROLE default` uses the cluster's default role with the same permission checks.
 - `REGION '<region>'` is accepted and ignored: Floci has one S3.
 - `CREDENTIALS 'aws_iam_role=<arn>'` behaves like `IAM_ROLE`. `ACCESS_KEY_ID` with `SECRET_ACCESS_KEY`
-  (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...'`,
-  are accepted but never verified or stored: S3 is read as an unsigned request, the same as with no
-  authorization clause. Combining key credentials with `IAM_ROLE`, or giving only one of the pair, is
+  (and an optional `SESSION_TOKEN`), or `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...[;token=...]'`,
+  make S3 be read as that principal when S3 authorization is enforced. IAM must know the access key (a temporary
+  key also needs its session token) and the secret must match, otherwise the `COPY` fails with SQLSTATE `XX000`.
+  The key's identity policy must allow `s3:ListBucket` and `s3:GetObject`, and any bucket policy must not deny
+  the request (`42501` otherwise). With S3 authorization off the keys are ignored, so placeholder keys keep
+  working, and a statement with no authorization clause reads S3 as an unsigned request. The keys are not
+  stored, and the statement text keeps them out of Floci's own messages. Combining key credentials with
+  `IAM_ROLE`, or giving only one of the pair, is
   not intercepted, and neither is a blank key, secret, token or role.
 - `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
   (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
@@ -782,12 +918,55 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   mode and an empty unquoted field in CSV mode. `TRUNCATECOLUMNS` cuts a value to the declared
   `CHAR`/`VARCHAR` length in bytes (Redshift's meaning of the declared length, so `éééé` into
   `VARCHAR(3)` loads `é`), never inside a multi-byte character or a backslash escape. Its column
-  lengths come from the database catalog, so it works only over the **Simple Query protocol** (`preferQueryMode=simple`);
-  over Extended Query the COPY fails with an error that names this requirement. A field-level option
+  lengths come from the database catalog at execution, through Simple Query, Extended Query and the Data API.
+  A field-level option
   buffers each decompressed object in memory, so an object over 64 MiB, or a heap budget shared
   across connections that is used up, fails the COPY instead of exhausting the emulator.
-- Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
-  `DATEFORMAT`, `TIMEFORMAT`, `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
+- `DATEFORMAT [AS] 'format'` reads the fields of `DATE` columns and `TIMEFORMAT [AS] 'format'` those of
+  `TIMESTAMP` columns, using the dateparts and timeparts `YY`, `YYYY`, `MM`, `MON`, `DD`, `HH`/`HH24`, `HH12`,
+  `MI`, `SS` (with up to six fractional digits) and `AM`/`PM`, with any other punctuation as separators.
+  `TIMEFORMAT` also takes `'epochsecs'` and `'epochmillisecs'`, read as UTC. A `DATEFORMAT` may name a time
+  of day, which is dropped; a `TIMEFORMAT` without one gives midnight. A format that names a time zone, or
+  any other text, is not recognized and the statement is forwarded to PostgreSQL. A value that does not
+  match its format is a record error counted against `MAXERROR`; the message names the column and the format,
+  and Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
+  `NULL` instead; when no format is given it reads the ISO form of a date, with an optional time of day, and
+  turns anything else into `NULL`. An empty unquoted field of a `DATE`, `TIMESTAMP` or other non-character column
+  is loaded as `NULL`, as in AWS, without requiring `ACCEPTANYDATE` or `EMPTYASNULL`. Numeric parts with no
+  separator between them, as in `YYYYMMDD`, need their
+  full width, a part may be named once, and `HH12` needs `AM` or `PM`; any other format string is not
+  recognized.
+  Like `TRUNCATECOLUMNS`, these and the empty non-character rule read column types from the catalog, so
+  they apply only with the options that query column types (`DATEFORMAT`, `TIMEFORMAT`, `FILLRECORD`), through
+  Simple Query, Extended Query and the Data API, and are not combined with `FORMAT AS JSON`; a plain `COPY` without those options does
+  not read the catalog. Floci deviations: `'auto'` is accepted but converts
+  nothing, leaving every value to PostgreSQL, which reads ISO 8601, Julian and `YYYYMMDD HHMISS` but not every
+  form Redshift recognizes (for example `BC` dates and `YYYY.DDD`), and with it `ACCEPTANYDATE` cannot turn a
+  value into `NULL`, so a value PostgreSQL rejects fails the COPY; `TIMESTAMPTZ` columns are read by
+  PostgreSQL whatever the format, since AWS requires `'auto'` for a format other than its default there; a
+  two-digit `YY` year below 70 means 20YY and otherwise 19YY, which AWS does not document.
+- `FILLRECORD` loads a text or CSV record that stops short of the last columns: the missing columns of a
+  `VARCHAR` or `TEXT` type get a zero-length string, as in AWS, and every other missing column gets
+  `NULL`. With `EMPTYASNULL`, or `NULL AS ''`, which behaves the same, the missing character columns get `NULL`
+  too. A column that does not allow `NULL` fails the COPY as it would without `FILLRECORD`, and a record with
+  too many fields still fails. The number and types of the columns come from the catalog (generated columns
+  left out), or from the column list, in which a name that matches no column counts as a non-character column.
+  A domain over a character type counts as a non-character column. It works through Simple Query,
+  Extended Query and the Data API, and is not combined with `FORMAT AS JSON`.
+- `MAXERROR [AS] n` (0 to 100000) lets the load go on past records that cannot be converted. With `n` of 0 or 1 the
+  COPY fails at the first error, as it does without the option. A larger `n` loads logical records under
+  savepoints on the default PostgreSQL 15 backend, through Simple Query, Extended Query and the Data API.
+  Conversion, date/time format, field-count, encoding, string-length and `NOT NULL` errors can be skipped.
+  The `n`-th record error, counted across all source objects, rolls back the entire COPY; earlier statements
+  in an explicit transaction remain subject to the caller's transaction and savepoints. Access denied,
+  cancellation, storage and unexpected internal errors are never ignored. An unterminated CSV quote or
+  unreadable compressed object aborts the load because the next record boundary cannot be established.
+  The returned `COPY` count includes accepted rows only. Floci deviations: tolerant loads use one COPY
+  per record, which costs more round trips and runs PostgreSQL statement triggers per record; PostgreSQL
+  deferred-constraint timing is not promised as Redshift behavior. Tolerant records are buffered within
+  the transform size and shared memory limits. No `stl_load_errors` row or Redshift load-summary message is written.
+- Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`,
+  `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
   `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL
   returns its own error.
 - A multi-statement query whose COPY is followed by another statement is not intercepted; send the
@@ -815,6 +994,14 @@ runs the `COPY` over a connection to the cluster proxy. See [Firehose](firehose.
 backing PostgreSQL container and writes
 the result to S3 as one or more objects under `<prefix>`.
 
+- `PARQUET` (also `FORMAT [AS] PARQUET`) writes Snappy-compressed Parquet v1 files using
+  floci-duck. The default extension is `.parquet`; `EXTENSION` overrides it.
+  Cast unconstrained `numeric` expressions to `DECIMAL(p,s)` (`p <= 38`, `0 <= s <= p`).
+  Unsupported types return SQLSTATE `0A000`. `SUPER`, `INTERVAL`, `ROWGROUPSIZE`, and
+  `PARTITION BY` are not supported. `MAXFILESIZE` is approximate at row-group boundaries,
+  so files may be larger or smaller than the target.
+  Internal staging access is scoped to the transfer session; no extra staging-bucket IAM
+  permissions are required. Destination permissions are checked normally.
 - Framing defaults to pipe-delimited text; `FORMAT CSV` (or `CSV`) switches to CSV
   with a `,` default. `DELIMITER`, `HEADER`, `NULL AS`, and `ADDQUOTES` are honoured
   (`ADDQUOTES` and `HEADER` force CSV framing on PostgreSQL 15).
@@ -836,8 +1023,9 @@ the result to S3 as one or more objects under `<prefix>`.
   AWS, the compression suffix is added only when no extension is given, so `EXTENSION 'txt.gz' GZIP`
   gives `<prefix>0000_part_00.txt.gz`. The value is not validated; an empty value or one containing
   `/` is not intercepted. AWS does not document whether it inserts the dot itself.
-- `REGION` and the credential clauses (`CREDENTIALS`, `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`,
-  `SESSION_TOKEN`) behave as described for COPY.
+- `REGION` behaves as described for COPY. The key credential clauses (`CREDENTIALS 'aws_access_key_id=...'`,
+  `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `SESSION_TOKEN`) are accepted but ignored by UNLOAD, which writes
+  as the role or as an unsigned request. Only COPY reads S3 as the principal those clauses name.
 - `ESCAPE` is accepted and relies on PostgreSQL text framing, which already escapes the backslash,
   newline, carriage return and the delimiter. It is only valid with text framing: combined with
   `CSV`, `ADDQUOTES` or `HEADER` (which switch the framing to CSV here) the statement is not
@@ -869,7 +1057,7 @@ the result to S3 as one or more objects under `<prefix>`.
   `FLOCI_SERVICES_S3_ENFORCE_AUTH` off, S3 policy checks are skipped. With it on, the role's
   identity policy must allow the required S3 actions, and any bucket policy must not deny the
   request. `IAM_ROLE default` uses the cluster's default role with the same permission checks.
-- Any other option (`PARQUET`, `JSON`, `FIXEDWIDTH`, `MASTER_SYMMETRIC_KEY`, `MANIFEST VERBOSE`,
+- Any other option (`JSON`, `FIXEDWIDTH`, `MASTER_SYMMETRIC_KEY`, `MANIFEST VERBOSE`,
   `ZSTD`, `BZIP2`, `PARTITION`, and so on) is not intercepted; the
   statement is forwarded and PostgreSQL reports its own error.
 - Extended Query UNLOAD is supported when the complete statement is present in `Parse` and has no
@@ -905,7 +1093,7 @@ These views expose the documented Redshift column names, types, and ordering map
 - Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; SUPER and Spectrum features outside the documented [Phase 1 subset](#redshift-spectrum-phase-1) are not emulated.
 - Multi-node clusters: `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
-- Subnet groups, VPC routing, and security groups are metadata only.
+- Subnet groups, VPC routing, and security groups are metadata only. A subnet group still records its tags, and takes its VPC and each subnet's availability zone from EC2 when the subnets exist there; subnets EC2 does not know are kept as given.
 - Resize, pause/resume, and IAM authentication.
 - Cross-account role ARNs are not supported for COPY or UNLOAD.
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.

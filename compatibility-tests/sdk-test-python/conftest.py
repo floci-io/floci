@@ -1,12 +1,12 @@
 """Shared fixtures for AWS service integration tests."""
 
 import datetime
+import io
+import logging
 import os
 import uuid
-import io
 import zipfile
-
-import logging
+from contextlib import ExitStack, closing
 
 import boto3
 import pytest
@@ -223,6 +223,13 @@ def ec2_client(aws_config, client_config):
 
 
 @pytest.fixture
+def autoscaling_client(aws_config, client_config):
+    """Create an Auto Scaling client and close it after the test."""
+    with closing(boto3.client("autoscaling", config=client_config, **aws_config)) as client:
+        yield client
+
+
+@pytest.fixture
 def elbv2_client(aws_config, client_config):
     """Create Elastic Load Balancing v2 client."""
     return boto3.client("elbv2", config=client_config, **aws_config)
@@ -294,6 +301,22 @@ def make_self_signed_certificate():
 # ============================================
 # Resource Fixtures with Cleanup
 # ============================================
+
+
+@pytest.fixture
+def test_launch_template(ec2_client, unique_name):
+    """Create an image and launch template, cleaning up both after the test."""
+    with ExitStack() as cleanup:
+        image = ec2_client.register_image(
+            Name=unique_name, Architecture="x86_64", RootDeviceName="/dev/sda1"
+        )["ImageId"]
+        cleanup.callback(ec2_client.deregister_image, ImageId=image)
+        template = ec2_client.create_launch_template(
+            LaunchTemplateName=unique_name,
+            LaunchTemplateData={"ImageId": image, "InstanceType": "t3.nano"},
+        )["LaunchTemplate"]["LaunchTemplateId"]
+        cleanup.callback(ec2_client.delete_launch_template, LaunchTemplateId=template)
+        yield template
 
 
 @pytest.fixture

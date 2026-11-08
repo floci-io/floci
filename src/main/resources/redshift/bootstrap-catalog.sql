@@ -415,6 +415,98 @@ JOIN pg_catalog.pg_namespace n ON n.nspname = c.schema_name
 CROSS JOIN LATERAL jsonb_array_elements(c.payload->'partitions') t
 WHERE has_schema_privilege(n.oid, 'USAGE');
 
+CREATE TABLE IF NOT EXISTS floci_internal.copy_job (
+    job_id bigserial PRIMARY KEY,
+    job_name text NOT NULL UNIQUE,
+    owner name NOT NULL,
+    iam_role text NOT NULL,
+    job_text text NOT NULL,
+    is_auto boolean NOT NULL,
+    target_table text NOT NULL,
+    bucket text NOT NULL,
+    prefix text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE OR REPLACE PROCEDURE floci_internal.reject_copy_job(sqlstate text, message text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    RAISE EXCEPTION '%', message USING ERRCODE = sqlstate;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE floci_internal.create_copy_job(
+    name text, iam_role text, job_text text, is_auto boolean, target_table text, bucket text, prefix text)
+LANGUAGE plpgsql SECURITY INVOKER AS $$
+BEGIN
+    -- PostgreSQL rejects COMMIT inside an explicit transaction, including a saved Parse executed later.
+    -- Keep transaction control outside SECURITY DEFINER and SET clauses, which forbid it unconditionally.
+    COMMIT;
+    CALL floci_internal.insert_copy_job(name, iam_role, job_text, is_auto, target_table, bucket, prefix);
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE floci_internal.insert_copy_job(
+    name text, iam_role text, job_text text, is_auto boolean, target_table text, bucket text, prefix text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    LOCK TABLE floci_internal.copy_job IN SHARE ROW EXCLUSIVE MODE;
+    IF (SELECT count(*) FROM floci_internal.copy_job) >= 200 THEN
+        RAISE EXCEPTION 'A cluster or workgroup can have at most 200 copy jobs' USING ERRCODE = '54000';
+    END IF;
+    BEGIN
+        INSERT INTO floci_internal.copy_job (job_name, owner, iam_role, job_text, is_auto, target_table, bucket, prefix)
+        VALUES (name, session_user, iam_role, job_text, is_auto, target_table, bucket, prefix);
+    EXCEPTION WHEN unique_violation THEN
+        RAISE EXCEPTION 'Copy job "%" already exists', name USING ERRCODE = '42710';
+    END;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE floci_internal.alter_copy_job(name text, is_auto boolean)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    UPDATE floci_internal.copy_job j SET is_auto = $2
+     WHERE j.job_name = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user));
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Copy job "%" does not exist', name USING ERRCODE = '42704';
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE floci_internal.drop_copy_job(name text)
+LANGUAGE plpgsql SECURITY INVOKER AS $$
+BEGIN
+    COMMIT;
+    CALL floci_internal.delete_copy_job(name);
+END;
+$$;
+
+CREATE OR REPLACE PROCEDURE floci_internal.delete_copy_job(name text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    DELETE FROM floci_internal.copy_job j
+     WHERE j.job_name = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user));
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Copy job "%" does not exist', name USING ERRCODE = '42704';
+    END IF;
+END;
+$$;
+
+CREATE OR REPLACE VIEW pg_catalog.sys_copy_job AS
+SELECT j.job_id::bigint AS job_id,
+       j.job_name::character(128) AS job_name,
+       j.iam_role::character(128) AS iam_role,
+       left(j.job_text, 256)::character(256) AS job_text,
+       CASE WHEN j.is_auto THEN 1 ELSE 0 END::integer AS is_auto,
+       0::integer AS on_error_suspend
+FROM floci_internal.copy_job j
+WHERE j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user);
+
 GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;
+GRANT USAGE ON SCHEMA floci_internal TO PUBLIC;
+-- Schema access for COPY JOB must not expose the unrelated privileged catalog writers.
+REVOKE EXECUTE ON FUNCTION floci_internal.refresh_external_catalog(text, jsonb) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION floci_internal.purge_external_schema(text) FROM PUBLIC;
 GRANT ALL ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO PUBLIC;

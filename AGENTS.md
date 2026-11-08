@@ -71,11 +71,11 @@ Floci follows a layered design:
 
 ## Package Layout
 
-- `io.github.hectorvent.floci.config`
-- `io.github.hectorvent.floci.core.common`
-- `io.github.hectorvent.floci.core.storage`
-- `io.github.hectorvent.floci.lifecycle`
-- `io.github.hectorvent.floci.services.<service>`
+- `io.floci.aws.config`
+- `io.floci.aws.core.common`
+- `io.floci.aws.core.storage`
+- `io.floci.aws.lifecycle`
+- `io.floci.aws.services.<service>`
 
 Typical service structure:
 
@@ -375,6 +375,10 @@ the registry and stubs what nothing serves; never add type-specific code to it.
 10. A schema `readOnlyProperties` entry you cannot set goes in
     `src/test/resources/cloudformation/getatt-attribute-gaps.tsv` with a reason;
     `CfnSchemaCoverageTest` requires every unset attribute to be fixed or recorded.
+    A new type also needs its row in `schema-surface.tsv` (same directory): run
+    `make cfn-schema-surface-sync`. A writable property the provisioner never reads goes in
+    `writable-property-gaps.tsv`. A provisioner arm that calls `droppedProperties` records, for each
+    writable property it reads, what a drop does in `drop-policy.tsv` (same directory).
 
 References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
 (update-in-place and replacement), `LogsCfnProvisioner` (reconcile-vs-replace update).
@@ -464,7 +468,7 @@ not a precedent.
 - JBoss Logging, in a field named `LOG`, using the parameterized `...v()` form.
   No string concatenation in log calls.
 - No `printStackTrace`, anywhere. No `System.out` or `System.err` in `src/main`; the
-  one exception is the CLI entry point `io.github.hectorvent.floci.tools.ami.AmiImageTool`,
+  one exception is the CLI entry point `io.floci.aws.tools.ami.AmiImageTool`,
   where stdout is the program's output. A few tests print a failure repro just before
   failing, which is the only good reason to print from a test: an assertion message
   usually says it better.

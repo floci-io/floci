@@ -1,0 +1,276 @@
+package io.floci.aws.services.redshiftserverless;
+
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.rds.proxy.PasswordValidator;
+import io.floci.aws.services.redshift.RedshiftCredentialBroker;
+import io.floci.aws.services.redshift.TempCredential;
+import io.floci.aws.services.redshift.container.RedshiftContainerHandle;
+import io.floci.aws.services.redshift.container.RedshiftContainerManager;
+import io.floci.aws.services.redshift.model.Endpoint;
+import io.floci.aws.services.redshift.proxy.RedshiftProxyManager;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.SecureRandom;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Supplier;
+import java.util.regex.Pattern;
+
+/**
+ * Owns the PostgreSQL container and the auth proxy behind a workgroup endpoint.
+ *
+ * <p>The container, proxy and credential managers are keyed by an {@code (account, identifier)}
+ * string and know nothing about provisioned clusters, so a workgroup reuses them under the
+ * identifier {@code serverless_<region>_<workgroup>}. The underscore cannot appear in a cluster
+ * identifier, so the two never collide and the workgroup stays out of {@code DescribeClusters}.
+ */
+@ApplicationScoped
+public class RedshiftServerlessRuntime {
+
+    private static final Logger LOG = Logger.getLogger(RedshiftServerlessRuntime.class);
+    private static final String PASSWORD_ALPHABET =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    private static final int GENERATED_PASSWORD_LENGTH = 32;
+    private static final Pattern HAS_UPPERCASE = Pattern.compile("[A-Z]");
+    private static final Pattern HAS_LOWERCASE = Pattern.compile("[a-z]");
+    private static final Pattern HAS_DIGIT = Pattern.compile("[0-9]");
+
+    /** The namespace admin pair as it stands now; read on every login so a password change applies at once. */
+    public record AdminCredentials(String username, String password) {
+    }
+
+    /** Where the workgroup's PostgreSQL container listens. */
+    public record Backend(String host, int port) {
+    }
+
+    private final RedshiftContainerManager containerManager;
+    private final RedshiftProxyManager proxyManager;
+    private final RedshiftCredentialBroker credentialBroker;
+    private final SecureRandom random = new SecureRandom();
+
+    @Inject
+    public RedshiftServerlessRuntime(RedshiftContainerManager containerManager, RedshiftProxyManager proxyManager,
+                                     RedshiftCredentialBroker credentialBroker) {
+        this.containerManager = containerManager;
+        this.proxyManager = proxyManager;
+        this.credentialBroker = credentialBroker;
+    }
+
+    public static String backendId(String region, String workgroupName) {
+        return "serverless_" + region + "_" + workgroupName;
+    }
+
+    /**
+     * Starts (or, when {@code adopt} is set, re-attaches to) the container and fronts it with the
+     * auth proxy on {@code endpoint}. Failed startup removes newly created containers and closes
+     * the proxy; adopted containers are preserved for another recovery attempt.
+     */
+    public Backend start(String accountId, String region, String workgroupName, String masterUsername,
+                         String masterPassword, String dbName, Endpoint endpoint, boolean adopt,
+                         Supplier<Optional<AdminCredentials>> admin) {
+        String backendId = backendId(region, workgroupName);
+        try {
+            RedshiftContainerHandle handle = adopt
+                    ? containerManager.adoptOrStart(accountId, backendId, masterUsername, masterPassword, dbName, "serverless")
+                    : containerManager.start(accountId, backendId, masterUsername, masterPassword, dbName, "serverless");
+            proxyManager.startProxy(relayKey(accountId, backendId), endpoint.getPort(),
+                    handle.getHost(), handle.getPort(), endpoint.getAddress(),
+                    masterUsername, masterPassword, dbName,
+                    validator(accountId, backendId, admin), List.of());
+            return new Backend(handle.getHost(), handle.getPort());
+        } catch (RuntimeException e) {
+            rollback(accountId, backendId);
+            throw e;
+        }
+    }
+
+    /** Dumps the workgroup's database to {@code outputFile} with pg_dump. */
+    public void takeSnapshot(String accountId, String region, String workgroupName, String masterUsername,
+                             String dbName, Path outputFile) {
+        containerManager.takeSnapshot(accountId, backendId(region, workgroupName), masterUsername, dbName, outputFile,
+                true);
+    }
+
+    /**
+     * Replaces the workgroup's database contents with the dump in {@code dumpFile}. The current
+     * contents are dumped first, and when the replay fails they are put back, so a bad dump never
+     * leaves the workgroup empty or half restored.
+     */
+    public void restoreSnapshot(String accountId, String region, String workgroupName, String masterUsername,
+                                String dbName, Path dumpFile) {
+        restoreSnapshot(accountId, region, workgroupName, masterUsername, dbName, dumpFile, () -> { });
+    }
+
+    /** Keeps the safety dump until the namespace's credentials and metadata have also committed. */
+    public void restoreSnapshot(String accountId, String region, String workgroupName, String masterUsername,
+                                String dbName, Path dumpFile, Runnable afterRestore) {
+        String backendId = backendId(region, workgroupName);
+        Path safety;
+        try {
+            safety = Files.createTempFile("redshift-serverless-restore-" + workgroupName + "-", ".sql");
+        } catch (IOException e) {
+            throw new AwsException("InternalServerException",
+                    "Failed to prepare the restore of workgroup " + workgroupName + ": " + e.getMessage(), 500);
+        }
+        try {
+            containerManager.takeSnapshot(accountId, backendId, masterUsername, dbName, safety, true);
+            try {
+                containerManager.resetUserSchemas(accountId, backendId, masterUsername, dbName);
+                containerManager.restoreSnapshot(accountId, backendId, masterUsername, dbName, dumpFile, true);
+                afterRestore.run();
+            } catch (RuntimeException e) {
+                rollBackRestore(accountId, backendId, masterUsername, dbName, safety, e);
+                throw e;
+            }
+        } finally {
+            try {
+                Files.deleteIfExists(safety);
+            } catch (IOException e) {
+                LOG.warnv(e, "Could not delete the pre-restore dump {0}", safety);
+            }
+        }
+    }
+
+    private void rollBackRestore(String accountId, String backendId, String masterUsername, String dbName,
+                                 Path safety, RuntimeException failure) {
+        try {
+            containerManager.resetUserSchemas(accountId, backendId, masterUsername, dbName);
+            containerManager.restoreSnapshot(accountId, backendId, masterUsername, dbName, safety, true);
+        } catch (RuntimeException rollbackFailure) {
+            LOG.errorv(rollbackFailure, "Could not put back the previous contents of {0} after a failed restore",
+                    backendId);
+            failure.addSuppressed(rollbackFailure);
+        }
+    }
+
+    /**
+     * Stops the proxy first and lets a failure propagate: if the listener cannot be closed the
+     * port must stay reserved and the workgroup must stay on record, so the caller can retry.
+     */
+    public void stop(String accountId, String region, String workgroupName) {
+        String backendId = backendId(region, workgroupName);
+        proxyManager.stopProxy(relayKey(accountId, backendId));
+        containerManager.stop(accountId, backendId);
+        proxyManager.forgetSpectrumRuntime(relayKey(accountId, backendId));
+        credentialBroker.revokeCluster(accountId, backendId);
+    }
+
+    /**
+     * Applies a new master password to the PostgreSQL role and to the proxy's backend leg. When the
+     * proxy step fails the role is put back to {@code oldPassword}, so the backend never requires a
+     * password the stored namespace does not hold.
+     */
+    public void changeMasterPassword(String accountId, String region, String workgroupName,
+                                     String masterUsername, String dbName, String oldPassword,
+                                     String newPassword) {
+        String backendId = backendId(region, workgroupName);
+        containerManager.alterUserPassword(accountId, backendId, masterUsername, newPassword, dbName);
+        try {
+            proxyManager.updateMasterPassword(relayKey(accountId, backendId), newPassword);
+        } catch (RuntimeException e) {
+            if (oldPassword != null) {
+                try {
+                    containerManager.alterUserPassword(accountId, backendId, masterUsername, oldPassword, dbName);
+                } catch (RuntimeException restoreFailure) {
+                    e.addSuppressed(restoreFailure);
+                }
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Puts the role and the proxy back to {@code password} after a rotation the caller could not
+     * store. The proxy is only reset once the role is, so a failed role restore never leaves the two
+     * disagreeing; the failure propagates instead.
+     */
+    public void restoreMasterPassword(String accountId, String region, String workgroupName,
+                                      String masterUsername, String dbName, String password) {
+        String backendId = backendId(region, workgroupName);
+        containerManager.alterUserPassword(accountId, backendId, masterUsername, password, dbName);
+        proxyManager.updateMasterPassword(relayKey(accountId, backendId), password);
+    }
+
+    public TempCredential issueCredential(String accountId, String region, String workgroupName,
+                                          String dbUser, int durationSeconds) {
+        return credentialBroker.issue(accountId, backendId(region, workgroupName), dbUser, List.of(),
+                durationSeconds);
+    }
+
+    public String generatePassword() {
+        return generatePassword(this::randomPasswordCandidate);
+    }
+
+    String generatePassword(Supplier<String> candidateSupplier) {
+        String password;
+        do {
+            password = candidateSupplier.get();
+        } while (!isValidPassword(password));
+        return password;
+    }
+
+    private String randomPasswordCandidate() {
+        StringBuilder sb = new StringBuilder(GENERATED_PASSWORD_LENGTH);
+        for (int i = 0; i < GENERATED_PASSWORD_LENGTH; i++) {
+            sb.append(PASSWORD_ALPHABET.charAt(random.nextInt(PASSWORD_ALPHABET.length())));
+        }
+        return sb.toString();
+    }
+
+    static boolean isValidPassword(String password) {
+        return password != null
+                && HAS_UPPERCASE.matcher(password).find()
+                && HAS_LOWERCASE.matcher(password).find()
+                && HAS_DIGIT.matcher(password).find();
+    }
+
+    private void rollback(String accountId, String backendId) {
+        try {
+            proxyManager.stopProxy(relayKey(accountId, backendId));
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not stop the proxy while rolling back workgroup backend {0}", backendId);
+        }
+        try {
+            containerManager.rollbackStartup(accountId, backendId);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not remove the container while rolling back workgroup backend {0}", backendId);
+        }
+        credentialBroker.revokeCluster(accountId, backendId);
+    }
+
+    /**
+     * The namespace admin pair and any live {@code GetCredentials} credential run the backend leg as
+     * the master role, a known broker user with a stale password is refused, and everyone else is
+     * passed through for PostgreSQL to judge. A namespace that no longer exists vouches for nothing:
+     * falling through to the broker would classify the admin name as unknown and let the wire proxy
+     * open the backend as master.
+     */
+    private PasswordValidator validator(String accountId, String backendId,
+                                        Supplier<Optional<AdminCredentials>> admin) {
+        return (user, password) -> {
+            Optional<AdminCredentials> current = admin.get();
+            if (current.isEmpty()) {
+                return PasswordValidator.AuthResult.REJECT;
+            }
+            if (user.equals(current.get().username())) {
+                return password.equals(current.get().password())
+                        ? PasswordValidator.AuthResult.MASTER_EQUIVALENT
+                        : PasswordValidator.AuthResult.REJECT;
+            }
+            return switch (credentialBroker.classify(accountId, backendId, user, password)) {
+                case MASTER_EQUIVALENT -> PasswordValidator.AuthResult.MASTER_EQUIVALENT;
+                case REJECT -> PasswordValidator.AuthResult.REJECT;
+                case PASSTHROUGH -> PasswordValidator.AuthResult.PASSTHROUGH;
+            };
+        };
+    }
+
+    private static String relayKey(String accountId, String backendId) {
+        return accountId + ":" + backendId;
+    }
+}

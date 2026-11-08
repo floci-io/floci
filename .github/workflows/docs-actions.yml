@@ -29,6 +29,10 @@ on:
       - 'tools/java_sources.py'
       - 'Makefile'
       - '.github/workflows/docs-actions.yml'
+  # Runs each merge queue entry against main plus the PRs queued ahead of it. paths does not
+  # apply to merge_group, so a queued PR is always checked.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read

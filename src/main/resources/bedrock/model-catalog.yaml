@@ -1,0 +1,141 @@
+# Amazon Bedrock foundation models and system-defined (cross-Region) inference profiles.
+#
+# Served by ListFoundationModels, GetFoundationModel, ListInferenceProfiles and
+# GetInferenceProfile. This is a seed, not a mirror of AWS: it holds a few real models with the
+# attributes and Regional availability their model cards publish
+# (https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html). Add a model by copying
+# its card; do not invent values a card does not show.
+#
+# A model is listed in a Region when the card shows it In-Region there (inRegion) or when one of
+# its inference profiles can be called from that Region. A profile is listed in a Region only
+# when that Region is one of its source Regions, and its models are the foundation models in the
+# destination Regions the card gives for that source Region. Commercial Regions only.
+
+foundationModels:
+  - modelId: amazon.nova-micro-v1:0
+    modelName: Nova Micro
+    providerName: Amazon
+    inputModalities: [TEXT]
+    outputModalities: [TEXT]
+    responseStreamingSupported: true
+    lifecycleStatus: ACTIVE
+    inRegion: [us-east-1, eu-west-2, ap-southeast-2]
+
+  - modelId: amazon.nova-lite-v1:0
+    modelName: Nova Lite
+    providerName: Amazon
+    inputModalities: [TEXT, IMAGE]
+    outputModalities: [TEXT]
+    responseStreamingSupported: true
+    lifecycleStatus: ACTIVE
+    inRegion: [us-east-1, us-east-2, us-west-2, eu-north-1, eu-west-2, ap-northeast-1, ap-southeast-2,
+               ap-southeast-3, me-central-1]
+
+  - modelId: amazon.titan-embed-text-v2:0
+    modelName: Titan Text Embeddings V2
+    providerName: Amazon
+    inputModalities: [TEXT]
+    outputModalities: [EMBEDDING]
+    responseStreamingSupported: false
+    lifecycleStatus: ACTIVE
+    inRegion: [us-east-1, us-east-2, us-west-2, ca-central-1, eu-central-1, eu-central-2, eu-north-1,
+               eu-south-1, eu-south-2, eu-west-1, eu-west-2, eu-west-3, ap-northeast-1, ap-northeast-2,
+               ap-northeast-3, ap-south-1, ap-south-2, ap-southeast-2, sa-east-1]
+
+  - modelId: meta.llama3-1-8b-instruct-v1:0
+    modelName: Llama 3.1 8B Instruct
+    providerName: Meta
+    inputModalities: [TEXT]
+    outputModalities: [TEXT]
+    responseStreamingSupported: true
+    lifecycleStatus: LEGACY
+    inRegion: [us-west-2]
+
+  - modelId: anthropic.claude-sonnet-4-5-20250929-v1:0
+    modelName: Claude Sonnet 4.5
+    providerName: Anthropic
+    inputModalities: [TEXT, IMAGE]
+    outputModalities: [TEXT]
+    responseStreamingSupported: true
+    lifecycleStatus: LEGACY
+    inRegion: []
+
+inferenceProfiles:
+  - inferenceProfileId: us.amazon.nova-micro-v1:0
+    inferenceProfileName: US Nova Micro
+    modelId: amazon.nova-micro-v1:0
+    createdAt: 2024-12-05T00:00:00Z
+    routes:
+      us-east-1: [us-east-1, us-east-2, us-west-2]
+      us-east-2: [us-east-1, us-east-2, us-west-2]
+      us-west-2: [us-east-1, us-east-2, us-west-2]
+
+  - inferenceProfileId: eu.amazon.nova-micro-v1:0
+    inferenceProfileName: EU Nova Micro
+    modelId: amazon.nova-micro-v1:0
+    createdAt: 2024-12-05T00:00:00Z
+    routes:
+      eu-central-1: [eu-central-1, eu-north-1, eu-west-1, eu-west-3]
+      eu-north-1: [eu-central-1, eu-north-1, eu-west-1, eu-west-3]
+      eu-south-1: [eu-central-1, eu-north-1, eu-south-1, eu-west-1, eu-west-3]
+      eu-south-2: [eu-central-1, eu-north-1, eu-south-2, eu-west-1, eu-west-3]
+      eu-west-1: [eu-central-1, eu-north-1, eu-west-1, eu-west-3]
+      eu-west-3: [eu-central-1, eu-north-1, eu-west-1, eu-west-3]
+      il-central-1: [eu-central-1, eu-north-1, eu-south-1, eu-west-1, eu-west-3, il-central-1]
+
+  - inferenceProfileId: us.amazon.nova-lite-v1:0
+    inferenceProfileName: US Nova Lite
+    modelId: amazon.nova-lite-v1:0
+    createdAt: 2024-12-05T00:00:00Z
+    routes:
+      us-east-1: [us-east-1, us-east-2, us-west-2]
+      us-east-2: [us-east-1, us-east-2, us-west-2]
+      us-west-1: [us-east-1, us-east-2, us-west-1, us-west-2]
+      us-west-2: [us-east-1, us-east-2, us-west-2]
+
+  - inferenceProfileId: eu.amazon.nova-lite-v1:0
+    inferenceProfileName: EU Nova Lite
+    modelId: amazon.nova-lite-v1:0
+    createdAt: 2024-12-05T00:00:00Z
+    routes:
+      eu-central-1: [eu-central-1, eu-north-1, eu-west-1, eu-west-3]
+      eu-north-1: [eu-central-1, eu-north-1, eu-west-1, eu-west-3]
+      eu-south-1: [eu-central-1, eu-north-1, eu-south-1, eu-west-1, eu-west-3]
+      eu-south-2: [eu-central-1, eu-north-1, eu-south-2, eu-west-1, eu-west-3]
+      eu-west-1: [eu-central-1, eu-north-1, eu-west-1, eu-west-3]
+      eu-west-3: [eu-central-1, eu-north-1, eu-west-1, eu-west-3]
+      il-central-1: [eu-central-1, eu-north-1, eu-south-1, eu-west-1, eu-west-3, il-central-1]
+
+  - inferenceProfileId: us.meta.llama3-1-8b-instruct-v1:0
+    inferenceProfileName: US Llama 3.1 8B Instruct
+    modelId: meta.llama3-1-8b-instruct-v1:0
+    createdAt: 2024-07-23T00:00:00Z
+    routes:
+      us-east-1: [us-east-1, us-east-2, us-west-2]
+      us-east-2: [us-east-1, us-east-2, us-west-2]
+      us-west-2: [us-east-1, us-east-2, us-west-2]
+
+  - inferenceProfileId: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    inferenceProfileName: US Claude Sonnet 4.5
+    modelId: anthropic.claude-sonnet-4-5-20250929-v1:0
+    createdAt: 2025-09-30T00:00:00Z
+    routes:
+      us-east-1: [us-east-1, us-east-2, us-west-2]
+      us-east-2: [us-east-1, us-east-2, us-west-2]
+      us-west-1: [us-east-1, us-east-2, us-west-1, us-west-2]
+      us-west-2: [us-east-1, us-east-2, us-west-2]
+      ca-central-1: [ca-central-1, us-east-1, us-east-2, us-west-2]
+
+  - inferenceProfileId: eu.anthropic.claude-sonnet-4-5-20250929-v1:0
+    inferenceProfileName: EU Claude Sonnet 4.5
+    modelId: anthropic.claude-sonnet-4-5-20250929-v1:0
+    createdAt: 2025-09-30T00:00:00Z
+    routes:
+      eu-central-1: [eu-central-1, eu-north-1, eu-south-1, eu-south-2, eu-west-1, eu-west-3]
+      eu-central-2: [eu-central-1, eu-central-2, eu-north-1, eu-south-1, eu-south-2, eu-west-1, eu-west-3]
+      eu-north-1: [eu-central-1, eu-north-1, eu-south-1, eu-south-2, eu-west-1, eu-west-3]
+      eu-south-1: [eu-central-1, eu-north-1, eu-south-1, eu-south-2, eu-west-1, eu-west-3]
+      eu-south-2: [eu-central-1, eu-north-1, eu-south-1, eu-south-2, eu-west-1, eu-west-3]
+      eu-west-1: [eu-central-1, eu-north-1, eu-south-1, eu-south-2, eu-west-1, eu-west-3]
+      eu-west-2: [eu-central-1, eu-north-1, eu-south-1, eu-south-2, eu-west-1, eu-west-2, eu-west-3]
+      eu-west-3: [eu-central-1, eu-north-1, eu-south-1, eu-south-2, eu-west-1, eu-west-3]

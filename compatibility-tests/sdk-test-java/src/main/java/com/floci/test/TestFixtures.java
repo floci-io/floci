@@ -66,6 +66,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalanci
 import software.amazon.awssdk.services.emr.EmrClient;
 import software.amazon.awssdk.services.emrserverless.EmrServerlessClient;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.fis.FisClient;
 import software.amazon.awssdk.services.globalaccelerator.GlobalAcceleratorClient;
@@ -105,7 +106,10 @@ import software.amazon.awssdk.services.neptune.NeptuneClient;
 import software.amazon.awssdk.services.oam.OamClient;
 import software.amazon.awssdk.services.opensearch.OpenSearchClient;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
+import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
+import software.amazon.awssdk.services.paymentcryptographydata.PaymentCryptographyDataClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
+import software.amazon.awssdk.services.quicksight.QuickSightClient;
 import software.amazon.awssdk.services.ram.RamClient;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.redshift.RedshiftClient;
@@ -154,6 +158,8 @@ import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityResponse;
 import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityRequest;
 import software.amazon.awssdk.services.sfn.SfnClient;
+import software.amazon.awssdk.services.sfn.model.DescribeExecutionResponse;
+import software.amazon.awssdk.services.sfn.model.ExecutionStatus;
 import software.amazon.awssdk.services.signin.SigninClient;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
@@ -641,6 +647,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static QuickSightClient quickSightClient() {
+        return QuickSightClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static ServiceQuotasClient serviceQuotasClient() {
         return ServiceQuotasClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1040,6 +1054,28 @@ public final class TestFixtures {
         }
     }
 
+    /**
+     * The execution's description once it is no longer {@code RUNNING}, or its last description at the
+     * timeout. It checks every 50 ms against Floci and every 500 ms against real AWS, like
+     * {@link #awaitStackTerminal}.
+     */
+    public static DescribeExecutionResponse awaitExecutionTerminal(SfnClient sfn, String executionArn, Duration timeout)
+            throws InterruptedException {
+        long pollMillis = isRealAws() ? 500 : 50;
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            DescribeExecutionResponse execution = sfn.describeExecution(request -> request.executionArn(executionArn));
+            if (execution.status() != ExecutionStatus.RUNNING) {
+                return execution;
+            }
+            long remainingNanos = deadline - System.nanoTime();
+            if (remainingNanos <= 0) {
+                return execution;
+            }
+            Thread.sleep(Math.min(pollMillis, Math.max(1, Duration.ofNanos(remainingNanos).toMillis())));
+        }
+    }
+
     public static GlueClient glueClient() {
         return GlueClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1080,6 +1116,35 @@ public final class TestFixtures {
         return KmsClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(region)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    /**
+     * The Payment Cryptography control plane. The real service is an awsJson 1.0 service
+     * that signs for {@code payment-cryptography}, and the SDK talks to it through the
+     * {@code PaymentCryptographyControlPlane} target prefix.
+     */
+    public static PaymentCryptographyClient paymentCryptographyClient() {
+        return paymentCryptographyClient(REGION);
+    }
+
+    public static PaymentCryptographyClient paymentCryptographyClient(Region region) {
+        return PaymentCryptographyClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(region)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    /**
+     * The Payment Cryptography data plane. The real service is a rest-json service of its
+     * own, at its own host, so the client talks to it over the paths of that protocol.
+     */
+    public static PaymentCryptographyDataClient paymentCryptographyDataClient() {
+        return PaymentCryptographyDataClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
     }
@@ -1160,6 +1225,14 @@ public final class TestFixtures {
 
     public static EventBridgeClient eventBridgeClient() {
         return EventBridgeClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static EventBridgeV2Client eventBridgeV2Client() {
+        return EventBridgeV2Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

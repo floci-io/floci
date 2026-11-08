@@ -1,0 +1,670 @@
+package io.floci.aws.services.dynamodb;
+
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.dynamodb.model.AttributeDefinition;
+import io.floci.aws.services.dynamodb.model.GlobalSecondaryIndex;
+import io.floci.aws.services.dynamodb.model.KeySchemaElement;
+import io.floci.aws.services.dynamodb.model.KinesisStreamingDestination;
+import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
+import io.floci.aws.services.dynamodb.model.StreamDescription;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
+import io.floci.aws.services.dynamodb.model.VectorIndex;
+import io.floci.aws.services.kinesis.KinesisService;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+/**
+ * Table control operations on the native DynamoDB engine: CreateTable, UpdateTable, the table a
+ * restore creates and the Kinesis streaming destination toggles.
+ *
+ * <p>Owns the sequence each operation runs against the backend: the validation that must fail
+ * before any side effect, the underlying create or update, the settings applied to the stored
+ * table afterwards, stream enable/disable, and the final flush. The JSON handler parses the wire
+ * request into these records and formats the response. It also keeps UpdateTable's
+ * PAY_PER_REQUEST with ProvisionedThroughput check and the GSI update index checks, which must
+ * precede request parsing errors, and the Kinesis precision check.
+ */
+@ApplicationScoped
+public class NativeDynamoDbTableService {
+
+    private static final String DEFAULT_ACCOUNT_ID = "000000000000";
+    private static final String SSE_TYPE_KMS = "KMS";
+    private static final Set<String> VALID_SSE_TYPES = Set.of("AES256", "KMS");
+
+    // A null field or throughput record means "not specified in the request". Collections and the
+    // settings record must not be null.
+    record Throughput(Long readCapacityUnits, Long writeCapacityUnits) {}
+
+    record OnDemandThroughput(Integer maxReadRequestUnits, Integer maxWriteRequestUnits) {}
+
+    record GsiThroughputUpdate(String indexName, Throughput provisionedThroughput,
+                               OnDemandThroughput onDemandThroughput) {}
+
+    record TableSettings(String billingMode, Boolean deletionProtectionEnabled, String tableClass,
+                         OnDemandThroughput onDemandThroughput,
+                         Boolean streamEnabled, String streamViewType,
+                         Boolean sseEnabled, String sseType, String kmsMasterKeyId) {}
+
+    record CreateTableRequest(String tableName, List<KeySchemaElement> keySchema,
+                              List<AttributeDefinition> attributeDefinitions, Throughput provisionedThroughput,
+                              List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                              List<LocalSecondaryIndex> localSecondaryIndexes,
+                              List<DynamoDbService.VectorIndexCreate> vectorIndexes,
+                              Map<String, String> tags, TableSettings settings) {}
+
+    record UpdateTableRequest(String tableName, Throughput provisionedThroughput,
+                              List<AttributeDefinition> attributeDefinitions,
+                              List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes,
+                              List<GsiThroughputUpdate> gsiUpdates,
+                              List<DynamoDbService.VectorIndexCreate> vectorCreates, List<String> vectorDeletes,
+                              List<String> replicaAdds, List<String> replicaRemoves, List<String> replicaUpdates,
+                              TableSettings settings) {}
+
+    /**
+     * What one Enable or Disable call applied. The values are the ones the call itself wrote, not a
+     * read-back of the stored {@link KinesisStreamingDestination}: that object is shared across
+     * requests, so reading it again could report a status a concurrent call wrote in the meantime.
+     */
+    public record KinesisDestination(String tableName, String streamArn, String destinationStatus,
+                              String approximateCreationDateTimePrecision) {}
+
+    /** One GlobalSecondaryIndexOverride or LocalSecondaryIndexOverride entry; LSIs carry no throughput. */
+    record IndexOverride(String indexName, List<KeySchemaElement> keySchema, String projectionType,
+                         List<String> nonKeyAttributes, Throughput provisionedThroughput,
+                         OnDemandThroughput onDemandThroughput) {}
+
+    /** The overrides of a restore request. A null member or list means the request did not override it. */
+    record RestoreOverrides(String billingMode, Throughput provisionedThroughput,
+                            OnDemandThroughput onDemandThroughput,
+                            List<IndexOverride> globalSecondaryIndexes, List<IndexOverride> localSecondaryIndexes,
+                            List<VectorIndex> vectorIndexes,
+                            Boolean sseEnabled, String sseType, String kmsMasterKeyId) {}
+
+    private final DynamoDbService dynamoDbService;
+    private final DynamoDbStreamService streamService;
+    private final KinesisService kinesisService;
+
+    @Inject
+    public NativeDynamoDbTableService(DynamoDbService dynamoDbService, DynamoDbStreamService streamService,
+                                      KinesisService kinesisService) {
+        this.dynamoDbService = dynamoDbService;
+        this.streamService = streamService;
+        this.kinesisService = kinesisService;
+    }
+
+    /**
+     * Creates the table, applies the request's settings to it and persists the result.
+     *
+     * @param initialStatus the status the new table reports: ACTIVE for CreateTable, CREATING for
+     *                      a table an ImportTable job is still loading
+     */
+    TableDefinition createTable(CreateTableRequest request, String initialStatus, String region) {
+        String tableName = request.tableName();
+        TableSettings settings = request.settings();
+        String billingMode = settings.billingMode();
+
+        // Validated before createTable below: that call and the stream-enable that follows it
+        // both have side effects, so an invalid SSEType must fail before either runs rather than
+        // after, or ValidationException would leave a real table (and stream) behind.
+        boolean sseEnabled = Boolean.TRUE.equals(settings.sseEnabled());
+        String sseType = sseEnabled ? effectiveSseType(settings) : null;
+        if (sseEnabled) {
+            validateSseType(sseType);
+        }
+
+        Throughput throughput = request.provisionedThroughput();
+        if ("PAY_PER_REQUEST".equals(billingMode) && throughput != null) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Neither ReadCapacityUnits nor WriteCapacityUnits "
+                    + "can be specified when BillingMode is PAY_PER_REQUEST", 400);
+        }
+
+        if (Boolean.FALSE.equals(settings.streamEnabled()) && settings.streamViewType() != null) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Table is being created with a stream "
+                    + "disabled, UpdateViewType should not be specified", 400);
+        }
+
+        TableDefinition table = dynamoDbService.createTable(tableName, request.keySchema(),
+                request.attributeDefinitions(),
+                throughput != null ? throughput.readCapacityUnits() : null,
+                throughput != null ? throughput.writeCapacityUnits() : null,
+                request.globalSecondaryIndexes(), request.localSecondaryIndexes(), request.vectorIndexes(),
+                billingMode, region);
+        table.setTableStatus(initialStatus);
+
+        table.setDeletionProtectionEnabled(Boolean.TRUE.equals(settings.deletionProtectionEnabled()));
+
+        if ("PAY_PER_REQUEST".equals(billingMode)) {
+            table.setBillingMode("PAY_PER_REQUEST");
+            table.getProvisionedThroughput().setReadCapacityUnits(0L);
+            table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+        } else {
+            table.setBillingMode("PROVISIONED");
+        }
+
+        if (settings.tableClass() != null) {
+            table.setTableClass(settings.tableClass());
+        }
+
+        applyOnDemandThroughput(table, settings.onDemandThroughput());
+
+        request.tags().forEach(table.getTags()::put);
+
+        if (Boolean.TRUE.equals(settings.streamEnabled())) {
+            enableStream(table, settings.streamViewType(), region);
+        }
+
+        if (sseEnabled) {
+            table.setSseEnabled(true);
+            table.setSseType(sseType);
+            if (SSE_TYPE_KMS.equals(sseType)) {
+                table.setKmsMasterKeyArn(kmsMasterKeyArn(settings.kmsMasterKeyId(), region));
+            }
+        }
+
+        // Everything above mutates the table AFTER createTable stored it, and a persistent
+        // backend serializes on write rather than holding the live object. Flush once so the
+        // stream, billing, class, tag and SSE settings survive a restart: stream state
+        // especially, since startup rebuilds streams from the persisted table.
+        dynamoDbService.persistTable(tableName, table, region);
+        return table;
+    }
+
+    /**
+     * Creates the target of a restore in CREATING from {@code source}, a copy of the table a backup
+     * holds or of the source of a point-in-time restore, with the request's overrides applied. Like
+     * AWS, the new table gets the keys, indexes, capacity and encryption, and none of the stream,
+     * TTL, point-in-time recovery, tags, deletion protection or table class.
+     */
+    TableDefinition restoreTable(TableDefinition source, String targetTableName, RestoreOverrides overrides,
+                                 String region) {
+        String billingMode = overrides.billingMode() != null
+                ? overrides.billingMode()
+                : "PAY_PER_REQUEST".equals(source.getBillingMode()) ? "PAY_PER_REQUEST" : "PROVISIONED";
+        boolean provisioned = "PROVISIONED".equals(billingMode);
+        checkThroughputOverrides(overrides.billingMode(), provisioned, overrides.provisionedThroughput(),
+                overrides.onDemandThroughput(), "");
+        Throughput throughput = null;
+        if (provisioned) {
+            throughput = overrides.provisionedThroughput() != null
+                    ? overrides.provisionedThroughput()
+                    : new Throughput(source.getProvisionedThroughput().getReadCapacityUnits(),
+                            source.getProvisionedThroughput().getWriteCapacityUnits());
+        }
+
+        List<GlobalSecondaryIndex> gsis = restoredGlobalSecondaryIndexes(source, overrides, provisioned);
+        List<LocalSecondaryIndex> lsis = restoredLocalSecondaryIndexes(source, overrides);
+        List<DynamoDbService.VectorIndexCreate> vectorIndexes = restoredVectorIndexes(source, overrides);
+
+        Set<String> usedAttributes = new HashSet<>();
+        source.getKeySchema().forEach(k -> usedAttributes.add(k.getAttributeName()));
+        gsis.forEach(g -> g.getKeySchema().forEach(k -> usedAttributes.add(k.getAttributeName())));
+        lsis.forEach(l -> l.getKeySchema().forEach(k -> usedAttributes.add(k.getAttributeName())));
+        vectorIndexes.forEach(v -> usedAttributes.addAll(v.index().getSearchSchemaAttributeNames()));
+        List<AttributeDefinition> attributeDefinitions = source.getAttributeDefinitions().stream()
+                .filter(a -> usedAttributes.contains(a.getAttributeName()))
+                .toList();
+
+        Boolean sseEnabled = overrides.sseEnabled() != null ? overrides.sseEnabled() : source.isSseEnabled();
+        String sseType = overrides.sseEnabled() != null ? overrides.sseType() : source.getSseType();
+        String kmsMasterKeyId = overrides.sseEnabled() != null ? overrides.kmsMasterKeyId() : source.getKmsMasterKeyArn();
+        OnDemandThroughput onDemand = provisioned ? null : mergedOnDemand(overrides.onDemandThroughput(),
+                source.getOnDemandMaxReadRequestUnits(), source.getOnDemandMaxWriteRequestUnits());
+        TableSettings settings = new TableSettings(billingMode, false, null, onDemand, null, null,
+                sseEnabled, sseType, kmsMasterKeyId);
+        dynamoDbService.requireRestoreTarget(targetTableName, region);
+        return createTable(new CreateTableRequest(targetTableName, new ArrayList<>(source.getKeySchema()),
+                new ArrayList<>(attributeDefinitions), throughput, gsis, lsis, vectorIndexes, Map.of(), settings),
+                "CREATING", region);
+    }
+
+    private static List<GlobalSecondaryIndex> restoredGlobalSecondaryIndexes(TableDefinition source,
+            RestoreOverrides overrides, boolean provisioned) {
+        List<GlobalSecondaryIndex> restored = new ArrayList<>();
+        if (overrides.globalSecondaryIndexes() == null) {
+            for (GlobalSecondaryIndex gsi : source.getGlobalSecondaryIndexes()) {
+                if ("PROVISIONED".equals(overrides.billingMode())) {
+                    throw invalidRestore("Must override ProvisionedThroughput if BillingMode is overridden to "
+                            + "PROVISIONED for index " + gsi.getIndexName());
+                }
+                restored.add(restoredGsi(gsi.getIndexName(), gsi, provisioned, null, null));
+            }
+            return restored;
+        }
+        for (IndexOverride override : overrides.globalSecondaryIndexes()) {
+            GlobalSecondaryIndex match = source.getGlobalSecondaryIndexes().stream()
+                    .filter(gsi -> sameIndex(override, gsi.getKeySchema(), gsi.getProjectionType(),
+                            gsi.getNonKeyAttributes()))
+                    .findFirst()
+                    .orElseThrow(() -> indexMismatch(override.indexName()));
+            String forIndex = " for index " + override.indexName();
+            checkThroughputOverrides(overrides.billingMode(), provisioned, override.provisionedThroughput(),
+                    override.onDemandThroughput(), forIndex);
+            if (provisioned && override.provisionedThroughput() == null) {
+                throw invalidRestore("Must specify provisioned throughput" + forIndex);
+            }
+            restored.add(restoredGsi(override.indexName(), match, provisioned, override.provisionedThroughput(),
+                    override.onDemandThroughput()));
+        }
+        return restored;
+    }
+
+    /**
+     * The table and each index override go through the same checks in this order. An empty
+     * OnDemandThroughput is ignored, and the message names the first member the override sets.
+     */
+    private static void checkThroughputOverrides(String billingModeOverride, boolean provisioned,
+                                                 Throughput throughput, OnDemandThroughput onDemand, String suffix) {
+        if ("PAY_PER_REQUEST".equals(billingModeOverride) && throughput != null) {
+            throw invalidRestore("Cannot override ProvisionedThroughput if BillingMode is overridden to "
+                    + "PAY_PER_REQUEST" + suffix);
+        }
+        if ("PROVISIONED".equals(billingModeOverride) && throughput == null) {
+            throw invalidRestore("Must override ProvisionedThroughput if BillingMode is overridden to PROVISIONED"
+                    + suffix);
+        }
+        if (onDemand != null && (onDemand.maxReadRequestUnits() != null || onDemand.maxWriteRequestUnits() != null)) {
+            String cannot = "Cannot override "
+                    + (onDemand.maxReadRequestUnits() != null ? "MaxReadRequestUnits" : "MaxWriteRequestUnits")
+                    + " for OnDemandThroughput ";
+            if ("PROVISIONED".equals(billingModeOverride)) {
+                throw invalidRestore(cannot + "when BillingMode is PROVISIONED" + suffix);
+            }
+            if (throughput != null) {
+                throw invalidRestore(cannot + "when ProvisionedThroughputOverride is present" + suffix);
+            }
+            if (provisioned) {
+                throw invalidRestore(cannot + "unless BillingModeOverride is PAY_PER_REQUEST" + suffix);
+            }
+        }
+        if (!provisioned && throughput != null) {
+            throw invalidRestore("Cannot override ProvisionedThroughput unless BillingMode is PROVISIONED" + suffix);
+        }
+    }
+
+    /** An on-demand override replaces only the members it sets. */
+    private static OnDemandThroughput mergedOnDemand(OnDemandThroughput override, Integer maxReadRequestUnits,
+                                                     Integer maxWriteRequestUnits) {
+        Integer maxRead = override != null && override.maxReadRequestUnits() != null
+                ? override.maxReadRequestUnits() : maxReadRequestUnits;
+        Integer maxWrite = override != null && override.maxWriteRequestUnits() != null
+                ? override.maxWriteRequestUnits() : maxWriteRequestUnits;
+        return maxRead == null && maxWrite == null ? null : new OnDemandThroughput(maxRead, maxWrite);
+    }
+
+    private static GlobalSecondaryIndex restoredGsi(String indexName, GlobalSecondaryIndex source, boolean provisioned,
+                                                    Throughput throughput, OnDemandThroughput onDemandOverride) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, new ArrayList<>(source.getKeySchema()), null,
+                source.getProjectionType(), new ArrayList<>(source.getNonKeyAttributes()));
+        if (provisioned) {
+            gsi.getProvisionedThroughput().setReadCapacityUnits(throughput != null ? throughput.readCapacityUnits()
+                    : source.getProvisionedThroughput().getReadCapacityUnits());
+            gsi.getProvisionedThroughput().setWriteCapacityUnits(throughput != null ? throughput.writeCapacityUnits()
+                    : source.getProvisionedThroughput().getWriteCapacityUnits());
+            return gsi;
+        }
+        OnDemandThroughput onDemand = mergedOnDemand(onDemandOverride, source.getOnDemandMaxReadRequestUnits(),
+                source.getOnDemandMaxWriteRequestUnits());
+        if (onDemand != null) {
+            gsi.setOnDemandMaxReadRequestUnits(onDemand.maxReadRequestUnits());
+            gsi.setOnDemandMaxWriteRequestUnits(onDemand.maxWriteRequestUnits());
+        }
+        return gsi;
+    }
+
+    private static List<LocalSecondaryIndex> restoredLocalSecondaryIndexes(TableDefinition source,
+                                                                           RestoreOverrides overrides) {
+        List<LocalSecondaryIndex> restored = new ArrayList<>();
+        if (overrides.localSecondaryIndexes() == null) {
+            for (LocalSecondaryIndex lsi : source.getLocalSecondaryIndexes()) {
+                restored.add(new LocalSecondaryIndex(lsi.getIndexName(), new ArrayList<>(lsi.getKeySchema()), null,
+                        lsi.getProjectionType(), new ArrayList<>(lsi.getNonKeyAttributes())));
+            }
+            return restored;
+        }
+        for (IndexOverride override : overrides.localSecondaryIndexes()) {
+            LocalSecondaryIndex match = source.getLocalSecondaryIndexes().stream()
+                    .filter(lsi -> sameIndex(override, lsi.getKeySchema(), lsi.getProjectionType(),
+                            lsi.getNonKeyAttributes()))
+                    .findFirst()
+                    .orElseThrow(() -> indexMismatch(override.indexName()));
+            restored.add(new LocalSecondaryIndex(override.indexName(), new ArrayList<>(match.getKeySchema()), null,
+                    match.getProjectionType(), new ArrayList<>(match.getNonKeyAttributes())));
+        }
+        return restored;
+    }
+
+    /** Vector indexes, unlike the others, are matched by name. */
+    private static List<DynamoDbService.VectorIndexCreate> restoredVectorIndexes(TableDefinition source,
+                                                                                 RestoreOverrides overrides) {
+        List<VectorIndex> kept = new ArrayList<>();
+        if (overrides.vectorIndexes() == null) {
+            kept.addAll(source.getVectorIndexes());
+        } else {
+            for (VectorIndex override : overrides.vectorIndexes()) {
+                kept.add(source.getVectorIndexes().stream()
+                        .filter(v -> v.getIndexName().equals(override.getIndexName()))
+                        .findFirst()
+                        .orElseThrow(() -> invalidRestore("Vector index " + override.getIndexName()
+                                + " does not match a vector index that existed in the source table and cannot be "
+                                + "created during the restore operation")));
+            }
+        }
+        List<DynamoDbService.VectorIndexCreate> restored = new ArrayList<>();
+        for (int i = 0; i < kept.size(); i++) {
+            VectorIndex v = kept.get(i);
+            VectorIndex copy = new VectorIndex(v.getIndexName(), v.getVectorAttributeName(),
+                    new ArrayList<>(v.getSearchSchema()), v.getProjectionType(),
+                    new ArrayList<>(v.getNonKeyAttributes()), v.getDimensions(), v.getDistanceFunction());
+            restored.add(new DynamoDbService.VectorIndexCreate(copy, "vectorIndexOverride." + (i + 1) + ".member"));
+        }
+        return restored;
+    }
+
+    private static boolean sameIndex(IndexOverride override, List<KeySchemaElement> keySchema, String projectionType,
+                                     List<String> nonKeyAttributes) {
+        if (override.keySchema().size() != keySchema.size()) {
+            return false;
+        }
+        for (int i = 0; i < keySchema.size(); i++) {
+            KeySchemaElement want = override.keySchema().get(i);
+            KeySchemaElement have = keySchema.get(i);
+            if (!want.getAttributeName().equals(have.getAttributeName()) || !want.getKeyType().equals(have.getKeyType())) {
+                return false;
+            }
+        }
+        String type = projectionType != null ? projectionType : "ALL";
+        if (!type.equals(override.projectionType())) {
+            return false;
+        }
+        return !"INCLUDE".equals(type) || Set.copyOf(nonKeyAttributes).equals(Set.copyOf(override.nonKeyAttributes()));
+    }
+
+    private static AwsException indexMismatch(String indexName) {
+        return invalidRestore("Index " + indexName + " does not match a secondary index that existed in the source "
+                + "table and cannot be created during the restore operation");
+    }
+
+    private static AwsException invalidRestore(String message) {
+        return new AwsException("ValidationException", "Invalid Request: " + message, 400);
+    }
+
+    /**
+     * Updates the table, applies the request's settings and replica changes to it and persists
+     * the result.
+     *
+     * <p>Wire-shape checks, the PAY_PER_REQUEST throughput check and the GSI update index checks
+     * stay with the caller, which runs them while it parses so their error precedence holds.
+     */
+    TableDefinition updateTable(UpdateTableRequest request, String region) {
+        String tableName = request.tableName();
+        TableSettings settings = request.settings();
+        List<String> addRegions = request.replicaAdds();
+        List<String> removeRegions = request.replicaRemoves();
+        List<String> updateRegions = request.replicaUpdates();
+        boolean replicaUpdates = !addRegions.isEmpty() || !removeRegions.isEmpty() || !updateRegions.isEmpty();
+
+        if (replicaUpdates) {
+            dynamoDbService.validateReplicaUpdates(
+                    tableName, addRegions, removeRegions, updateRegions, region);
+        }
+
+        // Validated up front, same as the replica check above: updateTable and the mutations that
+        // follow it have side effects (persisted throughput/GSI changes, stream enable/disable),
+        // so an invalid SSEType must fail before any of them run rather than after, or
+        // ValidationException would leave a partially-applied update behind.
+        boolean sseEnabled = Boolean.TRUE.equals(settings.sseEnabled());
+        String sseType = sseEnabled ? effectiveSseType(settings) : null;
+        if (sseEnabled) {
+            validateSseType(sseType);
+        }
+
+        Throughput throughput = request.provisionedThroughput();
+        TableDefinition table = dynamoDbService.updateTable(tableName,
+                throughput != null ? throughput.readCapacityUnits() : null,
+                throughput != null ? throughput.writeCapacityUnits() : null,
+                request.gsiCreates(), request.gsiDeletes(), request.attributeDefinitions(),
+                request.vectorCreates(), request.vectorDeletes(),
+                settings.billingMode(), region);
+
+        for (GsiThroughputUpdate update : request.gsiUpdates()) {
+            GlobalSecondaryIndex gsi = table.findGsi(update.indexName()).orElseThrow();
+            Throughput gsiThroughput = update.provisionedThroughput();
+            if (gsiThroughput != null) {
+                if (gsiThroughput.readCapacityUnits() != null) {
+                    gsi.getProvisionedThroughput().setReadCapacityUnits(gsiThroughput.readCapacityUnits());
+                }
+                if (gsiThroughput.writeCapacityUnits() != null) {
+                    gsi.getProvisionedThroughput().setWriteCapacityUnits(gsiThroughput.writeCapacityUnits());
+                }
+            }
+            OnDemandThroughput gsiOnDemand = update.onDemandThroughput();
+            if (gsiOnDemand != null) {
+                if (gsiOnDemand.maxReadRequestUnits() != null) {
+                    gsi.setOnDemandMaxReadRequestUnits(gsiOnDemand.maxReadRequestUnits());
+                }
+                if (gsiOnDemand.maxWriteRequestUnits() != null) {
+                    gsi.setOnDemandMaxWriteRequestUnits(gsiOnDemand.maxWriteRequestUnits());
+                }
+            }
+        }
+
+        if (settings.deletionProtectionEnabled() != null) {
+            table.setDeletionProtectionEnabled(settings.deletionProtectionEnabled());
+        }
+
+        String billingMode = settings.billingMode();
+        if (billingMode != null) {
+            table.setBillingMode(billingMode);
+            if ("PAY_PER_REQUEST".equals(billingMode)) {
+                table.getProvisionedThroughput().setReadCapacityUnits(0L);
+                table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+            }
+        }
+
+        if (settings.tableClass() != null) {
+            table.setTableClass(settings.tableClass());
+        }
+
+        applyOnDemandThroughput(table, settings.onDemandThroughput());
+
+        if (settings.streamEnabled() != null) {
+            if (settings.streamEnabled()) {
+                enableStream(table, settings.streamViewType(), region);
+            } else {
+                streamService.disableStream(table.getTableArn());
+                table.setStreamEnabled(false);
+            }
+        }
+
+        if (settings.sseEnabled() != null) {
+            if (sseEnabled) {
+                table.setSseEnabled(true);
+                table.setSseType(sseType);
+                if (SSE_TYPE_KMS.equals(sseType)) {
+                    table.setKmsMasterKeyArn(kmsMasterKeyArn(settings.kmsMasterKeyId(), region));
+                } else {
+                    table.setKmsMasterKeyArn(null);
+                }
+            } else {
+                table.setSseEnabled(false);
+                table.setSseType(null);
+                table.setKmsMasterKeyArn(null);
+            }
+        }
+
+        // Same flush as CreateTable: the stream and SSE mutations above land after updateTable's
+        // write, so without this a retargeted view type or SSE change is rebuilt from the stale
+        // persisted value on restart. Must run before applyReplicaUpdates below, which re-fetches
+        // the table from storage for its own persist. A persistent backend serializes on write
+        // rather than holding the live object, so without this flush first, that re-fetch would
+        // see neither the stream nor the SSE mutations above.
+        dynamoDbService.persistTable(tableName, table, region);
+
+        if (replicaUpdates) {
+            table = dynamoDbService.applyReplicaUpdates(tableName, addRegions, removeRegions, updateRegions, region);
+        }
+        return table;
+    }
+
+    /**
+     * Turns on forwarding to a Kinesis stream, reusing the table's destination for that stream
+     * when one exists.
+     *
+     * @param precision an already validated ApproximateCreationDateTimePrecision
+     * @return a snapshot of what this call left on the destination, with the canonical table name
+     */
+    public KinesisDestination enableKinesisStreamingDestination(String tableName, String streamArn, String precision,
+                                                                String region) {
+        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        String resolvedTableName = table.getTableName();
+
+        try {
+            kinesisService.describeStreamByArn(streamArn, region);
+        } catch (AwsException e) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Kinesis stream not found: " + streamArn, 400);
+        }
+
+        Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
+        if (existing.isPresent() && "ACTIVE".equals(existing.get().getDestinationStatus())) {
+            throw new AwsException("ValidationException",
+                    "Table already has an active Kinesis streaming destination with this stream ARN", 400);
+        }
+
+        KinesisStreamingDestination destination;
+        if (existing.isPresent()) {
+            destination = existing.get();
+            // The precision goes in before the status. A concurrent Disable gets past its
+            // already-disabled check only once the status reads ACTIVE, so writing the status last
+            // means that call can no longer read the precision this one is replacing.
+            destination.setApproximateCreationDateTimePrecision(precision);
+            destination.setDestinationStatusDescription("Kinesis streaming is enabled for this table");
+            destination.setDestinationStatus("ACTIVE");
+        } else {
+            destination = new KinesisStreamingDestination(streamArn, precision);
+            table.getKinesisStreamingDestinations().add(destination);
+        }
+        KinesisDestination enabled = new KinesisDestination(resolvedTableName, streamArn, "ACTIVE", precision);
+
+        // DynamoDB Streams is left as the caller configured it: Kinesis forwarding does not depend on it, and
+        // turning it on here showed up as stream_enabled drift on aws_dynamodb_table that never converged.
+        dynamoDbService.persistTable(resolvedTableName, table, region);
+        return enabled;
+    }
+
+    /**
+     * Turns off forwarding to a Kinesis stream and stops the forwarder draining it.
+     *
+     * @return a snapshot of what this call left on the destination, with the canonical table name
+     */
+    public KinesisDestination disableKinesisStreamingDestination(String tableName, String streamArn, String region) {
+        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        String resolvedTableName = table.getTableName();
+
+        Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
+        if (existing.isEmpty()) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Kinesis streaming destination not found for stream: " + streamArn, 400);
+        }
+
+        if ("DISABLED".equals(existing.get().getDestinationStatus())) {
+            throw new AwsException("ValidationException",
+                    "Kinesis streaming destination is already disabled for stream: " + streamArn, 400);
+        }
+
+        KinesisStreamingDestination destination = existing.get();
+        // Disable does not take a precision, so the destination's own is read once, here.
+        String precision = destination.getApproximateCreationDateTimePrecision();
+        destination.setDestinationStatus("DISABLED");
+        destination.setDestinationStatusDescription("Kinesis streaming is disabled for this table");
+        KinesisDestination disabled = new KinesisDestination(resolvedTableName, streamArn, "DISABLED", precision);
+        dynamoDbService.persistTable(resolvedTableName, table, region);
+        // Stop forwarding and discard buffered CDC records for this now-disabled destination.
+        dynamoDbService.onKinesisStreamingDestinationDisabled(resolvedTableName, streamArn, region);
+        return disabled;
+    }
+
+    /**
+     * Changes the precision of an active destination in place, as UpdateKinesisStreamingDestination
+     * does. Forwarding never stops: records already captured are still delivered, and the forwarder
+     * stamps each later write with the new precision.
+     *
+     * @param precision an already validated ApproximateCreationDateTimePrecision
+     * @return a snapshot of what this call left on the destination, with the canonical table name
+     */
+    public KinesisDestination updateKinesisStreamingDestination(String tableName, String streamArn, String precision,
+                                                                String region) {
+        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        String resolvedTableName = table.getTableName();
+
+        Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
+        if (existing.isEmpty()) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Kinesis streaming destination not found for stream: " + streamArn, 400);
+        }
+        if (!"ACTIVE".equals(existing.get().getDestinationStatus())) {
+            throw new AwsException("ValidationException",
+                    "Kinesis streaming destination is not active for stream: " + streamArn, 400);
+        }
+
+        existing.get().setApproximateCreationDateTimePrecision(precision);
+        KinesisDestination updated = new KinesisDestination(resolvedTableName, streamArn, "ACTIVE", precision);
+        dynamoDbService.persistTable(resolvedTableName, table, region);
+        return updated;
+    }
+
+    /** The AWS managed key a table reports when SSE is KMS and no customer key was given. */
+    static String defaultKmsMasterKeyArn(String region) {
+        return AwsArnUtils.Arn.of("kms", region, DEFAULT_ACCOUNT_ID,
+                "key/aws-managed-dynamodb").toString();
+    }
+
+    private void enableStream(TableDefinition table, String streamViewType, String region) {
+        String viewType = streamViewType != null ? streamViewType : DynamoDbService.DEFAULT_STREAM_VIEW_TYPE;
+        StreamDescription sd = streamService.enableStream(table.getTableName(), table.getTableArn(), viewType, region);
+        table.setStreamEnabled(true);
+        table.setStreamArn(sd.getStreamArn());
+        table.setStreamViewType(viewType);
+    }
+
+    private static void applyOnDemandThroughput(TableDefinition table, OnDemandThroughput onDemand) {
+        if (onDemand == null) {
+            return;
+        }
+        if (onDemand.maxReadRequestUnits() != null) {
+            table.setOnDemandMaxReadRequestUnits(onDemand.maxReadRequestUnits());
+        }
+        if (onDemand.maxWriteRequestUnits() != null) {
+            table.setOnDemandMaxWriteRequestUnits(onDemand.maxWriteRequestUnits());
+        }
+    }
+
+    private static String kmsMasterKeyArn(String kmsMasterKeyId, String region) {
+        return kmsMasterKeyId != null ? kmsMasterKeyId : defaultKmsMasterKeyArn(region);
+    }
+
+    private static void validateSseType(String sseType) {
+        if (!VALID_SSE_TYPES.contains(sseType)) {
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + sseType
+                    + "' at 'sSESpecification.sSEType' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [AES256, KMS]");
+        }
+    }
+
+    /** SSEType is optional when SSE is enabled; AWS then uses KMS. */
+    private static String effectiveSseType(TableSettings settings) {
+        return settings.sseType() != null ? settings.sseType() : SSE_TYPE_KMS;
+    }
+}

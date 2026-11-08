@@ -60,6 +60,23 @@ its version does not discard its pool identity. Unqualified invocation retains
 the normal on-demand path, and existing authorization checks still precede
 execution.
 
+## Task-token IAM resources
+
+With IAM enforcement enabled, `SendTaskSuccess`, `SendTaskFailure`, and
+`SendTaskHeartbeat` authorize against the resource associated with the token:
+the activity ARN for an activity task, or the unqualified state-machine ARN
+for a `.waitForTaskToken` service integration, including versioned executions.
+A grant on only the version ARN does not match. A wildcard grant also matches, and
+an explicit deny on the matching resource wins. An execution ARN or an
+unrelated resource does not grant callback access.
+
+This distinction was verified with signed SDK calls against AWS using both
+Lambda callback integrations and activities. Recent completed tokens retain
+their resource so a permitted retry receives `TaskTimedOut`. Unknown tokens
+return `InvalidToken` before IAM resource evaluation. Resource lookup
+does not consume the token. The caller must own the token before its resource
+is used for IAM evaluation, including for recent completed tokens.
+
 ## Nested task credentials
 
 Nested `states:startExecution` tasks, including `.sync` and `.sync:2`, and the SDK
@@ -73,7 +90,11 @@ With IAM enforcement enabled, the existing task authorizer checks the execution 
 permission to assume the task role, its trust policy, and the task role's permission to
 start the child. Account routing also works with enforcement disabled. The `.sync`
 polling and cancellation paths retain the task account; their additional IAM permissions
-are not evaluated. Other integrations retain their existing credential handling.
+are not evaluated. Lambda, API Gateway, SQS, SNS, EventBridge, DynamoDB, S3 `putObject`, RDS Data and
+Redshift Data tasks evaluate `Credentials` themselves
+([Lambda](#lambda-tasks-under-iam-enforcement), [messaging](#messaging-tasks-under-iam-enforcement),
+[data](#data-tasks-under-iam-enforcement)); other integrations retain their existing credential
+handling.
 A foreign state-machine ARN without task credentials grants no account access.
 
 A missing or mismatched task role fails with `States.TaskFailed`. A target account
@@ -547,6 +568,156 @@ function as `RoleArn.$`, or through JSONata. A role the execution role cannot as
 with `States.Permissions`, whose cause names the execution role's session and `sts:AssumeRole` on
 the role.
 
+## Messaging tasks under IAM enforcement
+
+These tasks and their `.waitForTaskToken` forms are evaluated with
+[IAM enforcement](iam.md#resource-based-policies) on:
+
+| Resource | Action | Resource evaluated | Refused with |
+|---|---|---|---|
+| `arn:aws:states:::sqs:sendMessage` | `sqs:SendMessage` | The queue `QueueUrl` names | `SQS.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:sqs:sendMessage` | `sqs:SendMessage` | The queue `QueueUrl` names | `Sqs.AccessDeniedException` |
+| `arn:aws:states:::sns:publish` | `sns:Publish` | `TopicArn`, else `TargetArn`, or `*` for a `PhoneNumber` | `SNS.AuthorizationErrorException` |
+| `arn:aws:states:::aws-sdk:sns:publish` | `sns:Publish` | `TopicArn`, else `TargetArn`, or `*` for a `PhoneNumber` | `Sns.AuthorizationErrorException` |
+| `arn:aws:states:::events:putEvents` | `events:PutEvents` | Each distinct event bus the entries name | `EventBridge.AccessDeniedException` |
+
+Each attempt is decided in turn, so `Retry` and `Catch` see a refusal like any other task failure:
+
+1. The execution role has to exist and to trust `states.amazonaws.com`, or the task fails with
+   `States.Permissions`.
+2. If the task's `Credentials` name a role, the execution role has to be able to assume it, as for a
+   [Lambda task](#lambda-tasks-under-iam-enforcement). A role it cannot assume, or one that does not
+   exist, fails the task with `States.TaskFailed` and the cause "The role X is not authorized to
+   assume the task state's role, Y.", the form AWS answers a nested execution with. `Credentials`
+   that do not resolve to an object holding only `RoleArn` fail with `States.Runtime`.
+3. The role the task ends up with has to be allowed the action on the resource, or the task fails with
+   the error in the table, whose cause names the role's session and the kind of policy that refused
+   it.
+
+The resource is the one Floci's lookup reaches, which is what the task then acts on:
+
+- **SQS:** the account and name in the URL's path, in the state machine's Region.
+- **SNS:** the ARN as the request gives it. `PhoneNumber` comes first, since Floci sends the SMS
+  whatever else the request names.
+- **EventBridge:** the bus of the name `EventBusName` gives, or the default bus without one, in the
+  state machine's account and Region. An ARN counts for its name only, because that is the bus
+  `PutEvents` reaches from a task: a bus ARN naming another account or Region is evaluated, and sent
+  to, as the bus of that name in the state machine's. A direct `PutEvents` request under enforcement
+  evaluates the ARN as given. All the buses are evaluated before any entry is sent, so one refused
+  bus sends nothing. An entry EventBridge would reject, such as one without `Source`, still counts,
+  as for a direct `PutEvents`. The EventBridge User Guide states the check on every entry, and the
+  refusal of the whole request, for the Custom Event Bus. It does not describe Classic buses, and
+  Floci applies the same reading to them.
+
+A request that names no resource has only the role checks in the list above, and its service then
+answers it with its own error: no `QueueUrl`, a `TopicArn` or `TargetArn` that is not an SNS ARN or
+neither of them, an entry that is not an object, an `EventBusName` that is a malformed ARN, or no
+entries at all.
+
+A refused permission is named as the task's other errors from its service are: the integration's
+prefix and the exception the service's SDK raises. For SNS that is `AuthorizationErrorException`, the
+refusal `Publish` declares and the one a direct `Publish` under enforcement answers with, and for the
+others `AccessDeniedException`. `States.Permissions`, and these names for a refusal, are Floci's
+reading: they have not been verified against AWS. Only global condition keys are available to the
+policies.
+
+Resource policies take part as they do for a direct request under enforcement, for queues, topics and
+event buses:
+
+- **SQS:** the queue's own policy (`SetQueueAttributes` or `AddPermission`) or the role's policies
+  can allow the send within one account, and across accounts both have to.
+- **SNS:** a topic policy can grant `sns:Publish` to a role of the topic's account with no identity
+  policy, a Deny in it refuses a role its identity policy allows, and the default policy of a new
+  topic admits no role, because no role's call carries `aws:SourceOwner`. Across accounts both the
+  role's policies and the topic policy have to allow the publish.
+- **EventBridge:** the bus's policy (`PutPermission`) can grant `events:PutEvents` to a role of the
+  bus's account that it names, with no identity policy, and a Deny in it refuses a role its identity
+  policy allows. A statement naming only the account, the form `PutPermission` writes for a
+  `Principal` account id, leaves the decision to that account's IAM policies. Across accounts both the
+  role's policies and the bus policy have to allow the send.
+
+A role in another account, named by `Credentials`, is authorized as that role but the task still
+runs in the state machine's account. Nested executions are the only tasks that run in the role's
+account. With enforcement off nothing here is evaluated.
+
+Floci has no `aws-sdk:eventbridge:putEvents` integration: that resource fails with
+`States.TaskFailed` and "Unsupported resource" whether or not enforcement is on.
+
+## Data tasks under IAM enforcement
+
+These tasks and their `.waitForTaskToken` forms are evaluated with
+[IAM enforcement](iam.md#resource-based-policies) on, in the same steps and with the same role errors
+as [messaging tasks](#messaging-tasks-under-iam-enforcement):
+
+| Resource | Action | Resource evaluated | Refused with |
+|---|---|---|---|
+| `arn:aws:states:::dynamodb:putItem`, `getItem`, `deleteItem`, `updateItem`, `scan` | `dynamodb:PutItem` and so on | The table `TableName` names | `DynamoDB.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:dynamodb:<api>` | See below | See below | `DynamoDb.AccessDeniedException` |
+| `arn:aws:states:::s3:putObject`, `arn:aws:states:::aws-sdk:s3:putObject` | `s3:PutObject` | `arn:<partition>:s3:::<bucket>/<key>` | `S3.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:rdsdata:executeStatement` | `rds-data:ExecuteStatement`, `secretsmanager:GetSecretValue` | `ResourceArn`, `SecretArn` | `RdsData.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:redshiftdata:<api>` | `redshift-data:<Action>` and what authenticates the call | See below | `RedshiftData.AccessDeniedException` |
+
+The `aws-sdk:dynamodb` form is checked as a direct DynamoDB request under enforcement is:
+
+- **Most APIs:** `dynamodb:<Api>` on the table, stream or other resource the request names, an ARN as
+  given, or on `*` when it names none, which includes a `putItem` with no `TableName`.
+- **`batchGetItem`, `batchWriteItem`:** the API's action on each table in `RequestItems`.
+- **`transactWriteItems`, `transactGetItems`:** no action of their own. Each item needs its own, one of
+  `dynamodb:PutItem`, `DeleteItem`, `UpdateItem`, `ConditionCheckItem` or `GetItem`, on its table, with
+  `dynamodb:EnclosingOperation` available to the policy. A table named by ARN counts for its name, as
+  execution reads it in the state machine's account.
+- **`listTables`:** its action on the Region's `table/*` collection.
+- **`executeStatement`:** `dynamodb:PartiQLSelect`, `PartiQLInsert`, `PartiQLUpdate` or `PartiQLDelete`,
+  by what the statement does. `batchExecuteStatement` and `executeTransaction` are checked under their
+  own names on each table a statement names, as a direct request is.
+
+Every permission is evaluated before the call, so one refused table in a batch or a transaction writes
+nothing.
+
+The `aws-sdk:redshiftdata` form's statement operations (`describeStatement`, `cancelStatement`,
+`getStatementResult`, `getStatementResultV2`, `listStatements`, `listSessions`) act on no resource in
+the service reference, so they are checked on `*`. The others are checked on the cluster
+`ClusterIdentifier` names, the workgroup `WorkgroupName` names, or the target of the session
+`SessionId` names, with what an [EventBridge target](eventbridge.md) needs to authenticate:
+`secretsmanager:GetSecretValue` on `SecretArn`, `redshift-serverless:GetCredentials` on the workgroup,
+or `redshift:GetClusterCredentials` on the `dbuser` and `dbname` of a `DbUser`. A workgroup Floci does
+not hold is evaluated on `workgroup/*`.
+
+`secretsmanager:GetSecretValue` on an RDS Data `SecretArn` follows AWS's `AmazonRDSDataFullAccess`
+managed policy and the CDK's `grantDataApiAccess`, which grant it along with the Data API actions.
+
+A request whose member names nothing it can reach has only the role checks, and its service answers
+it: no `TableName` in an optimized task or no recognised item in a transaction, a transaction's table
+ARN that is malformed or in another Region, a DynamoDB `ResourceArn` or similar that is not an ARN, no
+`Bucket` or `Key`, an RDS Data `ResourceArn` that is not an ARN, or a Redshift Data request naming no
+target. An API a form does not serve keeps its existing answer: `dynamodb:query` and
+`aws-sdk:rdsdata:beginTransaction` are "Unsupported" whether or not enforcement is on, and
+`aws-sdk:redshiftdata` answers its own `ValidationException` for an operation it does not have.
+
+The S3 bucket is resolved as a direct request resolves it. A bucket name is one namespace across
+partitions, so a task can reach a bucket of another partition, and the object's ARN is evaluated in the
+bucket's partition, not the state machine's. A bucket policy takes part as it does for a direct
+request: it can grant `s3:PutObject` to a role of the bucket's account with no identity policy, and a
+Deny in it refuses a role its identity policy allows. Another account's bucket is `S3.NoSuchBucket` to
+an allowed role unless `floci.services.s3.global-bucket-namespace` is on, and with it on both the
+role's policy and the bucket's have to allow. A DynamoDB table named by an ARN of another account is
+refused, since no table policy can grant it here.
+
+`<prefix>.AccessDeniedException` is Floci's reading for these too and has not been verified against
+AWS. Apart from `dynamodb:EnclosingOperation`, only global condition keys are available to the
+policies: `dynamodb:LeadingKeys`, `dynamodb:Attributes` and the like are absent. Global tables are not
+treated apart. With enforcement off nothing here is evaluated.
+
+Integrations other than these, the messaging tasks, Lambda, API Gateway and nested executions are not
+evaluated yet: they run in the state machine's account whatever the execution role's policies say.
+
+## Task credentials in history
+
+A task that declares `Credentials` records the resolved role in the `taskCredentials.roleArn` of its
+`TaskScheduled` or `LambdaFunctionScheduled` event, with enforcement on or off. With enforcement off,
+`Credentials` that do not resolve are left out of the event and the task runs as if they were not
+there. `ActivityScheduled` has no such member, as in the AWS model.
+
 ## AWS SDK task integrations
 
 A resource of the form `arn:aws:states:::aws-sdk:<service>:<action>` calls the service's API and
@@ -581,9 +752,9 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 | `arn:aws:states:::aws-sdk:scheduler:deleteSchedule` | `{}` | `Scheduler.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sns:publish` | `{MessageId}` | `Sns.NotFoundException` when the topic does not exist |
 
-Callback tokens are owned by the execution account. Foreign callbacks return
-`AccessDeniedException`; unknown tokens return `InvalidToken`. Recently closed tokens return
-`TaskTimedOut`. Closed-token classification retains at most 1,024 tokens for five minutes; older
+Callback tokens are owned by the execution account and region. Foreign-account callbacks return
+`AccessDeniedException`; callbacks sent to another region and unknown tokens return `InvalidToken`.
+Recently closed tokens return `TaskTimedOut`. Closed-token classification retains at most 1,024 tokens for five minutes; older
 or evicted tokens return `InvalidToken`. Invalid JSON output leaves a pending token available
 for a corrected callback. Token state remains in memory.
 
@@ -594,11 +765,16 @@ timestamps. Opaque dictionary keys, including secret version IDs and ECS log
 options, retain their original spelling. `describeSecret` returns metadata without
 the secret value. Disabled services fail with a catchable service exception.
 
+The Lambda `updateEventSourceMapping` SDK task takes `Uuid` in JSONPath
+`Parameters` or JSONata `Arguments`. The direct Lambda REST API still uses `UUID`.
+
 ECS `listServices` supports the same `MaxResults` and opaque `NextToken` as the
 direct ECS API. Lambda mapping tasks currently return an unpaginated list;
 `Marker` and `MaxItems` are rejected with `Lambda.InvalidParameterValueException`
 instead of being silently ignored. These six integrations do not evaluate the
-state-machine execution role's per-action IAM policies. Name-based lookups use the
+state-machine execution role's per-action IAM policies; among the task integrations, Lambda, API
+Gateway, nested executions, the [messaging tasks](#messaging-tasks-under-iam-enforcement) and the
+[data tasks](#data-tasks-under-iam-enforcement) do. Name-based lookups use the
 execution scope; explicit ARNs retain the underlying service's cross-account lookup
 behavior. The underlying services' validation still applies. They implement
 request-response calls, without job-completion polling.
@@ -832,8 +1008,18 @@ Floci currently supports object roots and scalar `COMMAS` arrays. Non-object roo
 (other than an absent or null body) and `COMMAS` arrays containing objects or arrays
 fail explicitly instead of being silently coerced. These are Floci limitations,
 not documented AWS restrictions; their exact AWS behavior has not been verified.
-EventBridge connection lookup and connection-level parameter merging are not
-implemented by the HTTP Task.
+
+## HTTP Task connections
+
+The EventBridge connection named by `InvocationConfig.ConnectionArn` or
+`Authentication.ConnectionArn` authorizes the request: `BASIC` and `OAUTH_CLIENT_CREDENTIALS`
+set the `Authorization` header and `API_KEY` sets the named header, as for an API destination.
+The connection's `InvocationHttpParameters` are merged over the task's `Headers`,
+`QueryParameters` and `RequestBody`, and the connection's value wins on a duplicate key, as
+[AWS merges them](https://docs.aws.amazon.com/step-functions/latest/dg/call-https-apis.html#http-task-data-merge).
+Body parameters are merged before `Transform` encodes the body. A `RequestBody` that is not a
+JSON object fails the task with `States.Runtime` when the connection has body parameters, and a
+connection that does not exist fails it with `Events.ConnectionResource.ResourceNotFound`.
 
 ## Executions abandoned by a restart
 

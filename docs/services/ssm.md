@@ -161,10 +161,15 @@ the catalog's x86_64 Amazon Linux 2023 image. The `recommended` value is JSON wi
 matching image ID and name; its ECS agent and runtime versions are `unknown` because
 the catalog image is synthetic and does not represent an installed ECS runtime.
 
+Canonical's Ubuntu Server AMI parameters under `/aws/service/canonical/ubuntu/server/` resolve
+too, by version or codename: `24.04`/`noble` (amd64 and arm64, `ebs-gp3`) and `22.04`/`jammy`
+and `20.04`/`focal` (amd64, `ebs-gp2`), each at `stable/current`.
+
 ```bash
 aws ssm get-parameter --name /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
 aws ssm get-parameter --name /aws/service/eks/optimized-ami/1.31/amazon-linux-2023/x86_64/standard/recommended/image_id
 aws ssm get-parameter --name /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+aws ssm get-parameter --name /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
 ```
 
 ## Secrets Manager References
@@ -220,8 +225,25 @@ or create the AWS RAM resource share AWS makes for a shared parameter.
 
 All AWS parameter types are accepted: `String`, `StringList`, `SecureString`.
 
+`PutParameter` encrypts a `SecureString` with Floci's KMS under the parameter's key
+(`alias/aws/ssm` when none was given), with the encryption context `PARAMETER_ARN` set to the
+parameter's ARN, as AWS does. A read without `WithDecryption` (`GetParameter`, `GetParameters`,
+`GetParametersByPath`, `GetParameterHistory`) returns that ciphertext, the same one on every read
+of a version, and KMS `Decrypt` with that context returns the plaintext. With `WithDecryption`
+the plaintext is returned.
+
 !!! note
-    `SecureString` parameters are stored as-is without actual KMS encryption in Floci. The type is preserved and returned correctly, but the value is not encrypted at rest.
+    The encryption applies to what the API returns, not to storage: Floci saves each
+    `SecureString` version's plaintext alongside its ciphertext, so the plaintext stays readable in
+    the persisted state files.
+
+    A `KeyId` that Floci's KMS cannot use, which AWS would refuse on `PutParameter`, is accepted,
+    and such a parameter is returned unencrypted. So is a value over KMS's 4096-byte limit, and a
+    parameter version stored before Floci encrypted `SecureString` values.
+
+    AWS encrypts every Advanced `SecureString` with the AWS Encryption SDK, so its value is the
+    SDK's encrypted message. Floci encrypts an Advanced value up to 4096 bytes with a plain KMS
+    `Encrypt` instead, the same as a Standard one.
 
 ## Parameter Store Change events
 

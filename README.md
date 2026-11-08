@@ -296,8 +296,8 @@ Floci supports local emulation for application services, data services, eventing
 
 | Category | Services |
 |---|---|
-| Core app services | S3, SQS, SNS, DynamoDB, Lambda, Lambda MicroVMs, Lambda Web Functions, IAM, STS, KMS, Secrets Manager, SSM |
-| Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics, CloudWatch OAM, CloudWatch RUM, Managed Prometheus (AMP) |
+| Core app services | S3, SQS, SNS, DynamoDB, Lambda, Lambda MicroVMs, Lambda Web Functions, IAM, STS, KMS, Payment Cryptography, Secrets Manager, SSM |
+| Events and workflows | EventBridge, EventBridge V2, EventBridge Pipes, EventBridge Scheduler, Step Functions, SWF, CloudWatch Logs, CloudWatch Metrics, CloudWatch OAM, CloudWatch RUM, Managed Prometheus (AMP) |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, Cognito Identity, ACM, Route53, Route 53 Resolver, Cloud Map, Global Accelerator |
 | Containers and compute | ECS, EC2, Lightsail, EKS, MWAA, ECR, EFS, CodeBuild, CodeDeploy, CodePipeline, CodeGuru Reviewer, CodeArtifact, AWS Batch, Auto Scaling, Application Auto Scaling, Elastic Beanstalk, ELB v2, ELB Classic |
 | Data, analytics, and AI | Athena, Glue, Lake Formation, EMR, EMR Serverless, Redshift, Redshift Data API, Redshift Serverless, Firehose, Managed Service for Apache Flink, OpenSearch, S3 Tables, S3 Vectors, Textract, Transcribe, Comprehend, Rekognition, Translate, Bedrock, Bedrock Runtime, Bedrock AgentCore, Bedrock AgentCore Control, SageMaker |
@@ -327,12 +327,14 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | IAM | In-process | Users, roles, groups, policies, instance profiles, access keys; STS AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
 | Cognito | In-process | User pools, app clients, auth flows, JWKS and OpenID well-known endpoints |
 | KMS | In-process | Encrypt, decrypt, sign, verify, data keys, aliases |
+| Payment Cryptography | In-process | Keys with real AES-256 material and check values, aliases, tagging |
 | Kinesis | In-process | Streams, shards, enhanced fan-out, split and merge |
 | Secrets Manager | In-process | Versioning, resource policies, tagging |
 | Step Functions | In-process | ASL execution, task tokens, execution history |
 | SWF | In-process | Decision and activity tasks, timers, child workflows, timeouts, real Lambda invocation |
 | CloudFormation | In-process | Stacks, change sets, resource provisioning, StackSets (cross-account instances) |
 | EventBridge | In-process | Custom buses, rules, SQS, SNS and Lambda targets |
+| EventBridge V2 | In-process | Event buses and filtered subscribers delivering to SQS |
 | EventBridge Pipes | In-process | Poller-based integration connecting SQS, Kinesis, DynamoDB, and MSK sources to targets with optional filtering |
 | EventBridge Scheduler | In-process | Schedule groups, schedules, flexible time windows, retry policies, DLQs |
 | CloudWatch Logs | In-process | Log groups, streams, ingestion, filtering |
@@ -348,6 +350,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | DocumentDB | Real Docker, mock mode available | MongoDB-compatible cluster via real MongoDB containers; RDS-shaped control plane; MongoDB wire protocol on port 27017 |
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
 | Amazon MQ | Real Docker | RabbitMQ broker via rabbitmq:3-management; AMQP + management console |
+| QuickSight | In-process metadata | Dashboard, dataset, data-source, user and ingestion metadata; direct-user dashboard search and a limited embed page; no SQL, SPICE processing or BI visualization |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
 | EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets (including resizing), bootstrap actions, steps, security configurations, scaling and termination policies, block public access, tagging |
@@ -363,7 +366,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | OpenSearch | Real Docker | Domain CRUD, tags, versions, instance types, upgrade stubs |
 | AppConfig | In-process | Applications, environments, profiles, hosted versions, deployments |
 | AppConfigData | In-process | Configuration sessions and dynamic configuration retrieval |
-| Bedrock | In-process | Guardrail lifecycle, versions, and tags on the control plane |
+| Bedrock | In-process | Guardrail lifecycle, versions, and tags, plus a seeded foundation model and inference profile catalog, on the control plane |
 | Bedrock Runtime | In-process stub | Dummy Converse and InvokeModel responses for local development |
 | Bedrock AgentCore | In-process stub | Stateful control plane (agent runtimes, gateways, memory, workload identity); canned InvokeAgentRuntime responses |
 | EKS | Real Docker, mock mode available | k3s clusters with live Kubernetes API server |

@@ -52,6 +52,18 @@ Continuation tokens are scoped to the action, account, region, and workgroup;
 invalid sizes, malformed tokens, and tokens outside 1 to 1024 characters return
 `InvalidRequestException`.
 
+A workgroup reports what its request gave and AWS's defaults for the rest. With
+no `ResultConfiguration`, it reports none (`primary` reports an empty one, as on
+AWS); a query then names its own output location, and Floci writes results to
+`s3://floci-athena-results/results/` when neither does. With no `EngineVersion`,
+it selects `AUTO`, reported with the effective version `Athena engine version 3`.
+`ManagedQueryResultsConfiguration` (`Enabled` and an optional
+`EncryptionConfiguration.KmsKey`) and `EnableMinimumEncryptionConfiguration`
+round-trip through `CreateWorkGroup`, `UpdateWorkGroup`
+(`ManagedQueryResultsConfigurationUpdates`, with `RemoveEncryptionConfiguration`)
+and `GetWorkGroup`; Floci records the setting and keeps no separate managed
+results storage.
+
 ## How it works
 
 1. **Lazy sidecar start**: On the first `StartQueryExecution` call, Floci checks for a local `floci/floci-duck:latest` image and starts the container. Subsequent queries reuse the running container.

@@ -1,0 +1,407 @@
+package io.floci.aws.services.s3;
+
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.*;
+
+@QuarkusTest
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+class S3EventBridgeIntegrationTest {
+
+    private static final String EB_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String EB_TARGET = "AWSEvents.";
+    private static final String VERSIONED_BUCKET = "eb-s3-versioned-test-bucket";
+
+    private static String ruleArn;
+    private static String queueUrl;
+
+    @Inject
+    S3LifecycleSweeper lifecycleSweeper;
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    @Order(1)
+    void createBucket_forEventBridgeTest() {
+        given()
+        .when()
+            .put("/eb-s3-test-bucket")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(2)
+    void createQueue_forEventBridgeDelivery() {
+        queueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "s3-eb-delivery-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+    }
+
+    @Test
+    @Order(3)
+    void putRule_forS3Events() {
+        ruleArn = given()
+            .contentType(EB_CONTENT_TYPE)
+            .header("X-Amz-Target", EB_TARGET + "PutRule")
+            .body("""
+                {
+                    "Name": "s3-event-rule",
+                    "EventPattern": "{\\"source\\":[\\"aws.s3\\"]}",
+                    "State": "ENABLED"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RuleArn", notNullValue())
+            .extract().path("RuleArn");
+    }
+
+    @Test
+    @Order(4)
+    void putTarget_sqsForS3Rule() {
+        String queueArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("AttributeName.1", "QueueArn")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("**.find { it.Name == 'QueueArn' }.Value");
+
+        given()
+            .contentType(EB_CONTENT_TYPE)
+            .header("X-Amz-Target", EB_TARGET + "PutTargets")
+            .body("""
+                {
+                    "Rule": "s3-event-rule",
+                    "Targets": [{"Id": "1", "Arn": "%s"}]
+                }
+                """.formatted(queueArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("FailedEntryCount", equalTo(0));
+    }
+
+    @Test
+    @Order(5)
+    void putBucketNotification_enableEventBridge() {
+        given()
+            .contentType("application/xml")
+            .body("""
+                <NotificationConfiguration>
+                    <EventBridgeConfiguration/>
+                </NotificationConfiguration>
+                """)
+        .when()
+            .put("/eb-s3-test-bucket?notification")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/eb-s3-test-bucket?notification")
+        .then()
+            .statusCode(200)
+            .body(containsString("<EventBridgeConfiguration"));
+    }
+
+    @Test
+    @Order(6)
+    void putObject_triggersEventBridgeDelivery() {
+        given()
+            .contentType("text/plain")
+            .body("hello from s3 eventbridge test")
+        .when()
+            .put("/eb-s3-test-bucket/test-object.txt")
+        .then()
+            .statusCode(200);
+
+        String messageBody = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.Body");
+
+        assert messageBody != null : "Expected a message in the queue after S3 put";
+        assert messageBody.contains("aws.s3") : "Expected source aws.s3 in: " + messageBody;
+        assert messageBody.contains("Object Created") : "Expected detail-type 'Object Created' in: " + messageBody;
+        assert messageBody.contains("eb-s3-test-bucket") : "Expected bucket name in: " + messageBody;
+        assert messageBody.contains("test-object.txt") : "Expected object key in: " + messageBody;
+    }
+
+    @Test
+    @Order(7)
+    void deleteObject_triggersEventBridgeDelivery() {
+        given()
+        .when()
+            .delete("/eb-s3-test-bucket/test-object.txt")
+        .then()
+            .statusCode(anyOf(equalTo(204), equalTo(200)));
+
+        String messageBody = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.Body");
+
+        assert messageBody != null : "Expected a message in the queue after S3 delete";
+        assert messageBody.contains("aws.s3") : "Expected source aws.s3 in: " + messageBody;
+        assert messageBody.contains("Object Deleted") : "Expected detail-type 'Object Deleted' in: " + messageBody;
+        assert messageBody.contains("\"deletion-type\":\"Permanently Deleted\"")
+                : "Expected deletion-type 'Permanently Deleted' in: " + messageBody;
+    }
+
+    @Test
+    @Order(8)
+    void disableEventBridge_noMoreNotifications() {
+        // Replace notification config with empty — no EventBridgeConfiguration
+        given()
+            .contentType("application/xml")
+            .body("<NotificationConfiguration/>")
+        .when()
+            .put("/eb-s3-test-bucket?notification")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/eb-s3-test-bucket?notification")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("EventBridgeConfiguration")));
+
+        // Drain any leftover messages
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "10")
+        .when()
+            .post("/");
+
+        // Put a new object — should NOT deliver to EventBridge
+        given()
+            .contentType("text/plain")
+            .body("quiet upload")
+        .when()
+            .put("/eb-s3-test-bucket/quiet.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("aws.s3")));
+    }
+
+    @Test
+    @Order(9)
+    void deleteObjectVersion_eventBridgeDetailCarriesTheDeletedVersionId() {
+        given().when().put("/" + VERSIONED_BUCKET).then().statusCode(200);
+        given()
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?versioning")
+        .then()
+            .statusCode(200);
+
+        String olderVersionId = given()
+            .contentType("text/plain")
+            .body("v1")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "/k.txt")
+        .then()
+            .statusCode(200)
+            .extract().header("x-amz-version-id");
+        given().contentType("text/plain").body("v2").when().put("/" + VERSIONED_BUCKET + "/k.txt")
+            .then().statusCode(200);
+
+        // Enabled after the writes, so the version delete is the only event on the queue.
+        given()
+            .contentType("application/xml")
+            .body("""
+                <NotificationConfiguration>
+                    <EventBridgeConfiguration/>
+                </NotificationConfiguration>
+                """)
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?notification")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .delete("/" + VERSIONED_BUCKET + "/k.txt?versionId=" + olderVersionId)
+        .then()
+            .statusCode(204);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", allOf(
+                containsString("Object Deleted"),
+                containsString("\"version-id\":\"" + olderVersionId + "\""),
+                containsString("\"deletion-type\":\"Permanently Deleted\"")));
+    }
+
+    @Test
+    @Order(10)
+    void deleteObjectOnVersionedBucket_eventBridgeDetailSaysDeleteMarkerCreated() {
+        String markerVersionId = given()
+        .when()
+            .delete("/" + VERSIONED_BUCKET + "/k.txt")
+        .then()
+            .statusCode(204)
+            .header("x-amz-delete-marker", "true")
+            .extract().header("x-amz-version-id");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", allOf(
+                containsString("Object Deleted"),
+                containsString("\"version-id\":\"" + markerVersionId + "\""),
+                containsString("\"deletion-type\":\"Delete Marker Created\"")));
+    }
+
+    @Test
+    @Order(11)
+    void lifecycleExpiration_eventBridgeDetailSaysLifecycleExpirationFromS3Itself() {
+        given().contentType("text/plain").body("short-lived").when().put("/" + VERSIONED_BUCKET + "/expiring.txt")
+            .then().statusCode(200);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", containsString("Object Created"));
+        given()
+            .contentType("application/xml")
+            .body("<LifecycleConfiguration><Rule><ID>past</ID><Filter><Prefix>expiring</Prefix></Filter>"
+                    + "<Status>Enabled</Status><Expiration><Date>2020-01-01T00:00:00Z</Date></Expiration>"
+                    + "</Rule></LifecycleConfiguration>")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?lifecycle")
+        .then()
+            .statusCode(200);
+
+        lifecycleSweeper.sweep();
+
+        // The user guide's lifecycle event: reason "Lifecycle Expiration", requester s3.amazonaws.com,
+        // and no source-ip-address, which is "Only present for events triggered by an S3 request".
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "0")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ReceiveMessageResponse.ReceiveMessageResult.Message.Body", allOf(
+                containsString("expiring.txt"),
+                containsString("\"reason\":\"Lifecycle Expiration\""),
+                containsString("\"deletion-type\":\"Delete Marker Created\""),
+                containsString("\"requester\":\"s3.amazonaws.com\""),
+                not(containsString("source-ip-address"))));
+        given().when().delete("/" + VERSIONED_BUCKET + "?lifecycle").then().statusCode(204);
+    }
+
+    @Test
+    @Order(100)
+    void cleanup() {
+        given()
+            .contentType("application/xml")
+            .body("<NotificationConfiguration/>")
+        .when()
+            .put("/" + VERSIONED_BUCKET + "?notification");
+
+        given()
+            .contentType(EB_CONTENT_TYPE)
+            .header("X-Amz-Target", EB_TARGET + "RemoveTargets")
+            .body("""
+                {"Rule": "s3-event-rule", "Ids": ["1"]}
+                """)
+        .when()
+            .post("/");
+
+        given()
+            .contentType(EB_CONTENT_TYPE)
+            .header("X-Amz-Target", EB_TARGET + "DeleteRule")
+            .body("""
+                {"Name": "s3-event-rule"}
+                """)
+        .when()
+            .post("/");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", queueUrl)
+        .when()
+            .post("/");
+    }
+}

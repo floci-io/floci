@@ -970,7 +970,7 @@ rather than echoing the request back:
 
 | Field | Request shape | Response shape | Extra members Floci fills in |
 |---|---|---|---|
-| `VpcConfig` | `VpcConfig` | `VpcConfigResponse` | `VpcId`, resolved from the first subnet via EC2 |
+| `VpcConfig` | `VpcConfig` | `VpcConfigResponse` | `VpcId`, shared by all declared subnets and security groups |
 | `SnapStart` | `SnapStart` | `SnapStartResponse` | `OptimizationStatus` — `On` only for a published version with `ApplyOn=PublishedVersions`, `Off` for `$LATEST` |
 | `LoggingConfig` | `LoggingConfig` | `LoggingConfig` | — |
 | `DurableConfig` | `DurableConfig` | `DurableConfig` | `RetentionPeriodInDays` defaults to 14; omitted for a function created without it |
@@ -1009,9 +1009,23 @@ on create and on update with `InvalidParameterValueException` ("LogLevel is not 
 LogFormat is set to "Text". Remove LogLevel from your request or change the LogFormat to
 "JSON" and try again."), as Lambda refuses it (measured in eu-west-1, 2026-10-18).
 
-`VpcConfig` is omitted entirely while the function is not attached to a VPC.
-Subnets that EC2 does not know about are still accepted and returned; only `VpcId`
-is left off in that case.
+`VpcConfig` accepts placeholder subnet and security-group IDs that are unknown in
+Floci's request account and region. This local compatibility behavior preserves the
+requested IDs but omits `VpcId` whenever any requested resource is unknown. Known
+subnets and security groups must still belong to one VPC, even when the request also
+contains unknown IDs. Mixed known VPCs or specifying only subnets or only security
+groups fail with `InvalidParameterValueException` before the function is mutated.
+A rejected update preserves the configuration and revision. Empty subnet and security
+group lists detach the function, and the response then omits `VpcConfig`. Published
+versions retain their network configuration when `$LATEST` changes.
+
+These checks validate the declaration. Function containers still use the configured
+Docker network. With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true`
+and `FLOCI_SERVICES_EC2_MOCK=false`) and a known `VpcId`, the container also joins that VPC's
+Docker network at an address leased from the first subnet in `SubnetIds`, so it reaches EC2
+instances and `awsvpc` ECS tasks in the VPC at the private addresses they report. The address is
+returned once the container is removed. `VpcConfig` does not yet enforce security-group rules or
+NAT egress, and the other subnets are not used.
 
 `RuntimeVersionConfig.RuntimeVersionArn` is returned for managed (non-image)
 runtimes. Its value is derived from the runtime name, so it is stable across
@@ -1277,6 +1291,32 @@ use `ParallelizationFactor` instead, which is a separate field.
     at a time regardless). Real parallel dispatch capped by
     `MaximumConcurrency` is tracked as a follow-up.
 
+### ParallelizationFactor (Kinesis and DynamoDB Streams only)
+
+`CreateEventSourceMapping` and `UpdateEventSourceMapping` accept a
+`ParallelizationFactor` integer between 1 and 10 on Kinesis and DynamoDB
+Streams event sources. `GetEventSourceMapping`, `ListEventSourceMappings`
+and the create, update and delete responses return it on every stream
+mapping, `1` when none was set, as AWS does. SQS mappings omit it.
+
+```bash
+aws lambda create-event-source-mapping \
+  --function-name my-function \
+  --event-source-arn $STREAM_ARN \
+  --starting-position LATEST \
+  --parallelization-factor 4 \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+Values outside 1 to 10 are rejected with `InvalidParameterValueException`,
+and so is `ParallelizationFactor` on any other event source.
+
+!!! note "Enforcement status"
+    The configured `ParallelizationFactor` is persisted and returned on the
+    wire, but the Kinesis and DynamoDB Streams pollers still process one
+    batch per shard at a time. Concurrent batches per shard are tracked as
+    a follow-up.
+
 ### FilterCriteria
 
 `CreateEventSourceMapping` and `UpdateEventSourceMapping` accept a
@@ -1316,28 +1356,26 @@ of `{}` or with an empty `Filters` array clears any existing filters.
 
 !!! note "Supported operators"
     Filtering reuses Floci's shared EventBridge matcher (the same one EventBridge
-    Pipes uses). It supports exact match on a string, number or `null`, plus
-    `prefix`, `suffix`, `equals-ignore-case`, `exists`, `anything-but` (a string,
-    a non-empty array of strings and numbers, or a nested `prefix`), and `numeric`
-    comparison/value pairs using `=`, `>`, `>=`, `<`, `<=`. Patterns using only
-    these behave as on AWS.
+    Pipes and EventBridge V2 use). It supports exact match on a string, number,
+    boolean or `null`, plus `prefix`, `suffix`, `equals-ignore-case`, `exists`,
+    `anything-but` (a string, a non-empty array of strings and numbers, or a nested
+    `prefix`), `numeric` comparison/value pairs using `=`, `>`, `>=`, `<`, `<=`,
+    and `$or`. Patterns using only these behave as on AWS. As on AWS, `[null]`
+    matches a field whose value is `null`, not a missing one (use
+    `[{"exists": false}]` for that), `anything-but` does not match a missing
+    field, and a record field that is an array matches when any element does.
 
     A pattern is validated at `CreateEventSourceMapping` and
     `UpdateEventSourceMapping` and rejected with `InvalidParameterValueException`
     when the matcher could not satisfy it: an unknown operator, an operator AWS
     documents that Floci does not implement (`cidr`, `wildcard`), more than one
-    operator in a single match element, a boolean literal, a wrong operand type,
+    operator in a single match element, a wrong operand type,
     or a malformed `numeric` sequence such as an odd-length array or a
     non-numeric value. This is stricter than AWS, which accepts several of these.
     The trade is deliberate: the pollers checkpoint past (Kinesis, DynamoDB) or
     delete (SQS) any record a pattern fails to match, so a pattern that cannot
     match destroys records rather than being inert, and create time is the last
     point at which the caller can still act on it.
-
-    One matcher deviation remains and is not a validation error, because it
-    depends on the record rather than the pattern: event-value array intersection,
-    where AWS matches when the record's own field is itself an array and any
-    element satisfies the pattern, and Floci does not.
 
 !!! warning "SAM event sources"
     CloudFormation `AWS::Lambda::EventSourceMapping` resources forward

@@ -121,6 +121,25 @@ def test_an_operation_with_no_action_of_its_name_goes_by_the_other_actions_of_it
     assert r.tag_on_create_operations([document])["svc:CreateACL"]["requestTags"] is True
 
 
+def test_a_rest_operation_the_reference_does_not_list_needs_the_tagging_of_the_operations_needing_its_action(
+        monkeypatch):
+    monkeypatch.setattr(r, "REST_MODELS", {"svc": "svc", "svcv2": "svc"})
+    document = reference("svc", {"CreateLegacyThing": ["svc:CreateThing", "svc:PutThing", "other:DescribeThing",
+                                                       "svc:AddTags"], "PutThing": []}, tagging={"AddTags": []})
+    document["Actions"] += [{"Name": name, "ActionConditionKeys": keys,
+                             "Annotations": {"Properties": {"IsTaggingOnly": False}}}
+                            for name, keys in (("CreateThing", ["aws:RequestTag/${TagKey}"]), ("DescribeThing", []))]
+    found = r.with_rest_operations(r.tag_on_create_operations([document]), [document], {
+        "svcv2": {"CreateLegacyThing", "CreateThing", "PutThing", "DescribeThing", "AddTags", "Unknown"}})
+    # The action of its name needs the legacy create's tagging action; the legacy create gains the client.
+    assert found["svc:CreateThing"] == {"tagging": ["svc:AddTags"], "createAction": False, "requestTags": True,
+                                        "clients": ["svcv2"]}
+    assert found["svc:CreateLegacyThing"]["clients"] == ["svc", "svcv2"]
+    # Listed with no tagging action, listed for another namespace only, the tagging action itself, or of no action:
+    # left out.
+    assert set(found) == {"svc:CreateLegacyThing", "svc:CreateThing"}
+
+
 def test_an_unusable_namespace_is_rejected():
     with pytest.raises(ValueError, match="not usable"):
         r.tag_on_create_operations([{"Name": "Not A Namespace", "Operations": []}])
@@ -394,4 +413,9 @@ def test_the_vendored_file_is_well_formed():
     assert document["resourceArns"]["ec2"]["instance"] == "arn:${Partition}:ec2:${Region}:${Account}:instance/*"
     assert document["resourceArns"]["ec2"]["image"] == "arn:${Partition}:ec2:${Region}::image/*"
     assert operations["budgets:CreateBudget"]["requestTags"] is True
+    # The opensearch client's CreateDomain, which the reference does not list, as es's CreateElasticsearchDomain.
+    assert document["namespaces"]["es"] == ["es", "opensearch"]
+    for operation in ("es:CreateDomain", "es:CreateElasticsearchDomain"):
+        assert operations[operation] == {"tagging": ["es:AddTags"], "requestTags": True,
+                                         "tags": [{"member": "TagList[]", "key": "Key", "value": "Value"}]}
     assert operations["logs:CreateLogGroup"].get("byHand")

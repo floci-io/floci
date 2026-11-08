@@ -4,7 +4,7 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>io.github.hectorvent</groupId>
+    <groupId>io.floci</groupId>
     <artifactId>floci</artifactId>
     <version>2.4.0</version>
     <packaging>jar</packaging>
@@ -15,12 +15,12 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <quarkus.platform.version>3.40.1</quarkus.platform.version>
+        <quarkus.platform.version>3.40.1.1</quarkus.platform.version>
         <jackson.version>2.22.4</jackson.version>
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
-        <wire.version>7.1.0</wire.version>
-        <aws.sdk.version>2.57.3</aws.sdk.version>
+        <wire.version>7.1.2</wire.version>
+        <aws.sdk.version>2.57.7</aws.sdk.version>
     </properties>
 
     <dependencyManagement>
@@ -92,6 +92,12 @@
     </dependencyManagement>
 
     <dependencies>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>quicksight</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
         <!-- Quarkus REST (RESTEasy Reactive) -->
         <dependency>
           <groupId>io.quarkus</groupId>
@@ -332,6 +338,18 @@
         <!-- Testing -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>accessanalyzer</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>acm</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>sts</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
@@ -369,6 +387,12 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>eventbridgev2</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
@@ -525,6 +549,12 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ec2</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>efs</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
@@ -724,8 +754,16 @@
                     <argLine>@{argLine} -Xmx6g</argLine>
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
+                        <!-- Parallel execution is opt-in per class; CPU-heavy service
+                             tests with independent fixtures can share four workers. -->
+                        <junit.jupiter.execution.parallel.enabled>true</junit.jupiter.execution.parallel.enabled>
+                        <junit.jupiter.execution.parallel.mode.default>same_thread</junit.jupiter.execution.parallel.mode.default>
+                        <junit.jupiter.execution.parallel.mode.classes.default>same_thread</junit.jupiter.execution.parallel.mode.classes.default>
+                        <junit.jupiter.execution.parallel.config.strategy>fixed</junit.jupiter.execution.parallel.config.strategy>
+                        <junit.jupiter.execution.parallel.config.fixed.parallelism>4</junit.jupiter.execution.parallel.config.fixed.parallelism>
+                        <junit.jupiter.execution.parallel.config.fixed.max-pool-size>4</junit.jupiter.execution.parallel.config.fixed.max-pool-size>
                         <!-- An ARN minted with a blank region fails the test that reached it (BlankRegionGuard). -->
-                        <io.github.hectorvent.floci.arn.fail-on-blank-region>true</io.github.hectorvent.floci.arn.fail-on-blank-region>
+                        <io.floci.aws.arn.fail-on-blank-region>true</io.floci.aws.arn.fail-on-blank-region>
                     </systemPropertyVariables>
                     <!-- Abort a hung test with a thread dump instead of letting CI's job timeout kill
                          the shard silently. Set here rather than in junit-platform.properties, which

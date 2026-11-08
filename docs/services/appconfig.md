@@ -2,6 +2,11 @@
 
 Floci supports AWS AppConfig and AppConfigData for local configuration management.
 
+Resources, name lookups, pagination and configuration-session tokens are isolated by
+the calling account and region. Persisted records from older versions that did not
+record a region remain available only in `floci.default-region`. New writes store
+their region explicitly in all storage modes.
+
 ## Management Plane (AppConfig)
 
 The management plane allows you to create and manage applications, environments, configuration profiles, and hosted configuration versions.
@@ -11,6 +16,7 @@ The management plane allows you to create and manage applications, environments,
 - `CreateApplication`
 - `GetApplication`
 - `ListApplications`
+- `UpdateApplication`
 - `DeleteApplication`
 - `CreateEnvironment`
 - `GetEnvironment`
@@ -28,6 +34,7 @@ The management plane allows you to create and manage applications, environments,
 - `ListDeploymentStrategies`
 - `DeleteDeploymentStrategy`
 - `StartDeployment`
+- `StopDeployment`
 - `GetDeployment`
 - `ListDeployments` (`GET /applications/{ApplicationId}/environments/{EnvironmentId}/deployments`)
 - `GetConfiguration` (deprecated by AWS in favor of the [data plane](#data-plane))
@@ -48,7 +55,7 @@ such as one from an S3 or SSM source, returns `ResourceNotFoundException`.
 
 `CreateEnvironment` keeps up to five `Monitors`, each a CloudWatch `AlarmArn` with an optional IAM role
 `AlarmRoleArn`, and environment reads return them; an environment created without monitors returns none.
-Floci does not evaluate the alarms or roll a deployment back. More than five monitors, or an `AlarmRoleArn`
+Floci does not evaluate the alarms or trigger automatic rollback. More than five monitors, or an `AlarmRoleArn`
 that is not an IAM role ARN, returns `BadRequestException`.
 `StartDeployment` and `GetDeployment` return the deployed profile's name and location URI as
 `ConfigurationName` and `ConfigurationLocationUri`. Deployments stored by earlier Floci versions did not
@@ -59,6 +66,20 @@ deployment with the profile name and strategy settings it recorded, also once it
 A deployment stored by an earlier Floci version returns no strategy settings from `GetDeployment`, and
 `ListDeployments` reports the strategy's current settings while the strategy exists.
 A configuration profile created without `Type` reports no type, as AWS documents no default.
+
+Configuration content becomes available immediately. A positive `FinalBakeTimeInMinutes`
+keeps the deployment in `BAKING` at 100 percent until that time has elapsed; get and list
+readback then report `COMPLETE`. Started and completed timestamps use the API's ISO 8601
+format and survive restart. Gradual per-client rollout and alarm evaluation are not implemented.
+
+`StopDeployment` with `AllowRevert=true` returns an in-progress deployment as `ROLLED_BACK`
+or a completed deployment as `REVERTED`, restoring the previous available configuration
+for that environment and profile. It rejects older deployments while a newer one is
+active, and rejects completed deployments outside their 72-hour revert window.
+If the previous hosted configuration version has been deleted, the stop is rejected
+with `BadRequestException` before changing the active version or stopping the deployment.
+Older persisted deployments without completion timestamps cannot be reverted because
+that window cannot be verified.
 
 ## Data Plane (AppConfigData) {#data-plane}
 

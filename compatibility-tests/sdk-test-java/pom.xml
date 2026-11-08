@@ -74,6 +74,10 @@
     <dependencies>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>quicksight</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>servicequotas</artifactId>
         </dependency>
         <dependency>
@@ -151,6 +155,14 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>kms</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>paymentcryptography</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>paymentcryptographydata</artifactId>
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -256,6 +268,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
+        </dependency>
+        <!-- EventBridge V2 client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>eventbridgev2</artifactId>
         </dependency>
         <!-- CloudHSM v2 client -->
         <dependency>

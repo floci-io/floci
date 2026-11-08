@@ -442,6 +442,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Default PostgreSQL Docker image |
+| `FLOCI_SERVICES_RDS_EXPORT_STAGING_BUCKET` | `floci-rds-export-staging` | S3 bucket used to stage table rows and Parquet before a snapshot export writes the Parquet to its bucket |
 | `FLOCI_SERVICES_RDS_DEFAULT_MYSQL_IMAGE` | `mysql:8.0` | Default MySQL Docker image |
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Default MariaDB Docker image |
 | `FLOCI_SERVICES_RDS_DEFAULT_SQL_SERVER_IMAGE` | `mcr.microsoft.com/mssql/server:2022-latest` | Default SQL Server Docker image |
@@ -610,6 +611,8 @@ See [Web Console](../ui/index.md) for running the console and swapping in a thir
 | `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` | `0` | Simulated processing window for Route 53 VPC association/auth mutations; positive values make documented overlap errors (`PriorRequestNotComplete` / `ConcurrentModification`) reproducible for retry tests |
 | `FLOCI_SERVICES_ELBV2_ENABLED` | `true` | Enable the ELBv2 (ALB/NLB) service |
 | `FLOCI_SERVICES_ELBV2_MOCK` | `false` | When `true`, load balancers are registered but no containers are spawned |
+| `FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE` | `true` | Reuse backend HTTP/1.x connections for ordinary HTTP forwarding. Set to `false` for fresh connections per request; WebSocket and TCP transports are unaffected. See [backend connection reuse](../services/elb.md#backend-connection-reuse) |
+| `FLOCI_SERVICES_ELBV2_BACKEND_KEEP_ALIVE_TIMEOUT_SECONDS` | `60` | Default idle-pool timeout for backend HTTP/1.x connections, in non-negative seconds; `0` disables expiry. A target's advertised `Keep-Alive` timeout overrides it. Does not time out active responses or WebSockets |
 | `FLOCI_SERVICES_AUTOSCALING_ENABLED` | `true` | Enable the Auto Scaling service |
 | `FLOCI_SERVICES_CODEBUILD_ENABLED` | `true` | Enable the CodeBuild service |
 | `FLOCI_SERVICES_CODEBUILD_DOCKER_NETWORK` | _(none)_ | Docker network for CodeBuild build containers |

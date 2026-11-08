@@ -21,25 +21,28 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Lambda](lambda.md) | `/2015-03-31/functions/...` + `/2025-12-01/durable-executions/...` | REST JSON | 55 |
 | [Lambda MicroVMs](lambda-microvms.md) | `/2025-09-09/...` + `/2026-04-04/...` | REST JSON | 22 |
 | [Lambda Web Functions](lambda-web-functions.md) | `/2025-03-07/web-functions/...` | REST JSON | 20 |
-| [API Gateway v1](api-gateway.md) | `/restapis/...` | REST JSON | 80 |
+| [API Gateway v1](api-gateway.md) | `/restapis/...` | REST JSON | 85 |
 | [API Gateway v2](api-gateway.md#v2) | `/v2/apis/...` | REST JSON | 53 + data-plane |
 | [IAM](iam.md) | `POST /` with `Action=` param | Query | 180 |
 | [STS](sts.md) | `POST /` with `Action=` param | Query | 11 |
 | [AWS Sign-In](iam.md#aws-sign-in-login-credentials) | `/v1/authorize`, `/v1/token` | REST JSON | 2 |
 | [Organizations](organizations.md) | `POST /` + `X-Amz-Target: AWSOrganizationsV20161128.*` | JSON 1.1 | 56 |
-| [Cognito](cognito.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityProviderService.*` | JSON 1.1 | 90 |
+| [Cognito](cognito.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityProviderService.*` | JSON 1.1 | 91 |
 | [Cognito Identity](cognitoidentity.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityService.*` | JSON 1.1 | 12 |
 | [Global Accelerator](globalaccelerator.md) | `POST /` + `X-Amz-Target: GlobalAccelerator_V20180706.*` | JSON 1.1 | 22 |
 | [KMS](kms.md) | `POST /` + `X-Amz-Target: TrentService.*` | JSON 1.1 | 44 |
 | [CloudHSM v2](cloudhsmv2.md) | `POST /` + `X-Amz-Target: BaldrApiService.*` | JSON 1.1 | 18 |
 | [Kinesis](kinesis.md) | `POST /` + `X-Amz-Target: Kinesis_20131202.*` | JSON 1.1 | 29 |
 | [Managed Service for Apache Flink](kinesisanalytics.md) | `POST /` + `X-Amz-Target: KinesisAnalytics_20180523.*` | JSON 1.1 | 15 |
+| [Payment Cryptography](payment-cryptography.md) | `POST /` + `X-Amz-Target: PaymentCryptographyControlPlane.*` | JSON 1.0 | 12 |
+| [Payment Cryptography data plane](payment-cryptography-data.md) | `POST /keys/{KeyIdentifier}/encrypt` and the rest | REST JSON | 5 |
 | [Secrets Manager](secrets-manager.md) | `POST /` + `X-Amz-Target: secretsmanager.*` | JSON 1.1 | 23 |
 | [Step Functions](step-functions.md) | `POST /` + `X-Amz-Target: AmazonStatesService.*` | JSON 1.1 | 32 |
 | [SWF](swf.md) | `POST /` + `X-Amz-Target: SimpleWorkflowService.*` | JSON 1.0 | 39 |
 | [CloudFormation](cloudformation.md) | `POST /` with `Action=` param | Query | 36 |
 | [Cloud Control API](cloudcontrol.md) | `POST /` + `X-Amz-Target: CloudApiService.*` | JSON 1.1 | 5 |
 | [EventBridge](eventbridge.md) | `POST /` + `X-Amz-Target: AmazonEventBridge.*` | JSON 1.1 | 40 |
+| [EventBridge V2](eventbridgev2.md) | `POST /service/AWSEventsV2/operation/*` | Smithy RPC v2 CBOR | 10 |
 | [EventBridge Scheduler](scheduler.md) | `/schedules/*`, `/schedule-groups/*`, `/tags/*` | REST JSON | 12 |
 | [EventBridge Pipes](pipes.md) | `/v1/pipes/*` | REST JSON | 7 |
 | [CloudWatch OAM](oam.md) | REST paths such as `POST /CreateSink` and `POST /CreateLink` | REST JSON | 15 |
@@ -48,15 +51,15 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudWatch RUM](rum.md) | `/appmonitor`, `/appmonitor/{name}`, `/appmonitors` | REST JSON | 5 |
 | [GuardDuty](guardduty.md) | `/detector`, `/detector/{detectorId}`, `/detector/{detectorId}/admin`, `/admin/*`, `/tags/*` | REST JSON | 28 |
 | [AWS Account Management](account.md) | `/putAlternateContact`, `/getAlternateContact`, `/deleteAlternateContact` | REST JSON | 3 |
-| [IAM Access Analyzer](access-analyzer.md) | `/analyzer`, `/analyzer/{name}` | REST JSON | 4 |
+| [IAM Access Analyzer](access-analyzer.md) | `/analyzer`, `/analyzer/{name}`, `/policy/validation` | REST JSON | 5 |
 | [IAM Identity Center (SSO Admin)](ssoadmin.md) | `POST /` + `X-Amz-Target: SWBExternalService.*` | JSON 1.1 | 79 |
 | [IAM Identity Center OIDC](ssooidc.md) | `/client/register`, `/device_authorization`, `/token`, `/token?aws_iam=t`, `/authorize`, `/device` | REST JSON | 4 |
 | [IAM Identity Center Access Portal](ssoportal.md) | `/assignment/accounts`, `/assignment/roles`, `/federation/credentials`, `/logout` | REST JSON | 4 |
 | [Identity Store](identitystore.md) | `POST /` + `X-Amz-Target: AWSIdentityStore.*` | JSON 1.1 | 19 |
 | [Amazon Macie](macie2.md) | `/admin`, `/macie`, `/admin/configuration` | REST JSON | 8 |
-| [Amazon Inspector](inspector2.md) | `/delegatedadminaccounts/*`, `/status/batch/get`, `/enable`, `/organizationconfiguration/*` | REST JSON | 7 |
+| [Amazon Inspector](inspector2.md) | `/delegatedadminaccounts/*`, `/status/batch/get`, `/enable`, `/disable`, `/organizationconfiguration/*` | REST JSON | 8 |
 | [Amazon Verified Permissions](verifiedpermissions.md) | `POST /` + `X-Amz-Target: VerifiedPermissions.*` | JSON 1.0 | 34 |
-| [Security Hub](securityhub.md) | `/organization/*`, `/accounts`, `/findingAggregator/*`, `/configurationPolicy*`, `/standards*`, `/tags/*` | REST JSON | 26 |
+| [Security Hub](securityhub.md) | `/organization/*`, `/accounts`, `/findingAggregator/*`, `/configurationPolicy*`, `/standards*`, `/tags/*`, `/findings*` | REST JSON | 28 |
 | [Amazon Detective](detective.md) | `/orgs/*`, `/graphs/list`, `/graph/*` | REST JSON | 8 |
 | [Amazon Connect](connect.md) | `/instance`, `/instance/{instanceId}/*`, `/tags/*` | REST JSON | 15 |
 | [Amazon AppIntegrations](appintegrations.md) | `/eventIntegrations/*`, `/dataIntegrations/*`, `/tags/*` | REST JSON | 14 |
@@ -74,9 +77,10 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Glue](glue.md) | `POST /` + `X-Amz-Target: AWSGlue.*` | JSON 1.1 | 135 |
 | [Lake Formation](lakeformation.md) | `POST /<Action>` | REST JSON | 16 |
 | [Neptune](neptune.md) | `POST /` with `Action=` param + Gremlin TCP proxy | Query + WebSocket | 14 |
-| [DocumentDB](docdb.md) | `POST /` with `Action=` param + MongoDB container | Query + MongoDB wire | 13 |
+| [DocumentDB](docdb.md) | `POST /` with `Action=` param + MongoDB container | Query + MongoDB wire | 17 |
 | [DMS](dms.md) | `POST /` + `X-Amz-Target: AmazonDMSv20160101.*` | JSON 1.1 | 20 |
-| [Redshift](redshift.md) | `POST /` with `Action=` param + PostgreSQL container | Query + PostgreSQL wire (+ CFN) | 52 |
+| [QuickSight](quicksight.md) | `/accounts/{AwsAccountId}/...` | REST JSON, metadata only | 16 |
+| [Redshift](redshift.md) | `POST /` with `Action=` param + PostgreSQL container | Query + PostgreSQL wire (+ CFN) | 55 |
 | [Redshift Data API](redshift-data.md) | `POST /` + `X-Amz-Target: RedshiftData.*` | JSON 1.1 | 12 |
 | [Redshift Serverless](redshift-serverless.md) | `POST /` + `X-Amz-Target: RedshiftServerless.*` | JSON 1.1 | 55 |
 | [EMR](emr.md) | `POST /` + `X-Amz-Target: ElasticMapReduce.*` | JSON 1.1 | 40 |
@@ -84,7 +88,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Data Firehose](firehose.md) | `POST /` + `X-Amz-Target: Firehose_20150804.*` | JSON 1.1 | 12 |
 | [ECS](ecs.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerServiceV20141113.*` | JSON 1.1 | 59 |
 | [EFS](efs.md) | `/2015-02-01/...` | REST JSON | 26 |
-| [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 202 |
+| [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 224 |
 | [Lightsail](lightsail.md) | `POST /` + `X-Amz-Target: Lightsail_20161128.*` | JSON 1.1 | 79 local responses; 161 recognized actions |
 | [ACM](acm.md) | `POST /` + `X-Amz-Target: CertificateManager.*` | JSON 1.1 | 16 |
 | [ECR](ecr.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.*` (control plane) and `/v2/...` (data plane proxied to `registry:2`) | JSON 1.1 + OCI Distribution | 34 |
@@ -97,9 +101,9 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AppConfig](appconfig.md) | `/applications/...`, `/deploymentstrategies/...` | REST JSON | 16 |
 | [AppConfigData](appconfig.md#data-plane) | `/configurationsessions`, `/configuration` | REST JSON | 2 |
 | [AppSync](appsync.md) | `/v1/apis/...` | REST JSON | 33 |
-| [Amazon Bedrock](bedrock.md) | `/guardrails`, `/guardrails/{guardrailIdentifier}`, `/tagResource`, `/untagResource`, `/listTagsForResource` | REST JSON | 9 |
+| [Amazon Bedrock](bedrock.md) | `/guardrails`, `/guardrails/{guardrailIdentifier}`, `/foundation-models`, `/foundation-models/{modelIdentifier}`, `/inference-profiles`, `/inference-profiles/{inferenceProfileIdentifier}`, `/resource-policy`, `/resource-policy/{resourceArn}`, `/tagResource`, `/untagResource`, `/listTagsForResource` | REST JSON | 16 |
 | [Bedrock Runtime](bedrock-runtime.md) | `/model/{modelId}/converse`, `/model/{modelId}/invoke` | REST JSON | 2 (stub; streaming returns 501) |
-| [Bedrock AgentCore Control](bedrock-agentcore.md) | `/runtimes/*`, `/gateways/*`, `/memories/*`, `/identities/*`, `/browsers*`, `/browser-profiles*`, `/code-interpreters*`, `/resourcepolicy/*`, `/tags/{resourceArn}` | REST JSON | 65 (+ 3 tagging via shared `/tags/{arn}` route) |
+| [Bedrock AgentCore Control](bedrock-agentcore.md) | `/runtimes/*`, `/gateways/*`, `/memories/*`, `/identities/*`, `/browsers*`, `/browser-profiles*`, `/code-interpreters*`, `/harnesses*`, `/resourcepolicy/*`, `/tags/{resourceArn}` | REST JSON | 71 (+ 3 tagging via shared `/tags/{arn}` route) |
 | [Bedrock AgentCore](bedrock-agentcore.md#data-plane-invokeagentruntime) | `/runtimes/{agentRuntimeArn}/invocations` | REST JSON (binary payload) | 1 (canned-response stub) |
 | [EKS](eks.md) | `/clusters`, `/clusters/{name}`, `/tags/{resourceArn}` | REST JSON | 7 |
 | [ELB v2](elb.md) | `POST /` with `Action=` param | Query | 37 |
@@ -114,7 +118,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CodePipeline](codepipeline.md) | `POST /` + `X-Amz-Target: CodePipeline_20150709.*` | JSON 1.1 | 44 |
 | [AWS Network Firewall](network-firewall.md) | `POST /` + `X-Amz-Target: NetworkFirewall_20201112.*` | JSON 1.0 | 27 |
 | [AWS Service Catalog](service-catalog.md) | `POST /` + `X-Amz-Target: AWS242ServiceCatalogService.*` | JSON 1.1 | 89 |
-| [Service Quotas](servicequotas.md) | `POST /` + `X-Amz-Target: ServiceQuotasV20190624.*` | JSON 1.1 | 7 |
+| [Service Quotas](servicequotas.md) | `POST /` + `X-Amz-Target: ServiceQuotasV20190624.*` | JSON 1.1 | 8 |
 | [AWS Budgets](budgets.md) | `POST /` + `X-Amz-Target: AWSBudgetServiceGateway.*` | JSON 1.1 | 26 |
 | [AWS RAM](ram.md) | `POST /{operationname}` (lowercase), `DELETE /deleteresourceshare` | REST JSON | 16 |
 | [Control Catalog](controlcatalog.md) | `/get-control`, `/list-controls` | REST JSON | 2 |

@@ -2,6 +2,9 @@
 
 Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
+HTTP integrations preserve path encoding through custom domains and `execute-api` hosts as well
+as path-based endpoints. For example, `/files/a%25b` reaches an HTTP backend with `%25` intact.
+
 ## JWT issuer network policy
 
 HTTP API JWT authorizers fetch the configured issuer's OIDC discovery document and JWKS. Floci
@@ -112,10 +115,14 @@ changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not a
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
 | **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Documentation Parts** | CreateDocumentationPart, GetDocumentationPart, GetDocumentationParts, UpdateDocumentationPart, DeleteDocumentationPart |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
+
+Documentation part listing covers created parts. The `UNDOCUMENTED` location status does not
+discover API locations without documentation content yet.
 
 `TagResource`, `UntagResource` and `GetTags` also accept API key and usage plan ARNs,
 `arn:aws:apigateway:<region>::/apikeys/<id>` and `arn:aws:apigateway:<region>::/usageplans/<id>`.
@@ -176,6 +183,19 @@ deleted, or not bound to the stage by a usage plan, with `403` `{"message":"Forb
 `x-amzn-ErrorType: ForbiddenException`, as AWS does. The header stays when the API customises its
 `INVALID_API_KEY` gateway response.
 
+#### API key source
+
+A REST API's `apiKeySource` is set with `CreateRestApi`, a `replace /apiKeySource` patch on
+`UpdateRestApi`, or an imported `x-amazon-apigateway-api-key-source`, and defaults to `HEADER`. Any
+other value is refused with `BadRequestException`. A stage export leaves the extension out, as AWS's
+does.
+
+With `AUTHORIZER`, the `x-api-key` header is not read. The key is the `usageIdentifierKey` the
+method's Lambda authorizer returns, checked against usage plans as above, and reported as
+`requestContext.identity.apiKey` and `apiKeyId` to a Lambda proxy integration. The authorizer's own
+event carries no key, since none is known before it runs. A method that requires a key and is not
+behind a Lambda authorizer then always answers `403`.
+
 ### REST Lambda Authorizers
 
 TOKEN and REQUEST authorizers must return a nonempty `principalId` and an IAM policy. Floci
@@ -210,7 +230,11 @@ A domain created with `CreateDomainName` is `AVAILABLE` at once. Its `regionalDo
 `<domain>.regional.local`, and a request whose `Host` header is either that name or the domain
 itself is routed through the domain's base path mappings to the mapped REST API stage. An
 `EDGE` domain also reports a `distributionDomainName` under `cloudfront.net` and the fixed
-CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. Moving a
+CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. The
+`regionalHostedZoneId` is the zone the [General Reference](https://docs.aws.amazon.com/general/latest/gr/apigateway.html)
+publishes for the domain's region, or the placeholder `Z2FDTNDATAQYL2`, which is no AWS zone, in a
+region the table does not list. The id is set at creation, so a stored domain keeps the one it
+was created with. Moving a
 domain between the two types with `UpdateDomainName` creates or drops the distribution. A
 domain created with no endpoint type is `EDGE`, as on AWS; it is `REGIONAL` when the request
 carries a regional certificate (`regionalCertificateArn` or `regionalCertificateName`) or the
@@ -375,7 +399,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 
 - Authorizer testing: `TestInvokeAuthorizer`
 - Model templates: `GetModelTemplate`
-- Documentation parts and versions (the entire family, 10 operations)
+- Documentation versions (5 operations)
 - Client Certificates (5 operations)
 - `ImportDocumentationParts`
 
@@ -396,7 +420,7 @@ and mappings. It supports these integration types; others return an error:
 
 A `MOCK` integration renders its request template and uses the `statusCode` it produces to pick the integration response, exactly as AWS does: the first response whose `selectionPattern` matches wins, otherwise the response without a pattern (the default) answers. This is what makes CORS preflights declared with a `204` response (CDK's `addCorsPreflight`) carry their `Access-Control-*` headers.
 
-`HTTP_PROXY` forwards the request to the integration's `uri` — with `{param}` placeholders resolved from the matched resource's path parameters — and relays the backend's status, headers and body unchanged. Per AWS, no request templates and no integration-response selection apply to `HTTP_PROXY`, so a backend `4xx`/`5xx` reaches the caller verbatim rather than being remapped. `integration.request.{header,querystring,path}.*` → `method.request.*` mappings are applied. Hop-by-hop headers (including `Host`) are stripped. An unreachable or failing backend yields `502`.
+`HTTP_PROXY` forwards the request to the integration's `uri` — with `{param}` placeholders resolved from the matched resource's path parameters — and relays the backend's status, headers and body unchanged. Per AWS, no request templates and no integration-response selection apply to `HTTP_PROXY`, so a backend `4xx`/`5xx` reaches the caller verbatim rather than being remapped. `integration.request.{header,querystring,path}.*` → `method.request.*` mappings are applied. Hop-by-hop headers (including `Host`) are stripped. An unreachable or failing backend yields `502`, and so does an integration URI that cannot be parsed. A path parameter copied from the request path keeps the caller's percent-encoding, so `/index/NIFTY%2050` and `/files/a%2Fb` reach the backend as sent, and a path value mapped from anywhere else, such as a header, is percent-encoded. HTTP API `HTTP_PROXY` integrations treat path parameters the same way.
 
 A greedy resource captures only the path segments after its parent. For example,
 `/api/v1/auth/signup/{proxy+}` captures `checkpoint/status` from
@@ -609,8 +633,12 @@ an offset inside it, a per-method throttle needs a plan throttle, and adding a s
 lists is a `ConflictException`. `AWS::ApiGateway::UsagePlan` maps its `ApiStages`, with each stage's
 `Throttle`, and its `Throttle` and `Quota` the same way, and an update replaces them.
 
-Floci does not check that a stage's API, stage or method exists, does not filter `GetUsagePlans` by
-`keyId`, and does not enforce throttles or quotas.
+`GetUsagePlans` with a `keyId` returns only the plans that key is added to, and an empty list for a key
+in no plan or an unknown key. A blank `keyId` lists every plan, as on AWS. Every matching plan comes
+back in one page.
+
+Floci does not check that a stage's API, stage or method exists, and does not enforce throttles or
+quotas.
 
 A `CreateUsagePlan` body member of the wrong JSON type is a `SerializationException` with API
 Gateway's deserializer message, before anything else is validated. The message names the Java class
@@ -856,6 +884,20 @@ The `integrationUri` names the backend:
 
 The request path is forwarded as received. The stage name is not added to it, and `tlsConfig` is not
 applied: the call to a Cloud Map instance uses plain HTTP.
+
+`$context.identity.sourceIp` is the address of the TCP connection to Floci, whatever `X-Forwarded-For`
+the client sent. An HTTP API `HTTP_PROXY` backend receives a `Forwarded` header holding the client's
+`X-Forwarded-For` entries and the client address, for example
+`Forwarded: for=198.51.100.7,for=192.0.2.43;by=10.0.0.1;host=api.example.test;proto=https`, and an
+`X-Forwarded-For` naming only the address Floci accepted the request on. A client's own `Forwarded`
+header is replaced. `$request.header.X-Forwarded-For` mappings still see the client's value. The
+[API Gateway important notes](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-known-issues.html)
+say HTTP APIs translate `X-Forwarded-*` into `Forwarded` and append the egress IP, Host and protocol.
+They do not give the syntax or the `X-Forwarded-For` value, which follow third-party descriptions of
+observed behavior. Floci translates only `X-Forwarded-For`: `X-Forwarded-Host`, `X-Forwarded-Proto` and
+`X-Forwarded-Port` reach the backend as the client sent them.
+An ALB HTTP or HTTPS listener integration goes through the listener, which adds its own hop. An NLB TCP
+listener relays the request unchanged and does not add a hop.
 
 ### Supported Operations
 

@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.*;
@@ -27,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @DisplayName("Data Lake (Athena + Glue + Firehose)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("floci-duck")
 class DataLakeTest {
 
     private static AthenaClient athena;

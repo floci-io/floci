@@ -46,6 +46,10 @@ on:
       - 'src/main/resources/iam/managed-policy-versions.json'
       - 'Makefile'
       - '.github/workflows/partition-literals.yml'
+  # Runs each merge queue entry against main plus the PRs queued ahead of it. paths does not
+  # apply to merge_group, so a queued PR is always checked.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -110,8 +114,8 @@ jobs:
       - name: Check S3 Control tag condition request members
         run: make s3control-tag-condition-keys-check
 
-      - name: Check Lambda Web condition request members
-        run: make lambda-web-condition-keys-check
+      - name: Check request condition key members
+        run: make request-condition-keys-check
 
       - name: Check partitions.json against a fresh generation
         run: make aws-data-check

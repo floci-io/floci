@@ -64,9 +64,9 @@ Route53 emulation supporting hosted zones, reusable delegation sets, resource re
 
 Floci resolves private hosted zone DNS records directly through its embedded DNS server on port 53. Cluster containers (such as EKS k3s containers) and workloads wired to embedded DNS automatically query Floci as their primary resolver.
 
-- **Record Types**: Resolves IPv4 `A` records (including `CNAME` and `ALIAS` target chasing across private zones, EC2 internal names, and external hostnames). When a private CNAME targets a public hostname, Floci resolves the target addresses off the event loop so container stub resolvers succeed. Multiple values are returned as separate answers.
-- **TTL and Negative Answers**: Answers carry the record set's `TTL`. A chased `CNAME` chain is flattened to `A` records, so it answers with the shortest TTL in the chain; an alias answers with its target's TTL, and an alias or `CNAME` to a name outside the private zones answers with at most 60 seconds, since Floci cannot see that target's TTL. A name absent from the zone receives NXDOMAIN; a name that exists without an `A` record (only `TXT`, for example, or only records beneath it) receives NOERROR with no answers. A wildcard record such as `*.example.internal` answers only when neither the name nor an ancestor closer than the wildcard exists, so a record at `api.team.example.internal` keeps the wildcard from answering for `team.example.internal` or anything beneath it.
-- **Zone Visibility and Fallthrough**: Private hosted zones (created with a VPC association) retain IPv4 resolution. Public zones support the authoritative record types described below; unowned external domains fall through to upstream forwarders. Because the standard DNS wire protocol carries no caller VPC identifier, Floci resolves across private zones without filtering by account or VPC ID.
+- **Record Types**: Resolves IPv4 `A` records (including `CNAME` and `ALIAS` target chasing across private zones, EC2 internal names, and external hostnames). When a private CNAME targets a public hostname, Floci resolves the target addresses off the event loop so container stub resolvers succeed. Multiple values are returned as separate answers. Simple private `SRV` record sets also resolve, preserving each value's priority, weight (including zero), port, target, and the record set TTL. The target `.` encodes an unavailable service. Malformed SRV values and SRV sets requiring routing policies or health evaluation return REFUSED; SRV CNAME chasing is not implemented.
+- **TTL and Negative Answers**: Answers carry the record set's `TTL`. A chased `CNAME` chain is flattened to `A` records, so it answers with the shortest TTL in the chain; an alias answers with its target's TTL, and an alias or `CNAME` to a name outside the private zones answers with at most 60 seconds, since Floci cannot see that target's TTL. A name absent from the zone receives NXDOMAIN; a name that exists without the requested record type (only `TXT`, for example, or only records beneath it) receives NOERROR with no answers. A private `CNAME` chain preserves that distinction from its target, including after the target is created or deleted. A wildcard record such as `*.example.internal` answers only when neither the name nor an ancestor closer than the wildcard exists, so a record at `api.team.example.internal` keeps the wildcard from answering for `team.example.internal` or anything beneath it.
+- **Zone Visibility and Fallthrough**: Private hosted zones (created with a VPC association) provide IPv4 and SRV resolution. Public zones support the authoritative record types described below; unowned external domains fall through to upstream forwarders. Because the standard DNS wire protocol carries no caller VPC identifier, Floci resolves across private zones without filtering by account or VPC ID.
 - **Resolver Rule Precedence**: A Route 53 Resolver rule associated with the querying container's VPC takes precedence over a private hosted zone that matches the same name, as it does in AWS: the query is forwarded to the rule's targets instead of answered from the zone. See [Route 53 Resolver](route53resolver.md#resolver-rules-and-dns-resolution).
 - **Zero-Restart Propagation**: Record changes via `ChangeResourceRecordSets` take effect immediately without restarts.
 - **Kubernetes and external-dns Compatibility**: In-cluster controllers like `external-dns` provisioning Route 53 private records for Services or Ingresses are immediately resolvable.
@@ -83,7 +83,7 @@ Public address routing, aliases, CNAME chasing, health-based or weighted record 
 
 ## Default Nameservers
 
-New zones without a reusable delegation set use these nameservers (configurable via `floci.services.route53.*`):
+By default, new public zones without a reusable delegation set and new standalone reusable sets receive four nameservers shaped like `ns-2048.awsdns-64.com`. Floci derives their numbers from each resource ID and uses the `org`, `net`, `com`, and `co.uk` TLDs. An occasional server name can overlap between resources, as with Route 53. With no explicit nameserver overrides, private zones keep these names:
 
 ```
 ns-1.awsdns-01.org
@@ -92,9 +92,9 @@ ns-3.awsdns-03.com
 ns-4.awsdns-04.co.uk
 ```
 
-A configured name can be written with or without the final dot. The delegation set lists it without the dot, as Route 53 does. A new zone's apex NS records, and the primary server named in its SOA record (the first nameserver), use the fully qualified form with the dot.
+Set any `floci.services.route53.default-nameserver*` value to use that exact name for its slot in new zones without a reusable set and in new standalone sets, including when the configured value equals the former default shown above. Zones using a reusable set keep that set's names. A configured name can have or omit its final dot. The delegation set lists names without the final dot, as Route 53 does. A new zone's apex NS records, and the primary server named in its SOA record (the first nameserver), use the fully qualified form with the dot.
 
-For zones without a reusable delegation set, the apex NS and SOA records are written when a zone is created, while the delegation set that `CreateHostedZone` and `GetHostedZone` return reflects the current settings. A zone kept in persistent storage therefore keeps its original NS and SOA records after these settings change; update them with an `UPSERT` change.
+For zones without a reusable delegation set, both the assigned servers returned by `CreateHostedZone` and `GetHostedZone` and the apex NS and SOA records remain stable after the configuration changes. Update the records with an `UPSERT` change if needed.
 
 ## Reusable Delegation Sets
 
@@ -106,7 +106,7 @@ Pass `delegationsetid` to `ListHostedZones` to filter by a reusable set before p
 
 Pass `DelegationSetId` to `CreateHostedZone` to reuse a set. The create/get responses include its ID, caller reference, and name servers; the new zone's apex NS records and SOA primary server use those same servers. Passing `HostedZoneId` to `CreateReusableDelegationSet` marks an existing public zone's delegation set as reusable. Private zones cannot use reusable sets. Deleting a set associated with any hosted zone returns `DelegationSetInUse`; delete its zones first. The default quotas are 100 sets per account and 100 hosted zones per set.
 
-A new standalone set snapshots the four configured local nameservers. Promotion reuses the zone's original assignment, even after configuration or apex NS changes. Older stored zones without a separate assignment recover it from their four apex NS entries, falling back to current settings when those entries are unavailable. Its servers and zone associations persist through the configured Route53 storage backend and remain stable after configuration changes. Floci does not allocate distinct AWS nameservers for each set, so different sets may contain the same servers. Requests selecting a reusable set reject equal, parent, or child public-zone names that share a nameserver with an existing public zone (`ConflictingDomainExists`). Sibling domains can share a set. This feature manages delegation metadata and apex records; public DNS delegation referrals remain unsupported.
+A new standalone set keeps its assigned four nameservers. Promotion reuses the zone's original assignment, even after configuration or apex NS changes. Older stored zones without a separate assignment recover it from their four apex NS entries, falling back to current settings when those entries are unavailable. Its servers and zone associations persist through the configured Route53 storage backend and remain stable after configuration changes. Requests selecting a reusable set reject equal, parent, or child public-zone names only when they share a nameserver with an existing public zone (`ConflictingDomainExists`). Sibling domains can share a set. This feature manages delegation metadata and apex records; public DNS delegation referrals remain unsupported.
 
 ```bash
 set_id=$(aws route53 create-reusable-delegation-set \
@@ -124,10 +124,10 @@ aws route53 create-hosted-zone \
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ROUTE53_ENABLED` | `true` | Enable or disable the service |
-| `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER1` | `ns-1.awsdns-01.org` | First default nameserver returned in delegation sets |
-| `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER2` | `ns-2.awsdns-02.net` | Second default nameserver |
-| `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER3` | `ns-3.awsdns-03.com` | Third default nameserver |
-| `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER4` | `ns-4.awsdns-04.co.uk` | Fourth default nameserver |
+| `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER1` | unset | Exact override for the first assigned nameserver |
+| `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER2` | unset | Exact override for the second assigned nameserver |
+| `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER3` | unset | Exact override for the third assigned nameserver |
+| `FLOCI_SERVICES_ROUTE53_DEFAULT_NAMESERVER4` | unset | Exact override for the fourth assigned nameserver |
 | `FLOCI_SERVICES_ROUTE53_VPC_ASSOCIATION_CONTROL_PLANE_DELAY_MS` | `0` | Optional VPC association/auth processing window used to reproduce documented retryable overlap errors |
 
 ## CLI Examples

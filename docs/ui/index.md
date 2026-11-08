@@ -161,7 +161,7 @@ previous run that it is pointing at a dead address.
 !!! note "The page says Floci could not reach the container runtime"
 
     Floci needs the Docker socket. Check that `/var/run/docker.sock` is mounted into the Floci
-    container. On SELinux hosts the bind-mount may need relabeling (`:z`) or
+    container. On SELinux hosts, start the Floci container with
     `--security-opt label=disable`. See [Docker Configuration](../configuration/docker.md).
 
 !!! note "The console loads but says it cannot reach Floci"
