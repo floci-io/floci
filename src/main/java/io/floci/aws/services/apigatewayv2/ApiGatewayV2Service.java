@@ -235,7 +235,8 @@ public class ApiGatewayV2Service {
             throw new AwsException("BadRequestException", "MaxResults must be at least 1", 400);
         }
         return Pagination.paginate(getApis(region), Api::getApiId,
-                maxResults == null ? Integer.MAX_VALUE : maxResults, nextToken, "apis",
+                maxResults == null ? Integer.MAX_VALUE : maxResults, nextToken,
+                "apis:" + regionResolver.getAccountId() + ":" + region,
                 token -> new AwsException("BadRequestException", "Invalid NextToken", 400));
     }
 

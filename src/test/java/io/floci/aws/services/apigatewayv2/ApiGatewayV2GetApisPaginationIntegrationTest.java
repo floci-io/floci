@@ -3,11 +3,14 @@ package io.floci.aws.services.apigatewayv2;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.http.apache5.Apache5HttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
@@ -20,6 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
@@ -77,7 +81,7 @@ class ApiGatewayV2GetApisPaginationIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(3)
     void getApisWithoutMaxResultsReturnsEveryApiWithoutAToken() {
         try (ApiGatewayV2Client client = client()) {
             GetApisResponse page = client.getApis(r -> { });
@@ -87,7 +91,7 @@ class ApiGatewayV2GetApisPaginationIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(4)
     void getApisRefusesAnUnreadableToken() {
         try (ApiGatewayV2Client client = client()) {
             BadRequestException e = assertThrows(BadRequestException.class,
@@ -97,7 +101,7 @@ class ApiGatewayV2GetApisPaginationIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(5)
     void getApisRefusesAMaxResultsBelowOne() {
         try (ApiGatewayV2Client client = client()) {
             BadRequestException e = assertThrows(BadRequestException.class,
@@ -107,34 +111,54 @@ class ApiGatewayV2GetApisPaginationIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(6)
     void getApisOverJson11PagesWithMaxResultsAndNextToken() {
-        String token = given()
-                .contentType("application/x-amz-json-1.1")
-                .header("X-Amz-Target", "AmazonApiGatewayV2.GetApis")
-                .header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=test/20260413/" + REGION.id() + "/apigatewayv2/aws4_request")
-                .body("{\"MaxResults\":\"2\"}")
-                .when().post("/")
+        String token = json11GetApis(REGION, "{\"MaxResults\":\"2\"}")
                 .then().statusCode(200)
                 .body("Items", hasSize(2))
                 .body("NextToken", notNullValue())
                 .extract().path("NextToken");
 
-        given()
-                .contentType("application/x-amz-json-1.1")
-                .header("X-Amz-Target", "AmazonApiGatewayV2.GetApis")
-                .header("Authorization",
-                        "AWS4-HMAC-SHA256 Credential=test/20260413/" + REGION.id() + "/apigatewayv2/aws4_request")
-                .body("{\"MaxResults\":\"2\",\"NextToken\":\"" + token + "\"}")
-                .when().post("/")
+        json11GetApis(REGION, "{\"MaxResults\":\"2\",\"NextToken\":\"" + token + "\"}")
                 .then().statusCode(200)
                 .body("Items", hasSize(1))
                 .body("NextToken", nullValue());
     }
 
     @Test
-    @Order(3)
+    @Order(7)
+    void getApisRefusesATokenIssuedForAnotherRegion() {
+        String token;
+        try (ApiGatewayV2Client client = client()) {
+            token = client.getApis(r -> r.maxResults("1")).nextToken();
+        }
+        try (ApiGatewayV2Client other = AwsTestClients.create(ApiGatewayV2Client.builder(), "test",
+                Region.AP_SOUTHEAST_4, Apache5HttpClient.builder())) {
+            assertThrows(BadRequestException.class, () -> other.getApis(r -> r.nextToken(token)));
+        }
+    }
+
+    @ParameterizedTest
+    @Order(8)
+    @ValueSource(strings = {"{\"MaxResults\":{\"n\":1}}", "{\"NextToken\":[\"x\"]}"})
+    void getApisOverJson11RefusesAPaginationFieldThatIsNotAScalar(String body) {
+        json11GetApis(REGION, body)
+                .then().statusCode(400)
+                .body("__type", containsString("BadRequestException"));
+    }
+
+    private static Response json11GetApis(Region region, String body) {
+        return given()
+                .contentType("application/x-amz-json-1.1")
+                .header("X-Amz-Target", "AmazonApiGatewayV2.GetApis")
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=test/20260413/" + region.id() + "/apigatewayv2/aws4_request")
+                .body(body)
+                .when().post("/");
+    }
+
+    @Test
+    @Order(20)
     void deleteApis() {
         try (ApiGatewayV2Client client = client()) {
             for (String apiId : CREATED) {

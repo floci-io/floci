@@ -119,9 +119,13 @@ public class ApiGatewayV2JsonHandler {
     }
 
     private Response handleGetApis(JsonNode request, String region) {
+        JsonNode maxResults = request.path("MaxResults");
+        if (maxResults.isContainerNode()) {
+            throw new AwsException("BadRequestException", "MaxResults must be a string.", 400);
+        }
         PaginatedResult<Api> page = service.getApis(region,
-                Pagination.parseMaxResults(request.path("MaxResults").asText(null), "BadRequestException"),
-                request.path("NextToken").asText(null));
+                Pagination.parseMaxResults(maxResults.asText(null), "BadRequestException"),
+                Pagination.parseNextToken(request, "NextToken", "BadRequestException"));
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Items");
         page.items().forEach(a -> items.add(toApiNode(a)));
