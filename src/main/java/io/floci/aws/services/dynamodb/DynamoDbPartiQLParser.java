@@ -1749,8 +1749,7 @@ public class DynamoDbPartiQLParser {
                 case NULL     -> new PVal.Null();
                 case QUESTION -> {
                     if (path != null) {
-                        defer("Unsupported data type: Parameter under key " + path + " at "
-                                + position(t.start(), 1));
+                        defer(refusedMember("Parameter", parent, path) + " at " + position(t));
                     }
                     yield resolveParam();
                 }
@@ -1798,13 +1797,16 @@ public class DynamoDbPartiQLParser {
             return new PVal.Null();
         }
         if (parent != null) {
-            boolean firstInBag = parent.close == TType.RBAG && parent.items.isEmpty();
-            defer((firstInBag ? BAG_MEMBER_TYPES : "Unsupported data type: Call under key " + path) + " at "
-                    + position(name));
+            defer(refusedMember("Call", parent, path) + " at " + position(name));
         }
         parseCall(name, false);
         deferExpression(expectedValue);
         return new PVal.Null();
+    }
+
+    private static String refusedMember(String type, OpenCollection parent, String path) {
+        boolean firstInBag = parent.close == TType.RBAG && parent.items.isEmpty();
+        return firstInBag ? BAG_MEMBER_TYPES : "Unsupported data type: " + type + " under key " + path;
     }
 
     private static final class OpenCollection {
@@ -1968,7 +1970,8 @@ public class DynamoDbPartiQLParser {
 
     private PVal resolveParam() {
         if (paramIdx >= parameters.size()) {
-            throw validationEx("Not enough parameters supplied for ? placeholders");
+            defer("Number of parameters in request and statement don't match.");
+            return new PVal.Null();
         }
         JsonNode p = parameters.get(paramIdx++);
         String type = DynamoDbAttributeValueValidator.typeOf(p);
