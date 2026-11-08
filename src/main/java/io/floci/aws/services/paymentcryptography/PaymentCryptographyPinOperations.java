@@ -109,9 +109,9 @@ public class PaymentCryptographyPinOperations {
         String pan = requirePan(text(request, "PrimaryAccountNumber"),
                 "PrimaryAccountNumber is required for Visa PVV verification");
         requireVisaPinLength(request);
-        requireHex(text(request, "EncryptedPinBlock"), format.blockHexLength(),
+        requireExactLength(text(request, "EncryptedPinBlock"), format.blockHexLength(),
                 "EncryptedPinBlock must be " + format.blockHexLength()
-                        + " hexadecimal characters (one " + format.label() + " block)");
+                        + " characters (one " + format.label() + " block)");
 
         JsonNode verificationAttributes = request.get("VerificationAttributes");
         String variant = soleVariant(verificationAttributes);
@@ -218,9 +218,9 @@ public class PaymentCryptographyPinOperations {
         String encryptedPinBlock;
         if (!givenBlock.isEmpty()) {
             // The caller's own block: recover the PIN from it and leave the block as it is.
-            requireHex(givenBlock, format.blockHexLength(),
+            requireExactLength(givenBlock, format.blockHexLength(),
                     "EncryptedPinBlock must be " + format.blockHexLength()
-                            + " hexadecimal characters (one " + format.label() + " block)");
+                            + " characters (one " + format.label() + " block)");
             try {
                 pin = PinCrypto.decipherPinBlock(format, givenBlock, pan, pek.keyBytes);
             } catch (IllegalArgumentException e) {
@@ -318,9 +318,9 @@ public class PaymentCryptographyPinOperations {
 
         // The block length follows the incoming format: eight bytes for the TDES formats,
         // sixteen for the AES one.
-        requireHex(text(request, "EncryptedPinBlock"), inFormat.blockHexLength(),
+        requireExactLength(text(request, "EncryptedPinBlock"), inFormat.blockHexLength(),
                 "EncryptedPinBlock must be " + inFormat.blockHexLength()
-                        + " hexadecimal characters (one " + inFormat.label() + " block)");
+                        + " characters (one " + inFormat.label() + " block)");
 
         JsonNode inAttrs = incoming.get(inVariant);
         JsonNode outAttrs = outgoing.get(outVariant);
@@ -394,13 +394,24 @@ public class PaymentCryptographyPinOperations {
         requireUsage(key, DERIVATION_USAGES, "deriving a PIN key");
         requireFamily(key, false, "deriving a PIN key");
 
-        // The model's DUKPT attributes carry the key serial number and the derivation type,
-        // and the derivation this path makes is the Triple DES one.
+        // The model's DUKPT attributes come in two shapes. The PIN operations take
+        // DukptAttributes, whose derivation type is DukptDerivationType, and the translation
+        // takes DukptDerivationAttributes, whose derivation type is DukptKeyDerivationType and
+        // whose variant is DukptKeyVariant. The derivation this path makes is the Triple DES
+        // one, and the PIN key it derives is the one that both encrypts and decrypts.
         String ksn = text(dukptAttributes, "KeySerialNumber");
         String derivationType = text(dukptAttributes, "DukptDerivationType");
-        if (!"TDES_2KEY".equals(derivationType)) {
-            throw validation("DukptDerivationType '" + derivationType
-                    + "' not supported by this service (TDES_2KEY)");
+        if (derivationType.isEmpty()) {
+            derivationType = text(dukptAttributes, "DukptKeyDerivationType");
+        }
+        if (!derivationType.isEmpty() && !"TDES_2KEY".equals(derivationType)) {
+            throw validation("the DUKPT derivation type '" + derivationType
+                    + "' is not supported by this service (TDES_2KEY)");
+        }
+        String keyVariant = text(dukptAttributes, "DukptKeyVariant");
+        if (!keyVariant.isEmpty() && !"BIDIRECTIONAL".equals(keyVariant)) {
+            throw validation("the DUKPT key variant '" + keyVariant
+                    + "' is not supported by this service (BIDIRECTIONAL)");
         }
         try {
             // A DUKPT PIN key is a TDES key, whatever the base derivation key is.
@@ -537,7 +548,7 @@ public class PaymentCryptographyPinOperations {
         return pan;
     }
 
-    private static void requireHex(String value, int length, String message) {
+    private static void requireExactLength(String value, int length, String message) {
         if (value == null || value.length() != length) {
             throw validation(message);
         }

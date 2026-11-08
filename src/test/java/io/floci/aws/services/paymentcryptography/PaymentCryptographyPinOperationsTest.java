@@ -654,6 +654,62 @@ class PaymentCryptographyPinOperationsTest {
     }
 
     @Test
+    void aDukptTranslationDerivesItsPinKeyFromTheBaseDerivationKey() {
+        // The translation's DUKPT attributes are the model's other shape: the key serial
+        // number, an optional derivation type and an optional key variant.
+        PaymentCryptographyKey bdk = createKey("TDES_2KEY", "TR31_B0_BASE_DERIVATION_KEY",
+                "DeriveKey");
+        PaymentCryptographyKey tdesPek = pinEncryptionKey();
+        String ksn = "12345678901234567890";
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.put("KeySerialNumber", ksn);
+        attributes.put("DukptKeyDerivationType", "TDES_2KEY");
+        attributes.put("DukptKeyVariant", "BIDIRECTIONAL");
+
+        // The block is enciphered under the PIN key the DUKPT derivation makes.
+        byte[] pinKey = DukptCrypto.pinKey(bdk.getKeyMaterialHex(), ksn);
+        String block = PinCrypto.encipherPinBlock(PinBlockFormat.ISO_FORMAT_0, PIN, PAN, pinKey,
+                new SecureRandom());
+
+        Map<String, Object> translated = pin.translatePinData(request(Map.of(
+                "EncryptedPinBlock", block,
+                "IncomingKeyIdentifier", bdk.getArn(),
+                "OutgoingKeyIdentifier", tdesPek.getArn(),
+                "IncomingDukptAttributes", attributes,
+                "IncomingTranslationAttributes", nested("IsoFormat0", "PrimaryAccountNumber", PAN),
+                "OutgoingTranslationAttributes", nested("IsoFormat0", "PrimaryAccountNumber", PAN))),
+                "us-east-1");
+        // The answer names the outgoing key, which is the key the block is enciphered under.
+        assertEquals(tdesPek.getArn(), translated.get("KeyArn"));
+    }
+
+    @Test
+    void aDukptTranslationOfAnotherKeyVariantIsRefused() {
+        // The PIN key this path derives both encrypts and decrypts, so it is the
+        // bidirectional one.
+        PaymentCryptographyKey bdk = createKey("TDES_2KEY", "TR31_B0_BASE_DERIVATION_KEY",
+                "DeriveKey");
+        PaymentCryptographyKey tdesPek = pinEncryptionKey();
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.put("KeySerialNumber", "12345678901234567890");
+        attributes.put("DukptKeyDerivationType", "TDES_2KEY");
+        attributes.put("DukptKeyVariant", "REQUEST");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> pin.translatePinData(request(Map.of(
+                        "EncryptedPinBlock", "0000000000000000",
+                        "IncomingKeyIdentifier", bdk.getArn(),
+                        "OutgoingKeyIdentifier", tdesPek.getArn(),
+                        "IncomingDukptAttributes", attributes,
+                        "IncomingTranslationAttributes", nested("IsoFormat0",
+                                "PrimaryAccountNumber", PAN),
+                        "OutgoingTranslationAttributes", nested("IsoFormat0",
+                                "PrimaryAccountNumber", PAN))),
+                        "us-east-1"));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
     void aDukptDerivationOfAnotherTypeIsRefused() {
         PaymentCryptographyKey bdk = createKey("TDES_2KEY", "TR31_B0_BASE_DERIVATION_KEY",
                 "DeriveKey");
