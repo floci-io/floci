@@ -71,6 +71,22 @@ public final class RequestConstraintCheck {
         checkValue(model.path("operations").path(operation).asText(), request, operation);
     }
 
+    /** Checks one modeled value without treating it as a whole request. */
+    public void checkShape(String shapeName, JsonNode value) {
+        checkValue(shapeName, value, shapeName);
+    }
+
+    /** Checks a modeled request list's count without validating its members as one batch error. */
+    public void checkListSize(String operation, String member, int size) {
+        String input = model.path("operations").path(operation).asText();
+        String list = model.path("shapes").path(input).path("members").path(member).asText();
+        JsonNode shape = model.path("shapes").path(list);
+        if (!"list".equals(shape.path("type").asText())) {
+            throw new IllegalArgumentException(operation + "." + member + " is not a modeled list");
+        }
+        checkBounds(shape, operation + "." + member, "list", size);
+    }
+
     private void checkValue(String name, JsonNode value, String path) {
         JsonNode shape = model.path("shapes").path(name);
         String type = shape.path("type").asText();
@@ -90,11 +106,7 @@ public final class RequestConstraintCheck {
             case "integer", "long" -> value.longValue();
             default -> value.size();
         };
-        Long min = shape.has("min") ? shape.get("min").asLong() : null;
-        Long max = shape.has("max") ? shape.get("max").asLong() : null;
-        if (min != null && size < min || max != null && size > max) {
-            throw messages.bounds(path, type, min, max, size);
-        }
+        checkBounds(shape, path, type, size);
         if (patterns.containsKey(name) && !patterns.get(name).matcher(value.asText()).matches()) {
             throw messages.pattern(path, VendoredPatterns.quoted(shape));
         }
@@ -136,6 +148,14 @@ public final class RequestConstraintCheck {
             }
             default -> {
             }
+        }
+    }
+
+    private void checkBounds(JsonNode shape, String path, String type, long size) {
+        Long min = shape.has("min") ? shape.get("min").asLong() : null;
+        Long max = shape.has("max") ? shape.get("max").asLong() : null;
+        if (min != null && size < min || max != null && size > max) {
+            throw messages.bounds(path, type, min, max, size);
         }
     }
 }

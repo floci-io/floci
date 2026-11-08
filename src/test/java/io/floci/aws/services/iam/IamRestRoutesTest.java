@@ -13,6 +13,7 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -86,6 +87,22 @@ class IamRestRoutesTest {
     @Test
     void aSegmentMixingALiteralAndALabelOutranksALabel() {
         assertEquals(Optional.of("GetThingVersion"), get("/things/web:3"));
+    }
+
+    /**
+     * The values the path holds are read under the names the route gives its labels, so that a
+     * service which names a resource in the path reads the resource from it. A label holding an
+     * ARN spans the slashes the ARN holds, so the route names it with a {@code +}.
+     */
+    @Test
+    void theValuesThePathHoldsAreReadUnderTheNamesItsLabelsCarry() {
+        IamRestRoutes table = routes(ROUTES.replace("\"/things/{ThingName}\"", "\"/keys/{KeyIdentifier+}\"")
+                .replace("\"GetThing\"", "\"GetKey\""));
+        assertEquals(Map.of("KeyIdentifier", "arn:aws:service:region:account:key/abc"),
+                table.match("svc", "GET", "/keys/arn:aws:service:region:account:key/abc", null)
+                        .map(IamRestRoutes.Match::labels).orElse(Map.of()));
+        assertEquals(Map.of(), table.match("svc", "GET", "/things/web", null)
+                .map(IamRestRoutes.Match::labels).orElse(Map.of()));
     }
 
     /** A greedy label takes the rest of the path, one segment or more, and ranks below a literal there. */

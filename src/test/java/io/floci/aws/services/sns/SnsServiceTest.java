@@ -275,6 +275,55 @@ class SnsServiceTest {
         assertSame(first.subscription(), second.subscription());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"", "{}", "{ }", "{\"color\":[\"blue\"]}", "{ \"color\": [\"red\"] }"})
+    void subscribeRejectsDifferentFilterPolicyWithoutMutatingExistingSubscription(String requestedPolicy) {
+        Topic topic = snsService.createTopic("filter-reuse", null, null, REGION);
+        String originalPolicy = "{\"color\":[\"red\"]}";
+        Subscription original = snsService.subscribe(topic.getTopicArn(), "sqs", "queue", REGION,
+                Map.of("FilterPolicy", originalPolicy));
+
+        AwsException error = assertThrows(AwsException.class, () -> snsService.subscribe(
+                topic.getTopicArn(), "sqs", "queue", REGION, Map.of("FilterPolicy", requestedPolicy)));
+
+        assertEquals("InvalidParameter", error.getErrorCode());
+        assertEquals(originalPolicy, original.getAttributes().get("FilterPolicy"));
+        assertSame(original, snsService.subscribe(topic.getTopicArn(), "sqs", "queue", REGION,
+                Map.of("FilterPolicy", originalPolicy)));
+    }
+
+    @Test
+    void subscribeRejectsChangedRawDeliveryAndKeepsExistingAttributes() {
+        Topic topic = snsService.createTopic("raw-reuse", null, null, REGION);
+        Subscription original = snsService.subscribe(topic.getTopicArn(), "sqs", "queue", REGION,
+                Map.of("RawMessageDelivery", "true", "FilterPolicy", "{\"color\":[\"red\"]}"));
+
+        AwsException error = assertThrows(AwsException.class, () -> snsService.subscribe(
+                topic.getTopicArn(), "sqs", "queue", REGION, Map.of("RawMessageDelivery", "false")));
+
+        assertEquals("InvalidParameter", error.getErrorCode());
+        assertEquals("true", original.getAttributes().get("RawMessageDelivery"));
+        assertSame(original, snsService.subscribe(topic.getTopicArn(), "sqs", "queue", REGION, Map.of()));
+        assertSame(original, snsService.subscribe(topic.getTopicArn(), "sqs", "queue", REGION,
+                Map.of("FilterPolicyScope", "MessageBody")));
+        assertNull(original.getAttributes().get("FilterPolicyScope"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "{}"})
+    void subscribeAcceptsExplicitDefaultsWithoutChangingSubscription(String policy) {
+        Topic topic = snsService.createTopic("default-reuse", null, null, REGION);
+        Subscription original = snsService.subscribe(topic.getTopicArn(), "sqs", "queue", REGION, Map.of());
+
+        assertSame(original, snsService.subscribe(topic.getTopicArn(), "sqs", "queue", REGION,
+                Map.of("RawMessageDelivery", "false", "FilterPolicy", policy)));
+        assertTrue(original.getAttributes().isEmpty());
+        assertThrows(AwsException.class, () -> snsService.subscribe(topic.getTopicArn(), "sqs", "queue", REGION,
+                Map.of("RawMessageDelivery", "true")));
+        assertThrows(AwsException.class, () -> snsService.subscribe(topic.getTopicArn(), "sqs", "queue", REGION,
+                Map.of("FilterPolicy", "{\"color\":[\"red\"]}")));
+    }
+
     @Test
     void subscribe_firehoseRequiresValidRoleArn() {
         Topic topic = snsService.createTopic("firehose-topic", null, null, REGION);

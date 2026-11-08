@@ -467,7 +467,7 @@ public class RedshiftQueryHandler {
                     encryptionContextMap(params),
                     tagMap(params),
                     regionResolver.resolveRegionFromAuth(authorizationHeader));
-            if (zeroEtlConsumer != null) {
+            if (zeroEtlConsumer != null && integration.isPollingEnabled()) {
                 zeroEtlConsumer.startPolling(integration);
             }
             String xml = new XmlBuilder()
@@ -1374,12 +1374,20 @@ public class RedshiftQueryHandler {
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
-    // No log delivery is emulated, so delivery timestamps and failure fields are omitted.
     private String buildLoggingStatusXml(Cluster cluster) {
+        String lastSuccessful = cluster.getLastSuccessfulDeliveryTime() != null
+                ? DateTimeFormatter.ISO_INSTANT.format(cluster.getLastSuccessfulDeliveryTime())
+                : null;
+        String lastFailure = cluster.getLastFailureTime() != null
+                ? DateTimeFormatter.ISO_INSTANT.format(cluster.getLastFailureTime())
+                : null;
         XmlBuilder builder = new XmlBuilder()
             .elem("LoggingEnabled", cluster.isLoggingEnabled())
             .elem("BucketName", cluster.getLoggingBucketName())
             .elem("S3KeyPrefix", cluster.getLoggingS3KeyPrefix())
+            .elem("LastSuccessfulDeliveryTime", lastSuccessful)
+            .elem("LastFailureTime", lastFailure)
+            .elem("LastFailureMessage", cluster.getLastFailureMessage())
             .elem("LogDestinationType", cluster.getLoggingDestinationType());
         if (cluster.getLoggingExports() != null) {
             builder.start("LogExports");
@@ -1585,6 +1593,9 @@ public class RedshiftQueryHandler {
                   .elem("TargetArn", integration.getTargetArn())
                   .elem("Status", integration.getStatus())
                   .elem("CreateTime", integration.getCreateTime());
+        if (integration.getSourceType() != null) {
+            builder.elem("SourceType", integration.getSourceType());
+        }
         if (integration.getDescription() != null) {
             builder.elem("Description", integration.getDescription());
         }

@@ -623,6 +623,9 @@ public class EcsContainerManager {
             }
             throw e;
         }
+        if (task.getNetworkInterfaceId() != null && protectedNetwork == null) {
+            joinTaskVpcNetwork(task, taskDef, containerIds, region);
+        }
 
         Map<String, Container> runtimeContainersByName = new LinkedHashMap<>();
         for (Container container : runtimeContainers) {
@@ -1145,6 +1148,30 @@ public class EcsContainerManager {
             LOG.debugv("Could not look up the VPC of ECS task {0}: {1}", task.getTaskArn(), e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Puts one container of an awsvpc task on its VPC's Docker network at the task ENI address, so
+     * the address DescribeTasks reports answers. AWS gives the whole task that one address; here it
+     * goes to the first container that maps a port, else to the first container. Without
+     * Docker-backed VPC networks, or for an ENI address outside the subnet's planned range, the
+     * containers keep only the network they were created on. Removing the container disconnects
+     * it, before {@link #releaseTaskNetwork} returns the address.
+     */
+    private void joinTaskVpcNetwork(EcsTask task, TaskDefinition taskDef, Map<String, String> containerIds,
+                                    String region) {
+        String vpcId = taskVpcId(task, region);
+        if (vpcId == null) {
+            return;
+        }
+        List<ContainerDefinition> definitions = taskDef.getContainerDefinitions();
+        ContainerDefinition holder = definitions.stream()
+                .filter(def -> def.getPortMappings() != null && !def.getPortMappings().isEmpty())
+                .findFirst()
+                .orElse(definitions.getFirst());
+        ec2Service.attachContainerToVpc(region, vpcId,
+                task.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst(),
+                containerIds.get(holder.getName()), task.getPrivateIpAddress());
     }
 
     /**
@@ -2165,8 +2192,9 @@ public class EcsContainerManager {
      * protected namespace has no network of its own, so the namespace holder's address is the one
      * it answers on.
      *
-     * <p>This is deliberately not the task ENI address. ECS containers never join the subnet's
-     * VPC network, so the ENI address is control-plane state that no peer can connect to.
+     * <p>This is deliberately not the task ENI address. One task container holds that address on
+     * the VPC's Docker network, when VPC networks are enabled, but peers outside that VPC reach the
+     * task on the network its container was created on, so that address is the one returned.
      *
      * @return the address, or empty when the container has not started or Docker cannot say
      */
@@ -2193,16 +2221,24 @@ public class EcsContainerManager {
 
             // A container can be on multiple networks; getNetworks() is unordered.
             // Pick an IP that the Floci/ELBv2 process can actually route to:
-            // 1. the explicitly-configured ECS Docker network, if set;
-            // 2. otherwise any user-defined network (Floci joins one when in Docker)
-            //    in preference to the default bridge;
-            // 3. otherwise the first non-blank IP.
-            String configured = config.services().ecs().dockerNetwork().orElse(null);
+            // 1. the network ECS containers join: the configured one, or the one Floci runs on;
+            // 2. otherwise the network the container was created on, rather than the VPC
+            //    network an awsvpc task also joins at its ENI address;
+            // 3. otherwise any user-defined network in preference to the default bridge;
+            // 4. otherwise the first non-blank IP.
+            String configured = containerBuilder.resolveDockerNetwork(config.services().ecs().dockerNetwork())
+                    .orElse(null);
             if (configured != null && !configured.isBlank()) {
                 ContainerNetwork net = networks.get(configured);
                 if (net != null && isUsableIp(net.getIpAddress())) {
                     return Optional.of(net.getIpAddress());
                 }
+            }
+            String ownNetwork = inspect.getHostConfig() == null ? null : inspect.getHostConfig().getNetworkMode();
+            ContainerNetwork own = ownNetwork == null ? null
+                    : networks.get("default".equals(ownNetwork) ? "bridge" : ownNetwork);
+            if (own != null && isUsableIp(own.getIpAddress())) {
+                return Optional.of(own.getIpAddress());
             }
             for (Map.Entry<String, ContainerNetwork> entry : networks.entrySet()) {
                 if (!isDefaultDockerNetwork(entry.getKey())

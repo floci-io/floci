@@ -1,9 +1,13 @@
 package io.floci.aws.core.common;
 
+import io.vertx.core.http.HttpClientRequest;
+import io.vertx.core.http.HttpClosedException;
+import io.vertx.core.http.HttpConnection;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpVersion;
 import io.vertx.core.net.NetSocket;
+import org.jboss.logging.Logger;
 
 /**
  * The parts of proxying a WebSocket handshake that the proxies Floci emulates share. An ALB and a
@@ -12,6 +16,8 @@ import io.vertx.core.net.NetSocket;
  * hop-by-hop and are stripped. AWS only tunnels WebSocket upgrades, over HTTP/1.1.
  */
 public final class WebSocketUpgrades {
+
+    private static final Logger LOG = Logger.getLogger(WebSocketUpgrades.class);
 
     private WebSocketUpgrades() {
     }
@@ -32,6 +38,25 @@ public final class WebSocketUpgrades {
             }
         }
         return false;
+    }
+
+    /**
+     * Releases a refused connect() request once forwarding has finished or failed. Reading its
+     * response does not finish the request, so the connection still holds a pool slot. Only the
+     * expected closed-connection notification from this deliberate cleanup is logged at debug.
+     */
+    public static void closeRefusedRequest(HttpClientRequest request) {
+        HttpConnection connection = request.connection();
+        request.exceptionHandler(err -> {
+            if (err instanceof HttpClosedException) {
+                LOG.debugv("Refused WebSocket origin connection closed: {0}", connection.remoteAddress());
+            } else {
+                LOG.warnv(err, "Unexpected error closing refused WebSocket origin connection to {0}",
+                        connection.remoteAddress());
+            }
+        });
+        connection.close().onFailure(err ->
+                LOG.warnv(err, "Could not close refused WebSocket origin connection to {0}", connection.remoteAddress()));
     }
 
     /**

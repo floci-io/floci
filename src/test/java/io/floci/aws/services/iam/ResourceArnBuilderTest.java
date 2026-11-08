@@ -1285,6 +1285,11 @@ class ResourceArnBuilderTest {
     void paymentCryptographyResolvesAnAliasToTheKeyItPointsAt() {
         ResourceArnBuilder reading = reading(stored("payment-cryptography", "key", "alias/team/card-key", PC_KEY_ARN));
 
+        // The route its resources are read from is the one the request's path matches, so the
+        // request names its method and its URI.
+        when(ctx.getMethod()).thenReturn("POST");
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost:4566/"));
+        when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost:4566/"));
         setJsonBody("{\"KeyIdentifier\":\"alias/team/card-key\"}");
         assertEquals(List.of(PC_KEY_ARN),
                 reading.buildResources("payment-cryptography", "payment-cryptography:GetKey", ctx,

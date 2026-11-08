@@ -2,6 +2,7 @@ package io.floci.aws.services.emr;
 
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 
+import java.util.Map;
 import java.util.Set;
 import java.util.function.BooleanSupplier;
 
@@ -20,14 +21,24 @@ public interface ClusterStorage {
     void create(String clusterId, String accountId, String region);
 
     /**
-     * Starts {@code clusterId}'s HDFS, a NameNode and a DataNode keeping their data in a volume of their own, in a
-     * container of {@code image} on a Docker network of the cluster's own, or on the host's when its steps run there,
-     * unless it is running, and returns the cluster's storage with it: its primary node's {@code host} name, which a
-     * step's container resolves to the address given, on the network given. A failure to start it is thrown, and
-     * {@link Stopped} once {@code stopped} says the step is past starting, or a teardown has stopped the HDFS.
+     * Starts {@code clusterId}'s HDFS, a NameNode and a DataNode keeping their data in a volume of their own, and,
+     * unless {@code hiveMetastore} is null, Hive's metastore service, in a container of {@code image} on a Docker
+     * network of the cluster's own, or on the host's when its steps run there, unless it is running, and returns the
+     * cluster's storage with them: its primary node's {@code host} name, which a step's container resolves to the
+     * address given, on the network given, and the metastore's URI, null in a namespace the steps share, where it
+     * does not run. A failure to start them is thrown, and {@link Stopped} once {@code stopped} says the step is past
+     * starting, or a teardown has stopped the HDFS.
      */
     SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host, String image,
-                                String dockerNetwork, BooleanSupplier stopped);
+                                String dockerNetwork, HiveMetastore hiveMetastore, BooleanSupplier stopped);
+
+    /**
+     * Hive's metastore service on a cluster's primary node, which reaches S3 as the cluster's EC2 instance profile's
+     * {@code role} does, or as its account when that is null, with the cluster's {@code settings}, its
+     * {@code core-site} and {@code hive-site} properties, after its own.
+     */
+    record HiveMetastore(String role, Map<String, String> settings) {
+    }
 
     /**
      * Removes {@code clusterId}'s HDFS and the volumes of its storage once it no longer needs them: true when the

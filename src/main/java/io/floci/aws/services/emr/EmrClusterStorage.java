@@ -12,13 +12,18 @@ import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLiveness;
-import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
+import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
+import io.floci.aws.services.iam.model.SessionCreds;
+import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -39,7 +44,9 @@ import java.util.function.LongSupplier;
  * emr-7.14.0 on, "When you select Trino as the only application at launch, Amazon EMR no longer starts YARN and
  * HDFS", a cluster Floci does not run), is a NameNode and a DataNode in a container of their own, the cluster's
  * primary node's, with their data in a third volume, so that the first container to mount the {@code /mnt} one is a
- * step's, which fills it from the step's image.
+ * step's, which fills it from the step's image. On a cluster with Hive or HCatalog the same container runs Hive's
+ * metastore service, as EMR's primary node does, with its database in that third volume, reaching S3 with a session
+ * for the cluster's instance profile's role, which goes with the container.
  */
 @ApplicationScoped
 public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
@@ -58,7 +65,21 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // starting a JVM of hdfs's own each time it is asked; each look is given five seconds, so one the NameNode does not
     // answer while it starts is asked again.
     private static final String NAMENODE_JMX = "http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=";
-    // How long a cluster's HDFS may take to start, its NameNode formatted the first time, before a step gives up.
+    // The metastore service's --hiveconf settings, Floci's S3 among them; set only on a cluster with Hive or
+    // HCatalog.
+    private static final String HIVE_METASTORE_VARIABLE = "FLOCI_HIVE_METASTORE";
+    // The cluster's core-site and hive-site, as --hiveconf settings one to a line, which the service gets after its
+    // own.
+    private static final String HIVE_METASTORE_SITE_VARIABLE = "FLOCI_HIVE_METASTORE_SITE";
+    private static final int HIVE_METASTORE_PORT = 9083;
+    // The folder a Hive session uploads Hive's exec jar to when it is not there, named after its SHA-256, under the
+    // image's hive.user.install.directory: the primary node puts it there first, as two sessions uploading it at once
+    // can leave one with a jar that changed under it, whose Tez tasks then fail to launch.
+    private static final String HIVE_JARS = "/tmp/hadoop/.hiveJars";
+    // The name Floci's own container has on a cluster's network, which it joins for the metastore service to reach it.
+    private static final String FLOCI_ALIAS = "floci";
+    // How long a cluster's HDFS and metastore may take to start, the NameNode formatted the first time, before a step
+    // gives up.
     private static final Duration HDFS_START_TIMEOUT = Duration.ofSeconds(120);
     private static final Duration HDFS_POLL_INTERVAL = Duration.ofMillis(500);
     // The primary node's HDFS, started as root: its daemons log their warnings and errors to the container's output,
@@ -71,9 +92,14 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     // one the namespace's containers share, the steps' too. Once the NameNode on its port is this container's own,
     // its ClusterId the one its format gave it, rather than another cluster's in that namespace, the DataNode has
     // joined and the NameNode has left safe mode, which on a restart waits for the blocks the volume holds, the
-    // folders EMR's HDFS has for steps, /tmp and the hadoop user's home, are made, and HDFS_READY says it is ready. A
-    // daemon that exits, before or after, ends the container, its readiness gone, so the next step starts it again on
-    // its data.
+    // folders EMR's HDFS has for steps, /tmp and the hadoop user's home, are made. With HIVE_METASTORE_VARIABLE set,
+    // Hive's metastore service starts too, with the image's Hadoop configuration, as Hive steps run, its settings after
+    // it: "Hive records metastore information in a MySQL database on the primary node's file system", kept as a Derby
+    // database in /mnt, which only the service opens, so any number of steps share it, its log in /tmp, and its
+    // warehouse in the HDFS, Hive's exec jar in HIVE_JARS; the cluster's core-site and hive-site, last, replace any of
+    // them, as on EMR's primary node. HDFS_READY then says the node is ready. A daemon that exits,
+    // before or after, the metastore among them, ends the container, its readiness gone, so the next step starts it
+    // again on its data.
     private static final String HDFS_SCRIPT = String.join("\n",
             "address=$FLOCI_HDFS_BIND; [ \"$address\" != 0.0.0.0 ] || address=$(hostname -i | awk '{print $1}')",
             "echo \"$address $FLOCI_HDFS_HOST\" >> /etc/hosts || exit",
@@ -114,6 +140,26 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + " | grep -q \"\\\"Safemode\\\" : \\\"\\\"\"; do "
                     + "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done; "
                     + "hdfs dfs -mkdir -p /tmp /user/hadoop || exit 1; "
+                    + "if [ -n \"$" + HIVE_METASTORE_VARIABLE + "\" ]; then "
+                    + "hdfs dfs -mkdir -p /user/hive/warehouse " + HIVE_JARS + " || exit 1; "
+                    + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); "
+                    + "hdfs dfs -put -f \"$jar\" " + HIVE_JARS
+                    + "/$(basename \"$jar\" .jar)-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar || exit 1; "
+                    + "[ -z \"$" + HIVE_METASTORE_SITE_VARIABLE + "\" ] || mapfile -t site <<< \"$"
+                    + HIVE_METASTORE_SITE_VARIABLE + "\"; "
+                    + "cd /tmp; LOGS_DIR=/tmp/floci-hive-logs HADOOP_CONF_DIR=/etc/hadoop/conf"
+                    + " hive --service metastore -p " + HIVE_METASTORE_PORT
+                    + " --hiveconf fs.defaultFS=hdfs://$FLOCI_HDFS_HOST:8020 $"
+                    + HIVE_METASTORE_VARIABLE
+                    + " --hiveconf \"javax.jdo.option.ConnectionURL=jdbc:derby:;"
+                    + "databaseName=/mnt/var/lib/hive/metastore_db;create=true\""
+                    + " --hiveconf datanucleus.schema.autoCreateAll=true"
+                    + " --hiveconf hive.metastore.schema.verification=false"
+                    + " --hiveconf hive.metastore.warehouse.dir=hdfs://$FLOCI_HDFS_HOST:8020/user/hive/warehouse"
+                    + " \"${site[@]}\" & "
+                    + "until (exec 3<>/dev/tcp/127.0.0.1/" + HIVE_METASTORE_PORT + ") 2>/dev/null; do "
+                    + "[ \"$(jobs -rp | wc -l)\" = 3 ] || exit 1; sleep 0.2; done; "
+                    + "fi; "
                     + "touch " + HDFS_READY + "; "
                     + "wait -n; rm -f " + HDFS_READY + "; kill $(jobs -rp) 2>/dev/null; exit 1'");
 
@@ -121,10 +167,16 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     private final Object sharedNamespaceStarts = new Object();
     // One start at a time for each cluster's HDFS; a step coming while it starts waits, then finds it running.
     private final Map<String, Object> starting = new ConcurrentHashMap<>();
+    // The metastore services this process started, by container name: the session each reaches S3 with, if any, and
+    // the address of Floci's it was given.
+    private final Map<String, MetastoreSession> sessions = new ConcurrentHashMap<>();
     // The HDFS containers this process has started or found running, by name, which a reset or a shutdown removes.
     private final Set<String> running = ConcurrentHashMap.newKeySet();
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerBuilder containerBuilder;
+    private final LaunchedContainerAwsEnv awsEnv;
+    private final LambdaExecutionRoleCredentials roleCredentials;
+    private final CurrentContainerNetworkResolver currentContainer;
     private final EmulatorConfig config;
     private final Duration hdfsStartTimeout;
     private final LongSupplier nanoTime;
@@ -133,14 +185,21 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
 
     @Inject
     public EmrClusterStorage(ContainerLifecycleManager lifecycleManager, ContainerBuilder containerBuilder,
-                             EmulatorConfig config) {
-        this(lifecycleManager, containerBuilder, config, HDFS_START_TIMEOUT, System::nanoTime);
+                             LaunchedContainerAwsEnv awsEnv, LambdaExecutionRoleCredentials roleCredentials,
+                             CurrentContainerNetworkResolver currentContainer, EmulatorConfig config) {
+        this(lifecycleManager, containerBuilder, awsEnv, roleCredentials, currentContainer, config, HDFS_START_TIMEOUT,
+                System::nanoTime);
     }
 
     EmrClusterStorage(ContainerLifecycleManager lifecycleManager, ContainerBuilder containerBuilder,
-                      EmulatorConfig config, Duration hdfsStartTimeout, LongSupplier nanoTime) {
+                      LaunchedContainerAwsEnv awsEnv, LambdaExecutionRoleCredentials roleCredentials,
+                      CurrentContainerNetworkResolver currentContainer, EmulatorConfig config,
+                      Duration hdfsStartTimeout, LongSupplier nanoTime) {
         this.lifecycleManager = lifecycleManager;
         this.containerBuilder = containerBuilder;
+        this.awsEnv = awsEnv;
+        this.roleCredentials = roleCredentials;
+        this.currentContainer = currentContainer;
         this.config = config;
         this.hdfsStartTimeout = hdfsStartTimeout;
         this.nanoTime = nanoTime;
@@ -163,7 +222,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
 
     @Override
     public SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host, String image,
-                                       String dockerNetwork, BooleanSupplier stopped) {
+                                       String dockerNetwork, HiveMetastore hiveMetastore, BooleanSupplier stopped) {
         String name = hdfsName(clusterId);
         String network = network(dockerNetwork);
         if (NO_NETWORK.equals(network)) {
@@ -191,10 +250,12 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                             + " runs");
                 }
                 boolean found = liveness == ContainerLiveness.RUNNING && attempt == 0
-                        && inStepsNamespace(name, shared ? network : name);
+                        && inStepsNamespace(name, shared ? network : name)
+                        && (shared || hiveMetastore == null || metastoreCurrent(name));
                 // Known before it starts, so a teardown while it starts removes it.
                 running.add(name);
-                String candidate = found ? name : start(clusterId, accountId, region, host, imageId, dockerNetwork);
+                String candidate = found ? name
+                        : start(clusterId, accountId, region, host, imageId, dockerNetwork, hiveMetastore);
                 if (awaitReady(clusterId, candidate, deadline, teardown, stopped)) {
                     containerId = candidate;
                 } else if (!found) {
@@ -206,8 +267,20 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             if (shared) {
                 return volumes(clusterId).withHdfs(host, LOOPBACK, null);
             }
-            return volumes(clusterId).withHdfs(host, address(clusterId, containerId), name);
+            SparkJobRunner.Storage storage = volumes(clusterId).withHdfs(host, address(clusterId, containerId), name);
+            return hiveMetastore != null
+                    ? storage.withHiveMetastore("thrift://" + host + ":" + HIVE_METASTORE_PORT) : storage;
         }
+    }
+
+    // Whether the metastore service of a primary node found running is one this process started, with a session it
+    // holds, which reaches Floci's S3 at the address it would be given now, Floci's container joining the network again
+    // if it has left. One an earlier process left has a session that process's end took away, and one started while
+    // Floci's container could not join the network has an address there that no join repairs: both start again, on
+    // the data their volume keeps.
+    private boolean metastoreCurrent(String name) {
+        MetastoreSession session = sessions.get(name);
+        return session != null && session.endpoint().equals(flociEndpointOn(name));
     }
 
     // Where a step reaches the cluster's HDFS: its container's address on the cluster's own Docker network.
@@ -256,14 +329,16 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
     }
 
     // A cluster's HDFS container, started anew on the HDFS data its volume holds, which goes with the cluster's other
-    // two; one a restart, a stop or a daemon's exit left goes first. It runs on a Docker network of the cluster's own,
-    // which only the cluster's steps join, as its HDFS serves its files to any client that reaches it: the steps of
-    // other clusters, of other accounts too, do not. In a namespace the steps share it listens on the loopback alone.
+    // two, with its metastore service when asked; one a restart, a stop or a daemon's exit left goes first. It runs on
+    // a Docker network of the cluster's own, which only the cluster's steps join, as its HDFS and its metastore serve
+    // its files and tables to any client that reaches them: the steps of other clusters, of other accounts too, do
+    // not. In a namespace the steps share it listens on the loopback alone, and the metastore does not run, as Hive 3's
+    // has no setting for the address it listens on: it would serve every interface, the host's own for one.
     private String start(String clusterId, String accountId, String region, String host, String imageId,
-                         String dockerNetwork) {
+                         String dockerNetwork, HiveMetastore hiveMetastore) {
         String network = network(dockerNetwork);
         if (!sharesNamespace(network)) {
-            return createContainer(clusterId, accountId, region, host, imageId, network, false);
+            return createContainer(clusterId, accountId, region, host, imageId, network, false, hiveMetastore);
         }
         // One namespace holds one HDFS's ports, whose daemons would answer this one's readiness and its steps: the look
         // for another cluster's and this one's start go together, so two clusters' steps cannot both pass it.
@@ -273,22 +348,23 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 throw new IllegalStateException("The HDFS of EMR cluster " + clusterId + " cannot start while that of"
                         + " EMR cluster " + other + " runs in the network namespace they share");
             }
-            return createContainer(clusterId, accountId, region, host, imageId, network, true);
+            return createContainer(clusterId, accountId, region, host, imageId, network, true, null);
         }
     }
 
     // Creates and starts the container start() decided on, in the namespace the steps share or on a network of its
     // cluster's own.
     private String createContainer(String clusterId, String accountId, String region, String host, String imageId,
-                                   String network, boolean shared) {
+                                   String network, boolean shared, HiveMetastore hiveMetastore) {
         String name = hdfsName(clusterId);
         // One left stopped goes first, and a removal Docker refuses fails the start as it is, not as a name clash.
         lifecycleManager.removeIfExistsStrict(name);
+        releaseSession(name);
         lifecycleManager.ensureVolume(name, labels(clusterId, accountId, region, COMPONENT));
         if (!shared) {
             lifecycleManager.ensureNetwork(name, labels(clusterId, accountId, region, HDFS_COMPONENT));
         }
-        ContainerSpec spec = containerBuilder.newContainer(imageId)
+        ContainerBuilder.Builder spec = containerBuilder.newContainer(imageId)
                 .withName(name)
                 .withUser("root")
                 .withEntrypoint(List.of("/bin/bash", "-c", HDFS_SCRIPT))
@@ -299,11 +375,77 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                 .withNamedVolume(name, "/mnt")
                 .withDockerNetwork(Optional.of(shared ? network : name))
                 .withLogRotation()
-                .withLabels(labels(clusterId, accountId, region, HDFS_COMPONENT))
-                .build();
-        String containerId = lifecycleManager.createAndStart(spec).containerId();
+                .withLabels(labels(clusterId, accountId, region, HDFS_COMPONENT));
+        String containerId;
+        try {
+            if (hiveMetastore != null) {
+                String endpoint = flociEndpointOn(name);
+                Optional<SessionCreds> credentials = roleCredentials.forRole(hiveMetastore.role(), accountId, name);
+                sessions.put(name, new MetastoreSession(accountId,
+                        credentials.map(SessionCreds::accessKeyId).orElse(null), endpoint));
+                spec.withEnv(awsEnv.sdkBaselineEnv(region, Optional.empty(), endpoint, credentials, accountId))
+                        .withEnv(HIVE_METASTORE_VARIABLE, String.join(" ",
+                                EmrServerlessSparkRunner.hiveMetastoreSettings(region, accountId, endpoint)))
+                        .withEnv(HIVE_METASTORE_SITE_VARIABLE, String.join("\n",
+                                EmrServerlessSparkRunner.hiveSettings(hiveMetastore.settings())))
+                        .withHostDockerInternalOnLinux()
+                        .withJavaTrustStore();
+            }
+            containerId = lifecycleManager.createAndStart(spec.build()).containerId();
+        } catch (RuntimeException e) {
+            // A start that fails leaves no session, nor Floci's container on a network with no service to reach it.
+            releaseSession(name);
+            if (hiveMetastore != null) {
+                detachFloci(name);
+            }
+            throw e;
+        }
         LOG.infov("Started the HDFS of EMR cluster {0} as {1}", clusterId, host);
         return containerId;
+    }
+
+    // Where the metastore service, on the cluster's network, which Docker keeps apart from Floci's, reaches Floci's
+    // S3: Floci on the host at the host's address, as the steps reach it; Floci in a container of its own as
+    // FLOCI_ALIAS, its container joining the cluster's network, as it joins the networks of EC2 VPCs.
+    private String flociEndpointOn(String network) {
+        String endpoint = awsEnv.flociEndpoint(false);
+        return attachFloci(network) ? "http://" + FLOCI_ALIAS + ":" + URI.create(endpoint).getPort() : endpoint;
+    }
+
+    // Whether Floci's own container is on the network, joined to it unless it was; false when Floci runs on the host,
+    // or its container could not join, which leaves the metastore service its address on Floci's network.
+    private boolean attachFloci(String network) {
+        Optional<String> floci = currentContainer.resolveContainerId();
+        if (floci.isEmpty()) {
+            return false;
+        }
+        try {
+            lifecycleManager.ensureConnected(floci.get(), network, FLOCI_ALIAS);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not connect Floci's container {0} to the Docker network {1}, so the Hive metastore"
+                    + " on it may not reach Floci's S3: {2}", floci.get(), network, e.getMessage());
+            return false;
+        }
+    }
+
+    // Floci's container leaves a cluster's network, which it joined for the metastore service, so the network can go,
+    // and Floci's container, restarted, does not find itself on it. Whether it is off it.
+    private boolean detachFloci(String network) {
+        return currentContainer.resolveContainerId()
+                .map(floci -> lifecycleManager.disconnectFromNetwork(floci, network))
+                .orElse(true);
+    }
+
+    // The session the metastore service of the container named so reached S3 with goes with the container.
+    private void releaseSession(String name) {
+        MetastoreSession session = sessions.remove(name);
+        if (session != null && session.accessKeyId() != null) {
+            roleCredentials.unregister(session.accountId(), session.accessKeyId());
+        }
+    }
+
+    private record MetastoreSession(String accountId, String accessKeyId, String endpoint) {
     }
 
     // The cluster of another HDFS container of this deployment running in the namespace network gives, or null.
@@ -416,17 +558,22 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
         }
     }
 
-    // Removes an HDFS container, forgetting it only once Docker says it is gone: one Docker keeps stays known, so the
-    // next reset or shutdown tries again. Whether it is gone.
+    // Removes an HDFS container, forgetting it only once Docker says it is gone and Floci's container has left its
+    // network: one Docker keeps, or keeps Floci's container on the network of, stays known, so the next reset or
+    // shutdown tries again. Its metastore's session goes with it. Whether both are done.
     private boolean removeKnown(String name) {
         try {
             lifecycleManager.removeIfExistsStrict(name);
-            running.remove(name);
-            return true;
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not remove the HDFS container {0}: {1}", name, e.getMessage());
             return false;
         }
+        releaseSession(name);
+        if (!detachFloci(name)) {
+            return false;
+        }
+        running.remove(name);
+        return true;
     }
 
     @Override
@@ -464,6 +611,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     .exec()) {
                 Map<String, String> labels = network.getLabels() != null ? network.getLabels() : Map.of();
                 if (!kept.contains(labels.get(ContainerStorageHelper.RESOURCE_ID_LABEL))) {
+                    detachFloci(network.getName());
                     lifecycleManager.removeNetwork(network.getName());
                 }
             }

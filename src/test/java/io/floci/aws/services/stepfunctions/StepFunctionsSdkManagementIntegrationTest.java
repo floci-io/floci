@@ -11,6 +11,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
@@ -109,8 +110,9 @@ class StepFunctionsSdkManagementIntegrationTest {
         }
     }
 
-    @Test
-    void lambdaMappingTasksUpdateAnActualMappingAndPreserveItsUuid() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"JSONPath", "JSONata"})
+    void lambdaMappingTasksUpdateAnActualMappingAndPreserveItsUuid(String queryLanguage) throws Exception {
         String region = "eu-west-2";
         String name = "sdk-mapping-" + UUID.randomUUID();
         // An empty ZIP is a valid deployment archive; no invocation is needed for this management fixture.
@@ -124,8 +126,8 @@ class StepFunctionsSdkManagementIntegrationTest {
         try {
             JsonNode listed = task("lambda", "listEventSourceMappings", Map.of("FunctionName", function), region, "aws");
             assertEquals(uuid, listed.path("EventSourceMappings").get(0).path("UUID").asText());
-            JsonNode updated = task("lambda", "updateEventSourceMapping", Map.of("UUID", uuid,
-                    "Enabled", false, "BatchSize", 3), region, "aws");
+            JsonNode updated = runTask("lambda", "updateEventSourceMapping", Map.of("Uuid", uuid,
+                    "Enabled", false, "BatchSize", 3), region, "aws", ACCOUNT, false, queryLanguage);
             assertEquals(uuid, updated.path("UUID").asText());
             assertEquals(3, updated.path("BatchSize").asInt());
             assertEquals("Disabled", updated.path("State").asText());
@@ -135,7 +137,7 @@ class StepFunctionsSdkManagementIntegrationTest {
             JsonNode pagination = runTask("lambda", "listEventSourceMappings", Map.of("FunctionName", function,
                     "MaxItems", 1), region, "aws", ACCOUNT, true);
             assertEquals("Lambda.InvalidParameterValueException", pagination.path("Error").asText());
-            JsonNode error = runTask("lambda", "updateEventSourceMapping", Map.of("UUID", uuid,
+            JsonNode error = runTask("lambda", "updateEventSourceMapping", Map.of("Uuid", uuid,
                     "Enabled", true), region, "aws", "771661200002", true);
             assertEquals("Lambda.ResourceNotFoundException", error.path("Error").asText());
         } finally {
@@ -151,9 +153,15 @@ class StepFunctionsSdkManagementIntegrationTest {
 
     private static JsonNode runTask(String service, String action, Map<String, Object> parameters,
                                      String region, String partition, String account, boolean catchError) throws Exception {
+        return runTask(service, action, parameters, region, partition, account, catchError, "JSONPath");
+    }
+
+    private static JsonNode runTask(String service, String action, Map<String, Object> parameters,
+                                     String region, String partition, String account, boolean catchError,
+                                     String queryLanguage) throws Exception {
         ObjectNode task = MAPPER.createObjectNode().put("Type", "Task").put("End", true)
                 .put("Resource", "arn:" + partition + ":states:::aws-sdk:" + service + ":" + action);
-        task.set("Parameters", MAPPER.valueToTree(parameters));
+        task.set("JSONata".equals(queryLanguage) ? "Arguments" : "Parameters", MAPPER.valueToTree(parameters));
         ObjectNode states = MAPPER.createObjectNode();
         states.set("Call", task);
         if (catchError) {
@@ -163,6 +171,7 @@ class StepFunctionsSdkManagementIntegrationTest {
             states.set("Caught", MAPPER.valueToTree(Map.of("Type", "Pass", "End", true)));
         }
         ObjectNode definition = MAPPER.createObjectNode().put("StartAt", "Call");
+        definition.put("QueryLanguage", queryLanguage);
         definition.set("States", states);
         try (SfnClient client = SfnClient.builder()
                 .endpointOverride(URI.create("http://localhost:" + RestAssured.port))

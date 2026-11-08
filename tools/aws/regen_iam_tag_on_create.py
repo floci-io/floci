@@ -32,6 +32,16 @@ model no longer gives it (`QUERY_MEMBERS`).
 
 Only the namespaces in `NAMESPACES` are read, and in them every operation the reference lists with a
 tagging action, whether Floci serves it or not, so an operation Floci adds is checked from the start.
+The reference lists the operations of one SDK client of a namespace, though: OpenSearch Service's are
+the `es` client's alone, while the `opensearch` client's are named after `es` actions all the same. So a
+namespace also takes the operations of each botocore model Floci reads REST routes for under it
+(`regen_rest_routes.MODELS`) that the reference lists for none of its clients, each read as the action
+of its own name: it needs the tagging actions the reference lists for the operations of its namespace
+that need that action, and is marked `requestTags` when that action takes the request's tags. The
+`opensearch` client's `CreateDomain` is `es:CreateDomain`, which the reference lists for
+`CreateElasticsearchDomain` beside `es:AddTags`, as the OpenSearch Service developer guide's policy for
+creating a domain only with a tag grants `es:CreateDomain` and `es:AddTags`. One with no action of its
+name, or no tagging action going with that action, is left out.
 Each of those operations ends up in exactly one of three places, and generation fails on an operation
 that would end up in none:
 
@@ -86,6 +96,7 @@ from regen_iam_authorized_actions import fetch_references
 from regen_iam_passed_roles import (BODY_LOCATIONS, MEMBER_PATH_RE, NAMESPACE_RE, OPERATION_RE, _shown, load_models,
                                     namespace_of)
 from regen_partitions import resolve_botocore_data
+from regen_rest_routes import MODELS as REST_MODELS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-tag-on-create.json"
@@ -97,7 +108,7 @@ NAMESPACES = (
     "bcm-pricing-calculator", "budgets", "ce", "cloudformation", "cloudhsm", "cloudtrail", "cloudwatch",
     "codedeploy", "codepipeline", "cognito-identity", "cognito-idp", "comprehend", "config", "cur", "datasync",
     "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticloadbalancing",
-    "elasticmapreduce", "events", "firehose", "globalaccelerator", "glue", "iam", "kinesis", "kinesisanalytics",
+    "elasticmapreduce", "es", "events", "firehose", "globalaccelerator", "glue", "iam", "kinesis", "kinesisanalytics",
     "kms", "lambda", "lightsail", "logs", "memorydb", "network-firewall", "organizations", "payment-cryptography",
     "pipes", "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "route53resolver",
     "sagemaker", "scheduler", "secretsmanager", "servicediscovery", "ses", "sns", "sqs", "ssm", "sso", "states",
@@ -113,7 +124,7 @@ NOT_COVERED = {
     "batch": _NO_ROUTES, "bedrock": _NO_ROUTES, "bedrock-agentcore": _NO_ROUTES,
     "cloudfront": _NO_ROUTES, "codeguru-reviewer": _NO_ROUTES, "connect": _NO_ROUTES,
     "controltower": _NO_ROUTES, "detective": _NO_ROUTES, "dlm": _NO_ROUTES,
-    "elasticfilesystem": _NO_ROUTES, "emr-serverless": _NO_ROUTES, "es": _NO_ROUTES, "fis": _NO_ROUTES,
+    "elasticfilesystem": _NO_ROUTES, "emr-serverless": _NO_ROUTES, "fis": _NO_ROUTES,
     "guardduty": _NO_ROUTES, "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES,
     "macie2": _NO_ROUTES, "mq": _NO_ROUTES, "oam": _NO_ROUTES,
     "quicksight": "metadata-only REST subset; creation-tag IAM authorization is not implemented",
@@ -271,6 +282,60 @@ def tag_on_create_operations(documents: list[dict]) -> dict[str, dict]:
             for key, value in sorted(found.items())}
 
 
+def rest_operations(data: Path) -> dict[str, set[str]]:
+    """The operation names of each botocore model whose REST routes Floci reads under a namespace the file reads."""
+    return {client: set(model["operations"])
+            for client, model in load_models(data, {client for client, namespace in REST_MODELS.items()
+                                                    if namespace in NAMESPACES}).items()}
+
+
+def with_rest_operations(upstream: dict[str, dict], documents: list[dict],
+                         given: dict[str, set[str]]) -> dict[str, dict]:
+    """`upstream` with the operations of the models Floci reads REST routes for (`regen_rest_routes.MODELS`), each
+    given as its operation names: an operation `upstream` has gets the model among its clients, and one the reference
+    lists for none of its clients is read as the action of its own name, needing the tagging actions `upstream` gives
+    the operations of its namespace that the reference lists that action for, and taking the request's tags when that
+    action does. One with no action of its name, or no tagging action going with it, is left out, so `--verify`
+    reports a vendored one as no longer listed."""
+    actions = _actions(documents)
+    lowered = {key.lower(): action for key, action in actions.items()}
+    resource_keys = _resource_keys(documents)
+    listed: set[str] = set()
+    needing: dict[str, set[str]] = {}
+    for document in documents:
+        namespace = document["Name"]
+        for operation in document.get("Operations", []):
+            listed.add(f"{namespace}:{operation['Name']}")
+            for entry in operation.get("AuthorizedActions") or []:
+                if entry.get("Service") == namespace and isinstance(entry.get("Name"), str):
+                    needing.setdefault(f"{namespace}:{entry['Name']}".lower(), set()).add(
+                        f"{namespace}:{operation['Name']}")
+    found = dict(upstream)
+    for client, names in sorted(given.items()):
+        namespace = REST_MODELS[client]
+        for name in sorted(names):
+            operation = f"{namespace}:{name}"
+            if operation in found:
+                if client not in found[operation]["clients"]:
+                    found[operation] = {**found[operation], "clients": sorted(found[operation]["clients"] + [client])}
+                continue
+            action = lowered.get(operation.lower())
+            if operation in listed or action is None or _tagging_only(action):
+                continue
+            tagging = sorted({tag for other in needing.get(operation.lower(), set()) if other in upstream
+                              for tag in upstream[other]["tagging"]})
+            if not tagging:
+                continue
+            found[operation] = {
+                "tagging": tagging,
+                "createAction": any(f"{namespace_of(tag)}:{CREATE_ACTION}"
+                                    in actions[tag].get("ActionConditionKeys", []) for tag in tagging),
+                "requestTags": bool(REQUEST_TAG_KEYS & _condition_keys(namespace, action, resource_keys)),
+                "clients": [client],
+            }
+    return dict(sorted(found.items()))
+
+
 # --------------------------------------------------------------------------- #
 # botocore: which members of the request carry the tags
 # --------------------------------------------------------------------------- #
@@ -403,7 +468,7 @@ def entry_for(operation: str, upstream: dict, models: dict[str, dict]) -> dict:
 
 
 def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> dict:
-    upstream = tag_on_create_operations(documents)
+    upstream = with_rest_operations(tag_on_create_operations(documents), documents, rest_operations(data))
     covered = {operation: value for operation, value in upstream.items() if namespace_of(operation) in NAMESPACES}
     _check_overrides(covered)
     namespaces: dict[str, list[str]] = {}
@@ -638,7 +703,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         try:
             documents, provenance = fetch_references(args.source_dir)
-            upstream = tag_on_create_operations(documents)
+            listed = tag_on_create_operations(documents)
+            upstream = with_rest_operations(listed, documents, {
+                client: {operation.split(":", 1)[1] for operation in document["operations"]
+                         if namespace_of(operation) == namespace and operation not in listed}
+                for client, namespace in REST_MODELS.items() if client in document["namespaces"].get(namespace, [])})
             arns = resource_arns(documents, set(document.get("resourceArns", {})))
         except (OSError, ValueError) as e:
             print(f"error: could not read the Service Reference ({e})", file=sys.stderr)

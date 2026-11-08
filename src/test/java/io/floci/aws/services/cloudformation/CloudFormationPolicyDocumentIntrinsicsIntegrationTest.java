@@ -199,6 +199,7 @@ class CloudFormationPolicyDocumentIntrinsicsIntegrationTest {
         String policyName = "unresolvable-policy-" + suffix;
 
         createStack(stackName, stackWithUnresolvablePolicyResource(roleName, policyName));
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
 
         String status = cfnQuery("DescribeStacks", stackName).then().statusCode(200).extract().asString();
         assertFalse(status.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),
@@ -219,6 +220,7 @@ class CloudFormationPolicyDocumentIntrinsicsIntegrationTest {
         String policyName = "unresolvable-user-policy-" + suffix;
 
         createStack(stackName, stackWithUnresolvableUserPolicy(userName, policyName));
+        CfnStackWaits.awaitStatus(stackName, "ROLLBACK_COMPLETE", CFN_AUTH);
 
         String status = cfnQuery("DescribeStacks", stackName).then().statusCode(200).extract().asString();
         assertFalse(status.contains("<StackStatus>CREATE_COMPLETE</StackStatus>"),

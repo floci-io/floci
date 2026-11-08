@@ -8,7 +8,7 @@
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
-| `CreateKey` | Create a key with fresh AES-256 material |
+| `CreateKey` | Create a key with fresh material |
 | `GetKey` | Get a key's attributes, state and check value |
 | `ListKeys` | List the keys of a region |
 | `DeleteKey` | Delete a key |
@@ -24,10 +24,12 @@
 
 ## Emulation Behavior
 
-- **Real key material:** `CreateKey` generates 32 bytes of AES-256 material, and the
-  `KeyCheckValue` is the leftmost three bytes of the CMAC of sixteen zero bytes under
-  it, which is what the service computes for a `CMAC` check value. The material is
-  held by the key while the emulator runs and is not written to the store.
+- **Real key material:** `CreateKey` generates the material the algorithm it names
+  calls for: 32 bytes of AES-256 for an AES-256 key, 16 or 24 bytes for the two Triple
+  DES ones, and a key pair for an RSA or EC one. The `KeyCheckValue` follows the
+  algorithm: the leftmost three bytes of the CMAC of sixteen zero bytes under an AES
+  key, and the ANSI X9.24 one for a Triple DES key. The material is held by the key
+  while the emulator runs and is not written to the store.
 - **Regional:** keys, aliases and tags all live in the region they were made in. The
   service is regional, and so is this.
 - **Alias names are unique in a region, not in an account:** the same name may name a
@@ -59,8 +61,11 @@
   only the name.
 - **Paging:** `ListKeys`, `ListAliases` and `ListTagsForResource` take `MaxResults`
   and `NextToken`, and answer with one page and the token that asks for the next.
-- **Not yet emulated:** the data plane (`POST /encrypt` and the rest), the import and
-  export formats, and the multi-region replication operations.
+- **The data plane is a service of its own:** the operations that use a key are on
+  [the data plane's page](payment-cryptography-data.md), which is reached at its own
+  routes.
+- **Not yet emulated:** the import and export formats, and the multi-region replication
+  operations.
 
 ## Configuration
 

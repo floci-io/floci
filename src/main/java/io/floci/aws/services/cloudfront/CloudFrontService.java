@@ -578,7 +578,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             return null;
         }
         String hostname = stripPort(host);
-        List<Distribution> distributions = distStore.scan(k -> true);
+        // Every request gets here once a distribution exists, so this lookup avoids copying strings.
+        String rawPrefix = AccountAwareStorageBackend.rawKey(distStore.accountId(), "");
+        List<Distribution> distributions = distStore.scanRaw(rawKey -> rawKey.startsWith(rawPrefix));
         for (Distribution dist : distributions) {
             if (hostname.equalsIgnoreCase(dist.getDomainName())) {
                 return dist;
@@ -640,8 +642,11 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     /** True when {@code hostname} is the local delivery host of the distribution with this id. */
     private boolean matchesLocalDeliveryHost(String hostname, String id) {
+        int idLength = id.length();
         for (String suffix : localDeliverySuffixes) {
-            if (hostname.equalsIgnoreCase(id + suffix)) {
+            if (hostname.length() == idLength + suffix.length()
+                    && hostname.regionMatches(true, 0, id, 0, idLength)
+                    && hostname.regionMatches(true, idLength, suffix, 0, suffix.length())) {
                 return true;
             }
         }

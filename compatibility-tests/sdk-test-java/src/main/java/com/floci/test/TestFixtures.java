@@ -107,6 +107,7 @@ import software.amazon.awssdk.services.oam.OamClient;
 import software.amazon.awssdk.services.opensearch.OpenSearchClient;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
+import software.amazon.awssdk.services.paymentcryptographydata.PaymentCryptographyDataClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.quicksight.QuickSightClient;
 import software.amazon.awssdk.services.ram.RamClient;
@@ -1132,6 +1133,18 @@ public final class TestFixtures {
         return PaymentCryptographyClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(region)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    /**
+     * The Payment Cryptography data plane. The real service is a rest-json service of its
+     * own, at its own host, so the client talks to it over the paths of that protocol.
+     */
+    public static PaymentCryptographyDataClient paymentCryptographyDataClient() {
+        return PaymentCryptographyDataClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
     }

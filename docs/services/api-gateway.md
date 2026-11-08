@@ -115,10 +115,14 @@ changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not a
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
 | **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Documentation Parts** | CreateDocumentationPart, GetDocumentationPart, GetDocumentationParts, UpdateDocumentationPart, DeleteDocumentationPart |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
+
+Documentation part listing covers created parts. The `UNDOCUMENTED` location status does not
+discover API locations without documentation content yet.
 
 `TagResource`, `UntagResource` and `GetTags` also accept API key and usage plan ARNs,
 `arn:aws:apigateway:<region>::/apikeys/<id>` and `arn:aws:apigateway:<region>::/usageplans/<id>`.
@@ -395,7 +399,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 
 - Authorizer testing: `TestInvokeAuthorizer`
 - Model templates: `GetModelTemplate`
-- Documentation parts and versions (the entire family, 10 operations)
+- Documentation versions (5 operations)
 - Client Certificates (5 operations)
 - `ImportDocumentationParts`
 
@@ -629,8 +633,12 @@ an offset inside it, a per-method throttle needs a plan throttle, and adding a s
 lists is a `ConflictException`. `AWS::ApiGateway::UsagePlan` maps its `ApiStages`, with each stage's
 `Throttle`, and its `Throttle` and `Quota` the same way, and an update replaces them.
 
-Floci does not check that a stage's API, stage or method exists, does not filter `GetUsagePlans` by
-`keyId`, and does not enforce throttles or quotas.
+`GetUsagePlans` with a `keyId` returns only the plans that key is added to, and an empty list for a key
+in no plan or an unknown key. A blank `keyId` lists every plan, as on AWS. Every matching plan comes
+back in one page.
+
+Floci does not check that a stage's API, stage or method exists, and does not enforce throttles or
+quotas.
 
 A `CreateUsagePlan` body member of the wrong JSON type is a `SerializationException` with API
 Gateway's deserializer message, before anything else is validated. The message names the Java class

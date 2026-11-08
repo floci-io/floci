@@ -5730,6 +5730,12 @@ public class RdsService implements Resettable, ResourceProvider {
         return cluster || instance;
     }
 
+    /** Whether RDS holds a cluster snapshot of this identifier in the request's region. */
+    public boolean hasClusterSnapshot(String snapshotId, String region) {
+        return snapshotId != null && !snapshotId.isBlank()
+                && findClusterSnapshotForScope(currentAccountId(), effectiveRegion(region), snapshotId) != null;
+    }
+
     public DbCluster getDbCluster(String id) {
         return getDbCluster(id, regionResolver.getDefaultRegion());
     }

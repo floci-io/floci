@@ -689,6 +689,28 @@
         "UpgradeDomain": {"method": "POST", "requestUri": "/2021-01-01/opensearch/upgradeDomain"}
       }
     },
+    "payment-cryptography-data": {
+      "credentialScope": "payment-cryptography",
+      "apiVersion": "2022-02-03",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "DecryptData": {"method": "POST", "requestUri": "/_paymentcryptography/keys/{KeyIdentifier+}/decrypt"},
+        "EncryptData": {"method": "POST", "requestUri": "/_paymentcryptography/keys/{KeyIdentifier+}/encrypt"},
+        "GenerateAs2805KekValidation": {"method": "POST", "requestUri": "/_paymentcryptography/as2805kekvalidation/generate"},
+        "GenerateAuthRequestCryptogram": {"method": "POST", "requestUri": "/_paymentcryptography/cryptogram/generate"},
+        "GenerateCardValidationData": {"method": "POST", "requestUri": "/_paymentcryptography/cardvalidationdata/generate"},
+        "GenerateMac": {"method": "POST", "requestUri": "/_paymentcryptography/mac/generate"},
+        "GenerateMacEmvPinChange": {"method": "POST", "requestUri": "/_paymentcryptography/macemvpinchange/generate"},
+        "GeneratePinData": {"method": "POST", "requestUri": "/_paymentcryptography/pindata/generate"},
+        "ReEncryptData": {"method": "POST", "requestUri": "/_paymentcryptography/keys/{IncomingKeyIdentifier+}/reencrypt"},
+        "TranslateKeyMaterial": {"method": "POST", "requestUri": "/_paymentcryptography/keymaterial/translate"},
+        "TranslatePinData": {"method": "POST", "requestUri": "/_paymentcryptography/pindata/translate"},
+        "VerifyAuthRequestCryptogram": {"method": "POST", "requestUri": "/_paymentcryptography/cryptogram/verify"},
+        "VerifyCardValidationData": {"method": "POST", "requestUri": "/_paymentcryptography/cardvalidationdata/verify"},
+        "VerifyMac": {"method": "POST", "requestUri": "/_paymentcryptography/mac/verify"},
+        "VerifyPinData": {"method": "POST", "requestUri": "/_paymentcryptography/pindata/verify"}
+      }
+    },
     "pipes": {
       "credentialScope": "pipes",
       "apiVersion": "2015-10-07",

@@ -63,6 +63,8 @@ final class EmrServiceFixture {
         final List<String> created = new ArrayList<>();
         // Each HDFS started: its cluster, primary node's host name, image and Docker network.
         final List<List<String>> hdfs = new ArrayList<>();
+        // Each HDFS's metastore service asked for.
+        final List<HiveMetastore> metastores = new ArrayList<>();
         RuntimeException hdfsFailure;
         // Runs as each HDFS starts, with what tells it the step is past starting.
         Consumer<BooleanSupplier> whileStartingHdfs = stopped -> { };
@@ -84,13 +86,19 @@ final class EmrServiceFixture {
 
         @Override
         public SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host,
-                                           String image, String dockerNetwork, BooleanSupplier stopped) {
-            hdfs.add(Arrays.asList(clusterId, host, image, dockerNetwork));
+                                           String image, String dockerNetwork, HiveMetastore hiveMetastore,
+                                           BooleanSupplier stopped) {
+            hdfs.add(Arrays.asList(clusterId, host, image, dockerNetwork, String.valueOf(hiveMetastore != null),
+                    hiveMetastore != null ? hiveMetastore.role() : null));
+            if (hiveMetastore != null) {
+                metastores.add(hiveMetastore);
+            }
             whileStartingHdfs.accept(stopped);
             if (hdfsFailure != null) {
                 throw hdfsFailure;
             }
-            return volumes(clusterId).withHdfs(host, HDFS_ADDRESS, HDFS_NETWORK);
+            SparkJobRunner.Storage storage = volumes(clusterId).withHdfs(host, HDFS_ADDRESS, HDFS_NETWORK);
+            return hiveMetastore != null ? storage.withHiveMetastore("thrift://" + host + ":9083") : storage;
         }
 
         @Override

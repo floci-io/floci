@@ -4599,7 +4599,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
             return List.of();
         }
-        return aware.scanAllAccountEntries(accessKeyId::equals);
+        return aware.findAllAccountEntries(accessKeyId);
     }
 
     private Optional<String> activeAccessKeySecret(String accessKeyId) {
@@ -5194,7 +5194,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         return delegatedApproverRole(approverArn)
                 .map(role -> new CallerArns(approverArn, role.getArn(), CallerArns.TYPE_ASSUMED_ROLE,
-                        null, null, role.getPermissionsBoundaryArn() != null));
+                        null, null, role.getPermissionsBoundaryArn() != null, role.getTags()));
     }
 
     /** The {@code aws:userid} of delegated credentials: the approver's, in the approver's shape. */
@@ -5445,9 +5445,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * @param userName      the request's {@code aws:username}, which only an IAM user has
      * @param permissionsBoundary whether a permissions boundary is attached to the user, or to the
      *                      role a session assumed, which a Deny's {@code NotPrincipal} never spares
+     * @param principalTags the stored user's or assumed role's tags, snapshotted for this request;
+     *                      STS session tags are not yet recorded
      */
     public record CallerArns(String callerArn, String principalArn, String principalType,
-                             String userId, String userName, boolean permissionsBoundary) {
+                             String userId, String userName, boolean permissionsBoundary,
+                             Map<String, String> principalTags) {
+
+        public CallerArns {
+            principalTags = Map.copyOf(principalTags);
+        }
+
+        /** A caller without stored principal tags, including account-root and federated identities. */
+        public CallerArns(String callerArn, String principalArn, String principalType, String userId,
+                          String userName, boolean permissionsBoundary) {
+            this(callerArn, principalArn, principalType, userId, userName, permissionsBoundary, Map.of());
+        }
 
         /**
          * The {@code aws:PrincipalType} values, from the IAM User Guide's principal key values
@@ -5508,6 +5521,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (userName != null) {
                 context.put("aws:username", List.of(userName));
             }
+            principalTags.forEach((key, value) -> context.put("aws:PrincipalTag/" + key, List.of(value)));
         }
     }
 
@@ -5518,8 +5532,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * anything derivable from the ARN.
      */
     private static CallerArns callerForUser(IamUser user) {
+        return callerForUser(user, true);
+    }
+
+    private static CallerArns callerForUser(IamUser user, boolean includeTags) {
         return new CallerArns(user.getArn(), user.getArn(), CallerArns.TYPE_USER,
-                user.getUserId(), user.getUserName(), user.getPermissionsBoundaryArn() != null);
+                user.getUserId(), user.getUserName(), user.getPermissionsBoundaryArn() != null,
+                includeTags ? user.getTags() : Map.of());
     }
 
 
@@ -5547,7 +5566,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (principalArn == null || !principalArn.contains(":user/")) {
             return Optional.empty();
         }
-        return userFromArnOrName(principalArn).map(IamService::callerForUser);
+        // The simulator requires callers to supply tag context explicitly, even for a tagged user.
+        return userFromArnOrName(principalArn).map(user -> callerForUser(user, false));
     }
 
     /**
@@ -5614,9 +5634,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
             String sessionArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
                     "assumed-role/" + roleName + "/" + sessionName).toString();
+            Optional<IamRole> role = roleFromArnOrName(roleArn);
             return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
                     sessionUserId(session).orElse(null), null,
-                    roleFromArnOrName(roleArn).map(IamRole::getPermissionsBoundaryArn).isPresent()));
+                    role.map(IamRole::getPermissionsBoundaryArn).isPresent(),
+                    role.map(IamRole::getTags).orElse(Map.of())));
         }
 
         return Optional.empty();

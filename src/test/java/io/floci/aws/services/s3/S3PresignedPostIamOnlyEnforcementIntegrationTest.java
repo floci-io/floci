@@ -7,9 +7,12 @@ import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -258,6 +261,103 @@ class S3PresignedPostIamOnlyEnforcementIntegrationTest {
         } finally {
             cloudTrail(region, "DeleteTrail", "{\"Name\":\"" + trail + "\"}");
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "x-amz-server-side-encryption,Allow,aws:kms",
+            "x-amz-server-side-encryption,Deny,aws:kms",
+            "x-amz-server-side-encryption-aws-kms-key-id,Allow,aws:kms",
+            "x-amz-server-side-encryption-aws-kms-key-id,Deny,aws:kms",
+            "x-amz-server-side-encryption,Allow,' aws:kms '",
+            "x-amz-server-side-encryption,Deny,' aws:kms '"
+    })
+    void presignedPostUsesEncryptionConditionsFromForm(String field, String effect, String encryption) {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "presigned-post-encryption-" + suffix;
+        String userName = "presigned-post-encryption-user-" + suffix;
+        String value = field.endsWith("key-id") ? "approved-key" : "aws:kms";
+        boolean isDenied = "Deny".equals(effect);
+        createBucketAsRoot(bucket);
+        String accessKeyId = createUser(userName);
+        if (isDenied) {
+            putUserPolicy(userName, "AllowPutObject", """
+                    {"Version":"2012-10-17","Statement":[
+                      {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}
+                    ]}""");
+        }
+        putUserPolicy(userName, "EncryptionCondition", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"%s","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*",
+                   "Condition":{"StringEquals":{"s3:%s":"%s"}}}
+                ]}""".formatted(effect, bucket, field, value));
+
+        given()
+                .header(field, "header-only-value")
+                .multiPart("key", "encrypted.txt")
+                .multiPart("x-amz-credential", presignedCredential(accessKeyId))
+                .multiPart("X-Amz-Server-Side-Encryption", encryption)
+                .multiPart("X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id", "approved-key")
+                .multiPart("file", "encrypted.txt", "encrypted".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+                .post("/" + bucket)
+        .then()
+                .statusCode(isDenied ? 403 : 204);
+
+        given()
+                .header("Authorization", auth("test", "s3"))
+        .when()
+                .get("/" + bucket + "/encrypted.txt")
+        .then()
+                .statusCode(isDenied ? 404 : 200);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            ",Allow,StringEquals",
+            "AES256,Allow,StringEquals",
+            ",Deny,StringNotEquals",
+            "AES256,Deny,StringNotEquals"
+    })
+    void presignedPostRejectsKmsKeyWithoutKmsEncryption(String encryption, String effect, String operator) {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "presigned-post-invalid-kms-" + suffix;
+        String userName = "presigned-post-invalid-kms-user-" + suffix;
+        createBucketAsRoot(bucket);
+        String accessKeyId = createUser(userName);
+        if ("Deny".equals(effect)) {
+            putUserPolicy(userName, "AllowPutObject", """
+                    {"Version":"2012-10-17","Statement":[
+                      {"Effect":"Allow","Action":"s3:PutObject","Resource":"*"}
+                    ]}""");
+        }
+        putUserPolicy(userName, "EncryptionCondition", """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"%s","Action":"s3:PutObject","Resource":"arn:aws:s3:::%s/*",
+                   "Condition":{"%s":{"s3:x-amz-server-side-encryption-aws-kms-key-id":"approved-key"}}}
+                ]}""".formatted(effect, bucket, operator));
+
+        RequestSpecification upload = given()
+                .header("x-amz-server-side-encryption", "aws:kms")
+                .multiPart("key", "invalid.txt")
+                .multiPart("x-amz-credential", presignedCredential(accessKeyId))
+                .multiPart("X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id", "approved-key")
+                .multiPart("file", "invalid.txt", "invalid".getBytes(StandardCharsets.UTF_8), "text/plain");
+        if (encryption != null) {
+            upload.multiPart("X-Amz-Server-Side-Encryption", encryption);
+        }
+        upload.when()
+                .post("/" + bucket)
+        .then()
+                .statusCode(400)
+                .body("Error.Code", equalTo("InvalidArgument"));
+
+        given()
+                .header("Authorization", auth("test", "s3"))
+        .when()
+                .get("/" + bucket + "/invalid.txt")
+        .then()
+                .statusCode(404);
     }
 
     private static void cloudTrail(String region, String operation, String body) {

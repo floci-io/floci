@@ -101,6 +101,9 @@ public class ContainerLifecycleManager {
     /** Daemon CPU count, resolved on first use. Null until then, so that empty can mean "unknown". */
     private final AtomicReference<OptionalInt> hostCpuCount = new AtomicReference<>();
 
+    /** Whether the daemon is Docker Desktop, resolved on first use and kept. Null until then. */
+    private final AtomicReference<Boolean> dockerDesktop = new AtomicReference<>();
+
     @Inject
     public ContainerLifecycleManager(DockerClient dockerClient,
                                      ImageCacheService imageCacheService,
@@ -362,7 +365,7 @@ public class ContainerLifecycleManager {
      * network-connect endpoint, so the container is reconnected before it starts.
      */
     private void attachNetworkBeforeStart(String containerId, ContainerSpec spec) {
-        if (!spec.hasPortBindings()) {
+        if (!connectsAfterStart(spec)) {
             dockerClient.disconnectFromNetworkCmd()
                     .withContainerId(containerId)
                     .withNetworkId(spec.networkMode())
@@ -483,7 +486,7 @@ public class ContainerLifecycleManager {
         LOG.infov("Started container {0}", containerId);
 
         if (spec.networkMode() != null && !spec.networkMode().isBlank()
-                && spec.publishesPorts() && !spec.hasNetworkConfiguration()) {
+                && connectsAfterStart(spec) && !spec.hasNetworkConfiguration()) {
             try {
                 dockerClient.connectToNetworkCmd()
                         .withContainerId(containerId)
@@ -1029,6 +1032,53 @@ public class ContainerLifecycleManager {
                 .withContainerId(containerId)
                 .withNetworkId(networkName)
                 .exec();
+    }
+
+    /**
+     * Connects the running container {@code containerId} to {@code networkName}, where its other containers reach it
+     * as {@code alias}, unless it is on it already.
+     */
+    public void ensureConnected(String containerId, String networkName, String alias) {
+        if (networksOf(containerId).containsKey(networkName)) {
+            return;
+        }
+        dockerClient.connectToNetworkCmd()
+                .withContainerId(containerId)
+                .withNetworkId(networkName)
+                .withContainerNetwork(new ContainerNetwork().withAliases(alias))
+                .exec();
+        LOG.debugv("Connected {0} to network {1} as {2}", containerId, networkName, alias);
+    }
+
+    /**
+     * Disconnects the container {@code containerId} from {@code networkName} when it is on it: true once it is not,
+     * false when Docker kept it there.
+     */
+    public boolean disconnectFromNetwork(String containerId, String networkName) {
+        try {
+            if (networksOf(containerId).containsKey(networkName)) {
+                dockerClient.disconnectFromNetworkCmd()
+                        .withContainerId(containerId)
+                        .withNetworkId(networkName)
+                        .withForce(true)
+                        .exec();
+                LOG.debugv("Disconnected {0} from network {1}", containerId, networkName);
+            }
+            return true;
+        } catch (NotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Error disconnecting {0} from network {1}: {2}", containerId, networkName, e.getMessage());
+            return false;
+        }
+    }
+
+    // The networks a container is on, by name.
+    private Map<String, ContainerNetwork> networksOf(String containerId) {
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        Map<String, ContainerNetwork> networks = inspect.getNetworkSettings() != null
+                ? inspect.getNetworkSettings().getNetworks() : null;
+        return networks != null ? networks : Map.of();
     }
 
     /**
@@ -1599,12 +1649,10 @@ public class ContainerLifecycleManager {
                     spec.name(), spec.networkMode(), spec.portBindings().keySet());
         }
 
-        // Network mode: only set during creation when no host ports are published.
-        // withNetworkMode() + port bindings suppresses port publishing on macOS Docker Desktop,
-        // so containers with published ports (e.g. ECR registry) connect to the network
-        // after start via connectToNetworkCmd() instead. host, none and container:<id> publish
-        // nothing and cannot be connected after creation, so they always go on the HostConfig.
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !spec.publishesPorts()) {
+        // Network mode: set during creation unless the container connects after start (see
+        // connectsAfterStart). host, none and container:<id> publish nothing and cannot be
+        // connected after creation, so they always go on the HostConfig.
+        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !connectsAfterStart(spec)) {
             hostConfig.withNetworkMode(spec.networkMode());
         }
 
@@ -1714,6 +1762,27 @@ public class ContainerLifecycleManager {
         }
         hostCpuCount.set(resolved);
         return resolved;
+    }
+
+    /**
+     * Whether a container joins its network only after it starts. On Docker Desktop, naming the
+     * network at creation together with port bindings suppresses the published ports, so a
+     * container that publishes ports is created on the default bridge and connected afterwards.
+     * Any other daemon publishes them on the named network, so the container is created there and
+     * joins it alone. A daemon that cannot be asked is treated as Docker Desktop, and the answer is
+     * kept either way, so a container's create and its start always take the same path.
+     */
+    private boolean connectsAfterStart(ContainerSpec spec) {
+        return spec.publishesPorts() && isDockerDesktop();
+    }
+
+    private boolean isDockerDesktop() {
+        Boolean known = dockerDesktop.get();
+        if (known != null) {
+            return known;
+        }
+        boolean desktop = DockerDaemon.operatingSystem(dockerClient).map(DockerDaemon::isDockerDesktop).orElse(true);
+        return dockerDesktop.compareAndSet(null, desktop) ? desktop : dockerDesktop.get();
     }
 
     private static boolean isContainerNetworkMode(String networkMode) {

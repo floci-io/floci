@@ -193,6 +193,38 @@ class CloudFrontWebSocketIntegrationTest {
     }
 
     @Test
+    void repeatedRefusalsDoNotExhaustOriginConnectionsAcrossDistributions() throws Exception {
+        List<Distribution> distributions = List.of(
+                createDistribution(policyBehavior(ALL_VIEWER)),
+                createDistribution(policyBehavior(ALL_VIEWER)),
+                createDistribution(policyBehavior(ALL_VIEWER)),
+                createDistribution(policyBehavior(ALL_VIEWER)),
+                createDistribution(policyBehavior(ALL_VIEWER)),
+                createDistribution(policyBehavior(ALL_VIEWER)),
+                createDistribution(policyBehavior(ALL_VIEWER)));
+
+        // All distribution hosts share the origin's default five-connection pool.
+        for (int attempt = 0; attempt < 12; attempt++) {
+            Distribution distribution = distributions.get(attempt % distributions.size());
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> connect(distribution, "/elsewhere/?transport=websocket"),
+                    "Refusal " + attempt + " must complete without waiting for a pool connection");
+            UpgradeRejectedException rejected = assertInstanceOf(UpgradeRejectedException.class, failure.getCause());
+            assertEquals(404, rejected.getStatus());
+            assertEquals(List.of("one", "two"), rejected.getHeaders().getAll("X-Multi"));
+            assertEquals("upgrade refused", rejected.getBody().toString());
+        }
+
+        WebSocket socket = connect(distributions.getLast(), "/socket.io/?transport=websocket");
+        try {
+            assertEquals("transport=websocket:hello", exchange(socket, "hello"));
+        } finally {
+            socket.close();
+        }
+        assertEquals(13, originUpgrades.get());
+    }
+
+    @Test
     void plainRequestThroughDistributionCarriesNoUpgrade() {
         Distribution distribution = createDistribution(policyBehavior(ALL_VIEWER));
 

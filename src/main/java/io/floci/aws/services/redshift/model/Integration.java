@@ -23,6 +23,7 @@ public class Integration {
     private String integrationName;
     private String sourceArn;
     private String targetArn;
+    private String sourceType;
     private String sourceStreamArn;
     private String targetClusterIdentifier;
     private String landingTableName;
@@ -79,6 +80,9 @@ public class Integration {
     public void setPollingEnabled(boolean pollingEnabled) { this.pollingEnabled = pollingEnabled; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
+    /** {@code s3-event-notifications} for an S3 event integration; null for a DynamoDB zero-ETL integration. */
+    public String getSourceType() { return sourceType; }
+    public void setSourceType(String sourceType) { this.sourceType = sourceType; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
     public String getKmsKeyId() { return kmsKeyId; }

@@ -238,11 +238,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             new SparkSetting("tez.local.mode", "true"),
             new SparkSetting("tez.am.client.am.port-range", "40000-40100"));
     // On a cluster, Hive's metastore is the cluster's own, as "Hive records metastore information in a MySQL database
-    // on the primary node's file system": an embedded Derby database in the cluster's /mnt, whose tables DataNucleus
-    // creates on first use. A cluster's hive-site replaces it, with the Glue Data Catalog's client factory for one.
-    private static final List<SparkSetting> HIVE_CLUSTER_SETTINGS = List.of(
-            new SparkSetting("hive.metastore.client.factory.class",
-                    "org.apache.hadoop.hive.ql.metadata.SessionHiveMetaStoreClientFactory"),
+    // on the primary node's file system": the metastore service on its primary node (see EmrClusterStorage), in place
+    // of the Glue Data Catalog client the image's hive-site names, or, where that does not run, an embedded Derby
+    // database in the cluster's /mnt, whose tables DataNucleus creates on first use. A cluster's hive-site replaces
+    // them, with the Glue Data Catalog's client factory for one.
+    private static final SparkSetting HIVE_CLUSTER_CLIENT = new SparkSetting("hive.metastore.client.factory.class",
+            "org.apache.hadoop.hive.ql.metadata.SessionHiveMetaStoreClientFactory");
+    private static final List<SparkSetting> HIVE_EMBEDDED_METASTORE = List.of(
             new SparkSetting("javax.jdo.option.ConnectionURL",
                     "jdbc:derby:;databaseName=/mnt/var/lib/hive/metastore_db;create=true"),
             new SparkSetting("hive.metastore.schema.verification", "false"),
@@ -743,7 +745,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         settings.addAll(HIVE_SETTINGS);
         if (job.storage() != null) {
             settings.addAll(hdfsSettings(job.storage()));
-            settings.addAll(HIVE_CLUSTER_SETTINGS);
+            settings.addAll(hiveClusterSettings(job.storage()));
         }
         List<String> arguments = new ArrayList<>();
         for (SparkSetting setting : settings) {
@@ -910,16 +912,32 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // Floci's Hadoop settings: S3A on Floci's S3, and the Glue Data Catalog client on Floci's Glue, in the job's
     // account. Given none, the client from emr-7.10.0 asks STS for it, through a client no setting points at Floci.
     private static List<SparkSetting> hadoopSettings(Job job, String flociEndpoint) {
+        return hadoopSettings(job.region(), job.accountId(), flociEndpoint);
+    }
+
+    /**
+     * The {@code --hiveconf} settings a cluster's Hive metastore service gets, so that it reaches the S3 locations of
+     * tables as the cluster's steps do: Floci's S3 through S3A.
+     */
+    public static List<String> hiveMetastoreSettings(String region, String accountId, String flociEndpoint) {
+        List<String> arguments = new ArrayList<>();
+        for (SparkSetting setting : hadoopSettings(region, accountId, flociEndpoint)) {
+            addHiveSetting(arguments, setting.key(), setting.value());
+        }
+        return arguments;
+    }
+
+    private static List<SparkSetting> hadoopSettings(String region, String accountId, String flociEndpoint) {
         return List.of(
                 new SparkSetting("fs.s3a.endpoint", flociEndpoint),
-                new SparkSetting("fs.s3a.endpoint.region", job.region()),
+                new SparkSetting("fs.s3a.endpoint.region", region),
                 new SparkSetting("fs.s3a.path.style.access", "true"),
                 new SparkSetting("fs.s3a.committer.magic.track.commits.in.memory.enabled", "true"),
                 new SparkSetting("fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"),
                 new SparkSetting("fs.AbstractFileSystem.s3.impl", "org.apache.hadoop.fs.s3a.S3A"),
                 new SparkSetting("aws.glue.endpoint", flociEndpoint),
-                new SparkSetting("hive.metastore.glue.catalogid", job.accountId()),
-                new SparkSetting("aws.region", job.region()));
+                new SparkSetting("hive.metastore.glue.catalogid", accountId),
+                new SparkSetting("aws.region", region));
     }
 
     // A cluster's HDFS, as Hadoop settings: its NameNode, on the cluster's primary node, which hdfs:// paths without a
@@ -949,15 +967,31 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         return settings;
     }
 
+    // The cluster's metastore, for its Hive steps (see HIVE_CLUSTER_CLIENT).
+    private static List<SparkSetting> hiveClusterSettings(Storage storage) {
+        List<SparkSetting> settings = new ArrayList<>(List.of(HIVE_CLUSTER_CLIENT));
+        if (storage.hiveMetastore() != null) {
+            settings.add(new SparkSetting("hive.metastore.uris", storage.hiveMetastore()));
+        } else {
+            settings.addAll(HIVE_EMBEDDED_METASTORE);
+        }
+        return settings;
+    }
+
     // Floci's settings, then the job's spark-defaults, in the order a later one wins. Spark's own Hadoop configuration
     // takes HDFS's client back from the core-site.xml's view, for Spark and its Hive client, which writes a Hive table
-    // in HDFS only through it.
+    // in HDFS only through it. On a cluster with Hive or HCatalog, Spark's Hive client uses the cluster's metastore
+    // too, as the Glue Data Catalog is the one to pick "when you require a persistent Hive metastore or a Hive
+    // metastore shared by different clusters"; a spark-hive-site naming its client factory still wins.
     private static List<SparkSetting> sparkSettings(Job job, String flociEndpoint) {
         List<SparkSetting> hadoop = new ArrayList<>(hadoopSettings(job, flociEndpoint));
         List<SparkSetting> hdfs = hdfsSettings(job.storage());
         hadoop.addAll(hdfs);
         if (!hdfs.isEmpty()) {
             hadoop.add(new SparkSetting("fs.hdfs.impl", "org.apache.hadoop.hdfs.DistributedFileSystem"));
+        }
+        if (job.storage() != null && job.storage().hiveMetastore() != null) {
+            hadoop.add(new SparkSetting("hive.metastore.uris", job.storage().hiveMetastore()));
         }
         List<SparkSetting> settings = new ArrayList<>();
         hadoop.forEach(setting -> settings.add(new SparkSetting("spark.hadoop." + setting.key(), setting.value())));

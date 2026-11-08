@@ -15,6 +15,7 @@ import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.api.model.VersionComponent;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerEngineDetector;
@@ -26,6 +27,7 @@ import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.iam.model.SessionCreds;
 import io.floci.aws.services.lambda.LambdaLayerFixtures;
@@ -49,6 +51,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mock;
+import org.mockito.MockMakers;
+import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.ByteArrayInputStream;
@@ -70,6 +74,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 import java.util.stream.Stream;
 
 import static io.floci.aws.testing.DockerDaemonVersionFixtures.stubDaemonVersion;
@@ -101,6 +106,7 @@ class ContainerLauncherTest {
     @Mock DockerClient dockerClient;
     @Mock LambdaExecutionRoleCredentials executionRoleCredentials;
     @Mock LambdaLayerService layerService;
+    @Mock Ec2Service ec2Service;
 
     @TempDir
     Path tempDir;
@@ -242,7 +248,7 @@ class ContainerLauncherTest {
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager, logStreamer, imageResolver, runtimeApiServerFactory,
                 dockerHostResolver, config, ecrRegistryManager, layers,
-                new LaunchedContainerAwsEnv(endpoint), executionRoleCredentials);
+                new LaunchedContainerAwsEnv(endpoint), executionRoleCredentials, ec2Service);
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("background-layer");
         fn.setFunctionArn("arn:aws:lambda:" + region + ":" + account + ":function:background-layer");
@@ -362,6 +368,39 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void launchLimitsMemoryAndSwapTogetherToTheDeclaredMemorySize() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("memory-fn");
+        fn.setHotReloadHostPath("/home/ci/code");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setMemorySize(256);
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals(256L * 1024 * 1024, spec.memoryBytes());
+        assertEquals(256L * 1024 * 1024, spec.linuxOptions().memorySwapBytes(),
+                "memory plus swap equal to the memory limit: no swap");
+    }
+
+    @Test
+    void launchLimitsMemoryAndSwapTogetherToLambdasDefaultWhereNoneIsDeclared() {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("default-memory-fn");
+        fn.setHotReloadHostPath("/home/ci/code");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+
+        launcher.launch(fn);
+
+        ContainerSpec spec = captureRealContainerSpec();
+        assertEquals(128L * 1024 * 1024, spec.memoryBytes());
+        assertEquals(128L * 1024 * 1024, spec.linuxOptions().memorySwapBytes(),
+                "memory plus swap equal to the memory limit: no swap");
+    }
+
+    @Test
     void launchFunction_hotReloadMountsTheHostDirectoryReadOnlyAtVarTask() {
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("hot-reload-fn");
@@ -463,7 +502,7 @@ class ContainerLauncherTest {
         return new ContainerLauncher(builder, lifecycleManager, logStreamer, selectedResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
                 layerService, new LaunchedContainerAwsEnv(endpoint),
-                executionRoleCredentials);
+                executionRoleCredentials, ec2Service);
     }
 
     @ParameterizedTest
@@ -854,7 +893,7 @@ class ContainerLauncherTest {
 
         // No populate helper is created/discarded for small code.
         verify(lifecycleManager, times(1)).create(any());
-        verify(lifecycleManager, never()).stopAndRemove(any(), any());
+        verify(lifecycleManager, never()).stopAndRemoveStrict(any(), any());
 
         // createAndStart must NOT be called — Lambda uses the split path
         verify(lifecycleManager, never()).createAndStart(any());
@@ -984,7 +1023,7 @@ class ContainerLauncherTest {
                 () -> launcher.launchProvisioned(fn));
         assertTrue(error.getMessage().startsWith("Configured layer is unavailable for provisioned initialization:"));
         verify(lifecycleManager, never()).startCreated(anyString(), any());
-        verify(lifecycleManager).stopAndRemove("container-123", null);
+        verify(lifecycleManager).stopAndRemoveStrict("container-123", null);
         verify(runtimeApiServerFactory).release(runtimeApiServer);
         verify(runtimeApiServer, never()).expectExtensions(anyInt());
         verify(runtimeApiServer, never()).enqueue(any());
@@ -1258,7 +1297,7 @@ class ContainerLauncherTest {
 
         // No populate helper for small code.
         verify(lifecycleManager, times(1)).create(any());
-        verify(lifecycleManager, never()).stopAndRemove(any(), any());
+        verify(lifecycleManager, never()).stopAndRemoveStrict(any(), any());
         verify(lifecycleManager, never()).createAndStart(any());
     }
 
@@ -1408,6 +1447,140 @@ class ContainerLauncherTest {
     }
 
     @Test
+    void vpcFunctionJoinsItsVpcNetworkBeforeStartAndReturnsTheAddressAfterRemoval() throws Exception {
+        LambdaFunction fn = vpcFunction("vpc-join-fn");
+        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.20"));
+        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.20"))
+                .thenReturn(Optional.of("floci-vpc-1"));
+
+        ContainerHandle handle = launcher.launch(fn);
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+        launcher.stop(handle);
+
+        InOrder order = inOrder(ec2Service, lifecycleManager);
+        order.verify(ec2Service).allocateVpcPrivateIp("us-east-1", "subnet-a");
+        order.verify(ec2Service).attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123",
+                "172.31.0.20");
+        order.verify(lifecycleManager).startCreated(eq("container-123"), any());
+        order.verify(lifecycleManager).stopAndRemoveStrict("container-123", null, 1);
+        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.20");
+    }
+
+    @Test
+    void vpcFunctionKeepsItsAddressUntilARetriedRemovalSucceeds() throws Exception {
+        LambdaFunction fn = vpcFunction("vpc-retry-fn");
+        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.23"));
+        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.23"))
+                .thenReturn(Optional.of("floci-vpc-1"));
+        ContainerHandle handle = launcher.launch(fn);
+        doThrow(new RuntimeException("removal failed")).doNothing()
+                .when(lifecycleManager).stopAndRemoveStrict("container-123", null, 1);
+
+        assertThrows(RuntimeException.class, () -> launcher.stop(handle));
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+
+        launcher.stop(handle);
+        verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.23");
+    }
+
+    @Test
+    void vpcFunctionReturnsTheAddressOnceAFailedLaunchRemovesItsContainer() throws Exception {
+        LambdaFunction fn = vpcFunction("vpc-launch-failure-fn");
+        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.21"));
+        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.21"))
+                .thenReturn(Optional.of("floci-vpc-1"));
+        doThrow(new RuntimeException("start failed")).when(lifecycleManager).startCreated(eq("container-123"), any());
+
+        assertThrows(RuntimeException.class, () -> launcher.launch(fn));
+
+        InOrder order = inOrder(lifecycleManager, ec2Service);
+        order.verify(lifecycleManager).stopAndRemoveStrict("container-123", null);
+        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.21");
+    }
+
+    @Test
+    void vpcFunctionKeepsTheAddressWhenAFailedLaunchCannotRemoveItsContainer() throws Exception {
+        LambdaFunction fn = vpcFunction("vpc-launch-removal-failure-fn");
+        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.24"));
+        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.24"))
+                .thenReturn(Optional.of("floci-vpc-1"));
+        doThrow(new RuntimeException("start failed")).when(lifecycleManager).startCreated(eq("container-123"), any());
+        doThrow(new IllegalStateException("removal failed"))
+                .when(lifecycleManager).stopAndRemoveStrict("container-123", null);
+
+        assertThrows(RuntimeException.class, () -> launcher.launch(fn));
+
+        verify(ec2Service, never()).releaseVpcPrivateIp(any(), any(), any());
+    }
+
+    @Test
+    void vpcFunctionReturnsTheAddressAtOnceWhenItCannotJoinTheNetwork() throws Exception {
+        LambdaFunction fn = vpcFunction("vpc-attach-failure-fn");
+        when(ec2Service.allocateVpcPrivateIp("us-east-1", "subnet-a")).thenReturn(Optional.of("172.31.0.22"));
+        when(ec2Service.attachContainerToVpc("us-east-1", "vpc-1", "subnet-a", "container-123", "172.31.0.22"))
+                .thenReturn(Optional.empty());
+
+        ContainerHandle handle = launcher.launch(fn);
+        launcher.stop(handle);
+
+        InOrder order = inOrder(ec2Service, lifecycleManager);
+        order.verify(ec2Service).releaseVpcPrivateIp("us-east-1", "subnet-a", "172.31.0.22");
+        order.verify(lifecycleManager).startCreated(eq("container-123"), any());
+        verify(ec2Service, times(1)).releaseVpcPrivateIp(any(), any(), any());
+    }
+
+    @Test
+    void vpcFunctionLeasesItsAddressInTheFunctionsAccountOutsideARequest() throws Exception {
+        // A provisioned or cross-account launch has no caller scope of the function's owner, and
+        // the allocator reads the owner's endpoint interfaces from the ambient account.
+        LambdaFunction fn = vpcFunction("vpc-account-fn");
+        fn.setFunctionArn("arn:aws:lambda:eu-west-1:222233334444:function:vpc-account-fn");
+        AtomicBoolean inOwnerScope = new AtomicBoolean();
+        when(ec2Service.allocateVpcPrivateIp("eu-west-1", "subnet-a"))
+                .thenAnswer(invocation -> inOwnerScope.get() ? Optional.of("172.31.0.25") : Optional.empty());
+        when(ec2Service.attachContainerToVpc("eu-west-1", "vpc-1", "subnet-a", "container-123", "172.31.0.25"))
+                .thenReturn(Optional.of("floci-vpc-1"));
+        try (MockedStatic<RequestScopes> scopes =
+                     mockStatic(RequestScopes.class, withSettings().mockMaker(MockMakers.INLINE))) {
+            scopes.when(() -> RequestScopes.callAs(eq("222233334444"), eq("eu-west-1"), any(Supplier.class)))
+                    .thenAnswer(invocation -> {
+                        inOwnerScope.set(true);
+                        try {
+                            return invocation.<Supplier<?>>getArgument(2).get();
+                        } finally {
+                            inOwnerScope.set(false);
+                        }
+                    });
+
+            launcher.launch(fn);
+        }
+
+        verify(ec2Service).attachContainerToVpc("eu-west-1", "vpc-1", "subnet-a", "container-123", "172.31.0.25");
+    }
+
+    @Test
+    void functionWithoutVpcConfigNeverCallsEc2() throws Exception {
+        LambdaFunction fn = vpcFunction("no-vpc-fn");
+        fn.setVpcId(null);
+        fn.setVpcConfig(null);
+
+        launcher.stop(launcher.launch(fn));
+
+        verifyNoInteractions(ec2Service);
+    }
+
+    private LambdaFunction vpcFunction(String name) throws IOException {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName(name);
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(Files.createDirectory(tempDir.resolve(name)).toString());
+        fn.setVpcId("vpc-1");
+        fn.setVpcConfig(Map.of("SubnetIds", List.of("subnet-a", "subnet-b"), "SecurityGroupIds", List.of("sg-1")));
+        return fn;
+    }
+
+    @Test
     void publishedVersionUnregistersUnderTheAccountItRegisteredWith() throws Exception {
         // A published version has no accountId, so both the handle stamp and the revoke must take
         // the account from the function ARN. Reading the field directly revokes under null and
@@ -1552,7 +1725,7 @@ class ContainerLauncherTest {
         verify(lifecycleManager, times(2)).create(any());
         verify(lifecycleManager, atLeastOnce()).ensureVolume(any());
         verify(lifecycleManager).stopAndRemove("helper-123", null, 0);
-        verify(lifecycleManager, never()).stopAndRemove(any(), any());
+        verify(lifecycleManager, never()).stopAndRemoveStrict(any(), any());
         InOrder order = inOrder(lifecycleManager);
         order.verify(lifecycleManager).stopAndRemove("helper-123", null, 0);
         order.verify(lifecycleManager).create(any());
@@ -1587,7 +1760,7 @@ class ContainerLauncherTest {
         order.verify(dockerClient).copyArchiveToContainerCmd("helper-123");
         order.verify(lifecycleManager).stopAndRemove("helper-123", null, 0);
         verify(lifecycleManager, times(1)).create(any());
-        verify(lifecycleManager, never()).stopAndRemove(any(), any());
+        verify(lifecycleManager, never()).stopAndRemoveStrict(any(), any());
         verify(lifecycleManager, never()).removeVolume(any());
         verify(runtimeApiServerFactory).release(runtimeApiServer);
         assertFalse(Files.exists(tempDir.resolve("lambda-codevol-markers")
@@ -2259,7 +2432,7 @@ class ContainerLauncherTest {
                 ecrRegistryManager,
                 mock(LambdaLayerService.class),
                 new LaunchedContainerAwsEnv(reachableEndpoint),
-                executionRoleCredentials);
+                executionRoleCredentials, ec2Service);
 
         stubExtensionDiscovery("otel-collector");
         // Feed a real stdout frame through whatever callback the launcher hands to execStartCmd.

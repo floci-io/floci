@@ -172,6 +172,7 @@ nav:
     - Amazon Data Lifecycle Manager: services/dlm.md
     - ACM: services/acm.md
     - Payment Cryptography: services/payment-cryptography.md
+    - Payment Cryptography data plane: services/payment-cryptography-data.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
     - AWS Resource Groups: services/resource-groups.md

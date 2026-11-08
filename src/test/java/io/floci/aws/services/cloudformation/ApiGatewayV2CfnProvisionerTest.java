@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.util.HashMap;
@@ -1034,6 +1035,71 @@ class ApiGatewayV2CfnProvisionerTest {
                 null, null);
     }
 
+    @Test
+    void stageVariablesDroppedFromTheTemplateAreClearedOnUpdate() throws Exception {
+        provisionStageUpdate("""
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"blue"}}
+                """, """
+                {"ApiId":"api-123","StageName":"prod"}
+                """);
+
+        assertEquals(Map.of(), updatedStageRequest().get("stageVariables"));
+    }
+
+    @Test
+    void emptyStageVariablesInTheTemplateStayEmpty() throws Exception {
+        provisionStageUpdate("""
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"blue"}}
+                """, """
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{}}
+                """);
+
+        assertEquals(Map.of(), updatedStageRequest().get("stageVariables"));
+    }
+
+    @Test
+    void changedStageVariablesStillApply() throws Exception {
+        provisionStageUpdate("""
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"blue"}}
+                """, """
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"green","size":"2"}}
+                """);
+
+        assertEquals(Map.of("color", "green", "size", "2"), updatedStageRequest().get("stageVariables"));
+    }
+
+    @Test
+    void stageVariablesSetOutsideTheStackSurviveAnUpdateThatNeverDeclaredThem() throws Exception {
+        provisionStageUpdate("""
+                {"ApiId":"api-123","StageName":"prod"}
+                """, """
+                {"ApiId":"api-123","StageName":"prod","AutoDeploy":true}
+                """);
+
+        assertNull(updatedStageRequest().get("stageVariables"));
+    }
+
+    @Test
+    void createStageSendsTheDeclaredStageVariables() throws Exception {
+        provisioner.provision("Stage", "AWS::ApiGatewayV2::Stage", mapper.readTree("""
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"blue"}}
+                """), engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        ArgumentCaptor<Map<String, Object>> request = requestCaptor();
+        verify(apiGatewayV2Service).createStage(eq(REGION), eq(API_ID), request.capture());
+        assertEquals(Map.of("color", "blue"), request.getValue().get("stageVariables"));
+    }
+
+    @Test
+    void droppingAutoDeployGoesBackToFalseAndDroppingStageNameKeepsTheStage() throws Exception {
+        provisionStageUpdate("{\"ApiId\": \"api-123\", \"StageName\": \"prod\", \"AutoDeploy\": true}",
+                "{\"ApiId\": \"api-123\"}");
+
+        Map<String, Object> request = updatedStageRequest();
+        assertEquals("false", request.get("autoDeploy"));
+        assertNull(request.get("stageName"));
+    }
+
     private static final String INTEGRATION_PROPERTIES = """
             {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
              "IntegrationMethod":"ANY","PayloadFormatVersion":"1.0","TimeoutInMillis":"15000",
@@ -1068,6 +1134,22 @@ class ApiGatewayV2CfnProvisionerTest {
         when(apiGatewayV2Service.updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap())).thenReturn(prior);
         when(apiGatewayV2Service.replaceIntegrationConnection(eq(REGION), eq(API_ID), eq("int-1"), anyString(), any()))
                 .thenReturn(prior);
+    }
+
+    private void provisionStageUpdate(String previous, String current) throws Exception {
+        provisioner.provision("Stage", "AWS::ApiGatewayV2::Stage", mapper.readTree(current), engine(), REGION,
+                "000000000000", "test-stack", "prod", Map.of(), event -> {}, mapper.readTree(previous));
+    }
+
+    private Map<String, Object> updatedStageRequest() {
+        ArgumentCaptor<Map<String, Object>> request = requestCaptor();
+        verify(apiGatewayV2Service).updateStage(eq(REGION), eq(API_ID), eq("prod"), request.capture());
+        return request.getValue();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<Map<String, Object>> requestCaptor() {
+        return ArgumentCaptor.forClass((Class<Map<String, Object>>) (Class<?>) Map.class);
     }
 
     private StackResource provisionIntegration(String properties) throws Exception {

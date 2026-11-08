@@ -71,11 +71,13 @@ final class EmrSparkSteps {
     private static final String HIVE_SCRIPT = "hive-script";
     private static final String HIVE_SCRIPT_ARGS = "--args";
     private static final String HIVE = "hive";
+    private static final String HCATALOG = "hcatalog";
     // The Hive classifications a Hive step's hive gets, each property a --hiveconf, in the order Hive reads their
     // files, a later one winning: core-site, tez-site, which will "Change values in Tez's tez-site.xml file", and
     // hive-site, which will "Change values in Hive's hive-site.xml"; and hive-env's exports, which will "Change
     // values in the Hive environment".
-    private static final List<String> HIVE_CLASSIFICATIONS = List.of(CORE_SITE, "tez-site", "hive-site");
+    private static final String HIVE_SITE = "hive-site";
+    private static final List<String> HIVE_CLASSIFICATIONS = List.of(CORE_SITE, "tez-site", HIVE_SITE);
     private static final String HIVE_ENV = "hive-env";
     // EMR's MapReduce jars are in /usr/lib/hadoop-mapreduce, as the image's own hadoop-streaming script has it,
     // which the image does not have; its streaming jar is in /usr/lib/hadoop.
@@ -175,11 +177,12 @@ final class EmrSparkSteps {
      * Floci's settings: the cluster's Hive classifications, then the step's own arguments, so that a
      * {@code --hiveconf} of the step's replaces a classification's property, as it replaces a hive-site.xml one.
      */
-    static HiveCommand hive(EmrStep step, String applications, String configurations, ObjectMapper objectMapper) {
+    static HiveCommand hive(EmrStep step, String releaseLabel, String applications, String configurations,
+            ObjectMapper objectMapper) {
         String jar = step.getJar();
         List<String> args = step.getArgs() != null ? step.getArgs() : List.of();
         if (jar == null || !named(jar, COMMAND_RUNNER) || args.isEmpty()
-                || !installsHive(applications, objectMapper)) {
+                || !installsHive(releaseLabel, applications, objectMapper)) {
             return null;
         }
         List<String> runner;
@@ -217,12 +220,23 @@ final class EmrSparkSteps {
     }
 
     /**
-     * Whether a cluster's {@code Applications}, the JSON array RunJobFlow was given, name Hive ("A case-insensitive
-     * list of applications for Amazon EMR to install").
+     * Whether a cluster installs Hive: its {@code Applications}, the JSON array RunJobFlow was given ("A
+     * case-insensitive list of applications for Amazon EMR to install"), name Hive, or HCatalog, with which EMR
+     * installs Hive's client, {@code hive-client}, the {@code hive} that EMR's {@code hive-script} looks for, and its
+     * HCatalog server, {@code hcatalog-server}, whose {@code hcat_server.sh} runs {@code hive --service metastore}.
+     * HCatalog "allows you to access Hive metastore tables within Pig, Spark SQL, and/or custom MapReduce
+     * applications". Such a cluster's Hive steps run, its steps' image has Hive, and its primary node runs Hive's
+     * metastore service. A release of the AWS runtime for Apache Spark has neither: "This release includes the
+     * following applications: AmazonCloudWatchAgent, Delta, Hudi, Iceberg, JupyterEnterpriseGateway, Livy, and
+     * Spark."
      */
-    static boolean installsHive(String applications, ObjectMapper objectMapper) {
+    static boolean installsHive(String releaseLabel, String applications, ObjectMapper objectMapper) {
+        if (releaseLabel != null && EmrServerlessSparkRunner.sparkRuntime(releaseLabel)) {
+            return false;
+        }
         for (JsonNode application : stored(applications, objectMapper)) {
-            if (HIVE.equalsIgnoreCase(application.path("Name").asText())) {
+            String name = application.path("Name").asText();
+            if (HIVE.equalsIgnoreCase(name) || HCATALOG.equalsIgnoreCase(name)) {
                 return true;
             }
         }
@@ -260,6 +274,16 @@ final class EmrSparkSteps {
     /** The properties of a cluster's {@code core-site}, which its steps' {@code hadoop} command gets too. */
     static Map<String, String> coreSite(String configurations, ObjectMapper objectMapper) {
         return properties(configurations, objectMapper, CORE_SITE);
+    }
+
+    /**
+     * The properties of a cluster's {@code core-site}, then its {@code hive-site}, which configure its Hive metastore
+     * service as they do on EMR's primary node.
+     */
+    static Map<String, String> hiveMetastoreSettings(String configurations, ObjectMapper objectMapper) {
+        Map<String, String> settings = new LinkedHashMap<>(properties(configurations, objectMapper, CORE_SITE));
+        settings.putAll(properties(configurations, objectMapper, HIVE_SITE));
+        return settings;
     }
 
     /** The properties of a cluster's {@code spark-log4j2}, which its steps' Spark gets in its log4j2.properties. */

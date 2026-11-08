@@ -5,6 +5,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Predicate;
 
 /**
@@ -26,7 +27,7 @@ import java.util.function.Predicate;
 public final class SignedServiceRoute {
 
     private final ResolvedServiceCatalog catalog;
-    private final String externalKey;
+    private final Set<String> externalKeys;
     private final String internalPrefix;
     private final Predicate<String> publicPaths;
 
@@ -37,12 +38,25 @@ public final class SignedServiceRoute {
      */
     public SignedServiceRoute(ResolvedServiceCatalog catalog, String externalKey, String internalPrefix,
                               Predicate<String> publicPaths) {
+        this(catalog, Set.of(externalKey), internalPrefix, publicPaths);
+    }
+
+    /**
+     * A service with more than one plane has one external key per plane, and a request signed for
+     * either of them belongs to the service.
+     *
+     * @param externalKeys   the service's external keys, one per plane
+     * @param internalPrefix one path segment beginning with an underscore, such as {@code /_dlm}
+     * @param publicPaths    which normalized request paths are the service's contested routes
+     */
+    public SignedServiceRoute(ResolvedServiceCatalog catalog, Set<String> externalKeys, String internalPrefix,
+                              Predicate<String> publicPaths) {
         if (!internalPrefix.startsWith("/_") || internalPrefix.indexOf('/', 1) >= 0) {
             throw new IllegalArgumentException("Internal prefix must be one segment starting with '/_': "
                     + internalPrefix);
         }
         this.catalog = catalog;
-        this.externalKey = externalKey;
+        this.externalKeys = Set.copyOf(externalKeys);
         this.internalPrefix = internalPrefix;
         this.publicPaths = publicPaths;
     }
@@ -84,7 +98,7 @@ public final class SignedServiceRoute {
         return signingService(ctx)
                 .flatMap(catalog::byCredentialScope)
                 .map(ServiceDescriptor::externalKey)
-                .filter(externalKey::equals)
+                .filter(externalKeys::contains)
                 .isPresent();
     }
 

@@ -20,6 +20,8 @@ Floci implements the AWS Security Hub CSPM organization and central-configuratio
 | `BatchEnableStandards` | Subscribes standards (`READY` at once); an unknown standards ARN is `InvalidInputException`, a disabled hub `InvalidAccessException`. `EnableSecurityHub` subscribes AFSBP and CIS 1.2.0 unless `EnableDefaultStandards` is false |
 | `BatchDisableStandards` | Removes subscriptions, answered as `DELETING`; an unknown one is `ResourceNotFoundException`, and then none of the batch is removed |
 | `GetEnabledStandards` | Lists subscriptions, all or the named ones. Controls and findings are not evaluated |
+| `BatchImportFindings` | Imports up to 100 ASFF findings for the caller's default product, with per-finding failures |
+| `GetFindings` | Reads imported findings with eight string-filter fields and cursor pagination |
 | `ListFindingAggregators` | - |
 | `CreateFindingAggregator` | - |
 | `GetFindingAggregator` | - |
@@ -46,6 +48,8 @@ The supported surface includes Security Hub CSPM enablement and configuration, d
 `EnableOrganizationAdminAccount` supports the AWS `SecurityHub` and `SecurityHubV2` feature values. Legacy `SecurityHub` delegation enables Security Hub CSPM for the delegated administrator in the current Region, matching AWS organization behavior.
 
 Finding aggregators support `ALL_REGIONS`, `ALL_REGIONS_EXCEPT_SPECIFIED`, `SPECIFIED_REGIONS`, and `NO_REGIONS`. `GetFindingAggregator` accepts the complete finding-aggregator ARN carried in the greedy AWS REST path.
+
+`BatchImportFindings` stores findings in the requested Region and reports invalid items individually. `GetFindings` reads findings from that Region and supports the `EQUALS`, `NOT_EQUALS`, and `PREFIX` comparisons for its documented string filters. `SortCriteria`, other filter comparisons, cross-Region aggregation of findings, and `BatchUpdateFindings` are not implemented.
 
 Central organization configuration models asynchronous convergence. Changing to `CENTRAL` first reports organization status `PENDING`; a subsequent poll converges to `ENABLED`. Central configuration forces `AutoEnable` to `false` and `AutoEnableStandards` to `NONE`, as AWS does in the home and linked Regions. Configuration-policy association behaves similarly with `PENDING` followed by `SUCCESS`. Disassociation is represented as a pending transition before the association disappears.
 

@@ -400,6 +400,8 @@ floci:
     elbv2:
       enabled: true
       mock: true
+      backend-keep-alive: true
+      backend-keep-alive-timeout-seconds: 60
     codebuild:
       enabled: true
       # docker-network: floci-network

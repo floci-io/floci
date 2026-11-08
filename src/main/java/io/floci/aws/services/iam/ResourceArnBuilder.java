@@ -1577,7 +1577,14 @@ public class ResourceArnBuilder {
     }
 
     private List<String> buildDynamoDbArns(ContainerRequestContext ctx, String region, String accountId) {
-        JsonNode json = readJsonBody(ctx);
+        return dynamoDbArns(readJsonBody(ctx), region, accountId);
+    }
+
+    /**
+     * The resources a DynamoDB request names, read from its body alone: the tables, or the stream, export,
+     * import or other resource it gives, each as given when it gives an ARN, and {@code *} when it names none.
+     */
+    public static List<String> dynamoDbArns(JsonNode json, String region, String accountId) {
         if (json != null && json.isObject()) {
             if (json.hasNonNull("TableName")) {
                 String tableName = json.get("TableName").asText().trim();

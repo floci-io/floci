@@ -333,12 +333,65 @@ class EmrServiceContainerStepsTest {
         assertEquals(3, service.listInstanceGroups(cluster.getId()).get(0).getRunningInstanceCount());
         fixture.runStepThread();
 
+        // A cluster without Hive runs no metastore service.
         List<String> started = Arrays.asList(cluster.getId(), "ip-10-0-0-1.ec2.internal",
-                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", null);
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", null, "false", null);
         assertEquals(List.of(started, started), fixture.clusterStorage.hdfs);
-        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt",
-                "ip-10-0-0-1.ec2.internal", EmrServiceFixture.RecordingStorage.HDFS_ADDRESS,
-                EmrServiceFixture.RecordingStorage.HDFS_NETWORK), runner.jobs.get(0).storage());
+        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt")
+                .withHdfs("ip-10-0-0-1.ec2.internal", EmrServiceFixture.RecordingStorage.HDFS_ADDRESS,
+                        EmrServiceFixture.RecordingStorage.HDFS_NETWORK), runner.jobs.get(0).storage());
+    }
+
+    @Test
+    void aHiveStepOnAClusterWithHCatalogRunsHiveInTheReleasesImageWithHive() {
+        EmrCluster requested = cluster("hcatalog", true, hiveStep("report", "-e", "show tables;"));
+        requested.setApplications("[{\"Name\": \"HCatalog\"}]");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        // EMR installs Hive's client with HCatalog, the hive EMR's hive-script looks for.
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(SparkJobRunner.Engine.HIVE, job.engine());
+        assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest")), fixture.releaseImages.asked);
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
+        assertEquals(hdfsStorage(cluster).withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"), job.storage());
+    }
+
+    @Test
+    void aClusterWithHCatalogRunsHivesMetastoreServiceWhichItsSparkStepsUse() {
+        EmrCluster requested = cluster("hcatalog", true, sparkStep("report", "CONTINUE"));
+        requested.setApplications("[{\"Name\": \"HCatalog\"}, {\"Name\": \"Spark\"}]");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        // EMR's HCatalog server is that service.
+        assertEquals("true", fixture.clusterStorage.hdfs.get(0).get(4));
+        assertEquals(hdfsStorage(cluster).withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"),
+                runner.jobs.get(0).storage());
+    }
+
+    @Test
+    void aClusterOfTheAwsRuntimeForSparkNamingHiveOrHCatalogRunsAsOneWithout() {
+        // Its releases include neither, and there is no Hive image of them to make its steps' image from.
+        EmrCluster requested = cluster("spark-runtime-hive", true, hiveStep("report", "-e", "show tables;"));
+        requested.setReleaseLabel("emr-spark-8.1.0");
+        requested.setApplications("[{\"Name\": \"Hive\"}, {\"Name\": \"HCatalog\"}, {\"Name\": \"Spark\"}]");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(), fixture.releaseImages.asked);
+        assertEquals("false", fixture.clusterStorage.hdfs.get(0).get(4));
+        // Its Hive step runs hive-script in the release's own image, which says "Hive isn't installed.".
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(SparkJobRunner.Engine.SPARK, job.engine());
+        assertEquals(List.of("hive-script", "--run-hive-script", "--args", "-e", "show tables;"), job.command());
+        assertEquals("public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest",
+                EmrServerlessSparkRunner.image(job.imageTemplate(), job.releaseLabel(), job.engine()));
+        assertEquals(hdfsStorage(cluster), job.storage());
     }
 
     @Test
@@ -824,7 +877,10 @@ class EmrServiceContainerStepsTest {
         // Its cluster's Spark settings are not Hive's.
         assertEquals(Map.of(), job.sparkDefaults());
         assertEquals(Map.of("HADOOP_HEAPSIZE", "2048"), job.environment());
-        assertEquals(hdfsStorage(cluster), job.storage());
+        // A cluster with Hive's primary node runs its metastore service, which its steps use, with its hive-site.
+        assertEquals("true", fixture.clusterStorage.hdfs.get(0).get(4));
+        assertEquals(Map.of("hive.exec.reducers.max", "8"), fixture.clusterStorage.metastores.get(0).settings());
+        assertEquals(hdfsStorage(cluster).withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"), job.storage());
         assertEquals("s3://logs/emr/" + cluster.getId() + "/steps/" + stepId + "/", job.logFolder());
         assertEquals(List.of(cluster.getId()), fixture.clusterStorage.created);
         assertEquals("COMPLETED", service.describeStep(cluster.getId(), stepId).getState());
@@ -1227,9 +1283,9 @@ class EmrServiceContainerStepsTest {
     // A spark-submit step through command-runner.jar, written for a cluster with YARN.
     // A cluster's storage as a step gets it, its HDFS on the primary node of a cluster with no instance groups.
     private static SparkJobRunner.Storage hdfsStorage(EmrCluster cluster) {
-        return new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt",
-                "ip-10-0-0-1.ec2.internal", EmrServiceFixture.RecordingStorage.HDFS_ADDRESS,
-                EmrServiceFixture.RecordingStorage.HDFS_NETWORK);
+        return new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt")
+                .withHdfs("ip-10-0-0-1.ec2.internal", EmrServiceFixture.RecordingStorage.HDFS_ADDRESS,
+                        EmrServiceFixture.RecordingStorage.HDFS_NETWORK);
     }
 
     // The AWS CLI's Hive step: command-runner.jar running hive-script with the step's arguments after its --args.

@@ -1,3 +1,7 @@
+AWS::ApiGatewayV2::Stage	ApiId	create-only	a drop fails: the stage is not found
+AWS::ApiGatewayV2::Stage	AutoDeploy	default:false
+AWS::ApiGatewayV2::Stage	StageName	keep:the stage is found by its physical id
+AWS::ApiGatewayV2::Stage	StageVariables	clear	an empty map replaces them
 AWS::AppSync::ApiKey	ApiId	create-only
 AWS::AppSync::ApiKey	Description	clear
 AWS::AppSync::ApiKey	Expires	keep:the update parses a date, null is refused
@@ -63,6 +67,19 @@ AWS::AppSync::Resolver	Runtime	clear
 AWS::AppSync::Resolver	SyncConfig	clear
 AWS::AppSync::Resolver	TypeName	create-only
 AWS::EC2::EIP	Tags	clear
+AWS::EC2::Instance	AvailabilityZone	create-only	a drop differs from the declared value, so the instance is replaced
+AWS::EC2::Instance	IamInstanceProfile	clear	the profile is disassociated, unless a launch template still supplies one, which takes its place
+AWS::EC2::Instance	ImageId	create-only	a drop is read as no preference and the instance is kept, unless a launch template still supplies a different image, which replaces it
+AWS::EC2::Instance	InstanceType	default:t3.micro	when no launch template supplies a type
+AWS::EC2::Instance	KeyName	create-only	a drop is read as no preference and the instance is kept, unless a launch template still supplies a different key, which replaces it
+AWS::EC2::Instance	LaunchTemplate	keep:the instance is kept, the instance type and the MetadataOptions members the template supplied go back to their defaults, and the instance profile it supplied is disassociated
+AWS::EC2::Instance	MetadataOptions	default:launch defaults, member by member	a member the launch template still supplies takes the template's value
+AWS::EC2::Instance	NetworkInterfaces	keep:read only when an instance launches
+AWS::EC2::Instance	PrivateIpAddress	create-only	a drop differs from the declared value, so the instance is replaced
+AWS::EC2::Instance	SecurityGroupIds	keep:only a declared set is applied
+AWS::EC2::Instance	SubnetId	create-only	a drop is read as no preference and the instance is kept
+AWS::EC2::Instance	Tags	clear	only the keys the stack wrote
+AWS::EC2::Instance	UserData	clear	a running instance is stopped for the rewrite and started again
 AWS::EC2::InternetGateway	Tags	clear
 AWS::EC2::NatGateway	AllocationId	create-only	a drop is refused for a public gateway
 AWS::EC2::NatGateway	AvailabilityMode	create-only	a drop is accepted and skipped

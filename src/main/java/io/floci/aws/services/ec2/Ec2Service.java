@@ -341,6 +341,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // region::subnetId → offset the next synthesised address is tried at. Only an ordering hint:
     // restart forgets it, and privateIpsInUse is what keeps addresses from being handed out twice.
     private final Map<String, Long> subnetIpCursors = new HashMap<>();
+    // region::subnetId → addresses allocateVpcPrivateIp leased to containers no stored resource
+    // stands behind; guarded by privateIpAllocationLock.
+    private final Map<String, Set<String>> containerPrivateIps = new HashMap<>();
     // Held from a synthesised address being chosen until the resource holding it is persisted, so
     // a concurrent allocation, which reads persisted resources to see what is taken, cannot pick
     // the same address in between. Taken after imageRegistryLock where a caller holds both.
@@ -409,6 +412,43 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return vpcNetworkManager.attachContainer(region, vpcId, containerId);
         }
         return false;
+    }
+
+    /** Attaches a container to the VPC's Docker network at {@code address}; empty when it stays off it. */
+    public Optional<String> attachContainerToVpc(String region, String vpcId, String subnetId,
+                                                 String containerId, String address) {
+        if (vpcNetworkManager == null) {
+            return Optional.empty();
+        }
+        return vpcNetworkManager.attach(region, vpcId, subnetId, containerId, address);
+    }
+
+    /**
+     * Leases an address of a Docker-backed subnet that nothing else holds, as an instance's is
+     * chosen; empty when the subnet is not Docker-backed or has none left.
+     */
+    public Optional<String> allocateVpcPrivateIp(String region, String subnetId) {
+        if (vpcNetworkManager == null) {
+            return Optional.empty();
+        }
+        synchronized (privateIpAllocationLock) {
+            Optional<String> allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId)
+                    .flatMap(first -> leaseNotHeld(region, subnetId, first,
+                            privateIpsHeldOnVpcNetwork(region, subnetId)));
+            allocated.ifPresent(address -> containerPrivateIps
+                    .computeIfAbsent(key(region, subnetId), ignored -> new HashSet<>()).add(address));
+            return allocated;
+        }
+    }
+
+    public void releaseVpcPrivateIp(String region, String subnetId, String address) {
+        synchronized (privateIpAllocationLock) {
+            containerPrivateIps.computeIfPresent(key(region, subnetId), (ignored, addresses) -> {
+                addresses.remove(address);
+                return addresses.isEmpty() ? null : addresses;
+            });
+            releasePrivateIps(region, subnetId, List.of(address));
+        }
     }
 
     public boolean isVpcNetworkEnabled() {
@@ -1071,7 +1111,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 if (inst.getDockerContainerId() != null
                         && containerManager.isContainerRunning(inst.getDockerContainerId())) {
-                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                    restoreVolumeDevice(vol, inst, att.getDevice());
                 }
             }
         }
@@ -1102,9 +1142,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             for (VolumeAttachment att : vol.getAttachments()) {
                 if (inst.getInstanceId().equals(att.getInstanceId())
                         && (inst.getRootDeviceName() == null || !att.getDevice().equals(inst.getRootDeviceName()))) {
-                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                    restoreVolumeDevice(vol, inst, att.getDevice());
                 }
             }
+        }
+    }
+
+    private void restoreVolumeDevice(Volume volume, Instance instance, String device) {
+        try {
+            volumeBlockDeviceManager.attachVolume(volume, instance, device);
+        } catch (AwsException e) {
+            LOG.warnv("Could not restore volume {0} on instance {1}: {2}",
+                    volume.getVolumeId(), instance.getInstanceId(), e.getMessage());
         }
     }
 
@@ -4545,6 +4594,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * Keeps the lease on {@code first}, or on the next address the network offers, unless
+     * {@code held} contains it. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private Optional<String> leaseNotHeld(String region, String subnetId, String first, Set<String> held) {
+        Optional<String> allocated = Optional.of(first);
+        List<String> skipped = new ArrayList<>();
+        while (allocated.isPresent() && held.contains(allocated.get())) {
+            skipped.add(allocated.get());
+            allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
+        }
+        // Given back only once the walk is over, or the network would offer them again. Their
+        // holders took no lease, so the network must not count one for them.
+        releasePrivateIps(region, subnetId, skipped);
+        return allocated;
+    }
+
+    /**
      * Gives back the VPC network's lease on each address, so automatic allocation can offer it
      * again. Callers must hold {@link #privateIpAllocationLock}.
      */
@@ -4577,16 +4643,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (allocated.isPresent()) {
                 held = privateIpsHeldOnVpcNetwork(region, subnetId);
                 held.addAll(pending);
+                allocated = leaseNotHeld(region, subnetId, allocated.get(), held);
             }
-            List<String> skipped = new ArrayList<>();
-            while (allocated.isPresent() && held.contains(allocated.get())) {
-                skipped.add(allocated.get());
-                allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
-            }
-            // Given back only once the walk is over, or the network would offer them again. Their
-            // holders took no lease, and deleting an interface returns none, so a lease kept here
-            // would outlive the holder.
-            releasePrivateIps(region, subnetId, skipped);
             if (allocated.isPresent()) {
                 return allocated.get();
             }
@@ -4670,10 +4728,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * lease to show for it: an interface created with its own address never takes one, and a
      * restart re-leases only instances. Any other subnet id belongs to one account, so for it the
      * wider scan finds nothing more. A lease with nothing in any account behind it does not fail
-     * the launch: it is stale (DeleteNetworkInterface never returns its lease), or it belongs to
-     * a launch that failed and has not given the address back yet, which it does once its
-     * container is detached. Either way the instance keeps the address without a lease of its
-     * own, and {@link #assignPrivateIp} still skips it, because the stored instance holds it.
+     * the launch: it belongs to a launch that failed and has not given the address back yet,
+     * which it does once its container is detached, or it outlived a holder that never returned
+     * it. Either way the instance keeps the address without a lease of its own, and
+     * {@link #assignPrivateIp} still skips it, because the stored instance holds it.
      * An address outside a substituted subnet's effective range is never leased at all, in which
      * case the instance keeps it the way it keeps a synthesised address.
      */
@@ -4687,9 +4745,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * The in-use half of {@link #claimRequestedPrivateIp}, without the lease. CreateNetworkInterface
      * and CreateNatGateway use it alone: neither an interface nor a NAT gateway has a container to
      * hold the address on the VPC network, and {@link #assignPrivateIp} already steps around
-     * addresses stored interfaces and NAT gateways hold. DeleteNetworkInterface returns no lease,
-     * so one taken here would keep the address from automatic allocation after the interface is
-     * gone. Callers must hold {@link #privateIpAllocationLock}.
+     * addresses stored interfaces and NAT gateways hold, so neither needs a lease. Callers must
+     * hold {@link #privateIpAllocationLock}.
      *
      * @return whether the address lies in a Docker-backed range, where a lease could be taken
      */
@@ -4749,7 +4806,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Every private address a live instance, network interface, NAT gateway or EC2 Instance Connect
-     * Endpoint holds in the subnet.
+     * Endpoint holds in the subnet, and those {@link #allocateVpcPrivateIp} leased to containers.
      */
     private Set<String> privateIpsInUse(String region, String subnetId) {
         return new HashSet<>(privateIpsBySubnet(region).getOrDefault(subnetId, Set.of()));
@@ -4768,10 +4825,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private Map<String, Set<String>> privateIpsBySubnet(String region) {
         String regionPrefix = region + "::";
-        return privateIpsBySubnet(networkInterfaces.scan(k -> k.startsWith(regionPrefix)),
+        Map<String, Set<String>> bySubnet = privateIpsBySubnet(networkInterfaces.scan(k -> k.startsWith(regionPrefix)),
                 instances.scan(k -> k.startsWith(regionPrefix)),
                 natGateways.scan(k -> k.startsWith(regionPrefix)),
                 instanceConnectEndpoints.scan(k -> k.startsWith(regionPrefix)));
+        // Read here, the one occupancy every allocator and endpoint derivation shares, so a derived
+        // endpoint interface cannot land on a container's address.
+        synchronized (privateIpAllocationLock) {
+            containerPrivateIps.forEach((subnetKey, addresses) -> {
+                if (subnetKey.startsWith(regionPrefix)) {
+                    bySubnet.computeIfAbsent(subnetKey.substring(regionPrefix.length()), ignored -> new HashSet<>())
+                            .addAll(addresses);
+                }
+            });
+        }
+        return bySubnet;
     }
 
     private static Map<String, Set<String>> privateIpsBySubnet(List<NetworkInterface> regionInterfaces,
@@ -5376,9 +5444,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     }
                 }
                 restoreInstanceFirewall(inst);
-                String accountId = callerAccountId();
-                containerManager.start(inst, () ->
-                        RequestScopes.runAs(accountId, () -> restoreAttachedVolumesForInstance(region, inst)));
+                containerManager.start(inst, () -> restoreAttachedVolumesForInstance(region, inst));
             }
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
@@ -7372,8 +7438,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * {@link #privateIpsInUse} as numeric IPv4 values, for endpoint derivation. Only persisted
-     * resources are read, never another endpoint's derived interfaces, so the derivation cannot
-     * recurse into itself through the allocator.
+     * resources and container leases are read, never another endpoint's derived interfaces, so the
+     * derivation cannot recurse into itself through the allocator.
      */
     private Set<Long> persistedAddressValuesInUse(String region, String subnetId) {
         return addressValues(privateIpsInUse(region, subnetId));
@@ -12995,9 +13061,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // A CreateTags write that read the gateway before an earlier delete can store it back
             // marked deleted. That delete gave its addresses back, and the network may have leased
             // them to something else since. A requested address took no lease of its own. The one it
-            // can carry is either a stale lease DeleteNetworkInterface left behind, which should go,
-            // or a failed launch's, given back once its container is detached; giving that back
-            // sooner matters only if the allocator wraps around to it in between.
+            // can carry is either a stale lease, which should go, or a failed launch's, given back
+            // once its container is detached; giving that back sooner matters only if the allocator
+            // wraps around to it in between.
             if (!"deleted".equals(natGateway.getState())) {
                 releasePrivateIps(region, natGateway.getSubnetId(), natGateway.getNatGatewayAddresses().stream()
                         .map(NatGatewayAddress::getPrivateIp).toList());
@@ -14510,6 +14576,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private final ConcurrentHashMap<String, RefCountedLock> volumeLocks = new ConcurrentHashMap<>();
+    private final Set<VolumeDevice> pendingVolumeAttachments = ConcurrentHashMap.newKeySet();
+
+    private record VolumeDevice(String accountId, String region, String instanceId, String device) {}
 
     private <T> T withVolumeLock(String volumeId, Supplier<T> action) {
         if (volumeId == null) {
@@ -14788,6 +14857,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterValue",
                     "Value '" + device + "' for parameter device is invalid.", 400);
         }
+        return withVolumeLock(volumeId, () -> {
+            String normalizedDevice = device.startsWith("/") ? device : "/dev/" + device;
+            VolumeDevice target = new VolumeDevice(callerAccountId(), region, instanceId, normalizedDevice);
+            if (!pendingVolumeAttachments.add(target)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The device '" + device + "' is already in use by an attachment in progress", 400);
+            }
+            try {
+                return attachVolumeToInstance(region, volumeId, instanceId, device);
+            } finally {
+                pendingVolumeAttachments.remove(target);
+            }
+        });
+    }
+
+    private VolumeAttachment attachVolumeToInstance(String region, String volumeId, String instanceId, String device) {
         Volume volume = getRequiredVolume(region, volumeId);
         Instance inst = getRequiredInstance(region, instanceId);
         if (!List.of("running", "stopped").contains(inst.getState().getName())) {
@@ -14824,6 +14909,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.attachVolume(volume, inst, device);
+        }
+
         VolumeAttachment attachment = new VolumeAttachment();
         attachment.setVolumeId(volumeId);
         attachment.setInstanceId(instanceId);
@@ -14835,10 +14924,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         volume.getAttachments().add(attachment);
         volume.setState("in-use");
         volumes.put(key(region, volumeId), volume);
-
-        if (volumeBlockDeviceManager != null) {
-            volumeBlockDeviceManager.attachVolume(volume, inst, device);
-        }
 
         return attachment;
     }
@@ -15265,9 +15350,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Deletes a standalone ENI. AWS refuses while it is still attached, floci-kt9, and equally
-     * while a service holds it: {@link #holdNetworkInterfaceForService} leaves no attachment
-     * behind, so the status is what says the interface is spoken for.
+     * Deletes a standalone ENI and gives the lease its primary address took back to the VPC
+     * network. A requested primary took no lease, so any it carries is a failed launch's, given
+     * back early as a deleted NAT gateway's is. AWS refuses while it is still attached,
+     * floci-kt9, and equally while a service holds it: {@link #holdNetworkInterfaceForService}
+     * leaves no attachment behind, so the status is what says the interface is spoken for.
      */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
         synchronized (privateIpAllocationLock) {
@@ -15278,6 +15365,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             releaseInterfaceAddresses(region, networkInterfaceId, true);
             networkInterfaces.delete(key(region, networkInterfaceId));
+            releasePrivateIps(region, ni.getSubnetId(), List.of(ni.getPrivateIpAddress()));
         }
     }
 

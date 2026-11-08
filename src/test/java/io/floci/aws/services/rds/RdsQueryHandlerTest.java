@@ -1540,6 +1540,61 @@ class RdsQueryHandlerTest {
         String body = (String) response.getEntity();
         assertTrue(body.contains("<DBClusterParameterGroup>"), "Expected <DBClusterParameterGroup> element in response");
         assertFalse(body.contains("<member><DBClusterParameterGroupName>"), "Did not expect <member> wrapping DBClusterParameterGroup");
+        assertFalse(body.contains("<Marker>"), "Did not expect <Marker> on terminal page");
+    }
+
+    @Test
+    void describeDbClusterParameterGroups_paginatesAndOmitsTerminalMarker() {
+        List<DbClusterParameterGroup> all = new ArrayList<>();
+        for (int i = 0; i < 23; i++) {
+            all.add(new DbClusterParameterGroup(String.format("cpg-%02d", i), "aurora-postgresql16", "desc"));
+        }
+        when(service.listDbClusterParameterGroups(null, null)).thenReturn(all);
+
+        MultivaluedMap<String, String> firstParams = params();
+        firstParams.add("MaxRecords", "20");
+        Response firstResponse = handler.handle("DescribeDBClusterParameterGroups", firstParams);
+        assertEquals(200, firstResponse.getStatus());
+        String firstBody = (String) firstResponse.getEntity();
+        assertTrue(firstBody.contains("<DBClusterParameterGroupName>cpg-00</DBClusterParameterGroupName>"));
+        assertTrue(firstBody.contains("<DBClusterParameterGroupName>cpg-19</DBClusterParameterGroupName>"));
+        assertFalse(firstBody.contains("<DBClusterParameterGroupName>cpg-20</DBClusterParameterGroupName>"));
+        assertTrue(firstBody.contains("<Marker>20</Marker>"));
+
+        MultivaluedMap<String, String> secondParams = params();
+        secondParams.add("MaxRecords", "20");
+        secondParams.add("Marker", "20");
+        Response secondResponse = handler.handle("DescribeDBClusterParameterGroups", secondParams);
+        assertEquals(200, secondResponse.getStatus());
+        String secondBody = (String) secondResponse.getEntity();
+        assertFalse(secondBody.contains("<DBClusterParameterGroupName>cpg-19</DBClusterParameterGroupName>"));
+        assertTrue(secondBody.contains("<DBClusterParameterGroupName>cpg-20</DBClusterParameterGroupName>"));
+        assertTrue(secondBody.contains("<DBClusterParameterGroupName>cpg-22</DBClusterParameterGroupName>"));
+        assertFalse(secondBody.contains("<Marker>"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"19", "101", "abc"})
+    void describeDbClusterParameterGroups_rejectsInvalidMaxRecords(String maxRecords) {
+        MultivaluedMap<String, String> queryParams = params();
+        queryParams.add("MaxRecords", maxRecords);
+
+        Response response = handler.handle("DescribeDBClusterParameterGroups", queryParams);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"-1", "abc"})
+    void describeDbClusterParameterGroups_rejectsInvalidMarker(String marker) {
+        MultivaluedMap<String, String> queryParams = params();
+        queryParams.add("Marker", marker);
+
+        Response response = handler.handle("DescribeDBClusterParameterGroups", queryParams);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
     }
 
     @Test

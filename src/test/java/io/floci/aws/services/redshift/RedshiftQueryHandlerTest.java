@@ -1063,6 +1063,28 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
+    void describeLoggingStatusIncludesDeliveryTimestampsAndFailureMessage() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "test-cluster");
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("test-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingBucketName("my-bucket");
+        cluster.setLastSuccessfulDeliveryTime(Instant.parse("2026-11-06T15:30:00Z"));
+        cluster.setLastFailureTime(Instant.parse("2026-11-06T15:31:00Z"));
+        cluster.setLastFailureMessage("Access Denied: The bucket policy does not allow Amazon Redshift to put objects.");
+        when(service.describeLoggingStatus("test-cluster")).thenReturn(cluster);
+
+        Response response = handler.handle("DescribeLoggingStatus", params);
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<LastSuccessfulDeliveryTime>2026-11-06T15:30:00Z</LastSuccessfulDeliveryTime>"));
+        assertTrue(xml.contains("<LastFailureTime>2026-11-06T15:31:00Z</LastFailureTime>"));
+        assertTrue(xml.contains("<LastFailureMessage>Access Denied: The bucket policy does not allow Amazon Redshift to put objects.</LastFailureMessage>"));
+    }
+
+    @Test
     void describeS3TableLoggingStatusIncludesEnabledAllWithoutGranularity() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "test-cluster");

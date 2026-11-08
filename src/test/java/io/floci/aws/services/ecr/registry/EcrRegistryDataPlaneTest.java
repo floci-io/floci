@@ -79,6 +79,17 @@ class EcrRegistryDataPlaneTest {
     }
 
     @Test
+    void hostnameStyleHostKeepsItsNamespaceWhenPathStyleIsConfigured() {
+        // Docker Desktop pulls the ECS, Lambda and EMR Serverless images Floci rewrites from this host in either URI style.
+        EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
+                "000000000000.dkr.ecr.us-east-1.localhost:54321",
+                "/v2/platform/api/manifests/v1", null, "path").orElseThrow();
+
+        assertEquals("000000000000/us-east-1/platform/api", request.storageRepositoryName());
+        assertEquals("/v2/000000000000/us-east-1/platform/api/manifests/v1", request.backendUri());
+    }
+
+    @Test
     void hostnameStyleWithTlsDomainMatchesAndCapturesAccountAndRegion() {
         EcrRegistryDataPlane.RegistryRequest request = EcrRegistryDataPlane.requestFor(
                 "123456789012.dkr.ecr.eu-west-1.localhost.floci.io:4566",

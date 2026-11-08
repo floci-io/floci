@@ -68,7 +68,7 @@ class ContainerLauncherCodeVolumeReuseTest {
                     mock(ImageResolver.class), mock(RuntimeApiServerFactory.class),
                     mock(DockerHostResolver.class), config, mock(EcrRegistryManager.class),
                     mock(LambdaLayerService.class), mock(LaunchedContainerAwsEnv.class),
-                    mock(LambdaExecutionRoleCredentials.class));
+                    mock(LambdaExecutionRoleCredentials.class), null);
         }
 
         @Override
@@ -283,7 +283,7 @@ class ContainerLauncherCodeVolumeReuseTest {
                 mock(ContainerLogStreamer.class), mock(ImageResolver.class),
                 mock(RuntimeApiServerFactory.class), mock(DockerHostResolver.class), config,
                 mock(EcrRegistryManager.class), mock(LambdaLayerService.class),
-                mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class));
+                mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class), null);
 
         assertThrows(IllegalStateException.class,
                 () -> real.populateCodeVolume("vol", fn("sha"), "img"));

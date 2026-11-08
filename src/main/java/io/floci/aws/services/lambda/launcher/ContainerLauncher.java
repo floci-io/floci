@@ -6,6 +6,7 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
@@ -14,6 +15,7 @@ import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.core.common.docker.RetryingTarCopier;
+import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.services.iam.model.SessionCreds;
 import io.floci.aws.services.lambda.LambdaLayerService;
@@ -124,6 +126,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private final LambdaLayerService layerService;
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials executionRoleCredentials;
+    private final Ec2Service ec2Service;
+    /** The VPC address each VpcConfig function's container holds, returned once it is removed. */
+    private final Map<String, VpcLease> vpcLeases = new ConcurrentHashMap<>();
 
     @Inject
     public ContainerLauncher(ContainerBuilder containerBuilder,
@@ -136,7 +141,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                              EcrRegistryManager ecrRegistryManager,
                              LambdaLayerService layerService,
                              LaunchedContainerAwsEnv awsEnv,
-                             LambdaExecutionRoleCredentials executionRoleCredentials) {
+                             LambdaExecutionRoleCredentials executionRoleCredentials,
+                             Ec2Service ec2Service) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -148,6 +154,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         this.layerService = layerService;
         this.awsEnv = awsEnv;
         this.executionRoleCredentials = executionRoleCredentials;
+        this.ec2Service = ec2Service;
         this.populateSemaphore = new Semaphore(resolvePopulateConcurrency(config));
     }
 
@@ -285,10 +292,14 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             env.add("AWS_LAMBDA_INITIALIZATION_TYPE=provisioned-concurrency");
         }
 
+        // Memory and swap together at the function's MemorySize, so the container cannot swap
+        // and has what Lambda gives the function, whatever swap the host has.
+        long memoryBytes = (long) fn.getMemorySize() * 1024 * 1024;
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv(env)
-                .withMemoryMb(fn.getMemorySize())
+                .withMemoryBytes(memoryBytes)
+                .withMemorySwapBytes(memoryBytes)
                 .withDockerNetwork(config.services().lambda().dockerNetwork())
                 .withLogRotation()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
@@ -442,6 +453,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         }
 
         // Now start the container with code in place
+        joinVpcNetwork(fn, containerId, lambdaAccountId, lambdaRegion);
         lifecycleManager.startCreated(containerId, spec);
         runtimeApiServer.markContainerStarted();
         watchForUnexpectedExit(dockerClient, containerId, runtimeApiServer);
@@ -496,7 +508,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     fn.getFunctionName(), e.getMessage());
             if (containerId != null) {
                 try {
-                    lifecycleManager.stopAndRemove(containerId, null);
+                    lifecycleManager.stopAndRemoveStrict(containerId, null);
+                    releaseVpcLease(containerId);
                 } catch (Exception cleanupError) {
                     LOG.warnv(cleanupError, "Could not remove failed Lambda container {0}", containerId);
                 }
@@ -656,6 +669,9 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             executionRoleCredentials.unregister(
                     handle.getExecutionRoleSessionAccountId(), handle.getExecutionRoleAccessKeyId());
         }
+        // Only once the container is gone: a failed removal is retried, and until then Docker
+        // still holds the address.
+        releaseVpcLease(handle.getContainerId());
 
         // Only now close the runtime API socket. Any pollers that were still parked when
         // the container exited get terminated by their end of the connection closing;
@@ -671,6 +687,38 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     handle.getContainerId());
         } finally {
             runtimeApiServerFactory.release(server);
+        }
+    }
+
+    /**
+     * Puts a VpcConfig function's container on its VPC's Docker network at an address leased from
+     * its first subnet, before it starts, so it reaches what the VPC holds by private address.
+     * Without Docker-backed VPC networks it stays on the network it was created on.
+     */
+    private void joinVpcNetwork(LambdaFunction fn, String containerId, String accountId, String region) {
+        Object subnetIds = fn.getVpcConfig() == null ? null : fn.getVpcConfig().get("SubnetIds");
+        if (fn.getVpcId() == null || ec2Service == null || !(subnetIds instanceof List<?> subnets)
+                || subnets.isEmpty() || !(subnets.getFirst() instanceof String subnetId)) {
+            return;
+        }
+        // Provisioned and cross-account launches run outside the owner's request scope.
+        Optional<String> address = RequestScopes.callAs(accountId, region,
+                () -> ec2Service.allocateVpcPrivateIp(region, subnetId));
+        if (address.isEmpty()) {
+            return;
+        }
+        if (ec2Service.attachContainerToVpc(region, fn.getVpcId(), subnetId, containerId, address.get()).isPresent()) {
+            vpcLeases.put(containerId, new VpcLease(region, subnetId, address.get()));
+        } else {
+            ec2Service.releaseVpcPrivateIp(region, subnetId, address.get());
+        }
+    }
+
+    /** Docker holds the address until the container is gone, so callers run this after removing it. */
+    private void releaseVpcLease(String containerId) {
+        VpcLease lease = vpcLeases.remove(containerId);
+        if (lease != null) {
+            ec2Service.releaseVpcPrivateIp(lease.region(), lease.subnetId(), lease.address());
         }
     }
 
@@ -1388,6 +1436,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
      */
     /** Where a container's output is sent: the CloudWatch log group/stream and its region. */
     private record LogDestination(String accountId, String logGroup, String logStream, String region) { }
+
+    private record VpcLease(String region, String subnetId, String address) { }
 
     /**
      * Arms an async watch (via Docker's own wait-for-exit API, not polling) that notices when

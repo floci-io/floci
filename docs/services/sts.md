@@ -300,6 +300,10 @@ request context holds `sts:RoleSessionName`, `sts:ExternalId` when the caller pa
 guard, refuses a call that omits it or passes another value, and a conditional `Deny` applies only
 when its condition matches.
 
+`aws:PrincipalTag/<key>` contains the stored tags of the calling IAM user or assumed role.
+The target role's tags do not supply the caller's principal tags. A chained request reads the
+current caller role's tags; tags on the user that originally assumed it are not inherited.
+
 ### Known limitations
 
 - **Session tags and source identity are not modelled.** `aws:RequestTag/*`, `aws:TagKeys`,

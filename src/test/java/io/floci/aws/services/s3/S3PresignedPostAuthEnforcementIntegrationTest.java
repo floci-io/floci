@@ -7,12 +7,17 @@ import io.floci.aws.testutil.S3RequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -539,7 +544,110 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .body("Error.Code", equalTo("AccessDenied"));
     }
 
-    /** Removes {@link #BUCKET}, which the tests from {@code createBucket} on share, with the objects they uploaded. */
+    @ParameterizedTest
+    @CsvSource({
+            "x-amz-server-side-encryption,StringNotEquals,204",
+            "x-amz-server-side-encryption,StringEquals,403",
+            "x-amz-server-side-encryption-aws-kms-key-id,StringNotEquals,204",
+            "x-amz-server-side-encryption-aws-kms-key-id,StringEquals,403"
+    })
+    @Order(35)
+    void presignedPostUsesBucketEncryptionConditionsFromForm(String field, String operator, int expectedStatus) {
+        String bucket = "presigned-post-encryption-" + expectedStatus + "-"
+                + (field.endsWith("key-id") ? "key" : "method");
+        String key = "uploads/encrypted.txt";
+        String value = field.endsWith("key-id") ? "approved-key" : "aws:kms";
+        createBucket(bucket);
+        putBucketPolicy(bucket, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Deny","Principal":"*","Action":"s3:PutObject",
+                   "Resource":"arn:aws:s3:::%s/*","Condition":{"%s":{"s3:%s":"%s"}}}
+                ]}""".formatted(bucket, operator, field, value));
+        String policy = """
+                {"expiration":"%s","conditions":[
+                  {"bucket":"%s"},{"key":"%s"},
+                  {"x-amz-server-side-encryption":"aws:kms"},
+                  {"x-amz-server-side-encryption-aws-kms-key-id":"approved-key"}
+                ]}""".formatted(Instant.now().plusSeconds(3600), bucket, key);
+        String policyBase64 = Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
+        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+
+        given()
+            .header(field, "header-only-value")
+            .multiPart("key", key)
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", AMZ_DATE)
+            .multiPart("x-amz-signature", signPolicy(policyBase64, credential, LEGACY_SECRET_KEY))
+            .multiPart("X-Amz-Server-Side-Encryption", "aws:kms")
+            .multiPart("X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id", "approved-key")
+            .multiPart("file", "encrypted.txt", "encrypted".getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + bucket)
+        .then()
+            .statusCode(expectedStatus);
+
+        given()
+            .filter(S3RequestSigner.signedAs(LEGACY_ACCESS_KEY_ID, LEGACY_SECRET_KEY))
+        .when()
+            .get("/" + bucket + "/" + key)
+        .then()
+            .statusCode(expectedStatus == 403 ? 404 : 200);
+    }
+
+        @ParameterizedTest
+        @NullSource
+        @ValueSource(strings = "AES256")
+        @Order(36)
+        void presignedPostRejectsKmsKeyWithoutKmsEncryption(String encryption) {
+        String bucket = "presigned-post-invalid-kms-" + (encryption == null ? "missing" : "aes256");
+        String key = "uploads/invalid.txt";
+        createBucket(bucket);
+        putBucketPolicy(bucket, """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Deny","Principal":"*","Action":"s3:PutObject",
+               "Resource":"arn:aws:s3:::%s/*",
+               "Condition":{"StringNotEquals":{"s3:x-amz-server-side-encryption-aws-kms-key-id":"approved-key"}}}
+            ]}""".formatted(bucket));
+        String encryptionCondition = encryption == null ? ""
+            : "{\"x-amz-server-side-encryption\":\"%s\"},".formatted(encryption);
+        String policy = """
+            {"expiration":"%s","conditions":[
+              {"bucket":"%s"},{"key":"%s"},%s
+              {"x-amz-server-side-encryption-aws-kms-key-id":"approved-key"}
+            ]}""".formatted(Instant.now().plusSeconds(3600), bucket, key, encryptionCondition);
+        String policyBase64 = Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
+        String credential = LEGACY_ACCESS_KEY_ID + "/20260101/us-east-1/s3/aws4_request";
+
+        RequestSpecification upload = given()
+            .header("x-amz-server-side-encryption", "aws:kms")
+            .multiPart("key", key)
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", credential)
+            .multiPart("x-amz-date", AMZ_DATE)
+            .multiPart("x-amz-signature", signPolicy(policyBase64, credential, LEGACY_SECRET_KEY))
+            .multiPart("X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id", "approved-key")
+            .multiPart("file", "invalid.txt", "invalid".getBytes(StandardCharsets.UTF_8), "text/plain");
+        if (encryption != null) {
+            upload.multiPart("X-Amz-Server-Side-Encryption", encryption);
+        }
+        upload.when()
+            .post("/" + bucket)
+        .then()
+            .statusCode(400)
+            .body("Error.Code", equalTo("InvalidArgument"));
+
+        given()
+            .filter(S3RequestSigner.signedAs(LEGACY_ACCESS_KEY_ID, LEGACY_SECRET_KEY))
+        .when()
+            .get("/" + bucket + "/" + key)
+        .then()
+            .statusCode(404);
+        }
+
+        /** Removes {@link #BUCKET}, which the tests from {@code createBucket} on share, with the objects they uploaded. */
     @Test
     @Order(99)
     void cleanup_removeTheSharedBucket() {

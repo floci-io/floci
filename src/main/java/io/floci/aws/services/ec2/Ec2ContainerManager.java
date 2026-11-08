@@ -12,6 +12,7 @@ import com.github.dockerjava.api.model.MountType;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExec;
@@ -1039,9 +1040,10 @@ public class Ec2ContainerManager {
             }
             return;
         }
+        String accountId = instance.getOwnerId() != null ? instance.getOwnerId() : regionResolver.getAccountId();
         InstanceState pending = InstanceState.pending();
         instance.setState(pending);
-        submitLifecycleOperation(containerId, () -> {
+        submitLifecycleOperation(containerId, () -> RequestScopes.runAs(accountId, instance.getRegion(), () -> {
             boolean setUpMetadataEndpoint = false;
             try {
                 dockerClient.startContainerCmd(containerId).exec();
@@ -1107,7 +1109,7 @@ public class Ec2ContainerManager {
             if (setUpMetadataEndpoint) {
                 setUpMetadataEndpointWhileRunning(instance, containerId, running);
             }
-        });
+        }));
     }
 
     /**

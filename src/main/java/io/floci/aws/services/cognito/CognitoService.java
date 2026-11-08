@@ -3101,13 +3101,25 @@ public class CognitoService implements ResourceProvider {
                         user.setUsername(targetUsername);
                         user.setUserPoolId(userPoolId);
                         user.getAttributes().put("sub", UUID.randomUUID().toString());
+                        user.setFederatedAutoProvisioned(true);
                     }
+                    // Determine whether this is a linked local profile or a federated profile
+                    // with a permanent password before reconciliation overwrites identities.
+                    boolean linkedOrPermanent = existing.isPresent()
+                            && (!user.isFederatedAutoProvisioned()
+                                    || (user.getPasswordHash() != null && !user.isTemporaryPassword()));
                     user.getAttributes().putAll(mappedAttributes);
                     user.setFederatedProviderName(provider.getProviderName());
                     user.setFederatedSubject(subject);
                     updateFederatedIdentity(user, provider, subject, issuer);
                     user.setEnabled(true);
-                    user.setUserStatus("CONFIRMED");
+                    // Preserve the status of linked local profiles and of federated profiles
+                    // that had a permanent password assigned; only auto-provisioned passwordless
+                    // federated profiles get EXTERNAL_PROVIDER.
+                    if (!linkedOrPermanent) {
+                        user.setUserStatus("EXTERNAL_PROVIDER");
+                        user.setFederatedAutoProvisioned(true);
+                    }
                     user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
                     userStore.put(userKey(userPoolId, user.getUsername()), user);
                     LOG.infov("Reconciled federated user {0} from provider {1} in pool {2}",

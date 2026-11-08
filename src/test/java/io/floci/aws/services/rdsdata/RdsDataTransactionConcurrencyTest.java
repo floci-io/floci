@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
+import io.floci.aws.services.rds.container.RdsBackendGate;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.SecretVersion;
+import io.floci.aws.testing.ManualClock;
 import org.h2.Driver;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,6 +23,7 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -47,6 +50,7 @@ class RdsDataTransactionConcurrencyTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final CountDownLatch started = new CountDownLatch(1);
     private final CountDownLatch release = new CountDownLatch(1);
+    private final ManualClock clock = new ManualClock(Instant.EPOCH);
     private String jdbcUrl;
     private RdsDataService service;
 
@@ -71,8 +75,8 @@ class RdsDataTransactionConcurrencyTest {
         when(secrets.getSecretValue(any(), any(), any(), any())).thenReturn(version);
         RdsDataConnectionFactory factory = mock(RdsDataConnectionFactory.class);
         when(factory.open(any(), any(), any(), any(), any())).thenAnswer(invocation -> connection());
-        return new RdsDataService(resolver, secrets, mapper, factory, ttl,
-                (runtimeId, engine) -> new EndpointInfo("127.0.0.1", 5432));
+        return new RdsDataService(resolver, secrets, mapper, factory, ttl, RdsBackendGate.OPEN,
+                (runtimeId, engine) -> new EndpointInfo("127.0.0.1", 5432), false, clock);
     }
 
     @AfterEach
@@ -147,7 +151,7 @@ class RdsDataTransactionConcurrencyTest {
             Future<ObjectNode> first = executor.submit(() -> service.executeStatement(request(tx, BLOCKED_QUERY), REGION));
             try {
                 assertTrue(started.await(5, TimeUnit.SECONDS));
-                Thread.sleep(1100);
+                clock.advance(Duration.ofSeconds(2));
                 Future<String> independent = executor.submit(this::begin);
                 String other = independent.get(5, TimeUnit.SECONDS);
                 service.rollbackTransaction(request(other, null), REGION);
@@ -157,7 +161,9 @@ class RdsDataTransactionConcurrencyTest {
             first.get(5, TimeUnit.SECONDS);
         }
         assertEquals(2, query(tx));
-        service.rollbackTransaction(request(tx, null), REGION);
+        clock.advance(Duration.ofSeconds(2));
+        assertEquals("TransactionNotFoundException",
+                assertThrows(AwsException.class, () -> query(tx)).getErrorCode());
     }
 
     @Test

@@ -18,6 +18,7 @@ import io.floci.aws.services.apigateway.model.ApiGatewayResource;
 import io.floci.aws.services.apigateway.model.ApiKey;
 import io.floci.aws.services.apigateway.model.BasePathMapping;
 import io.floci.aws.services.apigateway.model.CustomDomain;
+import io.floci.aws.services.apigateway.model.DocumentationPart;
 import io.floci.aws.services.apigateway.model.EndpointConfiguration;
 import io.floci.aws.services.apigateway.model.EndpointType;
 import io.floci.aws.services.apigateway.model.GatewayResponse;
@@ -894,9 +895,9 @@ public class ApiGatewayController {
 
     @GET
     @Path("/usageplans")
-    public Response getUsagePlans(@Context HttpHeaders headers) {
+    public Response getUsagePlans(@Context HttpHeaders headers, @QueryParam("keyId") String keyId) {
         String region = regionResolver.resolveRegion(headers);
-        List<UsagePlan> plans = service.getUsagePlans(region);
+        List<UsagePlan> plans = service.getUsagePlans(region, keyId);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
         plans.forEach(p -> items.add(toUsagePlanNode(p, false)));
@@ -1219,6 +1220,71 @@ public class ApiGatewayController {
                                 @PathParam("modelName") String modelName) {
         String region = regionResolver.resolveRegion(headers);
         service.deleteModel(region, apiId, modelName);
+        return Response.accepted().build();
+    }
+
+    // ──────────────────────────── Documentation Parts (v1) ────────────────────────────
+
+    @POST
+    @Path("/restapis/{apiId}/documentation/parts")
+    public Response createDocumentationPart(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                            String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            DocumentationPart part = service.createDocumentationPart(region, apiId, request);
+            return Response.status(201).entity(objectMapper.valueToTree(part).toString())
+                    .type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/documentation/parts")
+    public Response getDocumentationParts(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                          @QueryParam("type") String type, @QueryParam("name") String name,
+                                          @QueryParam("path") String path,
+                                          @QueryParam("locationStatus") String locationStatus,
+                                          @QueryParam("limit") Integer limit, @QueryParam("position") String position) {
+        String region = regionResolver.resolveRegion(headers);
+        ApiGatewayService.DocumentationPartPage page = service.getDocumentationParts(region, apiId, type, name,
+                path, locationStatus, limit, position);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("item");
+        page.items().forEach(part -> items.add(objectMapper.valueToTree(part)));
+        if (page.position() != null) {
+            root.put("position", page.position());
+        }
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/documentation/parts/{partId}")
+    public Response getDocumentationPart(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                         @PathParam("partId") String partId) {
+        String region = regionResolver.resolveRegion(headers);
+        DocumentationPart part = service.getDocumentationPart(region, apiId, partId);
+        return Response.ok(objectMapper.valueToTree(part).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @PATCH
+    @Path("/restapis/{apiId}/documentation/parts/{partId}")
+    public Response updateDocumentationPart(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                            @PathParam("partId") String partId, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        List<Map<String, String>> operations = parsePatchOperations(body);
+        DocumentationPart part = service.updateDocumentationPart(region, apiId, partId, operations);
+        return Response.ok(objectMapper.valueToTree(part).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/restapis/{apiId}/documentation/parts/{partId}")
+    public Response deleteDocumentationPart(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                            @PathParam("partId") String partId) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteDocumentationPart(region, apiId, partId);
         return Response.accepted().build();
     }
 
