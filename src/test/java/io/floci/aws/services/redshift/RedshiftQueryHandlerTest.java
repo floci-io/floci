@@ -1477,4 +1477,53 @@ class RedshiftQueryHandlerTest {
         String xml = (String) response.getEntity();
         assertTrue(xml.contains("<DbUser>IAM:alice</DbUser>"));
     }
+
+    // ── CopyClusterSnapshot ──────────────────────────────────────────────────
+
+    @Test
+    void copyClusterSnapshotRequiresSourceAndTargetIdentifiers() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        AwsException ex1 = assertThrows(AwsException.class, () -> handler.handle("CopyClusterSnapshot", params));
+        assertEquals("InvalidParameterValue", ex1.getErrorCode());
+        assertTrue(ex1.getMessage().contains("SourceSnapshotIdentifier is required"));
+
+        params.putSingle("SourceSnapshotIdentifier", "source-snap");
+        AwsException ex2 = assertThrows(AwsException.class, () -> handler.handle("CopyClusterSnapshot", params));
+        assertEquals("InvalidParameterValue", ex2.getErrorCode());
+        assertTrue(ex2.getMessage().contains("TargetSnapshotIdentifier is required"));
+    }
+
+    @Test
+    void copyClusterSnapshotDelegatesToServiceAndFormatsXml() {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier("target-snap");
+        snapshot.setClusterIdentifier("my-cluster");
+        snapshot.setSnapshotType("manual");
+        snapshot.setStatus("available");
+        snapshot.setMasterUsername("admin");
+        snapshot.setPort(5439);
+        snapshot.setManualSnapshotRetentionPeriod(15);
+        snapshot.setSnapshotArn("arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/target-snap");
+
+        when(service.copyClusterSnapshot("source-snap", "target-snap", "my-cluster", 15))
+                .thenReturn(snapshot);
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SourceSnapshotIdentifier", "source-snap");
+        params.putSingle("TargetSnapshotIdentifier", "target-snap");
+        params.putSingle("SourceSnapshotClusterIdentifier", "my-cluster");
+        params.putSingle("ManualSnapshotRetentionPeriod", "15");
+
+        Response response = handler.handle("CopyClusterSnapshot", params);
+        assertEquals(200, response.getStatus());
+
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<CopyClusterSnapshotResponse>"));
+        assertTrue(xml.contains("<CopyClusterSnapshotResult>"));
+        assertTrue(xml.contains("<SnapshotIdentifier>target-snap</SnapshotIdentifier>"));
+        assertTrue(xml.contains("<ClusterIdentifier>my-cluster</ClusterIdentifier>"));
+        assertTrue(xml.contains("<SnapshotType>manual</SnapshotType>"));
+        assertTrue(xml.contains("<SnapshotArn>arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/target-snap</SnapshotArn>"));
+        verify(service).copyClusterSnapshot("source-snap", "target-snap", "my-cluster", 15);
+    }
 }

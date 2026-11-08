@@ -2052,6 +2052,88 @@ public class RedshiftService implements ManagedSecretRotator {
                 || clusterIdentifier.equals(snapshot.getClusterIdentifier());
     }
 
+    public Snapshot copyClusterSnapshot(String sourceSnapshotIdentifier, String targetSnapshotIdentifier,
+                                        String sourceSnapshotClusterIdentifier, Integer manualRetention) {
+        validateSnapshotIdentifier(targetSnapshotIdentifier);
+        if (manualRetention != null) {
+            validateManualRetention(manualRetention);
+        }
+        String accountId = clusters.accountId();
+        String region = regionResolver.getRegion();
+
+        return withResourceLock("snapshot", targetSnapshotIdentifier, () -> {
+            boolean shadowedByCopy = snapshotCopies.get(copyKey(region, targetSnapshotIdentifier)).isPresent();
+            if (shadowedByCopy || snapshots.get(targetSnapshotIdentifier).isPresent()) {
+                throw new AwsException("ClusterSnapshotAlreadyExists",
+                        "Snapshot " + targetSnapshotIdentifier + " already exists", 400);
+            }
+
+            Snapshot source = findSnapshot(sourceSnapshotIdentifier)
+                    .filter(found -> takenFrom(found, sourceSnapshotClusterIdentifier))
+                    .orElseThrow(() -> new AwsException("ClusterSnapshotNotFound",
+                            "Snapshot " + sourceSnapshotIdentifier + " not found", 404));
+            if (!"available".equals(source.getStatus())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Snapshot " + sourceSnapshotIdentifier + " is not available", 400);
+            }
+            if (!"automated".equals(source.getSnapshotType())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Cannot copy a manual snapshot: " + sourceSnapshotIdentifier
+                                + ". Only automated snapshots can be copied.", 400);
+            }
+
+            Snapshot copy = new Snapshot(source);
+            copy.setSnapshotIdentifier(targetSnapshotIdentifier);
+            copy.setSnapshotType("manual");
+            copy.setSnapshotCreateTime(Instant.now());
+            copy.setManualSnapshotRetentionPeriod(
+                    manualRetention != null ? manualRetention : RETAIN_MANUAL_SNAPSHOTS_INDEFINITELY);
+            copy.setAutomatedSnapshotRetentionPeriod(null);
+            copy.setScheduledTime(null);
+            copy.setSnapshotArn(snapshotArn(source.getClusterIdentifier(), targetSnapshotIdentifier));
+            copy.setCopiedToRegions(new LinkedHashSet<>());
+            copy.setSqlDump(null);
+
+            Path copiedDump = null;
+            if (source.getSqlDump() != null && !source.getSqlDump().isBlank()) {
+                Path dumpDir = accountDumpDir(accountId);
+                try {
+                    copiedDump = SnapshotDumpCopier.copy(Paths.get(source.getSqlDump()), dumpDir, dumpDir);
+                } catch (IOException e) {
+                    LOG.warnv(e, "Could not copy the dump of snapshot {0}", sourceSnapshotIdentifier);
+                    throw new AwsException("InternalFailure", "Failed to copy snapshot dump", 500);
+                }
+                copy.setSqlDump(copiedDump.toString());
+            }
+
+            try {
+                snapshots.putAllAtomically(Map.of(targetSnapshotIdentifier, copy));
+                snapshots.flush();
+            } catch (RuntimeException e) {
+                deleteQuietly(copiedDump, e);
+                throw e;
+            }
+
+            emitSnapshotEvent(accountId, region, RedshiftEventCatalog.SNAPSHOT_STARTED,
+                    targetSnapshotIdentifier, "A user snapshot '" + targetSnapshotIdentifier
+                            + "' for Amazon Redshift cluster '" + source.getClusterIdentifier()
+                            + "' was copied from snapshot '" + sourceSnapshotIdentifier + "'.");
+
+            return copy;
+        });
+    }
+
+    private static void deleteQuietly(Path file, Exception cause) {
+        if (file == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException cleanupFailure) {
+            cause.addSuppressed(cleanupFailure);
+        }
+    }
+
     public Snapshot deleteSnapshot(String snapshotIdentifier) {
         return deleteSnapshot(snapshotIdentifier, null);
     }
