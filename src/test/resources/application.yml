@@ -508,6 +508,8 @@ floci:
       enabled: true
     efs:
       enabled: true
+    ec2instanceconnect:
+      enabled: true
     organizations:
       enabled: true
     rum:

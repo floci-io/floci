@@ -882,6 +882,7 @@ public interface EmulatorConfig {
 
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
+        Ec2InstanceConnectServiceConfig ec2instanceconnect();
         CodeGuruReviewerServiceConfig codegurureviewer();
         CodeArtifactServiceConfig codeartifact();
         QuickSightServiceConfig quicksight();
@@ -1203,6 +1204,11 @@ public interface EmulatorConfig {
     }
 
     interface LakeFormationServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface Ec2InstanceConnectServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
