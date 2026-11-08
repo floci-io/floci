@@ -7,6 +7,7 @@ import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.ExecStartCmd;
+import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.Frame;
@@ -80,6 +81,7 @@ import java.util.stream.Stream;
 import static io.floci.aws.testing.DockerDaemonVersionFixtures.stubDaemonVersion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -127,6 +129,7 @@ class ContainerLauncherTest {
 
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
+        lenient().when(lambda.reconcileContainersOnStartup()).thenReturn(true);
         when(lambda.dockerNetwork()).thenReturn(Optional.empty());
         lenient().when(lambda.extraHosts()).thenReturn(Optional.empty());
         lenient().when(lambda.awsConfigPath()).thenReturn(Optional.empty());
@@ -174,6 +177,9 @@ class ContainerLauncherTest {
                 new ContainerLifecycleManager.ContainerInfo("container-123", Map.of());
         lenient().when(lifecycleManager.startCreated(eq("container-123"), any())).thenReturn(info);
         lenient().when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        ListContainersCmd inventory = mock(ListContainersCmd.class, RETURNS_SELF);
+        lenient().when(dockerClient.listContainersCmd()).thenReturn(inventory);
+        lenient().when(inventory.exec()).thenReturn(List.of());
 
         // Stub the Docker copy chain so code and bootstrap archive copies
         // don't throw when the mock DockerClient is used. Each invocation
@@ -604,10 +610,41 @@ class ContainerLauncherTest {
         verify(lifecycleManager, times(2)).create(any(ContainerSpec.class), platformCaptor.capture());
         assertTrue(platformCaptor.getAllValues().stream()
                 .allMatch("linux/arm64"::equals));
+        ArgumentCaptor<ContainerSpec> specs = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager, times(2)).create(specs.capture(), anyString());
+        for (ContainerSpec spec : specs.getAllValues()) {
+            assertEquals("4566", spec.labels().get("io.floci.owner"));
+            assertEquals("lambda", spec.labels().get("io.floci.service"));
+            assertNotNull(spec.labels().get("io.floci.lambda.run"));
+        }
+        assertEquals(specs.getAllValues().getFirst().labels().get("io.floci.lambda.run"),
+                specs.getAllValues().getLast().labels().get("io.floci.lambda.run"));
     }
 
-    @Test
-    void launchFunction_labelsContainerWithResourceIdentity() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void coldStartRetriesAFailedStartupSweepOnlyWhenEnabled(boolean enabled) throws Exception {
+        when(config.services().lambda().reconcileContainersOnStartup()).thenReturn(enabled);
+        ListContainersCmd inventory = dockerClient.listContainersCmd();
+        lenient().when(inventory.exec()).thenThrow(new IllegalStateException("daemon unavailable"))
+                .thenReturn(List.of());
+        launcher.removeLeftoverContainers();
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("retry-cleanup");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(Files.createDirectory(tempDir.resolve("code")).toString());
+        launcher.launch(fn);
+        launcher.removeLeftoverContainers();
+
+        verify(inventory, times(enabled ? 3 : 0)).exec();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "--label io.floci.owner=foreign --label io.floci.lambda.run=forged --label io.floci.service=ecs"})
+    void launchFunction_labelsContainerWithResourceIdentity(String flags) throws Exception {
+        when(config.services().lambda().dockerFlags()).thenReturn(Optional.of(flags));
         Path codePath = Files.createDirectory(tempDir.resolve("code"));
 
         LambdaFunction fn = new LambdaFunction();
@@ -620,12 +657,17 @@ class ContainerLauncherTest {
         launcher.launch(fn);
 
         ContainerSpec spec = captureRealContainerSpec();
+        assertEquals("4566", spec.labels().get("io.floci.owner"));
+        assertNotNull(spec.labels().get("io.floci.lambda.run"));
+        assertNotEquals("forged", spec.labels().get("io.floci.lambda.run"));
         assertEquals(Map.of(
                 "io.floci", "aws",
                 "io.floci.service", "lambda",
                 "io.floci.resource-id", "standard-fn",
                 "io.floci.account", "222222222222",
-                "io.floci.region", "us-west-2"),
+                "io.floci.region", "us-west-2",
+                "io.floci.owner", "4566",
+                "io.floci.lambda.run", spec.labels().get("io.floci.lambda.run")),
                 spec.labels());
     }
 

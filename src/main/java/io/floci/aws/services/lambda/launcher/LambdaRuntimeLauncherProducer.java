@@ -38,6 +38,14 @@ public class LambdaRuntimeLauncherProducer {
         }
     }
 
+    void reconcileDockerContainers(@Observes StartupEvent event, EmulatorConfig config,
+                                   Instance<ContainerLauncher> docker) {
+        if (config.services().lambda().enabled() && config.services().lambda().reconcileContainersOnStartup()
+                && requireValidExecutor(config).equals("docker")) {
+            docker.get().removeLeftoverContainers();
+        }
+    }
+
     @Produces
     @ApplicationScoped
     LambdaRuntimeLauncher launcher(EmulatorConfig config,

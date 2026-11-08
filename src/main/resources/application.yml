@@ -442,6 +442,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      reconcile-containers-on-startup: true  # FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP
       ephemeral: false
       # Extra Docker create flags for Lambda containers, for example: --env KEY=VALUE --volume /host:/container:ro
       docker-flags: ""
