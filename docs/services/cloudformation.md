@@ -738,7 +738,7 @@ an API key's `Expires`, a GraphQL API's `ApiType` and `Visibility`, a UNIT resol
 a `NatGateway`'s `PrivateIpAddress`, a `PrefixList`'s `MaxEntries`, a `Stage`'s `StageName` and an
 `Instance`'s `SecurityGroupIds`, `NetworkInterfaces` and `LaunchTemplate`. A dropped `LaunchTemplate` keeps
 the instance, but the instance type and the `MetadataOptions` members the template supplied go back to
-their defaults. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
+their defaults, and the instance profile it supplied is disassociated. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
 cleared: a running instance is stopped for the rewrite and started again, and a stopped one stays stopped.
 An update that drops a `PrefixList`'s `AddressFamily` or `PrefixListName` fails. Create-only members are
 not cleared either.
