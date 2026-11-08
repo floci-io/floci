@@ -101,6 +101,9 @@ public class ContainerLifecycleManager {
     /** Daemon CPU count, resolved on first use. Null until then, so that empty can mean "unknown". */
     private final AtomicReference<OptionalInt> hostCpuCount = new AtomicReference<>();
 
+    /** Whether the daemon is Docker Desktop, resolved on first use and kept. Null until then. */
+    private final AtomicReference<Boolean> dockerDesktop = new AtomicReference<>();
+
     @Inject
     public ContainerLifecycleManager(DockerClient dockerClient,
                                      ImageCacheService imageCacheService,
@@ -362,7 +365,7 @@ public class ContainerLifecycleManager {
      * network-connect endpoint, so the container is reconnected before it starts.
      */
     private void attachNetworkBeforeStart(String containerId, ContainerSpec spec) {
-        if (!spec.hasPortBindings()) {
+        if (!connectsAfterStart(spec)) {
             dockerClient.disconnectFromNetworkCmd()
                     .withContainerId(containerId)
                     .withNetworkId(spec.networkMode())
@@ -483,7 +486,7 @@ public class ContainerLifecycleManager {
         LOG.infov("Started container {0}", containerId);
 
         if (spec.networkMode() != null && !spec.networkMode().isBlank()
-                && spec.publishesPorts() && !spec.hasNetworkConfiguration()) {
+                && connectsAfterStart(spec) && !spec.hasNetworkConfiguration()) {
             try {
                 dockerClient.connectToNetworkCmd()
                         .withContainerId(containerId)
@@ -1646,12 +1649,10 @@ public class ContainerLifecycleManager {
                     spec.name(), spec.networkMode(), spec.portBindings().keySet());
         }
 
-        // Network mode: only set during creation when no host ports are published.
-        // withNetworkMode() + port bindings suppresses port publishing on macOS Docker Desktop,
-        // so containers with published ports (e.g. ECR registry) connect to the network
-        // after start via connectToNetworkCmd() instead. host, none and container:<id> publish
-        // nothing and cannot be connected after creation, so they always go on the HostConfig.
-        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !spec.publishesPorts()) {
+        // Network mode: set during creation unless the container connects after start (see
+        // connectsAfterStart). host, none and container:<id> publish nothing and cannot be
+        // connected after creation, so they always go on the HostConfig.
+        if (spec.networkMode() != null && !spec.networkMode().isBlank() && !connectsAfterStart(spec)) {
             hostConfig.withNetworkMode(spec.networkMode());
         }
 
@@ -1761,6 +1762,27 @@ public class ContainerLifecycleManager {
         }
         hostCpuCount.set(resolved);
         return resolved;
+    }
+
+    /**
+     * Whether a container joins its network only after it starts. On Docker Desktop, naming the
+     * network at creation together with port bindings suppresses the published ports, so a
+     * container that publishes ports is created on the default bridge and connected afterwards.
+     * Any other daemon publishes them on the named network, so the container is created there and
+     * joins it alone. A daemon that cannot be asked is treated as Docker Desktop, and the answer is
+     * kept either way, so a container's create and its start always take the same path.
+     */
+    private boolean connectsAfterStart(ContainerSpec spec) {
+        return spec.publishesPorts() && isDockerDesktop();
+    }
+
+    private boolean isDockerDesktop() {
+        Boolean known = dockerDesktop.get();
+        if (known != null) {
+            return known;
+        }
+        boolean desktop = DockerDaemon.operatingSystem(dockerClient).map(DockerDaemon::isDockerDesktop).orElse(true);
+        return dockerDesktop.compareAndSet(null, desktop) ? desktop : dockerDesktop.get();
     }
 
     private static boolean isContainerNetworkMode(String networkMode) {

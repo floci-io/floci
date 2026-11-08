@@ -3,6 +3,7 @@ package io.floci.aws.services.ec2;
 import com.github.dockerjava.api.DockerClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.core.common.docker.DockerDaemon;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -10,7 +11,6 @@ import org.jboss.logging.Logger;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.util.Locale;
 import java.util.Optional;
 
 /**
@@ -107,7 +107,7 @@ public class ContainerNetworkReachability {
         // Floci is containerised. The probe just proved container-to-container reachability,
         // which is true even on Docker Desktop, where the host still cannot route there.
         String backend = dockerBackend();
-        if (backend.contains("docker desktop")) {
+        if (DockerDaemon.isDockerDesktop(backend)) {
             LOG.infov("Docker backend is {0}: container IPs are not routable from the host, so "
                             + "EC2 public addresses stay on 127.0.0.1 with published ports. Set "
                             + "FLOCI_SERVICES_EC2_CONTAINER_IPS_ROUTABLE=true to override.",
@@ -134,12 +134,6 @@ public class ContainerNetworkReachability {
     }
 
     private String dockerBackend() {
-        try {
-            String os = dockerClient.infoCmd().exec().getOperatingSystem();
-            return os == null ? "" : os.toLowerCase(Locale.ROOT);
-        } catch (Exception e) {
-            LOG.debugv("Could not read the Docker daemon's operating system: {0}", e.getMessage());
-            return "";
-        }
+        return DockerDaemon.operatingSystem(dockerClient).orElse("");
     }
 }
