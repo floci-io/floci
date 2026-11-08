@@ -4200,7 +4200,7 @@ public class NativeDynamoDbJsonHandler {
                 JsonNode s = stmts.get(i);
                 List<JsonNode> parameters = toPartiQLParams(s.path("Parameters"));
                 statements.add(inTransactStatement(i,
-                        () -> DynamoDbPartiQLParser.parse(s.path("Statement").asText(), parameters)));
+                        () -> DynamoDbPartiQLParser.parse(s.path("Statement").asText(), parameters, true)));
             }
             long reads = statements.stream().filter(DynamoDbPartiQLParser.Stmt.Select.class::isInstance).count();
             if (reads > 0 && reads < statements.size()) {
