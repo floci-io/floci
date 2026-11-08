@@ -506,7 +506,7 @@ public class DynamoDbPartiQLParser {
     private static Stmt parseStatement(String statement, List<JsonNode> parameters, boolean transaction) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
         DynamoDbPartiQLParser parser = new DynamoDbPartiQLParser(statement, parameters);
-        Stmt stmt = parser.parseStmt();
+        Stmt stmt = parser.parseStmt(transaction);
         if (parser.peek().type() == TType.SEMICOLON) {
             parser.advance();
         }
@@ -515,7 +515,7 @@ public class DynamoDbPartiQLParser {
         }
         // Outside a transaction DynamoDB refuses EXISTS before it checks anything inside it.
         if (stmt instanceof Stmt.Exists && !transaction) {
-            throw validationEx("EXISTS can only be used in ExecuteTransaction write requests.");
+            throw validationEx(EXISTS_OUTSIDE_TRANSACTION);
         }
         if (parser.fromClauseError != null) {
             throw validationEx(parser.fromClauseError);
@@ -552,11 +552,13 @@ public class DynamoDbPartiQLParser {
         return !tokens.isEmpty() && OPERAND_ENDS.contains(tokens.getLast().type());
     }
 
-    private Stmt parseStmt() {
-        if (peekFunction("exists")) {
+    private static final String EXISTS_OUTSIDE_TRANSACTION =
+            "EXISTS can only be used in ExecuteTransaction write requests.";
+
+    private Stmt parseStmt(boolean transaction) {
+        if (peekFunction("exists") && tokens.get(pos + 2).type() == TType.SELECT) {
             advance();
             consume(TType.LPAREN);
-            requireTermStart();
             Stmt.Select select = parseSelect();
             consume(TType.RPAREN);
             return new Stmt.Exists(select);
@@ -569,13 +571,13 @@ public class DynamoDbPartiQLParser {
             case DELETE -> parseDelete();
             default -> {
                 requireTermStart();
-                throw validationEx(expressionStatementRefusal());
+                throw validationEx(expressionStatementRefusal(transaction));
             }
         };
     }
 
     // DynamoDB reads any other statement as one expression and refuses it by the kind of that expression.
-    private String expressionStatementRefusal() {
+    private String expressionStatementRefusal(boolean transaction) {
         String kind = parseTermKind();
         if (kind == null || continuesExpression(peek())) {
             return NOT_WELL_FORMED + "Expected data manipulation";
@@ -586,11 +588,17 @@ public class DynamoDbPartiQLParser {
         if (peek().type() != TType.EOF) {
             return UNEXPECTED_TOKEN;
         }
+        // Outside a transaction DynamoDB answers any call as it answers EXISTS.
+        if (CALL.equals(kind)) {
+            return transaction ? "Unsupported operation in transaction." : EXISTS_OUTSIDE_TRANSACTION;
+        }
         return OPERATOR.equals(kind) ? NOT_WELL_FORMED + "Expected data manipulation" : "Unsupported operation: " + kind;
     }
 
     // A sign on anything but a number, or IS NOT. DynamoDB refuses it with a message of its own.
     private static final String OPERATOR = "Operator";
+
+    private static final String CALL = "Call";
 
     // A sign folds into the number it applies to. It binds tighter than IS and looser than a path step.
     private String parseTermKind() {
@@ -675,6 +683,11 @@ public class DynamoDbPartiQLParser {
                 };
             }
             case IDENT -> {
+                if (peekCall()) {
+                    advance();
+                    parseCallArguments(t, false);
+                    yield AGGREGATE_FUNCTIONS.contains(t.value().toLowerCase(Locale.ROOT)) ? "CallAgg" : CALL;
+                }
                 if (isBareWord(t) && KEYWORDS.contains(t.value().toLowerCase(Locale.ROOT))
                         || tokens.get(pos + 1).type() == TType.LPAREN) {
                     yield null;
