@@ -1829,6 +1829,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (def.getMemory() != null) {
                 container.setMemory(String.valueOf(def.getMemory()));
             }
+            if (def.getMemoryReservation() != null) {
+                container.setMemoryReservation(String.valueOf(def.getMemoryReservation()));
+            }
             if (task.getNetworkInterfaceId() != null) {
                 container.setNetworkInterfaces(List.of(new TaskNetworkInterface(
                         task.getAttachmentId(), task.getPrivateIpAddress(), null)));

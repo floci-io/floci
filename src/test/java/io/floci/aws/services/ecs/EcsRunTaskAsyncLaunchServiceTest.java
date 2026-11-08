@@ -146,6 +146,21 @@ class EcsRunTaskAsyncLaunchServiceTest {
     }
 
     @Test
+    void theResponseCarriesTheContainersMemoryReservation() {
+        EcsService service = newService(false);
+        ContainerDefinition container = new ContainerDefinition();
+        container.setName("app");
+        container.setImage("busybox:latest");
+        container.setMemoryReservation(128);
+        service.registerTaskDefinition("reserved", List.of(container), null, null, null,
+                null, null, List.of(), REGION);
+
+        EcsTask response = run(service, "reserved");
+
+        assertEquals("128", response.getContainers().getFirst().getMemoryReservation());
+    }
+
+    @Test
     void theExecAgentIsPendingUntilTheTaskRuns() {
         EcsService service = newService(true);
         registerTaskDefinition(service, "exec");
