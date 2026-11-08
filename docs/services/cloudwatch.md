@@ -401,7 +401,21 @@ aws logs put-retention-policy \
 
 ## CloudWatch Metrics {#metrics}
 
-**Protocol:** Query (XML) and JSON 1.0 (both supported)
+**Protocol:** Query (XML), JSON 1.0, and OTLP/HTTP.
+
+The OTLP HTTP metrics endpoint accepts `POST /v1/metrics` with `application/json` or
+`application/x-protobuf`, optionally gzip-compressed. Requests are stored separately from classic
+CloudWatch metrics, retaining their OTLP resource, scope and metric data. The uncompressed request
+limit is 5 MiB and a request may contain at most 1,000 data points. Floci checks each datapoint's
+timestamp, the limit of 150 resource, scope and datapoint attributes combined, and the 40,000-byte
+metadata limit. Attribute strings are limited to 1,024 UTF-16 code units. Storage follows the
+`cloudwatchmetrics` storage configuration. Metric querying through PromQL is not yet supported, and
+the endpoint does not yet implement every CloudWatch OTLP validation rule. Invalid requests return OTLP `google.rpc.Status`
+bodies. When only part of a request is invalid, Floci returns an OTLP partial-success response and
+stores only the accepted datapoints. Empty or untyped metrics produce a partial-success message
+without increasing the rejected datapoint count.
+With IAM enforcement enabled, requests require AWS credentials and the `cloudwatch:PutMetricData`
+permission. Bearer-token authentication for this endpoint is not implemented.
 
 CloudWatch Query operations accept form-encoded POST requests and root GET requests with
 URL query parameters. GET uses the existing handlers, signature validation and IAM policy checks. A `monitoring`
