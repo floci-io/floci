@@ -15,6 +15,7 @@ import java.time.Instant;
 public record ManagedAgent(String name, String lastStatus, String reason, Instant lastStartedAt) {
 
     public static final String EXECUTE_COMMAND_AGENT = "ExecuteCommandAgent";
+    public static final String PENDING = "PENDING";
     public static final String RUNNING = "RUNNING";
     public static final String STOPPED = "STOPPED";
 

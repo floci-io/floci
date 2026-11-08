@@ -1749,8 +1749,11 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     private void failLaunch(EcsTask task, String reason, String region) {
         synchronized (task) {
-            task.setStoppedReason(reason);
-            task.setStopCode(STOP_CODE_TASK_FAILED_TO_START);
+            // A StopTask that came first keeps its own reason and UserInitiated code.
+            if (!TaskStatus.STOPPED.name().equals(task.getDesiredStatus())) {
+                task.setStoppedReason(reason);
+                task.setStopCode(STOP_CODE_TASK_FAILED_TO_START);
+            }
             landUnstartedTask(task, region);
         }
     }
@@ -1831,7 +1834,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                         task.getAttachmentId(), task.getPrivateIpAddress(), null)));
             }
             if (task.isEnableExecuteCommand()) {
-                container.setManagedAgents(List.of(ManagedAgent.executeCommandAgent(Instant.now())));
+                container.setManagedAgents(List.of(status == TaskStatus.RUNNING
+                        ? ManagedAgent.executeCommandAgent(Instant.now())
+                        : new ManagedAgent(ManagedAgent.EXECUTE_COMMAND_AGENT, ManagedAgent.PENDING, null, null)));
             }
             containers.add(container);
         }

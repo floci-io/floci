@@ -9,8 +9,10 @@ import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
+import io.floci.aws.services.ecs.model.ManagedAgent;
 import io.floci.aws.services.ecs.model.NetworkConfiguration;
 import io.floci.aws.services.ecs.model.NetworkMode;
+import io.floci.aws.services.ecs.model.RunTaskRequest;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -141,6 +143,48 @@ class EcsRunTaskAsyncLaunchServiceTest {
         assertEquals(List.of("RUNNING"), containerStatuses(describe(service, response)));
         assertEquals(1, runningTasksCount(service));
         verify(containerManager, never()).startTask(any(), any(), any(), anyString());
+    }
+
+    @Test
+    void theExecAgentIsPendingUntilTheTaskRuns() {
+        EcsService service = newService(true);
+        registerTaskDefinition(service, "exec");
+        RunTaskRequest request = new RunTaskRequest();
+        request.setTaskDefinition("exec");
+        request.setEnableExecuteCommand(true);
+
+        EcsTask response = assertTimeoutPreemptively(Duration.ofSeconds(2),
+                () -> service.runTask(request, REGION).getFirst());
+
+        ManagedAgent pending = response.getContainers().getFirst().getManagedAgents().getFirst();
+        assertEquals("ExecuteCommandAgent", pending.name());
+        assertEquals("PENDING", pending.lastStatus());
+        assertNull(pending.lastStartedAt());
+        await().atMost(LAUNCH_BUDGET).until(() -> "RUNNING".equals(describe(service, response).getLastStatus()));
+        ManagedAgent running = describe(service, response).getContainers().getFirst().getManagedAgents().getFirst();
+        assertEquals("RUNNING", running.lastStatus());
+        assertNotNull(running.lastStartedAt());
+    }
+
+    @Test
+    void aFailedPullDuringAStopKeepsTheUsersReason() throws Exception {
+        doAnswer(invocation -> {
+            startEntered.countDown();
+            assertTrue(releaseStart.await(5, TimeUnit.SECONDS));
+            throw new IllegalStateException("CannotPullContainerError: pull access denied");
+        }).when(containerManager).startTask(any(), any(), any(), anyString());
+        EcsService service = newService(false);
+        registerTaskDefinition(service, "stop-then-fail");
+        EcsTask response = run(service, "stop-then-fail");
+        assertTrue(startEntered.await(5, TimeUnit.SECONDS));
+
+        service.stopTask(null, response.getTaskArn(), "scaling in", REGION);
+        releaseStart.countDown();
+
+        await().atMost(LAUNCH_BUDGET).until(() -> "STOPPED".equals(describe(service, response).getLastStatus()));
+        EcsTask stopped = describe(service, response);
+        assertEquals("UserInitiated", stopped.getStopCode());
+        assertEquals("scaling in", stopped.getStoppedReason());
     }
 
     @Test
