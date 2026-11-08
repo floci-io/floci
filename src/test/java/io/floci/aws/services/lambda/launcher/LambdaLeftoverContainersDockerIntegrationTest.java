@@ -8,6 +8,7 @@ import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.services.lambda.model.LambdaFunction;
+import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -49,12 +50,9 @@ class LambdaLeftoverContainersDockerIntegrationTest {
     Path code;
 
     @BeforeEach
-    void requireDocker() {
-        try {
-            docker.pingCmd().exec();
-        } catch (RuntimeException unavailable) {
-            Assumptions.abort("Docker daemon must be available for the Lambda leftover container test");
-        }
+    void requireDocker() throws InterruptedException {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(),
+                "Docker daemon must be available for the Lambda leftover container test");
     }
 
     @Test

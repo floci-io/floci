@@ -3092,6 +3092,15 @@ public interface EmulatorConfig {
         boolean enabled();
 
         /**
+         * Remove previous-run Docker Lambda containers at startup and retry incomplete cleanup
+         * on cold starts. Disable when deployments share a daemon and the same owner identity.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
+
+        /**
          * Registry host (optionally with a path prefix) that Lambda runtime images are pulled
          * from, e.g. {@code public.ecr.aws} produces {@code public.ecr.aws/lambda/python:3.12}.
          * Point it at a private mirror to avoid depending on ECR Public.

@@ -268,6 +268,21 @@ class EcsContainerManagerLifecycleTest {
     }
 
     @Test
+    void removeLeftoverContainersStillReclaimsOwnedLegacyContainersWithoutRunLabels() {
+        ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+        Container unmarked = leftover("unmarked", Map.of("io.floci.service", "ecs", "io.floci.owner", "alpha/4566"));
+        Container foreign = leftover("foreign", Map.of("io.floci.service", "ecs", "io.floci.owner", "beta/4566"));
+        Container otherService = leftover("other-service", Map.of("io.floci.service", "lambda",
+                "io.floci.owner", "alpha/4566"));
+        stubLeftoverListing(lifecycle, Map.of("unmarked", unmarked, "foreign", foreign,
+                "other-service", otherService), Map.of());
+        assertTrue(manager(lifecycle, namespacedConfig()).removeLeftoverContainers("current"));
+        verify(lifecycle).removeIfExistsStrict("unmarked", true);
+        verify(lifecycle, never()).removeIfExistsStrict("foreign", true);
+        verify(lifecycle, never()).removeIfExistsStrict("other-service", true);
+    }
+
+    @Test
     void previousRunVolumesAreRemovedAfterContainersAndFailedRemovalIsRetried() {
         ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
         stubLeftoverListing(lifecycle, Map.of(), Map.of());

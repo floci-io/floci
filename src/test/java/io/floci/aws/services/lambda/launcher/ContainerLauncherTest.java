@@ -129,6 +129,7 @@ class ContainerLauncherTest {
 
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
+        lenient().when(lambda.reconcileContainersOnStartup()).thenReturn(true);
         when(lambda.dockerNetwork()).thenReturn(Optional.empty());
         lenient().when(lambda.extraHosts()).thenReturn(Optional.empty());
         lenient().when(lambda.awsConfigPath()).thenReturn(Optional.empty());
@@ -620,10 +621,13 @@ class ContainerLauncherTest {
                 specs.getAllValues().getLast().labels().get("io.floci.lambda.run"));
     }
 
-    @Test
-    void coldStartRetriesAFailedStartupSweep() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void coldStartRetriesAFailedStartupSweepOnlyWhenEnabled(boolean enabled) throws Exception {
+        when(config.services().lambda().reconcileContainersOnStartup()).thenReturn(enabled);
         ListContainersCmd inventory = dockerClient.listContainersCmd();
-        when(inventory.exec()).thenThrow(new IllegalStateException("daemon unavailable")).thenReturn(List.of());
+        lenient().when(inventory.exec()).thenThrow(new IllegalStateException("daemon unavailable"))
+                .thenReturn(List.of());
         launcher.removeLeftoverContainers();
 
         LambdaFunction fn = new LambdaFunction();
@@ -634,7 +638,7 @@ class ContainerLauncherTest {
         launcher.launch(fn);
         launcher.removeLeftoverContainers();
 
-        verify(inventory, times(3)).exec();
+        verify(inventory, times(enabled ? 3 : 0)).exec();
     }
 
     @ParameterizedTest

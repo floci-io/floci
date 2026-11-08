@@ -6,16 +6,22 @@ import com.github.dockerjava.api.model.Container;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.Mockito.*;
 
 class LambdaContainerReconcilerTest {
@@ -32,6 +38,11 @@ class LambdaContainerReconcilerTest {
         when(config.docker()).thenReturn(docker);
         when(docker.resourceNamespace()).thenReturn(Optional.of("deployment-a"));
         when(config.port()).thenReturn(4566);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.LambdaServiceConfig lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.lambda()).thenReturn(lambda);
+        when(lambda.reconcileContainersOnStartup()).thenReturn(true);
         lifecycle = mock(ContainerLifecycleManager.class);
         DockerClient client = mock(DockerClient.class);
         list = mock(ListContainersCmd.class, RETURNS_SELF);
@@ -92,10 +103,17 @@ class LambdaContainerReconcilerTest {
         verify(lifecycle).removeIfExistsStrict("old", true);
     }
 
-    @Test
-    void nullInventoryIsNotTreatedAsAnEmptySuccessfulSweep() {
-        when(list.exec()).thenReturn(null).thenReturn(List.of(container("old", Map.of())));
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void nullInventoryIsNotTreatedAsAnEmptySuccessfulSweep(boolean secondQuery) {
+        Container old = container("old", Map.of());
+        if (secondQuery) {
+            when(list.exec()).thenReturn(List.of(old)).thenReturn(null).thenReturn(List.of(old));
+        } else {
+            when(list.exec()).thenReturn(null).thenReturn(List.of(old));
+        }
         reconciler.reconcile();
+        verify(lifecycle, never()).removeIfExistsStrict(anyString(), anyBoolean());
         reconciler.reconcile();
         verify(lifecycle).removeIfExistsStrict("old", true);
     }
@@ -111,6 +129,41 @@ class LambdaContainerReconcilerTest {
         reconciler.reconcile();
         verify(lifecycle, times(2)).removeIfExistsStrict("first", true);
         verify(lifecycle, never()).removeIfExistsStrict("current", true);
+    }
+
+    @Test
+    void disabledCleanupNeverInventoriesOrRemovesAnotherRunsContainers() {
+        when(config.services().lambda().reconcileContainersOnStartup()).thenReturn(false);
+        reconciler.reconcile();
+        verifyNoInteractions(lifecycle);
+    }
+
+    @Test
+    void repeatedInventoryFailureWarnsOnceAndRetainsItsCause() {
+        RuntimeException failure = new IllegalStateException("offline", new IllegalStateException("daemon refused"));
+        when(list.exec()).thenThrow(failure);
+        List<LogRecord> records = LogCapture.capture(LambdaContainerReconciler.class, () -> {
+            reconciler.reconcile();
+            reconciler.reconcile();
+        });
+        assertEquals(List.of(Level.WARNING.intValue(), Level.FINE.intValue()),
+                records.stream().map(record -> record.getLevel().intValue()).toList());
+        assertSame(failure, records.getFirst().getThrown());
+    }
+
+    @Test
+    void repeatedRemovalFailureWarnsOnceAndRetainsItsCause() {
+        Container old = container("old", Map.of());
+        when(list.exec()).thenReturn(List.of(old));
+        RuntimeException failure = new IllegalStateException("busy", new IllegalStateException("daemon refused"));
+        doThrow(failure).when(lifecycle).removeIfExistsStrict("old", true);
+        List<LogRecord> records = LogCapture.capture(LambdaContainerReconciler.class, () -> {
+            reconciler.reconcile();
+            reconciler.reconcile();
+        });
+        assertEquals(List.of(Level.WARNING.intValue(), Level.FINE.intValue()),
+                records.stream().map(record -> record.getLevel().intValue()).toList());
+        assertSame(failure, records.getFirst().getThrown());
     }
 
     private static Container container(String id, Map<String, String> overrides) {
