@@ -825,6 +825,77 @@ class EcrRegistryDataPlaneTest {
         assertNull(response.apiVersion());
     }
 
+    @Test
+    void garbageCollectionAllowsReadsAndRefusesWrites() throws Exception {
+        StubRegistry stub = stubRegistry();
+        when(stub.manager().isGarbageCollecting()).thenReturn(true);
+
+        HttpServer dataPlane = dataPlane(stub.manager(), false, null);
+        try {
+            RegistryResponse readResponse = request(dataPlane.actualPort(), HttpMethod.GET, "/v2/");
+            assertEquals(200, readResponse.status());
+            assertEquals("{\"status\":\"ok\"}", readResponse.body());
+
+            RegistryResponse putResponse = request(dataPlane.actualPort(), HttpMethod.PUT, "/v2/platform/api/manifests/v1");
+            assertEquals(503, putResponse.status());
+            assertEquals("registry/2.0", putResponse.apiVersion());
+            JsonObject json = new JsonObject(putResponse.body());
+            JsonArray errors = json.getJsonArray("errors");
+            assertNotNull(errors);
+            assertEquals("UNAVAILABLE", errors.getJsonObject(0).getString("code"));
+            assertTrue(errors.getJsonObject(0).getString("message").contains("garbage collection"));
+
+            RegistryResponse postResponse = request(dataPlane.actualPort(), HttpMethod.POST, "/v2/platform/api/blobs/uploads/");
+            assertEquals(503, postResponse.status());
+            assertEquals("registry/2.0", postResponse.apiVersion());
+        } finally {
+            dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            stub.registry().close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
+    void garbageCollectionDuringStartupRefusesWritesAndPreservesReads() throws Exception {
+        StubRegistry stub = stubRegistry();
+        AtomicBoolean gcActive = new AtomicBoolean(false);
+        when(stub.manager().isGarbageCollecting()).thenAnswer(inv -> gcActive.get());
+        Mockito.doAnswer(inv -> { gcActive.set(true); return null; }).when(stub.manager()).ensureStarted();
+
+        HttpServer dataPlane = dataPlane(stub.manager(), false, null);
+        try {
+            RegistryResponse postResponse = request(dataPlane.actualPort(), HttpMethod.POST, "/v2/platform/api/blobs/uploads/");
+            assertEquals(503, postResponse.status());
+            assertEquals("registry/2.0", postResponse.apiVersion());
+
+            RegistryResponse readResponse = request(dataPlane.actualPort(), HttpMethod.GET, "/v2/");
+            assertEquals(200, readResponse.status());
+
+            RegistryResponse headResponse = request(dataPlane.actualPort(), HttpMethod.HEAD, "/v2/");
+            assertEquals(200, headResponse.status());
+        } finally {
+            dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            stub.registry().close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    // Issue #6150 / PR #7437: Shared helper to build stub registry and mock manager wiring
+    private StubRegistry stubRegistry() throws Exception {
+        HttpServer registry = vertx.createHttpServer().requestHandler(request -> {
+            if (request.method() == HttpMethod.GET || request.method() == HttpMethod.HEAD) {
+                request.response().setStatusCode(200).end("{\"status\":\"ok\"}");
+            } else {
+                request.response().setStatusCode(201).end();
+            }
+        }).listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        when(manager.httpClient()).thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
+        when(manager.isStarted()).thenReturn(true);
+        return new StubRegistry(registry, manager);
+    }
+
+    private record StubRegistry(HttpServer registry, EcrRegistryManager manager) {}
+
     /**
      * A data plane in front of {@code registry}, on plain HTTP that a client can speak HTTP/1.1 or,
      * with prior knowledge, HTTP/2 to. Repository {@code platform/api} of account 000000000000 in
@@ -847,6 +918,8 @@ class EcrRegistryDataPlaneTest {
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(config.services().ecr().enabled()).thenReturn(true);
         when(config.services().ecr().uriStyle()).thenReturn("hostname");
+        when(registryManager.tryAcquireWriteAdmission())
+                .thenAnswer(inv -> !registryManager.isGarbageCollecting());
         when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
                 .thenReturn(immutableTags);
         // The tag lock lives in EcrService, so the mock holds a real one.
