@@ -57,10 +57,8 @@ public class AccountContextFilter implements ContainerRequestFilter {
     // Lazily resolved: JAX-RS providers are instantiated before runtime config mappings exist
     // (the AwsProtocolClaimFilter pattern). jakarta.inject.Provider is qualified inline because
     // this class also carries the JAX-RS @Provider annotation.
-    private final jakarta.inject.Provider<EmulatorConfig> configProvider;
-    private final jakarta.inject.Provider<ResolvedServiceCatalog> catalogProvider;
-    private volatile EmulatorConfig config;
-    private volatile ResolvedServiceCatalog catalog;
+    private final MemoizedSupplier<EmulatorConfig> config;
+    private final MemoizedSupplier<ResolvedServiceCatalog> catalog;
 
     @Inject
     public AccountContextFilter(AccountResolver accountResolver,
@@ -73,26 +71,16 @@ public class AccountContextFilter implements ContainerRequestFilter {
         this.regionResolver = regionResolver;
         this.requestContext = requestContext;
         this.sessionAccountLookup = sessionAccountLookup;
-        this.configProvider = configProvider;
-        this.catalogProvider = catalogProvider;
+        this.config = new MemoizedSupplier<>(configProvider::get);
+        this.catalog = new MemoizedSupplier<>(catalogProvider::get);
     }
 
     private EmulatorConfig config() {
-        EmulatorConfig resolved = config;
-        if (resolved == null) {
-            resolved = configProvider.get();
-            config = resolved;
-        }
-        return resolved;
+        return config.get();
     }
 
     private ResolvedServiceCatalog catalog() {
-        ResolvedServiceCatalog resolved = catalog;
-        if (resolved == null) {
-            resolved = catalogProvider.get();
-            catalog = resolved;
-        }
-        return resolved;
+        return catalog.get();
     }
 
     @Override
