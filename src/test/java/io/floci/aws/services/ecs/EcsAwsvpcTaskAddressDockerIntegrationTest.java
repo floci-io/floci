@@ -22,11 +22,13 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -87,7 +89,7 @@ class EcsAwsvpcTaskAddressDockerIntegrationTest {
         String network = null;
         String probe = null;
         try {
-            EcsTask described = ecsService.describeTasks(clusterName, List.of(task.getTaskArn()), REGION).getFirst();
+            EcsTask described = awaitLaunched(clusterName, task.getTaskArn());
             assertEquals("RUNNING", described.getLastStatus(), "the task must start: " + described.getStoppedReason());
             String address = described.getPrivateIpAddress();
             assertNotNull(address, "an awsvpc task must report its ENI address");
@@ -125,6 +127,15 @@ class EcsAwsvpcTaskAddressDockerIntegrationTest {
                 vpcNetworkManager.deleteVpcNetwork(REGION, vpcId);
             }
         }
+    }
+
+    /** RunTask answers before the launch; waits for it to land the task RUNNING or STOPPED. */
+    private EcsTask awaitLaunched(String clusterName, String taskArn) {
+        await().atMost(Duration.ofMinutes(2)).until(() -> {
+            String status = ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst().getLastStatus();
+            return !"PROVISIONING".equals(status) && !"PENDING".equals(status);
+        });
+        return ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst();
     }
 
     private TaskDefinition registerWebServer() {
