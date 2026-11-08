@@ -79,10 +79,16 @@ class ExternalTableMaterializerTest {
     private static final class RecordingBackend implements BackendSql {
         private final List<String> statements = new ArrayList<>();
         private boolean publicationAllowed = true;
+        private Object connection;
 
         @Override
         public boolean permitsCachePublication() {
             return publicationAllowed;
+        }
+
+        @Override
+        public Object connectionKey() {
+            return connection;
         }
 
         @Override
@@ -1257,7 +1263,7 @@ class ExternalTableMaterializerTest {
     }
 
     @Test
-    void loadsEveryPartitionInATransactionAndOnAnExtendedQueryBackend() {
+    void loadsEveryPartitionWhenTheBackendDoesNotReportTheEndOfTheTransaction() {
         Table table = dayPartitionedTable();
         Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
         Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
@@ -1269,6 +1275,179 @@ class ExternalTableMaterializerTest {
 
         verify(duck, times(2)).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
                 && sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void loadsOnlyTheSelectedPartitionOnAnExtendedQueryBackend() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_ONE_SQL);
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && !sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void loadsOnlyTheSelectedPartitionInsideATransaction() {
+        twoDayPartitions();
+        RecordingBackend inTransaction = extendedBackend("connection-1");
+        inTransaction.publicationAllowed = true;
+
+        materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL);
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && !sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void aTransactionKeepsThePartitionsItLoadedForItsNextQuery() {
+        twoDayPartitions();
+        RecordingBackend inTransaction = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL);
+        assertThat(materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+        int loaded = inTransaction.statements.size();
+        materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_TWO_SQL);
+
+        verify(duck, times(2)).execute(anyString(), any(), anyString(), eq(ACCOUNT));
+        assertThat(inTransaction.statements.subList(loaded, inTransaction.statements.size()).stream()
+                .noneMatch(sql -> sql.contains("TRUNCATE")), equalTo(true));
+    }
+
+    @Test
+    void aCommitPublishesThePartitionsALaterConnectionReuses() {
+        twoDayPartitions();
+        RecordingBackend first = extendedBackend("connection-1");
+        materializer.ensureCurrent(first, session(false), BINDING, "events", DAY_ONE_SQL);
+
+        materializer.finishCycle(first, true);
+
+        RecordingBackend second = extendedBackend("connection-2");
+        assertThat(materializer.ensureCurrent(second, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+    }
+
+    @Test
+    void aRollbackDropsThePartitionsItStagedSoTheNextQueryReloadsThem() {
+        twoDayPartitions();
+        RecordingBackend first = extendedBackend("connection-1");
+        materializer.ensureCurrent(first, session(false), BINDING, "events", DAY_ONE_SQL);
+
+        materializer.finishCycle(first);
+
+        RecordingBackend second = extendedBackend("connection-2");
+        assertThat(materializer.ensureCurrent(second, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void aRollbackOfLaterPartitionsKeepsOnlyTheCommittedBaselineUsable() {
+        twoDayPartitions();
+        RecordingBackend connection = extendedBackend("connection-1");
+        materializer.ensureCurrent(connection, session(false), BINDING, "events", DAY_ONE_SQL);
+        materializer.finishCycle(connection, true);
+        materializer.ensureCurrent(connection, session(true), BINDING, "events", DAY_TWO_SQL);
+
+        materializer.finishCycle(connection);
+
+        // the rolled back load of day two is not trusted, and neither is the baseline it was added to
+        assertThat(materializer.ensureCurrent(connection, session(false), BINDING, "events", DAY_TWO_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void aRollbackToASavepointMakesTheNextQueryInTheTransactionReload() {
+        twoDayPartitions();
+        RecordingBackend connection = extendedBackend("connection-1");
+        materializer.ensureCurrent(connection, session(true), BINDING, "events", DAY_ONE_SQL);
+
+        materializer.finishCycle(connection);
+
+        assertThat(materializer.ensureCurrent(connection, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void aCommitWithNothingStagedChangesNothing() {
+        twoDayPartitions();
+        RecordingBackend connection = extendedBackend("connection-1");
+
+        materializer.finishCycle(connection, true);
+
+        assertThat(materializer.ensureCurrent(connection, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void dropsTheRowsOfAPartitionGlueNoLongerHasInsideATransaction() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+        RecordingBackend connection = extendedBackend("connection-1");
+        connection.publicationAllowed = true;
+        materializer.ensureCurrent(connection, session(true), BINDING, "events", null);
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one));
+        int loaded = connection.statements.size();
+
+        assertThat(materializer.ensureCurrent(connection, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        assertThat(connection.statements.subList(loaded, connection.statements.size()).stream().anyMatch(sql -> sql.contains(
+                "DELETE FROM \"analytics\".\"events\" WHERE (\"day\" = CAST('2026-01-02' AS text))")), equalTo(true));
+    }
+
+    @Test
+    void aStagedLoadOfOneConnectionDoesNotAffectAnotherTablesOrConnectionsStagedState() {
+        twoDayPartitions();
+        RecordingBackend first = extendedBackend("connection-1");
+        RecordingBackend second = extendedBackend("connection-2");
+        materializer.ensureCurrent(first, session(true), BINDING, "events", DAY_ONE_SQL);
+
+        materializer.finishCycle(second, true);
+
+        assertThat(materializer.ensureCurrent(first, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.CURRENT));
+    }
+
+    @Test
+    void aCommitDoesNotPublishPartitionsThatAnotherLoadHasSupersededSince() {
+        twoDayPartitions();
+        RecordingBackend staged = extendedBackend("connection-1");
+        materializer.ensureCurrent(staged, session(false), BINDING, "events", DAY_ONE_SQL);
+        materializer.invalidateTable(BINDING.clusterKey(), "dev", "analytics", "events");
+
+        materializer.finishCycle(staged, true);
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    @Test
+    void aTransactionDoesNotTrustPartitionsItLoadedOnceAnotherLoadChangedTheTable() {
+        twoDayPartitions();
+        RecordingBackend inTransaction = extendedBackend("connection-1");
+        materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL);
+        materializer.invalidateTable(BINDING.clusterKey(), "dev", "analytics", "events");
+
+        assertThat(materializer.ensureCurrent(inTransaction, session(true), BINDING, "events", DAY_ONE_SQL),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+    }
+
+    private void twoDayPartitions() {
+        Table table = dayPartitionedTable();
+        Partition one = dayPartition(table, "2026-01-01", "one/", "e1");
+        Partition two = dayPartition(table, "2026-01-02", "two/", "e2");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, two));
+    }
+
+    private static RecordingBackend extendedBackend(Object connection) {
+        RecordingBackend extended = new RecordingBackend();
+        extended.publicationAllowed = false;
+        extended.connection = connection;
+        return extended;
     }
 
     @Test

@@ -790,9 +790,12 @@ needs, reloads the ones whose objects or Glue entry changed and drops the ones G
 When two partitions hold key values that PostgreSQL casts to the same value, such as integer `1` and `01`,
 rows can no longer be told apart by partition, so a query on that table loads every partition and replaces
 the whole table when any of them changes.
-Pruning applies to the simple query protocol and the Data API. A session in a transaction block, and a client
-on the extended query protocol (the default of the PostgreSQL JDBC driver, unless `preferQueryMode=simple`),
-load every partition.
+Pruning applies to the simple query protocol, the extended query protocol (the default of the PostgreSQL JDBC
+driver, unless `preferQueryMode=simple`) and statements inside a transaction block, for a query whose predicates
+are literals. The partitions such a query loads are staged for its connection and recorded as loaded only when
+the transaction (or the extended query cycle) commits, so a rollback leaves nothing behind that a later query
+would trust. While a connection holds staged partitions, other connections reload the table on their next query. A statement with
+bind parameters (`$1`, `$2`) and the Data API inside a transaction block still load every partition.
 
 Materialized relations are cached in the cluster database. Each new query checks the associated
 role, trust policy and S3 access before using cached data, following the existing S3 enforcement
