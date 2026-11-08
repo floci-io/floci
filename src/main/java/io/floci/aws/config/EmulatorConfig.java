@@ -3726,6 +3726,14 @@ public interface EmulatorConfig {
         @WithDefault("0")
         int maxVcpus();
 
+        /**
+         * Optional EC2 catalog instance type the k3s node container is sized from, in place of its
+         * first node group's type. The node group, the node's {@code node.kubernetes.io/instance-type}
+         * label and the synthesized EC2 instance keep the requested type. A type absent from the
+         * catalog is ignored with a warning; {@link #maxMemoryMib()} and {@link #maxVcpus()} still apply.
+         */
+        Optional<String> nodeInstanceType();
+
         @WithDefault("k3s")
         String provider();
 
