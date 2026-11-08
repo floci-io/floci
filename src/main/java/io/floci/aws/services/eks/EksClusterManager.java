@@ -1643,7 +1643,7 @@ public class EksClusterManager
         return labels == null ? "localhost" : labels.getOrDefault(ENDPOINT_HOST_LABEL, "localhost");
     }
 
-    private static boolean isIpv4Literal(String host) {
+    static boolean isIpv4Literal(String host) {
         // ofLiteral also takes BSD shorthand such as 1.2.3, which no URL or certificate means.
         if (host.split("\\.", -1).length != 4) {
             return false;
