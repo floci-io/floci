@@ -48,7 +48,7 @@ public class AwsRestRouteScopeFilter implements ContainerRequestFilter {
     private static final List<RouteCollision> ROUTE_COLLISIONS = List.of(
             new RouteCollision(ApiGatewayController.class, "/v2/apis", Set.of("appsync")),
             new RouteCollision(AppConfigController.class, "/applications",
-                    Set.of("app-integrations", "appintegrations", "servicecatalog", "servicecatalog-appregistry")),
+                    Set.of("app-integrations", "servicecatalog")),
             new RouteCollision(MskController.class, "/v1/configurations", Set.of("mq")),
             new RouteCollision(MacieController.class, "/members", Set.of("securityhub")),
             new RouteCollision(CodeGuruReviewerController.class, "/associations", Set.of("securityhub")),
@@ -58,7 +58,7 @@ public class AwsRestRouteScopeFilter implements ContainerRequestFilter {
             new RouteCollision(DsqlController.class, "/cluster/get", Set.of("inspector2")),
             new RouteCollision(RdsDataController.class, "/CommitTransaction", Set.of("lakeformation")),
             new RouteCollision(BedrockAgentCoreResourcePolicyController.class, "/resourcepolicy",
-                    Set.of("bedrock", "bedrock-agent"))
+                    Set.of("bedrock"))
     );
 
     private final ResolvedServiceCatalog catalog;
@@ -96,10 +96,7 @@ public class AwsRestRouteScopeFilter implements ContainerRequestFilter {
         // Issue #6426: Reject cross-service REST calls matching another service's controller route
         String rawPath = ctx.getUriInfo().getPath();
         String normalizedPath = rawPath.startsWith("/") ? rawPath : "/" + rawPath;
-        String auth = IamEnforcementFilter.requestAuthorization(
-                ctx.getHeaderString("Authorization"),
-                ctx.getUriInfo().getQueryParameters());
-        Optional<String> scope = SigV4CredentialScope.serviceName(auth);
+        Optional<String> scope = SignedServiceRoute.signingService(ctx);
         if (scope.isEmpty()) {
             return;
         }

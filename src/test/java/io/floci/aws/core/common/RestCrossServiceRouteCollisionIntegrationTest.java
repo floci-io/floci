@@ -24,6 +24,23 @@ class RestCrossServiceRouteCollisionIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    @Test
+    void querySignedCollidingRestCallWithBlankAuthorizationHeaderIsSafelyRejectedWith404() {
+        given()
+            .header("Authorization", "")
+            .queryParam("X-Amz-Credential", "test/20260707/us-east-1/appsync/aws4_request")
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/v2/apis")
+        .then()
+            .statusCode(404)
+            .contentType(containsString("application/json"))
+            .header("X-Amzn-Errortype", "UnknownOperationException")
+            .body("__type", equalTo("UnknownOperationException"))
+            .body("message", equalTo("Unknown operation: POST /v2/apis"));
+    }
+
     private static String authorization(String service) {
         return "AWS4-HMAC-SHA256 Credential=test/20260707/us-east-1/" + service
                 + "/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef";
@@ -35,16 +52,14 @@ class RestCrossServiceRouteCollisionIntegrationTest {
             "appsync, GET, /v2/apis",
             "appsync, GET, /v2/apis/api-123",
             "appsync, DELETE, /v2/apis/api-123",
-            "appintegrations, POST, /applications",
-            "appintegrations, GET, /applications",
-            "appintegrations, GET, /applications/app-123",
-            "appintegrations, DELETE, /applications/app-123",
+            "app-integrations, POST, /applications",
+            "app-integrations, GET, /applications",
+            "app-integrations, GET, /applications/app-123",
+            "app-integrations, DELETE, /applications/app-123",
             "servicecatalog, POST, /applications",
             "servicecatalog, GET, /applications",
             "servicecatalog, GET, /applications/app-123",
             "servicecatalog, DELETE, /applications/app-123",
-            "servicecatalog-appregistry, POST, /applications",
-            "servicecatalog-appregistry, GET, /applications",
             "mq, POST, /v1/configurations",
             "mq, GET, /v1/configurations",
             "mq, GET, /v1/configurations/c-123",
@@ -62,8 +77,7 @@ class RestCrossServiceRouteCollisionIntegrationTest {
             "lakeformation, POST, /CommitTransaction",
             "bedrock, GET, /resourcepolicy/arn:aws:bedrock:us-east-1:123456789012:probe",
             "bedrock, PUT, /resourcepolicy/arn:aws:bedrock:us-east-1:123456789012:probe",
-            "bedrock, DELETE, /resourcepolicy/arn:aws:bedrock:us-east-1:123456789012:probe",
-            "bedrock-agent, GET, /resourcepolicy/arn:aws:bedrock:us-east-1:123456789012:probe"
+            "bedrock, DELETE, /resourcepolicy/arn:aws:bedrock:us-east-1:123456789012:probe"
     })
     void collidingRestCallsAreSafelyRejectedWith404(String service, String method, String path) {
         given()
