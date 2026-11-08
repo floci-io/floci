@@ -475,8 +475,6 @@ public class RedshiftOperationsTest {
             .formParam("SourceSnapshotIdentifier", "snap-test-1")
             .formParam("TargetSnapshotIdentifier", "snap-copy-1")
             .formParam("ManualSnapshotRetentionPeriod", "30")
-            .formParam("Tags.Tag.1.Key", "Env")
-            .formParam("Tags.Tag.1.Value", "Test")
         .when()
             .post("/")
         .then()
@@ -485,9 +483,7 @@ public class RedshiftOperationsTest {
             .body(containsString("<CopyClusterSnapshotResponse>"))
             .body(containsString("<SnapshotIdentifier>snap-copy-1</SnapshotIdentifier>"))
             .body(containsString("<SnapshotType>manual</SnapshotType>"))
-            .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"))
-            .body(containsString("<Key>Env</Key>"))
-            .body(containsString("<Value>Test</Value>"));
+            .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"));
 
         given()
             .contentType("application/x-www-form-urlencoded")

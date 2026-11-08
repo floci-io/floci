@@ -246,11 +246,9 @@ public class RedshiftQueryHandler {
             String targetSnapshotId = requireParam(params, "TargetSnapshotIdentifier");
             String sourceClusterId = params.getFirst("SourceSnapshotClusterIdentifier");
             Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
-            Map<String, String> tags = parseTags(params);
-            String kmsKeyId = params.getFirst("KmsKeyId");
 
             Snapshot snapshot = service.copyClusterSnapshot(sourceSnapshotId, targetSnapshotId,
-                    sourceClusterId, manualRetention, tags, kmsKeyId);
+                    sourceClusterId, manualRetention);
 
             String xml = new XmlBuilder()
                     .start("CopyClusterSnapshotResponse")
@@ -1309,16 +1307,6 @@ public class RedshiftQueryHandler {
             .elem("SourceRegion", snapshot.getSourceRegion());
         if (snapshot.getKmsKeyId() != null) {
             builder.elem("Encrypted", "true").elem("KmsKeyId", snapshot.getKmsKeyId());
-        }
-        if (snapshot.getTags() != null && !snapshot.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : snapshot.getTags().entrySet()) {
-                builder.start("Tag")
-                        .elem("Key", tag.getKey())
-                        .elem("Value", tag.getValue())
-                        .end("Tag");
-            }
-            builder.end("Tags");
         }
 
         return builder.end("Snapshot").build();

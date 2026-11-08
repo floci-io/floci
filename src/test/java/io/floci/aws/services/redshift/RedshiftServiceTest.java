@@ -68,6 +68,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static io.floci.aws.testing.InlineMocks.inlineMock;
 import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
@@ -2393,98 +2395,96 @@ class RedshiftServiceTest {
         verify(snapshotBackend, never()).put(anyString(), any(Snapshot.class));
     }
 
+    private Snapshot automatedSnapshot(String identifier) {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier(identifier);
+        snapshot.setClusterIdentifier("my-cluster");
+        snapshot.setSnapshotType("automated");
+        snapshot.setStatus("available");
+        snapshot.setMasterUsername("admin");
+        snapshot.setMasterPassword("secret-pw");
+        snapshot.setPort(5439);
+        snapshot.setAutomatedSnapshotRetentionPeriod(7);
+        when(snapshotBackend.get(identifier)).thenReturn(Optional.of(snapshot));
+        return snapshot;
+    }
+
+    private void targetSnapshotIsFree(String identifier) {
+        when(snapshotBackend.get(identifier)).thenReturn(Optional.empty());
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+    }
+
+    private void assertCopyFails(String errorCode, int status, String source, String target, String cluster,
+                                 Integer retention) {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.copyClusterSnapshot(source, target, cluster, retention));
+        assertEquals(errorCode, ex.getErrorCode());
+        assertEquals(status, ex.getHttpStatus());
+    }
+
     @Test
     void copyClusterSnapshotSuccess() {
-        Snapshot autoSnap = new Snapshot();
-        autoSnap.setSnapshotIdentifier("auto-snap-1");
-        autoSnap.setClusterIdentifier("my-cluster");
-        autoSnap.setSnapshotType("automated");
-        autoSnap.setStatus("available");
-        autoSnap.setMasterUsername("admin");
-        autoSnap.setMasterPassword("secret-pw");
-        autoSnap.setPort(5439);
-        autoSnap.setAutomatedSnapshotRetentionPeriod(7);
-
-        when(snapshotBackend.get("auto-snap-1")).thenReturn(Optional.of(autoSnap));
-        when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+        Snapshot source = automatedSnapshot("auto-snap-1");
+        source.setKmsKeyId("orig-key");
+        source.setTags(Map.of("Env", "Test"));
+        source.setCopiedToRegions(new HashSet<>(Set.of("us-west-2")));
+        targetSnapshotIsFree("manual-copy-1");
 
         Snapshot copy = service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, 30);
 
-        assertNotNull(copy);
         assertEquals("manual-copy-1", copy.getSnapshotIdentifier());
         assertEquals("my-cluster", copy.getClusterIdentifier());
         assertEquals("manual", copy.getSnapshotType());
         assertEquals("available", copy.getStatus());
         assertEquals(30, copy.getManualSnapshotRetentionPeriod());
         assertNull(copy.getAutomatedSnapshotRetentionPeriod());
+        assertEquals("orig-key", copy.getKmsKeyId());
+        assertEquals(Map.of("Env", "Test"), copy.getTags());
+        assertTrue(copy.getCopiedToRegions().isEmpty());
         verify(snapshotBackend).putAllAtomically(any());
         verify(snapshotBackend).flush();
     }
 
     @Test
-    void copyClusterSnapshotSourceNotFound() {
-        when(snapshotBackend.get("missing-snap")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+    void copyClusterSnapshotDefaultsToIndefiniteRetention() {
+        automatedSnapshot("auto-snap-1");
+        targetSnapshotIsFree("manual-copy-1");
 
-        AwsException ex = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot("missing-snap", "manual-copy-1", null, -1));
-        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
-        assertEquals(404, ex.getHttpStatus());
+        Snapshot copy = service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", "my-cluster", null);
+
+        assertEquals(-1, copy.getManualSnapshotRetentionPeriod());
+    }
+
+    @Test
+    void copyClusterSnapshotSourceNotFound() {
+        targetSnapshotIsFree("missing-snap");
+        targetSnapshotIsFree("manual-copy-1");
+
+        assertCopyFails("ClusterSnapshotNotFound", 404, "missing-snap", "manual-copy-1", null, -1);
     }
 
     @Test
     void copyClusterSnapshotClusterMismatch() {
-        Snapshot autoSnap = new Snapshot();
-        autoSnap.setSnapshotIdentifier("auto-snap-1");
-        autoSnap.setClusterIdentifier("my-cluster");
-        autoSnap.setSnapshotType("automated");
-        autoSnap.setStatus("available");
+        automatedSnapshot("auto-snap-1");
+        targetSnapshotIsFree("manual-copy-1");
 
-        when(snapshotBackend.get("auto-snap-1")).thenReturn(Optional.of(autoSnap));
-        when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
-
-        AwsException ex = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", "wrong-cluster", -1));
-        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
-        assertEquals(404, ex.getHttpStatus());
+        assertCopyFails("ClusterSnapshotNotFound", 404, "auto-snap-1", "manual-copy-1", "wrong-cluster", -1);
     }
 
     @Test
     void copyClusterSnapshotManualSourceRejected() {
-        Snapshot manualSnap = new Snapshot();
-        manualSnap.setSnapshotIdentifier("manual-snap-1");
-        manualSnap.setClusterIdentifier("my-cluster");
-        manualSnap.setSnapshotType("manual");
-        manualSnap.setStatus("available");
+        automatedSnapshot("manual-snap-1").setSnapshotType("manual");
+        targetSnapshotIsFree("manual-copy-1");
 
-        when(snapshotBackend.get("manual-snap-1")).thenReturn(Optional.of(manualSnap));
-        when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
-
-        AwsException ex = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot("manual-snap-1", "manual-copy-1", null, -1));
-        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
-        assertEquals(400, ex.getHttpStatus());
+        assertCopyFails("InvalidClusterSnapshotState", 400, "manual-snap-1", "manual-copy-1", null, -1);
     }
 
     @Test
     void copyClusterSnapshotSourceNotAvailable() {
-        Snapshot autoSnap = new Snapshot();
-        autoSnap.setSnapshotIdentifier("auto-snap-1");
-        autoSnap.setClusterIdentifier("my-cluster");
-        autoSnap.setSnapshotType("automated");
-        autoSnap.setStatus("creating");
+        automatedSnapshot("auto-snap-1").setStatus("creating");
+        targetSnapshotIsFree("manual-copy-1");
 
-        when(snapshotBackend.get("auto-snap-1")).thenReturn(Optional.of(autoSnap));
-        when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
-
-        AwsException ex = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, -1));
-        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
-        assertEquals(400, ex.getHttpStatus());
+        assertCopyFails("InvalidClusterSnapshotState", 400, "auto-snap-1", "manual-copy-1", null, -1);
     }
 
     @Test
@@ -2492,159 +2492,51 @@ class RedshiftServiceTest {
         when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.of(new Snapshot()));
         when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
 
-        AwsException ex = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, -1));
-        assertEquals("ClusterSnapshotAlreadyExists", ex.getErrorCode());
-        assertEquals(400, ex.getHttpStatus());
+        assertCopyFails("ClusterSnapshotAlreadyExists", 400, "auto-snap-1", "manual-copy-1", null, -1);
     }
 
     @Test
     void copyClusterSnapshotInvalidRetentionPeriod() {
-        when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
-
-        AwsException ex = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, 0));
-        assertEquals("InvalidRetentionPeriod", ex.getErrorCode());
-        assertEquals(400, ex.getHttpStatus());
+        assertCopyFails("InvalidRetentionPeriodFault", 400, "auto-snap-1", "manual-copy-1", null, 0);
     }
 
     @Test
-    void copyClusterSnapshotWithTagsAndKmsKey() {
-        Snapshot autoSnap = new Snapshot();
-        autoSnap.setSnapshotIdentifier("auto-snap-1");
-        autoSnap.setClusterIdentifier("my-cluster");
-        autoSnap.setSnapshotType("automated");
-        autoSnap.setStatus("available");
-        autoSnap.setTags(Map.of("SourceKey", "SourceVal"));
-
-        when(snapshotBackend.get("auto-snap-1")).thenReturn(Optional.of(autoSnap));
-        when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
-
-        Snapshot copy = service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, 15,
-                Map.of("Env", "Prod"), "arn:aws:kms:us-east-1:111111111111:key/custom-key");
-
-        assertNotNull(copy);
-        assertEquals(Map.of("Env", "Prod"), copy.getTags());
-        assertEquals("arn:aws:kms:us-east-1:111111111111:key/custom-key", copy.getKmsKeyId());
+    void copyClusterSnapshotInvalidTargetIdentifier() {
+        assertCopyFails("InvalidParameterValue", 400, "auto-snap-1", "bad--name", null, -1);
     }
 
     @Test
-    void copyClusterSnapshotInheritsSourceTagsAndResetsCopiedToRegions() {
-        Snapshot autoSnap = new Snapshot();
-        autoSnap.setSnapshotIdentifier("auto-snap-1");
-        autoSnap.setClusterIdentifier("my-cluster");
-        autoSnap.setSnapshotType("automated");
-        autoSnap.setStatus("available");
-        autoSnap.setKmsKeyId("orig-key");
-        autoSnap.setTags(Map.of("Env", "Test", "Team", "Data"));
-        autoSnap.setCopiedToRegions(new HashSet<>(Set.of("us-west-2", "eu-west-1")));
-
-        when(snapshotBackend.get("auto-snap-1")).thenReturn(Optional.of(autoSnap));
-        when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
-
-        Snapshot copy = service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, -1,
-                null, null);
-
-        assertNotNull(copy);
-        assertEquals(Map.of("Env", "Test", "Team", "Data"), copy.getTags());
-        assertEquals("orig-key", copy.getKmsKeyId());
-        assertTrue(copy.getCopiedToRegions().isEmpty());
-    }
-
-    @Test
-    void copyClusterSnapshotWithSourceArnValidation() {
-        Snapshot autoSnap = new Snapshot();
-        autoSnap.setSnapshotIdentifier("auto-snap-1");
-        autoSnap.setClusterIdentifier("my-cluster");
-        autoSnap.setSnapshotType("automated");
-        autoSnap.setStatus("available");
-
-        when(snapshotBackend.get("auto-snap-1")).thenReturn(Optional.of(autoSnap));
-        when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
-
-        // Valid ARN succeeds
-        String validArn = "arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/auto-snap-1";
-        Snapshot copy = service.copyClusterSnapshot(validArn, "manual-copy-1", null, -1);
-        assertNotNull(copy);
-
-        // Malformed ARN throws InvalidParameterValue 400
-        AwsException exMalformed = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot("arn:bad", "manual-copy-2", null, -1));
-        assertEquals("InvalidParameterValue", exMalformed.getErrorCode());
-        assertEquals(400, exMalformed.getHttpStatus());
-
-        // Mismatched account throws ClusterSnapshotNotFound 404
-        String wrongAccountArn = "arn:aws:redshift:us-east-1:999999999999:snapshot:my-cluster/auto-snap-1";
-        AwsException exAccount = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot(wrongAccountArn, "manual-copy-3", null, -1));
-        assertEquals("ClusterSnapshotNotFound", exAccount.getErrorCode());
-        assertEquals(404, exAccount.getHttpStatus());
-
-        // Mismatched cluster in ARN throws ClusterSnapshotNotFound 404
-        String wrongClusterArn = "arn:aws:redshift:us-east-1:111111111111:snapshot:other-cluster/auto-snap-1";
-        AwsException exCluster = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot(wrongClusterArn, "manual-copy-4", null, -1));
-        assertEquals("ClusterSnapshotNotFound", exCluster.getErrorCode());
-        assertEquals(404, exCluster.getHttpStatus());
-
-        // Mismatched cluster parameter throws ClusterSnapshotNotFound 404
-        AwsException exClusterParam = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot(validArn, "manual-copy-5", "wrong-cluster-param", -1));
-        assertEquals("ClusterSnapshotNotFound", exClusterParam.getErrorCode());
-        assertEquals(404, exClusterParam.getHttpStatus());
-    }
-
-    @Test
-    void copyClusterSnapshotCopiesDumpFileAndCleansUpOnPersistenceFailure() throws Exception {
+    void copyClusterSnapshotCopiesDumpAndCleansUpOnPersistenceFailure() throws Exception {
         Path dumpDir = Paths.get("target/test-data").resolve("redshift-dumps").resolve("111111111111")
                 .toAbsolutePath().normalize();
         Files.createDirectories(dumpDir);
         Path sourceDump = dumpDir.resolve("auto-snap-src.sql");
         Files.writeString(sourceDump, "SELECT 1;");
-
-        Snapshot autoSnap = new Snapshot();
-        autoSnap.setSnapshotIdentifier("auto-snap-src");
-        autoSnap.setClusterIdentifier("my-cluster");
-        autoSnap.setSnapshotType("automated");
-        autoSnap.setStatus("available");
-        autoSnap.setSqlDump(sourceDump.toString());
-
-        when(snapshotBackend.get("auto-snap-src")).thenReturn(Optional.of(autoSnap));
-        when(snapshotBackend.get("manual-copy-dump")).thenReturn(Optional.empty());
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+        automatedSnapshot("auto-snap-src").setSqlDump(sourceDump.toString());
+        targetSnapshotIsFree("manual-copy-dump");
+        targetSnapshotIsFree("manual-copy-fail");
 
         Snapshot copy = service.copyClusterSnapshot("auto-snap-src", "manual-copy-dump", null, -1);
-        assertNotNull(copy);
-        Path targetDump = dumpDir.resolve("manual-copy-dump.sql");
-        assertTrue(Files.exists(targetDump));
-        assertEquals("SELECT 1;", Files.readString(targetDump));
-        assertEquals(targetDump.toString(), copy.getSqlDump());
+        Path copiedDump = Paths.get(copy.getSqlDump());
+        assertNotEquals(sourceDump, copiedDump);
+        assertEquals(dumpDir, copiedDump.getParent());
+        assertEquals("SELECT 1;", Files.readString(copiedDump));
 
-        // Test cleanup on persistence failure
-        when(snapshotBackend.get("manual-copy-fail")).thenReturn(Optional.empty());
-        doThrow(new RuntimeException("Simulated storage write error"))
-                .when(snapshotBackend).putAllAtomically(any());
+        try (Stream<Path> before = Files.list(dumpDir)) {
+            Set<Path> existing = before.collect(Collectors.toSet());
+            doThrow(new RuntimeException("Simulated storage write error"))
+                    .when(snapshotBackend).putAllAtomically(any());
 
-        assertThrows(RuntimeException.class, () ->
-                service.copyClusterSnapshot("auto-snap-src", "manual-copy-fail", null, -1));
-        Path failedDump = dumpDir.resolve("manual-copy-fail.sql");
-        assertFalse(Files.exists(failedDump));
+            assertThrows(RuntimeException.class, () ->
+                    service.copyClusterSnapshot("auto-snap-src", "manual-copy-fail", null, -1));
 
-        // Clean up
-        Files.deleteIfExists(sourceDump);
-        Files.deleteIfExists(targetDump);
-    }
-
-    @Test
-    void copyClusterSnapshotInvalidTargetIdentifier() {
-        AwsException ex = assertThrows(AwsException.class, () ->
-                service.copyClusterSnapshot("auto-snap-1", "bad--name", null, -1));
-        assertEquals("InvalidParameterValue", ex.getErrorCode());
-        assertEquals(400, ex.getHttpStatus());
+            try (Stream<Path> after = Files.list(dumpDir)) {
+                assertEquals(existing, after.collect(Collectors.toSet()));
+            }
+        } finally {
+            Files.deleteIfExists(sourceDump);
+            Files.deleteIfExists(copiedDump);
+        }
     }
 
     @Test
