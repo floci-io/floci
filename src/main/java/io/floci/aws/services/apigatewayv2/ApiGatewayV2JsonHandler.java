@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.JsonErrorResponseUtils;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.apigatewayv2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -40,7 +42,7 @@ public class ApiGatewayV2JsonHandler {
                 case "CreateApi" -> handleCreateApi(request, region);
                 case "ImportApi" -> handleImportApi(request, region);
                 case "ReimportApi" -> handleReimportApi(request, region);
-                case "GetApis" -> handleGetApis(region);
+                case "GetApis" -> handleGetApis(request, region);
                 case "GetApi" -> handleGetApi(request, region);
                 case "UpdateApi" -> handleUpdateApi(request, region);
                 case "DeleteApi" -> handleDeleteApi(request, region);
@@ -116,11 +118,16 @@ public class ApiGatewayV2JsonHandler {
         return Response.status(201).entity(toApiNode(api).toString()).build();
     }
 
-    private Response handleGetApis(String region) {
-        List<Api> apis = service.getApis(region);
+    private Response handleGetApis(JsonNode request, String region) {
+        PaginatedResult<Api> page = service.getApis(region,
+                Pagination.parseMaxResults(request.path("MaxResults").asText(null), "BadRequestException"),
+                request.path("NextToken").asText(null));
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Items");
-        apis.forEach(a -> items.add(toApiNode(a)));
+        page.items().forEach(a -> items.add(toApiNode(a)));
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
         return Response.ok(root.toString()).build();
     }
 

@@ -5,6 +5,8 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -226,6 +228,15 @@ public class ApiGatewayV2Service {
     public List<Api> getApis(String region) {
         String prefix = region + "::";
         return apiStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public PaginatedResult<Api> getApis(String region, Integer maxResults, String nextToken) {
+        if (maxResults != null && maxResults < 1) {
+            throw new AwsException("BadRequestException", "MaxResults must be at least 1", 400);
+        }
+        return Pagination.paginate(getApis(region), Api::getApiId,
+                maxResults == null ? Integer.MAX_VALUE : maxResults, nextToken, "apis",
+                token -> new AwsException("BadRequestException", "Invalid NextToken", 400));
     }
 
     public void deleteApi(String region, String apiId) {
