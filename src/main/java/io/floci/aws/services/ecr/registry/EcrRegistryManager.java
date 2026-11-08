@@ -35,6 +35,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.TimeUnit;
@@ -107,6 +108,8 @@ public class EcrRegistryManager {
     private volatile String containerId;
     private volatile Closeable logStream;
     private volatile Consumer<List<String>> reconcileHook;
+    /** Whether the Docker daemon is Docker Desktop; null until the daemon has answered. */
+    private volatile Boolean dockerDesktop;
 
     @Inject
     public EcrRegistryManager(ContainerBuilder containerBuilder,
@@ -160,12 +163,20 @@ public class EcrRegistryManager {
         String region = m.group(2);
         String repoAndTag = m.group(3);
         ensureStarted();
-        // Path style on localhost whatever style the API advertises. A daemon with the
-        // containerd image store, the default from Docker Engine 29, reaches only localhost and
-        // 127.0.0.1 over plain HTTP and takes every other name, *.localhost included, for an
-        // HTTPS registry: Floci's plain port cannot answer that, and its TLS port cannot prove
-        // itself to a daemon that does not trust Floci's CA.
-        String rewritten = "localhost:" + advertisedPort() + "/" + internalRepoName(account, region, repoAndTag);
+        String rewritten;
+        if (dockerDesktop()) {
+            // Docker Desktop's daemon runs in a VM and dials localhost there, where a host port Docker
+            // chose for Floci's container is not bound. It sends any other registry name through its
+            // host proxy, which reaches the port, and pulls *.localhost over plain HTTP.
+            rewritten = account + ".dkr.ecr." + region + ".localhost:" + advertisedPort() + "/" + repoAndTag;
+        } else {
+            // Path style on localhost whatever style the API advertises. A daemon with the
+            // containerd image store, the default from Docker Engine 29, reaches only localhost and
+            // 127.0.0.1 over plain HTTP and takes every other name, *.localhost included, for an
+            // HTTPS registry: Floci's plain port cannot answer that, and its TLS port cannot prove
+            // itself to a daemon that does not trust Floci's CA.
+            rewritten = "localhost:" + advertisedPort() + "/" + internalRepoName(account, region, repoAndTag);
+        }
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
     }
@@ -193,6 +204,23 @@ public class EcrRegistryManager {
                     image, e.getMessage());
             return false;
         }
+    }
+
+    private boolean dockerDesktop() {
+        Boolean cached = dockerDesktop;
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            String os = lifecycleManager.getDockerClient().infoCmd().exec().getOperatingSystem();
+            cached = os != null && os.toLowerCase(Locale.ROOT).contains("docker desktop");
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not read the operating system of the Docker daemon ({0}); pulling ECR images from localhost",
+                    e.getMessage());
+            return false;
+        }
+        dockerDesktop = cached;
+        return cached;
     }
 
     /** Returns the docker-pullable repository URI for the given account/region/name. */
