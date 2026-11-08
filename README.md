@@ -366,7 +366,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | OpenSearch | Real Docker | Domain CRUD, tags, versions, instance types, upgrade stubs |
 | AppConfig | In-process | Applications, environments, profiles, hosted versions, deployments |
 | AppConfigData | In-process | Configuration sessions and dynamic configuration retrieval |
-| Bedrock | In-process | Guardrail lifecycle, versions, and tags on the control plane |
+| Bedrock | In-process | Guardrail lifecycle, versions, and tags, plus a seeded foundation model and inference profile catalog, on the control plane |
 | Bedrock Runtime | In-process stub | Dummy Converse and InvokeModel responses for local development |
 | Bedrock AgentCore | In-process stub | Stateful control plane (agent runtimes, gateways, memory, workload identity); canned InvokeAgentRuntime responses |
 | EKS | Real Docker, mock mode available | k3s clusters with live Kubernetes API server |
