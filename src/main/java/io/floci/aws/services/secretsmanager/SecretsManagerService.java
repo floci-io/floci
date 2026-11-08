@@ -464,6 +464,26 @@ public class SecretsManagerService implements ResourceProvider {
         }
     }
 
+    /**
+     * Writes the description exactly as given, null included, which {@link #updateSecret} reads as
+     * "keep". Only a CloudFormation update that drops the description calls it.
+     */
+    public Secret replaceSecretDescription(String secretId, String description, String region) {
+        Secret secret = resolveSecret(secretId, region);
+        throwIfPendingDeletion(secret);
+        throwIfReplica(secret);
+
+        synchronized (lockFor(secret.getArn())) {
+            throwIfManagedRelease(secret.getArn());
+            secret.setDescription(description);
+            secret.setLastChangedDate(Instant.now());
+
+            persist(secret, region);
+            LOG.infov("Replaced secret description: {0}", secret.getName());
+            return secret;
+        }
+    }
+
     public Secret describeSecret(String secretId, String region) {
         Secret secret = resolveSecret(secretId, region);
         return secret;

@@ -3444,6 +3444,19 @@ public class CognitoService implements ResourceProvider {
         return group;
     }
 
+    /**
+     * Writes the group description exactly as given, null included, which {@link #updateGroup} reads
+     * as "keep". Only a CloudFormation update that drops the description calls it.
+     */
+    public CognitoGroup replaceGroupDescription(String userPoolId, String groupName, String description) {
+        CognitoGroup group = getGroup(userPoolId, groupName);
+        group.setDescription(description);
+        group.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        groupStore.put(groupKey(userPoolId, groupName), group);
+        LOG.infov("Replaced Cognito group description: {0} in pool {1}", groupName, userPoolId);
+        return group;
+    }
+
     public List<CognitoUser> listUsersInGroup(String userPoolId, String groupName) {
         CognitoGroup group = getGroup(userPoolId, groupName);
         return group.getUserNames().stream()

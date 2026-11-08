@@ -3305,6 +3305,25 @@ public class LambdaService implements ResourceProvider {
         }
     }
 
+    /**
+     * Writes the alias description exactly as given, null included, which {@link #updateAlias} reads
+     * as "keep". Only a CloudFormation update that drops the description calls it.
+     */
+    public LambdaAlias replaceAliasDescription(String region, String functionName, String aliasName,
+                                               String description) {
+        validateAliasName(aliasName);
+        validateAliasMembers(null, description);
+        LambdaFunction fn = getFunction(region, functionName);
+        synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
+            LambdaAlias alias = getAlias(region, functionName, aliasName);
+            alias.setDescription(description);
+            alias.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            alias.setRevisionId(UUID.randomUUID().toString());
+            if (aliasStore != null) aliasStore.save(region, alias);
+            return alias;
+        }
+    }
+
     /** FunctionUrlQualifier in botocore: 1-128 characters, not all digits. */
     private static void validateFunctionUrlQualifier(String qualifier) {
         validateNonEmpty(qualifier, "qualifier", false);

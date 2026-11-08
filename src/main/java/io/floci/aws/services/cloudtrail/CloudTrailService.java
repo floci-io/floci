@@ -216,6 +216,38 @@ public class CloudTrailService {
         });
     }
 
+    /**
+     * Writes the S3 key prefix exactly as given, null included, which {@link #updateTrail} reads as
+     * "keep". Only a CloudFormation update that drops the prefix calls it.
+     */
+    public Trail replaceTrailS3KeyPrefix(String region, String trailNameOrArn, String s3KeyPrefix) {
+        Trail resolved = findTrailOrThrow(region, trailNameOrArn);
+        String key = regionKey(resolved.homeRegion(), resolved.name());
+        return withTrailLock(key, () -> {
+            CloudTrailEntry entry = store.get(key).orElseThrow(() -> new AwsException(
+                    "TrailNotFoundException", "Unknown trail: " + trailNameOrArn, 400));
+            Trail existing = entry.trail();
+            Trail updated = new Trail(
+                    existing.name(),
+                    existing.trailArn(),
+                    existing.s3BucketName(),
+                    s3KeyPrefix,
+                    existing.snsTopicArn(),
+                    existing.includeGlobalServiceEvents(),
+                    existing.isMultiRegionTrail(),
+                    existing.homeRegion(),
+                    existing.logFileValidationEnabled(),
+                    existing.hasCustomEventSelectors(),
+                    existing.hasInsightSelectors(),
+                    existing.isOrganizationTrail(),
+                    existing.kmsKeyId(),
+                    existing.cloudWatchLogsLogGroupArn(),
+                    existing.cloudWatchLogsRoleArn());
+            store.put(key, entry.withTrail(updated));
+            return updated;
+        });
+    }
+
     public List<Trail> describeTrails(String region, List<String> trailNameOrArnList) {
         if (trailNameOrArnList == null || trailNameOrArnList.isEmpty()) {
             List<Trail> results = new ArrayList<>();
