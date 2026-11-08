@@ -761,8 +761,32 @@ public class Ec2ContainerManager {
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run"))
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"))
                     .withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+            // The guest shares the Docker host's kernel but ships none of its modules, so
+            // `modprobe br_netfilter` (Kubernetes node setup) fails with "not found" even
+            // when the module is built in. Only the running kernel's directory is bound: the
+            // guest's dpkg owns the rest of /lib/modules, and a read-only bind of the whole
+            // tree breaks apt-get upgrade, DKMS and linux-modules-extra.
+            String kernelVersion = hostKernelVersion();
+            if (kernelVersion != null) {
+                String modules = "/lib/modules/" + kernelVersion;
+                specBuilder.withReadOnlyBind(modules, modules);
+            }
         }
         return specBuilder.build();
+    }
+
+    /** The Docker daemon's kernel version, or null when it cannot be read (the modules bind is then skipped). */
+    private String hostKernelVersion() {
+        try {
+            String version = dockerClient.infoCmd().exec().getKernelVersion();
+            if (version != null && !version.isBlank()) {
+                return version;
+            }
+        } catch (Exception e) {
+            LOG.debugv("Could not read the Docker host's kernel version: {0}", e.getMessage());
+        }
+        LOG.warn("Docker host kernel version unknown; systemd guest launches without /lib/modules");
+        return null;
     }
 
     private void failLaunch(Instance instance) {
